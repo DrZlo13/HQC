@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.149, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
+Version 0.155, 2026-11-16. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -3151,8 +3151,13 @@ next stream item: `tool_use` → `final: false`, `result` → `final: true`;
 `tool_use` → `tool.call` (since 0.135 the `args_preview` of an `Agent` or `Task` call has its
 `prompt` last: the input's keys come sorted, and a prompt cut at 4 KB took `subagent_type` and
 `run_in_background` with it: `subagent_type` in 8158 of the 11437 such calls in the owner's
-transcripts; the mirror builds it the same way, §9.1); `tool_result` → `tool.result`; `result`
-→ `usage` and `status idle`. Since 0.121 a `system/init` while no turn of hqc's runs (a turn the CLI
+transcripts; since 0.155 any call's input has its fields from the shortest value to the longest,
+values of 3 KB or more counted as equally long, fields of the same length in sorted order (an
+Edit of two long strings keeps `new_string` before `old_string`), an `Agent` or `Task` call's
+`prompt` still last, so the cut falls in the longest values and a Write's `file_path` or a Bash
+call's `description` comes whole; the mirror builds it the same way, §9.1); `tool_result` →
+`tool.result`; `result` → `usage` and `status idle`. Since 0.121 a `system/init` while no
+turn of hqc's runs (a turn the CLI
 starts by itself, e.g. after a background task's end; the turn of an input of hqc's that the CLI
 carries over, §17.2, is hqc's) → `status running`, before anything else of that turn (§17.1). Since
 0.69 a `result` with `num_turns: 0`, no tokens and no cost (a local slash command, the empty
@@ -3755,7 +3760,8 @@ per §3 Event (`Event::id_from_claude_block`). Mapping: `user` with text → `us
 (`delivery: delivered`), `tool_result` → `tool.result`; `assistant` with text →
 `agent.message`, `final: true` when `stop_reason: end_turn`, `in_reply_to` is the file's last
 prompt; `tool_use` → `tool.call` (since 0.135 an `Agent` or `Task` call's `args_preview` with
-its `prompt` last, as the adapter's, §8.1); non-empty `thinking` → `agent.thinking`. Since 0.69:
+its `prompt` last, since 0.155 any call's with its fields from the shortest value to the
+longest, as the adapter's, §8.1); non-empty `thinking` → `agent.thinking`. Since 0.69:
 `assistant` text with `message.model` `<synthetic>` → `agent.message` with `runtime: true`
 (§8.1), `final` by its `stop_reason` as any other; a `user` record with `origin.kind:
 task-notification` (2.1.312: `origin {kind, producer: session-task, runId}`, `promptSource:
@@ -5323,6 +5329,18 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.149 → 0.155 (a call whose arguments are cut at 4 KB keeps its short fields)
+§8.1, §9.1: `args_preview` had the input's keys sorted, so a cut at 4 KB took every field after a
+long value with it: a Write's `file_path` after its `content`, a Bash call's `description` and
+`timeout` after a long script; the feed showed such a call as just "Write" or "Bash", and so did
+the Running line. The fields now go from the shortest value to the longest, values of 3 KB or
+more counted as equally long and kept in sorted order (an Edit of two long strings still brings
+the start of its `new_string`), an `Agent` or `Task` call's `prompt` still last; the client
+reads a cut preview as far as it goes for a call's line (its row, the header of a group of one
+call, the Running line, an approval card), so a cut command shows its first line, and a row's
+count of the lines that follow reads "+N+ lines" when the preview is cut. 0.150–0.154 are taken
+by other pull requests.
 
 ### 0.148 → 0.149 (the browser marked in the lists)
 §6 client layout: a session given the browser has a ring in the browser's color and a globe in

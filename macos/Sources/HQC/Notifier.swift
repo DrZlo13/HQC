@@ -1,4 +1,5 @@
 import AppKit
+import AudioToolbox
 import UserNotifications
 
 // One event the notification script reports (NotificationScript).
@@ -68,6 +69,14 @@ final class Notifier {
 
     private let cards = NotificationCards()
 
+    // The sound macOS plays for an app's notification when none is set: Notification Center
+    // plays the tone `texttone:Rebound`, this file, as a system sound (its log, macOS 15).
+    private static let sound: SystemSoundID? = {
+        let url = URL(fileURLWithPath: "/System/Library/PrivateFrameworks/ToneLibrary.framework/Versions/A/Resources/AlertTones/EncoreInfinitum/Rebound-EncoreInfinitum.caf")
+        var id: SystemSoundID = 0
+        return AudioServicesCreateSystemSoundID(url as CFURL, &id) == noErr ? id : nil
+    }()
+
     // Takes away what the app posted to Notification Center before it drew its own cards, and
     // asks for the permission the Dock badge needs (macOS asks the user once); the answer goes to
     // the system log.
@@ -79,7 +88,7 @@ final class Notifier {
         }
     }
 
-    // Shows one event of a session, with the system alert sound. Skipped when the user is
+    // Shows one event of a session, with macOS's notification sound. Skipped when the user is
     // looking at that session now. The identifier is `<server id>:<tag>`, so a later event with
     // the same tag replaces the earlier card in its place.
     func notify(server: Server, event: PageEvent) {
@@ -113,7 +122,7 @@ final class Notifier {
                 }
             }
         }
-        NSSound.beep()
+        if let sound = Self.sound { AudioServicesPlaySystemSound(sound) }
     }
 
     // The requests the hub lists open for a server, as tags: that server's permission request

@@ -64,7 +64,8 @@ icon marks with its light dot.
 The app draws its own notification cards for the events the hub sends a browser push for:
 permission requests, questions, the agent's final reply (not of a room's agent), a post in an
 agents' room and input that failed. Every server notifies, also one whose tab is not open. They
-come only while the app runs (its window may be closed), each with the system alert sound.
+come only while the app runs (its window may be closed), each with the sound macOS plays for a
+notification.
 Nothing is shown for the session you are looking at. The cards are not macOS notifications:
 they do not go to Notification Center, System Settings ▸ Notifications does not change them
 (macOS asks once for permission only for the number on the Dock icon), and Focus and screen

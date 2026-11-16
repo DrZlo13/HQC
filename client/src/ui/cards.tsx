@@ -112,6 +112,9 @@ export interface ChatActions {
   /** A new session with the conversation before this message of the user, the message in
    *  its input (SPEC §6 fork); absent where a session cannot fork. */
   fork?(event: EventOf<'user.message'>): void;
+  /** A fork before this message of the user is under way: its time says so, and its fork
+   *  button waits. */
+  forking?(eventId: string): boolean;
   /** Gives the secret an agent's `hqc_secret` asks for (SPEC 0.147); absent where it cannot
    *  be given (the session's worker does not take secrets). */
   giveSecret?(requestId: string, f: SecretFields): Promise<void>;
@@ -576,6 +579,8 @@ function UserMessage({ event, actions }: { event: EventOf<'user.message'>; actio
   const d = event.delivery;
   const ids = event.payload.artifact_ids;
   const fork = actions.fork && event.author.kind === 'user' && d !== 'pending' && d !== 'failed';
+  // The hub copies the history before it answers, seconds for a long session (SPEC §6).
+  const forking = fork && !!actions.forking?.(event.event_id);
   const phone = useIsPhone();
   const buttons = (event.payload.text || fork) && [
     event.payload.text && <CopyButton key="copy" text={event.payload.text} icon />,
@@ -584,8 +589,9 @@ function UserMessage({ event, actions }: { event: EventOf<'user.message'>; actio
         key="fork"
         type="button"
         class="btn-copy btn-copy-idle btn-fork"
-        aria-label="Fork from here"
-        title="Fork from here: a new session with the conversation before this message"
+        disabled={forking}
+        aria-label={forking ? 'Forking…' : 'Fork from here'}
+        title={forking ? 'Forking…' : 'Fork from here: a new session with the conversation before this message'}
         onClick={() => actions.fork!(event)}
       >
         <IconFork />
@@ -602,6 +608,11 @@ function UserMessage({ event, actions }: { event: EventOf<'user.message'>; actio
           event.payload.schedule_id && <span class="scheduled"> · scheduled</span>,
           d === 'pending' && <span class="delivery"> · awaiting delivery</span>,
           d === 'failed' && <span class="delivery delivery-failed"> · not delivered</span>,
+          forking && (
+            <span class="forking" role="status">
+              {' · forking…'}
+            </span>
+          ),
         ]}
       >
         {event.payload.text && <UserText text={event.payload.text} />}

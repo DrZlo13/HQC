@@ -191,10 +191,13 @@ export function Chat({
     fork: !system && info?.workspace_id
       ? (e) =>
           void app.forkSession(sessionId, e.event_id, e.payload.text).then(
-            (s) => (location.hash = `#/s/${s.id}`),
+            (s) => {
+              if (s) location.hash = `#/s/${s.id}`;
+            },
             (err: Error) => setNotice(`Not forked: ${err.message}`),
           )
       : undefined,
+    forking: (eventId) => app.forking(eventId),
     openArtifact: (id, download) => {
       // Open the window synchronously, or mobile browsers block it as a popup.
       const w = window.open('about:blank', '_blank');

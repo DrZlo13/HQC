@@ -19,9 +19,10 @@
 // The page's own `document.title` is always "HQC".
 //
 // For the Dock badge it posts `{badge: n}` to `hqcChrome`: the sessions with `unread > 0`,
-// archived and service ones aside, as client/src/favicon.ts picks them for its light dot. The
-// service sessions come from `GET /api/sessions`, read at load and again for a session the last
-// read did not list.
+// archived and service ones and a room's agents' sessions aside (a room counts for them), as
+// client/src/favicon.ts picks them for its light dot. The service sessions, the rooms and their
+// agents come from `GET /api/sessions`, read at load and again for a session the last read did
+// not list.
 enum NotificationScript {
 
     static let handlerName = "hqcNotify"
@@ -52,6 +53,10 @@ enum NotificationScript {
           // from the client's own all-sessions call (client/src/api.ts allSessions()).
           const service = new Set();
           const listed = new Set();
+          // Rooms (`room_mode`) and their agents' sessions (`room_id`), from the same call: an
+          // agent's final message gets no push, its post in the room does (push.rs on_event).
+          const rooms = new Set();
+          const members = new Set();
           let sessionsLoad = null;
 
           const clip = (s, n) => {
@@ -68,6 +73,7 @@ enum NotificationScript {
               case 'clarify.request':
                 return p.questions && p.questions[0] ? `Question: ${clip(p.questions[0].text, 140)}` : 'The agent has a question';
               case 'agent.message':
+              case 'peer.message':
                 return clip(p.text, 160);
               case 'system':
                 return p.code === 'agent_start_failed' || p.code === 'input_rejected' ? clip(p.text, 160) : null;
@@ -76,9 +82,15 @@ enum NotificationScript {
             }
           };
 
-          // The events the hub sends a push for (push.rs on_event): the requests, the final reply
-          // and a `system` line about input that failed. The other unread ones get no push.
-          const pushed = (e) => hubBody(e) !== null && (e.type !== 'agent.message' || (e.payload || {}).final === true);
+          // The events of session `id` the hub sends a push for (push.rs on_event): the requests,
+          // the final reply (not of a room's agent), a post in a room and a `system` line about
+          // input that failed. The other unread ones get no push.
+          const pushed = (e, id) => {
+            if (hubBody(e) === null) return false;
+            if (e.type === 'agent.message') return (e.payload || {}).final === true && !members.has(id);
+            if (e.type === 'peer.message') return rooms.has(id);
+            return true;
+          };
 
           // sw.js describe(), on the event itself.
           const describe = (e) => {
@@ -196,20 +208,24 @@ enum NotificationScript {
           window.addEventListener('hashchange', routed);
           routed();
 
-          // The Dock badge: the sessions with something unread, archived and service sessions
-          // aside, as the client's tab icon counts them for its light dot (client/src/favicon.ts).
+          // The Dock badge: the sessions with something unread, archived and service sessions and
+          // rooms' agents aside, as the client's tab icon counts them for its light dot
+          // (client/src/favicon.ts).
           let lastBadge = null;
           const postBadge = () => {
             let n = 0;
             for (const s of summaries.values()) {
-              if (s.unread > 0 && s.state !== 'archived' && !service.has(s.session_id)) n++;
+              if (s.unread > 0 && s.state !== 'archived' && !service.has(s.session_id) && !members.has(s.session_id)) n++;
             }
             if (!chrome || n === lastBadge) return;
             lastBadge = n;
             chrome.postMessage({ badge: n });
           };
-          // Which sessions are service ones: read once, and again when a summary names a session
-          // the last read did not list (a worker enrolled since).
+          // Which sessions are service ones, rooms and rooms' agents: read once, and again when a
+          // summary or an event read names a session the last read did not list (a worker enrolled
+          // or a room made since). A session named while a read is in flight may be missing from
+          // it (a room's agents are made one by one after the room): one more read follows it.
+          let relist = false;
           const loadSessions = () => {
             if (!sessionsLoad) {
               sessionsLoad = fetch('/api/sessions')
@@ -219,12 +235,17 @@ enum NotificationScript {
                     if (!s || typeof s.id !== 'string') continue;
                     listed.add(s.id);
                     if (s.system) service.add(s.id);
+                    if (s.room_mode) rooms.add(s.id);
+                    if (s.room_id) members.add(s.id);
                   }
                 })
                 .catch(() => {})
                 .finally(() => {
                   sessionsLoad = null;
-                  postBadge();
+                  if (relist) {
+                    relist = false;
+                    loadSessions();
+                  } else postBadge();
                 });
             }
             return sessionsLoad;
@@ -292,11 +313,14 @@ enum NotificationScript {
               const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/events?after_seq=${after}&limit=50`);
               if (!res.ok) return;
               const page = await res.json();
+              // A room or an agent made since the last list call: list again before deciding.
+              if (!listed.has(id)) await loadSessions();
+              if (!listed.has(id)) await loadSessions();
               const fresh = [];
               for (const e of (page && page.events) || []) {
                 if (!e || !(e.seq > (posted.get(id) || 0))) continue;
                 posted.set(id, e.seq);
-                if (pushed(e)) fresh.push(e);
+                if (pushed(e, id)) fresh.push(e);
               }
               if (!fresh.length) return;
               const project = await projectName(projectId);
@@ -343,8 +367,9 @@ enum NotificationScript {
           // After summaries: the badge, re-read once the list call has not listed one of them.
           const sessionsSeen = (sessions) => {
             const unknown = (sessions || []).some((s) => s && typeof s.session_id === 'string' && !listed.has(s.session_id));
-            if (unknown && !sessionsLoad) loadSessions();
-            else postBadge();
+            if (!unknown) postBadge();
+            else if (sessionsLoad) relist = true;
+            else loadSessions();
           };
 
           // `socket.baseline`: until this socket's first summary, its frames only set the baseline.

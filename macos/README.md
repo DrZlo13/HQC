@@ -51,13 +51,14 @@ Settings… (⌘,) holds:
 
 Closing the window hides it, so the pages keep their state; a click on the Dock icon shows it
 again, ⌘Q quits. The Dock icon shows how many sessions have something unread on all servers,
-archived ones and the workers' own aside: the sessions the client's tab icon marks with its
-light dot.
+archived ones, the workers' own and the agents of a room aside: the sessions the client's tab
+icon marks with its light dot.
 
 ## Notifications
 
 The app shows macOS notifications for the events the hub sends a browser push for: permission
-requests, questions, the agent's final reply and input that failed, worded as the push, with
+requests, questions, the agent's final reply (not of a room's agent), a post in an agents' room
+and input that failed, worded as the push, with
 the project's name on top and the session's title under it. Every server notifies, also one
 whose tab is not open. They come only while the app runs (its window may be closed); a click
 opens the session. Nothing is shown for the session you are looking at. macOS asks once for

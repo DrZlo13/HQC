@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.156, 2026-11-17. Status: the architecture agreed after six reviews and a survey of
+Version 0.160, 2026-11-17. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -354,7 +354,10 @@ chain whose mode set it, from `session.state.capped_input`, §5.4), `subagents` 
 runs now, from `session.state.subagents`, §5.4; 0 after a worker restart),
 `background_tasks` (since 0.104: the background tasks the runtime lists for the agent now,
 from `session.state.background_tasks`, §5.4; 0 after a worker restart), `output_per_s` (since
-0.122: the session's latest `tokens.rate`, §4; absent — 0, also after its worker disconnects).
+0.122: the session's latest `tokens.rate`, §4; absent — 0, also after its worker disconnects),
+`paused_at` (nullable; since 0.160, migration `0050`: when the session was paused, then, once the
+hub itself stops its agent for the pause, when it did; a process that ends another way keeps the
+time of the pause; cleared on resume, §17.3).
 In `ask` a tool call outside the worker's rules is asked about (§10.1); in `auto` Claude Code's
 classifier decides and never asks (§8.1); in `allow_all` Claude Code runs it without the
 classifier and asks only about a call an `ask` rule of its settings files matches and where
@@ -528,7 +531,7 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn") | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
+| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text` | adapter; transport only, not written to the database |
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands, Monitors left out, in the order they became rows, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row and `command` for a command's; a command's row carries only `task_id`, `description` (its Bash call's description, or the command), `duration_ms`, `call_id?` and `kind` |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops (§8.1) |
@@ -1625,6 +1628,13 @@ the rest is marked "later"):
   process and starts it again at once (`session.kill`, then `session.start` with `mode: resume`,
   §17.3) and answers `{sent}`, `false` with nothing sent while the worker is offline; archived:
   `409 archived`, driven from VS Code: `409 locked_vscode`, service session: `409 system_session`
+- `POST /api/sessions/{id}/pause`, `/resume` → the session object (since 0.160, `write` level,
+  §17.3). `/pause` sets `paused_at` and, with no turn running, ends the agent's process at once
+  (`session.kill`); with one running, when it ends. `/resume` clears it; when the process was
+  stopped, it stores the note of the pause as a pending `user.message` and starts the agent
+  (`session.start` with `mode: resume`). A pause of a paused session and a resume of one that
+  is not paused change nothing; archived: `409 archived`, driven from VS Code: `409
+  locked_vscode`, service session: `409 system_session`
 - `POST /api/sessions/{id}/background` {call_id} → `{sent}` (since 0.125; `write` level, as
   `/stop`): `session.background` to the worker (§5.3), `sent: false` when the worker is not
   connected; nothing comes back of what the runtime did, the call leaves the session's
@@ -1937,8 +1947,9 @@ card or tooltip: Archive archives the row as its menu's Archive does; the star, 
 favorite, adds the session to the favorites or takes it out as its menu's item does. A right
 click on a row (the menu key; on a phone a long press or a right click) opens its menu: Open in
 new tab, Add to (Remove from) favorites, Rename, Move to project…, Folder rules (with a
-workspace), Restart session (§17.3; not for an archived, a service, a VS Code-driven session or
-one whose worker is offline), Archive, and Delete…, which asks in a second step of the menu with the focus on
+workspace), Restart session and (since 0.160) Pause session (§17.3; not for an archived, a
+service, a VS Code-driven session or one whose worker is offline), or for a paused session Resume
+session in their place, Archive, and Delete…, which asks in a second step of the menu with the focus on
 Cancel. A desktop row (not in Reorder) can also be dragged onto another project on the bar, whose
 tile or row is ringed while the row is over it: dropped there, the session moves
 (`POST /api/sessions/{id}/move`) into that project's one `ready` folder on the session's worker,
@@ -2166,7 +2177,8 @@ acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
 disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, locked_by,
 last_seq, archived, archived_at?, system?, held_by?, state, queue_len, last_read_seq, unread, created_at,
 updated_at, commands?, spawned_by?, permission_mode?, effective_permission_mode?,
-permission_capped_by?, subagents?, background_tasks?, output_per_s?, foreground_calls?}`.
+permission_capped_by?, subagents?, background_tasks?, output_per_s?, foreground_calls?,
+paused_at?}`.
 `subagents` (since 0.70): the subagents the agent runs now, from `session.state` (§5.4);
 absent — 0. The client shows "N agents" ("1 agent") next to the state in the chat header and in
 the session's row of the list while it is above 0; a background subagent keeps it up after the
@@ -2189,6 +2201,9 @@ keeps it up after the turn has ended.
 now and can move to the background (`POST .../background`), from `session.state` (§5.4), kept
 in the hub's memory; absent — none. The chat offers "Run in background" for such a call
 (§17.1).
+`paused_at` (since 0.160): §3 Session, §17.3; absent — not paused. While it is set and the
+session is still `running` or `waiting`, the chat header and the session's row say "Pausing
+after this turn" instead of the state.
 `permission_mode` and `effective_permission_mode` (since 0.42, T38): §3 Session; absent —
 null. The client shows the mode in the chat header: `effective_permission_mode`, else
 `permission_mode`; "Auto" and (since 0.129) "Allow all" as a marked badge, "Ask" as plain
@@ -2279,10 +2294,10 @@ newer copy).
   `{type: session.summary, session}`: one session changed; an element is `{session_id,
   project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?,
   permission_mode?, effective_permission_mode?, permission_capped_by?, subagents?,
-  background_tasks?, output_per_s?, foreground_calls?}` (the same as in the session object; the
-  modes since 0.42, so the header follows a switch the worker confirms, the cap since 0.43,
-  `subagents` since 0.70, `background_tasks` since 0.104, `output_per_s` since 0.122,
-  `foreground_calls` since 0.125); `{type: requests, requests[]}` (since 0.41, T37,
+  background_tasks?, output_per_s?, foreground_calls?, paused_at?}` (the same as in the session
+  object; the modes since 0.42, so the header follows a switch the worker confirms, the cap since
+  0.43, `subagents` since 0.70, `background_tasks` since 0.104, `output_per_s` since 0.122,
+  `foreground_calls` since 0.125, `paused_at` since 0.160); `{type: requests, requests[]}` (since 0.41, T37,
   `client.requests.json`): the list of `GET /api/requests`, sent right after `summary` and then
   again, whole, whenever one of the user's requests opens or closes (an event of §4
   `approval.*`/`clarify.*`, a deleted session) or an `hqc_ask` between the user's sessions opens
@@ -2684,7 +2699,10 @@ Delivery:
   archived, not a worker's service session, else `not_found`. The calling session itself
   (`invalid_args`) and a target with `locked_by: vscode` (`unavailable`) are refused at once,
   for `send` as well as `ask`: there is no silent queue for a session driven from VS Code
-  (§9.3). An empty (blank) `text` is `invalid_args`.
+  (§9.3). Since 0.160 an `ask` to a paused session (§17.3) is refused at once as well, with
+  `unavailable` and "<address> is paused; it takes no questions until it is resumed", so it does
+  not wait out its timeout; a `send` to it is queued. An `ask` queued before the pause stays
+  queued and its caller waits out its timeout. An empty (blank) `text` is `invalid_args`.
 
 Queues (two different ones):
 - The session's **input queue** (§17.2): `user.message` and `peer.message` with `mode=ask`.
@@ -4953,7 +4971,9 @@ Since 0.38 (T35, `crates/hqc-hub/src/schedules.rs`):
   sends, so a pause or a delete during a run waits for it. Resuming a `cron` skips the runs
   missed while paused. Deleting the session deletes its schedules. A session that is archived or
   driven from VS Code takes no input (§6, §9.3): its runs are skipped (`next_run` moves on, a
-  warn in the hub's log), not queued.
+  warn in the hub's log), not queued. Since 0.160 so are the runs of a `cron` while the session is
+  paused (§17.3), which would pile up for the resume; a run of an `at` is stored and waits for
+  it.
 - Since 0.39 (T36): a schedule made by an agent (`hqc_schedule`) keeps the chain of its call,
   and its runs carry it (§7.1); since 0.43 (T39) with the chain's permission cap, fixed when
   the schedule is made: a run of a schedule made by a session in `ask` runs in `ask` (§5.3).
@@ -4980,6 +5000,7 @@ open requests, `process_state` and delivery. Priority top to bottom, the first t
 | `waiting` | there is an open `approval`/`clarify` |
 | `error` | there is an input with `delivery: failed` and no later input was delivered after it (since 0.117), or the last turn ended with a process error |
 | `running` | a turn is in progress |
+| `paused` | `paused_at` is set (since 0.160, §17.3) |
 | `queued` | `queue_len > 0`, no turn (the agent is starting) |
 | `idle` | otherwise |
 
@@ -4993,7 +5014,8 @@ for 2 s, counted from its `ts` or from a later answer to a request after it (a p
 question it, or a subagent it runs, waited for); since 0.125, when that call is one
 of the session's `foreground_calls`, §6, the line ends with a small "Run in background" button,
 which sends `POST .../background` with its `call_id`, a failure shown as a notice; the button
-goes once the worker reports the call moved or ended), `queued` — "Input queued",
+goes once the worker reports the call moved or ended), `queued` — "Input queued", `paused` —
+"Paused" in the header and the session's row,
 `waiting` — "Waiting for approval" if the open request is not in the feed (otherwise its card is
 that line).
 A `status` event is not drawn as a feed line, except `error` with `detail`.
@@ -5062,6 +5084,30 @@ send from a session in a lower mode (§7.1).
   resuming its transcript, so its MCP servers and settings are read anew. A turn that runs is
   lost as when the process dies (open `approval`/`clarify` get `stopped`, `system turn_lost`);
   inputs the old process did not take go to the new one after the start's `ack`.
+- Pause (since 0.160, `POST /api/sessions/{id}/pause`, §6; Claude Code has no pause of its own):
+  the hub sets the session's `paused_at`. With no turn running it ends the agent's process at
+  once as a restart does (`session.kill`) and starts nothing; with a turn running it lets the
+  turn end and ends the process then, on the worker's `status` `idle` or `error`, or the
+  watchdog's turn loss. When the hub ends the process itself, it sets `paused_at` again: the
+  time the agent stopped. A process that ends another way (a restart for a change of provider or
+  browser, a worker restart, a crash) leaves the time of the pause. The agent's background
+  subagents and commands, and what it set to wake it up, end with the process. While `paused_at`
+  is set the hub neither starts the agent nor delivers input to it, whatever asks for it (a
+  worker's `hello`, a process that stopped, a schedule, a peer message, a move): inputs typed
+  meanwhile wait in `pending`, and the session is `paused` once no turn runs (§17.1). A turn that
+  still runs gets the answers to its requests that its worker has not acknowledged, which after
+  a reconnect only a start's `ack` would send otherwise. A run of a `cron` schedule is skipped
+  (§16), a run of an `at` one is stored and waits; `hqc_ask` to the session is refused at once
+  with `unavailable` (§7.1; one queued before the pause waits out its timeout), `hqc_send` is
+  queued. Resume (`POST .../resume`) clears
+  `paused_at`. When the process was ended, the hub stores, as a pending `user.message` of the
+  user who resumed with `resume: true` (§4), the note `[hqc] You were paused at <HH:MM> UTC on
+  <YYYY-MM-DD> and are resumed now: <elapsed> passed.` (`<elapsed>`: the two largest units,
+  rounded down, a zero second one
+  left out: `45 s`, `12 min`, `1 h 20 min`, `3 d 2 h`), and starts the agent with `mode: resume`,
+  the same history; the note goes to it ahead of the inputs held during the pause. Resumed before
+  the turn the pause was asked during has ended, the agent was never stopped: no note, and the
+  held inputs go to it.
 - Worker offline: input accumulates in the hub (`pending`), the session is `worker_offline`,
   delivery on connect in `seq` order. Open `approval`s on an offline worker
   stay open until it returns or until `expires_at`.
@@ -5095,8 +5141,9 @@ send from a session in a lower mode (§7.1).
 ### 17.4 Archiving and deletion
 - Archiving: the hub sets `archived_at` (since 0.53; unarchiving clears it), sends `session.kill`, open requests get
   `approval.cancel`/`clarify.cancel {archived}`, `pending` inputs are marked `failed`,
-  the send buffer is cleared. Unarchiving returns `idle`; the process comes back via
-  resume on the first input. Since 0.61 (T47): archiving the last unarchived session of an
+  the send buffer is cleared. Unarchiving returns `idle`, or `paused` for a session paused before
+  it was archived; the process comes back via resume on the first input, or for a paused one on
+  Resume (§17.3). Since 0.61 (T47): archiving the last unarchived session of an
   `ephemeral` workspace marks the workspace for deletion, and unarchiving one clears the mark (`marked_for_deletion`, §3 Workspace); nothing is sent to the worker for it.
 - Session deletion: events, `ReadCursor`, `PendingRequest`, the session's artifacts
   (unless another session references them) are deleted; jsonl files on the worker
@@ -5341,6 +5388,24 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.156 → 0.160 (a session is paused and resumed)
+§3, §4, §6, §7.1, §16, §17.1, §17.3, §17.4 (user decision, 2026-11-15: "wait for the end of the
+turn, stop it, and then, on a button, say 'you are unpaused, X time passed' and start it"): a
+session could be stopped only for good (archived) or restarted at once; Claude Code has no pause of
+its own. A session's menu has "Pause session" next to "Restart session", and for a paused session
+"Resume session" in their place. `POST /api/sessions/{id}/pause` sets the session's `paused_at` (hub
+migration `0050`); the hub ends the agent's process as a restart does, at once with no turn running,
+else when the turn ends, and then sets `paused_at` to that time (a process that ends another way
+keeps the time of the pause). While it is set nothing starts the agent or delivers input to it, and
+the inputs typed meanwhile wait on the hub: a `cron` run is skipped, an `at` run waits, `hqc_ask` is
+refused at once, a running turn still gets its answers; the session's state is `paused`, below
+`running` and above `queued`, and while the turn still runs the client says "Pausing after this
+turn". `POST .../resume` clears it and, when the process was ended, stores the user's `user.message`
+with `resume: true`, `[hqc] You were paused at <HH:MM> UTC on <YYYY-MM-DD> and are resumed now:
+<elapsed> passed.`, and starts the agent with the same history; the note goes first, before the held
+inputs. The session object and `session.summary` carry `paused_at?`. No frame or worker change.
+0.157–0.159 are taken by open pull requests; migrations 0046 and 0049 by open branches.
 
 ### 0.149 → 0.156 (a fork is quick, and says so while it is made)
 §6, §15: the events a fork copies go in without their search words and the hub writes them

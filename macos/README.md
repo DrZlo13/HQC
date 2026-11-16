@@ -83,13 +83,14 @@ the screen with the menu bar, under it, in the system's light or dark appearance
 and full-screen space; a new one slides in on top and the others move down. It shows the
 project's tile (its colour and letters), the project's name and what happened (Permission,
 Question, Reply, Message or Failed), the session's title, and then a permission request's tool
-and its whole command or description (up to 6 lines), a question and how many more there are,
-or the reply, post or failure (up to 4 lines). A click on a card opens the session.
+and its whole command or description (up to 6 lines; for a publication, the path, how many files,
+then the files, hidden ones first, as many as fit), a question and how many more there are, or
+the reply, post or failure (up to 4 lines). A click on a card opens the session.
 
-A permission request has Allow and Deny always visible in a column on the right (not a
-publication: that one is allowed only on its card), which answer it without opening the app or
-taking the focus from the app you are in, and the card goes; when the request has no such option
-or the hub refuses the answer, the session opens instead. Its card stays until the request is
+A permission request, a publication included, has Allow and Deny always visible in a column on
+the right, which answer it without opening the app or taking the focus from the app you are in,
+and the card goes; when the request has no such option or the hub refuses the answer, the
+session opens instead. Its card stays until the request is
 answered, here, in the client or elsewhere, also one shown before the page reloaded, once the page
 is connected again. Every other card goes after the time set in Settings (5 s by default) from
 when it appears; while the pointer is over a card it stays, and the time starts again when the

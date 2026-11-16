@@ -541,7 +541,7 @@ private final class CardView: NSView {
                                  color: .secondaryLabelColor)
             y = Self.place(tool, at: y, x: textX, width: textWidth, in: body)
             if !event.body.isEmpty {
-                let command = Self.text(event.body, font: mono, color: .labelColor, lines: 6, wrap: .byCharWrapping)
+                let command = Self.text(event.body, font: mono, color: .labelColor, lines: 6, wrap: .byWordWrapping)
                 y = Self.place(command, at: y + 1, x: textX, width: textWidth, in: body)
             }
         } else {

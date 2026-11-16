@@ -304,8 +304,22 @@ enum NotificationScript {
           // One notification per request; other events of a session replace each other (SPEC §16).
           // The card's text is the whole description, question or message, up to 600
           // characters; a permission request names its tool, a question counts the ones after
-          // the first. A permission request (not a publication: the client publishes only on a
-          // click on its card) carries the options of the card's Allow and Deny buttons.
+          // the first. A permission request, a publication included (the client publishes on a click
+          // on a button, as the card's Allow is), carries the options of the card's Allow and
+          // Deny buttons.
+          // A publication's text (the hub's publish.rs card()) for the card's few lines: its
+          // fixed sentence gives way to the path, and the hidden files and folders (a part of the
+          // name starting with `.`) come before the rest, so they are on the card first. Text of
+          // another form stays as it is.
+          const publication = (d) => {
+            const lines = d.split('\\n');
+            const head = /^The agent asks to publish (.*) at a public link:/.exec(lines[0]);
+            if (!head || lines.length < 2) return d;
+            const files = lines.slice(2);
+            const hidden = (l) => l.split('/').some((c) => c.startsWith('.'));
+            return [head[1], lines[1], ...files.filter(hidden), ...files.filter((l) => !hidden(l))].join('\\n');
+          };
+
           const post = (id, project, title, e) => {
             const p = e.payload || {};
             const request = e.type === 'approval.request' || e.type === 'clarify.request';
@@ -324,18 +338,17 @@ enum NotificationScript {
               viewing: openSession() === id,
             };
             if (e.type === 'approval.request') m.tool = String(p.tool || 'tool');
+            if (e.type === 'approval.request' && p.tool === 'hqc_publish') m.body = clip(publication(p.description || ''), 600);
             if (e.type === 'clarify.request' && Array.isArray(p.questions)) m.more = Math.max(0, p.questions.length - 1);
             if (e.type === 'approval.request' && p.request_id) {
               // Answered or gone already: an earlier `requests` frame listed it, the last one not.
               if (everOpen.has(tag) && !lastOpen.has(tag)) return;
-              if (p.tool !== 'hqc_publish') {
-                const options = Array.isArray(p.options) ? p.options : [];
-                const once = options.find((o) => o && o.canonical === 'once');
-                const deny = options.find((o) => o && o.canonical === 'deny') || options.find((o) => o && o.canonical === 'deny_always');
-                m.request_id = p.request_id;
-                m.allow_option = once ? once.id : null;
-                m.deny_option = deny ? deny.id : null;
-              }
+              const options = Array.isArray(p.options) ? p.options : [];
+              const once = options.find((o) => o && o.canonical === 'once');
+              const deny = options.find((o) => o && o.canonical === 'deny') || options.find((o) => o && o.canonical === 'deny_always');
+              m.request_id = p.request_id;
+              m.allow_option = once ? once.id : null;
+              m.deny_option = deny ? deny.id : null;
             }
             handler.postMessage(m);
           };

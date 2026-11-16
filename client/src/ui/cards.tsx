@@ -800,7 +800,13 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
         <span class="tool-line mono">
           {line ? relativePaths(line.text, actions.workspaceRoot) : oneLine(r?.result_preview ?? '', 80)}
         </span>
-        {line?.more && <span class="tool-more">+{line.more} {line.more === 1 ? 'line' : 'lines'}</span>}
+        {line?.more && (
+          // "+N lines"; a cut preview counts only the lines it carries: "+N+ lines", at least that many.
+          <span class="tool-more">
+            +{line.more}
+            {line.cut ? '+' : ''} {line.more === 1 && !line.cut ? 'line' : 'lines'}
+          </span>
+        )}
         {r?.duration_ms !== undefined && <span class="tool-time">{formatDuration(r.duration_ms)}</span>}
         <StateMark state={state} />
       </summary>

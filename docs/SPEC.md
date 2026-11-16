@@ -615,7 +615,8 @@ Rules:
 - `subagents.live` (since 0.113) goes to clients the same way and is not saved either. The hub
   keeps a session's latest list in memory while it is not empty, so a client that subscribes
   or falls behind the stream gets it (§6), its `duration_ms` grown and the `due_in_ms` of its timers
-  shrunk (to 0 at the least) by the time the hub has kept it; the worker sends an empty list when the agent's process stops. The hub takes it for an
+  shrunk (to 0 at the least) by the time the hub has kept it; the worker sends an empty list when
+  the agent's process stops. The hub takes it for an
   archived session too, so that empty list drops the one kept. That list goes directly and is
   lost on a broken link (§8.1), so the hub also drops the kept list itself, and sends the
   session's subscribers an empty one, when the worker's `hello` says it restarted (every
@@ -2292,8 +2293,9 @@ holds the agent's background commands, which only `background_tasks` counts, so 
 either count is above 0; a command's line is its description and its run time. Since 0.141 a line
 starts with "Agent: " or "Command: " dimmed, as its `kind` says; a line without a known `kind`
 (from an older worker, or a value this client does not know) has neither. Since 0.161 a line
-marked `stoppable`, a subagent's, a command's or (since 0.168) a Monitor's, ends with a small stop button, as in the VS Code
-tab: it sends `POST .../tasks/{task_id}/stop` and is disabled until the hub answers, a failure
+marked `stoppable`, a subagent's, a command's or (since 0.168) a Monitor's, ends with a small
+stop button, as in the VS Code tab: it sends `POST .../tasks/{task_id}/stop` and is disabled until
+the hub answers, a failure
 shown as a notice; the line goes when the task ends.
 Since 0.168 the block holds timers too, and shows while any of its lines would: a Monitor watcher's
 line ("Monitor: ", a command's line: its description and run time), the wakeup of the agent
@@ -2305,7 +2307,8 @@ is not known has none), and the lines of the session's schedules of the latest `
 dot does not pulse: it waits, it does not run. The wakeups and the cron jobs wait while the agent is
 idle, so the block shows for them with both counts 0, and so for a schedule; a line of a scheduled
 message opens the schedules of the chat ("Schedules" in the menu), and goes when its one-off
-is sent or it is paused or deleted (a recurring one then shows its next run). The same one-line ellipsis as the other lines, on a computer and on a
+is sent or it is paused or deleted (a recurring one then shows its next run). The same one-line
+ellipsis as the other lines, on a computer and on a
 phone; a dropped socket clears these lines too until the next subscribe.
 `background_tasks` (since 0.104): the background tasks the runtime lists for the agent now,
 from `session.state` (§5.4); absent — 0. A command the agent left running in the background
@@ -2371,7 +2374,8 @@ the session's latest `subagents.live` follows it when its list is not empty, and
 carries each new one; a client whose part of the hub's event stream fell behind gets it again,
 or an empty one when none is kept, with the history it catches up. Since 0.168 the session's
 `schedules.live` (§4, §16) follows it the same way, when its list is not empty, and the stream
-carries each change of the session's schedules; a client that fell behind gets it, empty or not. Since 0.108 a `user.message`
+carries each change of the session's schedules; a client that fell behind gets it, empty or not.
+Since 0.108 a `user.message`
 or `peer.message` that came while that text was being written stands under it in the feed, live
 (after the text, before the activity line, with the messages not stored yet) and once the text
 is stored: the `agent.message` goes above the inputs with `during_text` right before it in `seq`
@@ -3551,7 +3555,8 @@ after an unload) or starts a copy of it (a fork, `--resume <copy> --fork-session
 resurrects the session's cron jobs from the transcript and they keep firing (checked live on
 2.1.312: a `*/2` job fired twice after a resume); a pending wakeup is not re-armed (its time passed
 with no fire). So the worker reads the transcript (for a copy, the part that is copied; only the
-lines with a `CronCreate` or `CronDelete` call and the results of those calls are parsed) and seeds
+lines with a `CronCreate` or `CronDelete` call and the results of the `CronCreate` calls are
+parsed) and seeds
 the rows by the CLI's rule, as the first list of the process: every `CronCreate` call of the main
 thread (`isSidechain` lines are skipped) whose successful result has a string `id`, that is not
 `durable`, not named by a `CronDelete` call and has a string `cron` and `prompt`; a recurring job
@@ -3567,7 +3572,8 @@ state. The worker sends `subagents.live` directly, not through the outbox, as
 `agent.delta`, ignores a list read after the agent's process stopped and sends an empty list when it
 stops; after every reconnect it sends the last list it sent again, unless that one was empty,
 `duration_ms` grown and `due_in_ms` (down to 0) shrunk by the time since it was sent, since a
-restarted hub has none and lists sent while disconnected are lost. Since 0.127 it also sends again an empty list that followed a non-empty
+restarted hub has none and lists sent while disconnected are lost. Since 0.127 it also sends again
+an empty list that followed a non-empty
 one, on every reconnect until a non-empty list or the process's stop: the hub keeps the last
 non-empty list while a background task runs, and an empty one lost with the link would leave rows of
 work that has ended. Since 0.122 the adapter counts the session's token rate (`tokens.rate`, §4)
@@ -3825,8 +3831,11 @@ true`; the turn ends with `system turn_interrupted` (above).
 
 Stopping one task (since 0.161, the VS Code tab's stop of a background task, which
 `perTaskStopAffordance` declares): the adapter marks every row of `subagents.live`
-`stoppable`, the subagents' and the commands', and `session.stop_task` (§5.3) is `control_request
-{subtype: "stop_task", task_id: <task_id>}` (2.1.312). The CLI stops that task and answers
+`stoppable` but a wakeup's and a cron job's, which are no tasks of the CLI: the subagents', the
+commands' and (since 0.168) the Monitors' (2.1.312 registers a Monitor's task as `local_bash`,
+and `stop_task` stops a task as its type does; not checked live), and `session.stop_task` (§5.3)
+is `control_request {subtype: "stop_task", task_id: <task_id>}` (2.1.312). The CLI stops that
+task and answers
 `success` with `{}`, also for a task it does not know or one that has already ended, or an
 error with the reason it did not stop it; the subagent then ends as any end of it, with
 `task_updated` `killed` and `task_notification` `stopped` **[verify]**: its row goes and its
@@ -5819,18 +5828,21 @@ without a hub each of these would have to be done peer-to-peer.
 
 ### 0.167 → 0.168 (timers and scheduled work above the input)
 §4, §5.2, §6, §8.1, §16: the block above the input shows more than subagents and commands.
-`subagents.live` has `kind` `monitor` (a Monitor watcher, a command's row), `wakeup` (the wakeup
-the agent armed with `ScheduleWakeup`) and `cron` (a job of its `CronCreate`) and, on the last
-two, `due_in_ms`; the worker sends those rows, from what the CLI says (§8.1). A new event
-`schedules.live`, written by the hub and transport only, lists the session's enabled schedules with
-a next run (§16); it goes to a session's subscribers on subscribe and on every change of the
-session's schedules, and a worker sending one is refused. The hub counts the kept list's
-`due_in_ms` down as it does `duration_ms` and, when `session.state` counts neither subagents nor
-background tasks, keeps the wakeup and the cron jobs in the list (the agent is idle, they wait)
-and drops the rest; when it says the agent stopped, it drops the whole list. The client leads the lines with "Monitor: ", "Wakeup: ", "Cron: " and
-"Scheduled: ", counts a timer down to `due`, keeps its dot still, shows the block for a timer or a
-schedule alone, and opens the chat's schedules from a "Scheduled" line. On a resume the worker seeds the cron
-rows from the transcript by the CLI's rule (§8.1). No migration.
+`subagents.live` has `kind` `monitor` (a Monitor watcher, a command's row, `stoppable` as a
+command's), `wakeup` (the wakeup the agent armed with `ScheduleWakeup`, the same one that holds
+off the idle unload since 0.162) and `cron` (a job of its `CronCreate`) and, on the last two,
+`due_in_ms` and no `stoppable`; the worker sends those rows, from what the CLI says (§8.1). A new
+event `schedules.live`, written by the hub and transport only, lists the session's enabled
+schedules with a next run (§16); it goes to a session's subscribers on subscribe and on every
+change of the session's schedules, and a worker sending one is refused. The hub counts the kept
+list's `due_in_ms` down as it does `duration_ms` and, when `session.state` counts neither
+subagents nor background tasks, keeps the wakeup and the cron jobs in the list (the agent is
+idle, they wait) and drops the rest; when it says the agent stopped, it drops the whole list.
+The client leads the lines with "Monitor: ", "Wakeup: ", "Cron: " and "Scheduled: ", counts a
+timer down to `due`, keeps its dot still, shows the block for a timer or a schedule alone, and
+opens the chat's schedules from a "Scheduled" line. On a resume, and on the start of a fork from
+the copied part, the worker seeds the cron rows from the transcript by the CLI's rule (§8.1). No
+migration.
 
 ### 0.166 → 0.167 (quick messages)
 §3 Project `quick_messages` (hub migration `0049_project_quick_messages`), §6 `PATCH

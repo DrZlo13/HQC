@@ -804,7 +804,8 @@ impl ClaudeCodeAdapter {
     /// session's own folder, cut at the record of the first of `f.at_event_ids` in it, and
     /// written up to that record to [`fork_copy_path`], which the CLI resumes. The records the fork
     /// copies are registered as the adapter's, so the mirror does not take them for another
-    /// writer's.
+    /// writer's. It returns the cron jobs the CLI resurrects in the copy
+    /// ([`resurrected_cron_jobs`] of the copied part).
     fn fork(
         &self,
         spec: &StartSpec,

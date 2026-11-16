@@ -3,9 +3,10 @@
 //!
 //! - `subscribe {session_id, after_seq?}` — stored events with `seq > after_seq` (default 0),
 //!   the answer being written as one `agent.delta` ([`AppState::live_text`]), the latest
-//!   `subagents.live` ([`AppState::live_agents`]), then `subscribed {session_id, last_seq}`,
-//!   then the live stream: stored events, `agent.delta` and `subagents.live` (no `seq`),
-//!   `delivery` changes of inputs;
+//!   `subagents.live` ([`AppState::live_agents`]), the session's `schedules.live`, unless
+//!   it is empty ([`crate::schedules::live_event`]), then `subscribed {session_id, last_seq}`,
+//!   then the live stream: stored events, `agent.delta`, `subagents.live` and
+//!   `schedules.live` (no `seq`), `delivery` changes of inputs;
 //! - `unsubscribe {session_id}`;
 //! - `subscribe_summary` — `summary {sessions}` for every session of the user, then
 //!   `session.summary {session}` whenever one of them changes; with it `requests {requests}`,
@@ -169,6 +170,9 @@ impl Client {
                         return false;
                     }
                 }
+                if !self.send_schedules(session_id, false).await {
+                    return false;
+                }
                 let last_seq = self.subs[&session_id].max(0) as u64;
                 self.send(ServerFrame::Subscribed {
                     session_id,
@@ -262,7 +266,7 @@ impl Client {
                 }
                 _ => true,
             },
-            Notice::LiveAgents { session_id, event } => {
+            Notice::Live { session_id, event } => {
                 if !self.subs.contains_key(session_id) {
                     return true;
                 }
@@ -353,6 +357,21 @@ impl Client {
         }
     }
 
+    /// The session's `schedules.live`, from the database; an empty one only when
+    /// `even_empty`: a new subscription has no list to clear, one that lost events has.
+    async fn send_schedules(&mut self, session_id: Uuid, even_empty: bool) -> bool {
+        match crate::schedules::live_event(&self.app, session_id).await {
+            Ok(event) if !even_empty && event["payload"]["schedules"] == serde_json::json!([]) => {
+                true
+            }
+            Ok(event) => self.send(ServerFrame::Event { event }).await,
+            Err(e) => {
+                tracing::error!(error = %e, "schedules.live");
+                self.error("internal", "internal error", None).await
+            }
+        }
+    }
+
     /// The bus overflowed: catch up every subscription from the database.
     async fn resync(&mut self) -> bool {
         let ids: Vec<Uuid> = self.subs.keys().copied().collect();
@@ -367,6 +386,9 @@ impl Client {
                 .live_agents(id)
                 .unwrap_or_else(|| crate::app::no_live_agents(id));
             if !self.send(ServerFrame::Event { event }).await {
+                return false;
+            }
+            if !self.send_schedules(id, true).await {
                 return false;
             }
         }

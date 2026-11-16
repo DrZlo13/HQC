@@ -817,9 +817,9 @@ async fn on_session_state(
     db::set_subagents(&app.db, session_id, subagents).await?;
     if subagents == 0 && background_tasks == 0 {
         // Neither a subagent nor a background task runs: the kept list, which holds the agent's
-        // background commands too, goes, its empty successor may have been lost with the link
-        // (SPEC §4).
-        app.drop_live_agents(session_id);
+        // background commands too, goes, its empty successor may have been lost with the link;
+        // the wakeups and cron jobs the agent armed stay, they wait while it is idle (SPEC §4).
+        app.drop_ended_live_agents(session_id);
     }
     db::set_background_tasks(&app.db, session_id, background_tasks).await?;
     // Every report carries the list, in memory only; a stopped agent runs none.

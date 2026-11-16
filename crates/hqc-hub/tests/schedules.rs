@@ -502,3 +502,109 @@ async fn a_scheduled_run_acked_as_joined_opens_its_turn() {
     assert!(run["payload"].get("joined").is_none(), "{run}");
     hub.finish().await;
 }
+
+/// The next `schedules.live` the client gets, its `schedules`.
+async fn next_live(c: &mut FakeClient) -> Value {
+    loop {
+        let e = c.until("event").await["event"].clone();
+        if e["type"] == "schedules.live" {
+            return e["payload"]["schedules"].clone();
+        }
+    }
+}
+
+/// SPEC §4, §6, §16: `schedules.live` lists the session's enabled schedules with a next run,
+/// the next one first, to the subscribers of the session: on subscribe (not an empty one) and
+/// whenever one is created (the tool and the API), paused, resumed, deleted or run. It is not
+/// stored.
+#[tokio::test]
+async fn schedules_live_follows_the_schedules_of_the_session() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (a, ta) = started(&hub, &mut w, "Live").await;
+    hub.app.clock.set(utc("2026-03-01T10:00:00Z"));
+    let mut c = FakeClient::connect(&hub).await;
+    let backlog = c.subscribe(&a, 0).await;
+    assert!(
+        backlog.iter().all(|e| e["type"] != "schedules.live"),
+        "{backlog:?}"
+    );
+
+    // The API: a one-off in 10 minutes.
+    let (s, one) = hub
+        .post(
+            "/api/schedules",
+            json!({"session_id": a, "at": "2026-03-01T10:10:00Z", "message": "one"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{one}");
+    let got = next_live(&mut c).await;
+    assert_eq!(
+        got,
+        json!([{"schedule_id": one["id"], "message": "one", "due_in_ms": 600_000,
+                "at": "2026-03-01T10:10:00Z", "timezone": "UTC"}])
+    );
+
+    // The tool: a cron; the one-off is the next.
+    let r = schedule(
+        &mut w,
+        &ta,
+        json!({"session": "personal/live", "message": "two", "cron": "*/30 * * * *"}),
+        "r1",
+    )
+    .await;
+    let cron_id = r["result"]["schedule_id"].as_str().unwrap().to_string();
+    let got = next_live(&mut c).await;
+    assert_eq!(got.as_array().unwrap().len(), 2, "{got}");
+    assert_eq!(got[0]["message"], "one");
+    assert_eq!(got[1]["schedule_id"], cron_id.as_str());
+    assert_eq!(got[1]["cron"], "*/30 * * * *");
+    assert_eq!(got[1]["due_in_ms"], 1_800_000);
+    assert!(got[1].get("at").is_none(), "{got}");
+
+    // A subscriber that comes later gets the list; it is not in the stored events.
+    let mut late = FakeClient::connect(&hub).await;
+    let backlog = late.subscribe(&a, 0).await;
+    let kept = backlog
+        .iter()
+        .find(|e| e["type"] == "schedules.live")
+        .unwrap();
+    assert_eq!(kept["payload"]["schedules"], got);
+    assert!(hub
+        .events(&a)
+        .await
+        .iter()
+        .all(|e| e["type"] != "schedules.live"));
+
+    // Paused: out of the list.
+    let (s, _) = hub
+        .patch(
+            &format!("/api/schedules/{cron_id}"),
+            json!({"enabled": false}),
+        )
+        .await;
+    assert_eq!(s, 200);
+    let got = next_live(&mut c).await;
+    assert_eq!(got.as_array().unwrap().len(), 1, "{got}");
+    assert_eq!(got[0]["message"], "one");
+
+    // A run of the one-off: it has no next run, the list is empty.
+    assert_eq!(run_at(&hub, "2026-03-01T10:10:04Z").await, 1);
+    assert_eq!(next_live(&mut c).await, json!([]));
+
+    // Resumed: next after now. Then deleted.
+    let (s, _) = hub
+        .patch(
+            &format!("/api/schedules/{cron_id}"),
+            json!({"enabled": true}),
+        )
+        .await;
+    assert_eq!(s, 200);
+    let got = next_live(&mut c).await;
+    assert_eq!(got[0]["schedule_id"], cron_id.as_str());
+    assert_eq!(got[0]["due_in_ms"], 1_196_000);
+    assert_eq!(hub.delete(&format!("/api/schedules/{cron_id}")).await, 204);
+    assert_eq!(next_live(&mut c).await, json!([]));
+    hub.finish().await;
+}

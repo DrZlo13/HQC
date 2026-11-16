@@ -40,7 +40,7 @@ use croner::{
 };
 use hqc_proto::{
     api::{CreateSchedule, PatchSchedule, Schedule, ScheduleList},
-    event::Chain,
+    event::{Chain, LiveSchedule},
     frame::{McpCall, McpError, PermissionMode},
     mcp::error_code,
 };
@@ -50,7 +50,7 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::{
-    app::AppState,
+    app::{AppState, Notice},
     auth::CurrentUser,
     db::{self, SessionRow},
     delivery,
@@ -249,6 +249,7 @@ async fn create(
     .execute(&app.db)
     .await?;
     tracing::info!(%id, session_id = %n.session_id, %next_run, "schedule created");
+    changed(app, n.session_id).await;
     row(app, id)
         .await?
         .ok_or_else(|| Refused::Internal(anyhow::anyhow!("schedule {id} vanished")))
@@ -403,6 +404,50 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
     })))
 }
 
+// ---------------------------------------------------------------- schedules.live
+
+/// The session's `schedules.live` (SPEC §4): its enabled schedules with a next run, the next
+/// one first, `due_in_ms` by [`Clock::now`]; empty when there are none.
+pub async fn live_event(app: &AppState, session_id: Uuid) -> sqlx::Result<Value> {
+    let rows: Vec<ScheduleRow> = sqlx::query_as(
+        "SELECT * FROM scheduled_messages
+         WHERE session_id = $1 AND enabled AND next_run IS NOT NULL
+         ORDER BY next_run, created_at",
+    )
+    .bind(session_id)
+    .fetch_all(&app.db)
+    .await?;
+    let now = app.clock.now();
+    let schedules: Vec<LiveSchedule> = rows
+        .into_iter()
+        .filter_map(|r| {
+            let due = (r.next_run? - now).num_milliseconds().max(0);
+            Some(LiveSchedule {
+                schedule_id: r.id,
+                message: r.message,
+                due_in_ms: due as u64,
+                cron: r.cron,
+                at: r.at,
+                timezone: r.timezone,
+            })
+        })
+        .collect();
+    Ok(crate::app::transport_event(
+        session_id,
+        "schedules.live",
+        json!({ "schedules": schedules }),
+    ))
+}
+
+/// The schedules of the session changed: its subscribers get the whole list again. A list
+/// that cannot be read is logged; the change itself stands.
+async fn changed(app: &AppState, session_id: Uuid) {
+    match live_event(app, session_id).await {
+        Ok(event) => app.notify(Notice::Live { session_id, event }),
+        Err(e) => tracing::error!(%session_id, error = %e, "schedules.live"),
+    }
+}
+
 // ---------------------------------------------------------------- the API
 
 async fn own_session(app: &AppState, user: &CurrentUser, id: Uuid) -> ApiResult<SessionRow> {
@@ -502,6 +547,7 @@ pub async fn patch(
         .execute(&app.db)
         .await?;
         tracing::info!(%id, enabled, "schedule changed");
+        changed(&app, r.session_id).await;
     }
     Ok(Json(own_schedule(&app, &user, id).await?.to_api()))
 }
@@ -512,12 +558,13 @@ pub async fn delete(
     user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<StatusCode> {
-    own_schedule(&app, &user, id).await?;
+    let r = own_schedule(&app, &user, id).await?;
     sqlx::query("DELETE FROM scheduled_messages WHERE id = $1")
         .bind(id)
         .execute(&app.db)
         .await?;
     tracing::info!(%id, "schedule deleted");
+    changed(&app, r.session_id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -625,6 +672,7 @@ async fn fire(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    changed(app, r.session_id).await;
     Ok(sent)
 }
 

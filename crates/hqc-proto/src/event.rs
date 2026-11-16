@@ -218,6 +218,23 @@ pub struct LiveSubagent {
     pub due_in_ms: Option<u64>,
 }
 
+/// One schedule of `schedules.live` (SPEC §4, since 0.168): an enabled schedule of the session
+/// with a next run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveSchedule {
+    pub schedule_id: Uuid,
+    pub message: String,
+    /// Milliseconds until its next run when the list was sent, by the hub's clock, 0 when due.
+    pub due_in_ms: u64,
+    /// The pattern of a recurring schedule; absent for a one-off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
+    /// The time of a one-off; absent for a recurring one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<DateTime<Utc>>,
+    pub timezone: String,
+}
+
 /// What a row of `subagents.live` is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -284,6 +301,11 @@ pub enum EventKind {
     /// never stored (SPEC §4, §5.2).
     #[serde(rename = "tokens.rate")]
     TokensRate { output_per_s: u32 },
+    /// The session's enabled schedules (SPEC §16) with a next run, the next one first; empty:
+    /// none (since SPEC 0.168). Written by the hub only, transport only, never stored (SPEC
+    /// §4, §5.2).
+    #[serde(rename = "schedules.live")]
+    SchedulesLive { schedules: Vec<LiveSchedule> },
     #[serde(rename = "agent.message")]
     AgentMessage {
         text: String,
@@ -469,6 +491,7 @@ impl EventKind {
         "agent.delta",
         "subagents.live",
         "tokens.rate",
+        "schedules.live",
         "agent.message",
         "agent.thinking",
         "tool.call",
@@ -593,6 +616,7 @@ mod tests {
         "agent.delta",
         "subagents.live",
         "tokens.rate",
+        "schedules.live",
         "agent.message",
         "agent.thinking",
         "tool.call",
@@ -627,6 +651,10 @@ mod tests {
         (
             "tokens.rate",
             include_str!("../examples/wire/event.tokens.rate.json"),
+        ),
+        (
+            "schedules.live",
+            include_str!("../examples/wire/event.schedules.live.json"),
         ),
         (
             "agent.message",
@@ -690,6 +718,7 @@ mod tests {
             EventKind::AgentDelta { .. } => "agent.delta",
             EventKind::SubagentsLive { .. } => "subagents.live",
             EventKind::TokensRate { .. } => "tokens.rate",
+            EventKind::SchedulesLive { .. } => "schedules.live",
             EventKind::AgentMessage { .. } => "agent.message",
             EventKind::AgentThinking { .. } => "agent.thinking",
             EventKind::ToolCall { .. } => "tool.call",

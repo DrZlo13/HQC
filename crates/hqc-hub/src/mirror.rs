@@ -160,6 +160,7 @@ pub async fn ingest(
         EventKind::AgentDelta { .. }
             | EventKind::SubagentsLive { .. }
             | EventKind::TokensRate { .. }
+            | EventKind::SchedulesLive { .. }
     ) {
         return Ok(dropped.into());
     }

@@ -290,7 +290,7 @@ impl LiveAgent {
 
 /// A job of the agent's `CronCreate`, shown as a row ([`Core::cron_jobs`]).
 #[derive(Debug)]
-struct CronJob {
+pub struct CronJob {
     /// The row: its `task_id` is the job's id, its `title` the job's prompt, its `activity`
     /// the schedule in words, its `since` when the result of `CronCreate` came.
     row: LiveAgent,
@@ -571,16 +571,16 @@ impl Core {
         self.fresh
     }
 
-    /// The cron jobs the CLI resurrects from the session's `transcript` on `--resume`, at
-    /// `now` (epoch ms): [`resurrected_cron_jobs`]. A pending wakeup is not re-armed by a
-    /// resume (checked live on 2.1.312), so none is seeded.
-    pub fn with_resumed_cron(mut self, transcript: &str, now: i64) -> Self {
-        self.cron_jobs = resurrected_cron_jobs(transcript, now);
+    /// The cron jobs the CLI resurrects when it resumes or forks a transcript
+    /// ([`resurrected_cron_jobs`]). A pending wakeup is not re-armed by a resume (checked live
+    /// on 2.1.312), so none is seeded.
+    pub fn with_resumed_cron(mut self, jobs: Vec<CronJob>) -> Self {
+        self.cron_jobs = jobs;
         self
     }
 
     /// The list of rows to send when the process starts: only when [`Core::with_resumed_cron`]
-    /// found a job, nothing otherwise.
+    /// was given a job, nothing otherwise.
     pub fn resumed_live(&self) -> Vec<Action> {
         if self.cron_jobs.is_empty() {
             return vec![];
@@ -2759,39 +2759,51 @@ fn epoch_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// The cron jobs the CLI resurrects from the session's `transcript` when it resumes it at
-/// `now` (epoch ms), as it picks them (`os` over the calls, results and deletions it collects
-/// from the transcript): every main-thread `CronCreate` call whose result, a successful one,
-/// has a string `id`, that is not `durable` (those live in a file of the project), is not named
-/// by a `CronDelete` call and has a string `cron` and `prompt`. A recurring job (all but
-/// `recurring: false`) is left out when it was created [`CRON_MAX_AGE_MS`] before `now` or
-/// earlier, else it fires next at [`next_cron_fire`] from `now` (the CLI sets its last fire to
-/// the resume); a one-shot job is left out when its time, the result's `nextFireAt`, is before
-/// `now`. A job's `createdAt` is its call's timestamp. The first call of an id counts.
-fn resurrected_cron_jobs(transcript: &str, now: i64) -> Vec<CronJob> {
+/// The cron jobs the CLI resurrects from the session's `transcript` when it resumes it or
+/// forks a copy of it, at `now` (epoch ms), as it picks them (`os` over the calls, results and
+/// deletions it collects from the transcript): every main-thread `CronCreate` call whose
+/// result, a successful one, has a string `id`, that is not `durable` (those live in a file of
+/// the project, which the worker does not read), is not named by a `CronDelete` call and has
+/// a string `cron` and `prompt`. A recurring job (all but `recurring: false`) is left out when
+/// it was created [`CRON_MAX_AGE_MS`] before `now` or earlier, else it fires next at
+/// [`next_cron_fire`] from `now` (the CLI sets its last fire to the resume); a one-shot job is
+/// kept while its time, the result's `nextFireAt`, is ahead of `now` (the CLI computes the same
+/// time again from the call's timestamp, equal up to the call's delay). A job's `createdAt` is
+/// its call's timestamp. The first call of an id counts.
+///
+/// A transcript is up to hundreds of MB, its tool results most of it, so only the lines that
+/// can matter are parsed: those with a `CronCreate` or `CronDelete` call, and the results of
+/// the calls found.
+pub fn resurrected_cron_jobs(transcript: &str, now: i64) -> Vec<CronJob> {
     // The calls in order: id, input, timestamp.
     let mut calls: Vec<(String, Value, i64)> = Vec::new();
     let mut results: HashMap<String, Value> = HashMap::new();
     let mut deleted: HashSet<String> = HashSet::new();
-    for v in transcript
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-    {
+    for line in transcript.lines() {
+        let is_call = line.contains("\"CronCreate\"") || line.contains("\"CronDelete\"");
+        let is_result = line.contains("\"toolUseResult\"")
+            && calls.iter().any(|(id, ..)| line.contains(id.as_str()));
+        if !is_call && !is_result {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if v["isSidechain"] == true {
             continue;
         }
         match v["type"].as_str() {
             Some("assistant") => {
-                let Some(at) = v["timestamp"]
-                    .as_str()
-                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                    .map(|t| t.timestamp_millis())
-                else {
-                    continue;
-                };
                 for b in blocks(&v).iter().filter(|b| b["type"] == "tool_use") {
                     match (b["name"].as_str(), b["id"].as_str()) {
                         (Some("CronCreate"), Some(id)) => {
+                            let Some(at) = v["timestamp"]
+                                .as_str()
+                                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                                .map(|t| t.timestamp_millis())
+                            else {
+                                continue;
+                            };
                             let input = if b["input"].is_object() {
                                 b["input"].clone()
                             } else {
@@ -2811,7 +2823,10 @@ fn resurrected_cron_jobs(transcript: &str, now: i64) -> Vec<CronJob> {
             Some("user") if v["toolUseResult"].is_object() => {
                 for b in blocks(&v) {
                     if b["type"] == "tool_result" && b["is_error"] != true {
-                        if let Some(id) = b["tool_use_id"].as_str() {
+                        if let Some(id) = b["tool_use_id"]
+                            .as_str()
+                            .filter(|id| calls.iter().any(|(call, ..)| call == id))
+                        {
                             results.insert(id.to_owned(), v["toolUseResult"].clone());
                         }
                     }

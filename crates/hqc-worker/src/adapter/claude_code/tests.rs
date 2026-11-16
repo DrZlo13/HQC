@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::engine::{
-    next_cron_fire, Action, Core, COMMAND_TEXT_LIMIT, CONVERSATION_CLEARED,
+    next_cron_fire, resurrected_cron_jobs, Action, Core, COMMAND_TEXT_LIMIT, CONVERSATION_CLEARED,
     CONVERSATION_CLEARED_TEXT,
 };
 use super::process::{CommandSpec, OsSpawner, Sig};
@@ -5943,14 +5943,10 @@ fn a_cron_fire_takes_the_job_due_next() {
     assert_eq!(ids, ["bbbbbbbb"], "the job due next was the 5-minute one");
 }
 
-/// A resume brings back the session's cron jobs as the CLI resurrects them from the
-/// transcript (checked live on 2.1.312: a `*/2` job kept firing after a resume): a recurring
-/// job made less than 7 days ago, due from `next_cron_fire` at the resume, and a one-shot job
-/// not yet due. Not a deleted one, a one 8 days old, a `durable` one (it lives in a file), a
-/// one-shot one in the past, nor a subagent's call. The row's run time counts from its call.
-#[test]
-fn a_resume_brings_back_the_cron_jobs_of_the_transcript() {
-    let now = now_ms();
+/// A transcript of cron jobs as of `now` (epoch ms): see
+/// [`a_resume_brings_back_the_cron_jobs_of_the_transcript`] for what each of them is. The
+/// deletion of the second job has no timestamp: the CLI counts it all the same.
+fn cron_transcript(now: i64) -> String {
     let stamp = |ago_ms: i64| {
         chrono::DateTime::from_timestamp_millis(now - ago_ms)
             .unwrap()
@@ -5987,13 +5983,26 @@ fn a_resume_brings_back_the_cron_jobs_of_the_transcript() {
     create("66666666", 3_600_000, false, false, now + 3_600_000, false);
     create("77777777", 3_600_000, true, false, now + 1, true);
     lines.push(
-        json!({"type": "assistant", "timestamp": stamp(1_000), "message": {"content": [
+        json!({"type": "assistant", "message": {"content": [
             {"type": "tool_use", "id": "toolu_del", "name": "CronDelete", "input": {"id": "22222222"}}]}})
         .to_string(),
     );
-    let transcript = lines.join("\n");
+    lines.join("\n")
+}
 
-    let core = Core::new(Uuid::now_v7(), false).with_resumed_cron(&transcript, now);
+/// A resume brings back the session's cron jobs as the CLI resurrects them from the
+/// transcript (checked live on 2.1.312: a `*/2` job kept firing after a resume): a recurring
+/// job made less than 7 days ago, due from `next_cron_fire` at the resume, and a one-shot job
+/// not yet due. Not a deleted one, a one 8 days old, a `durable` one (it lives in a file), a
+/// one-shot one in the past, nor a subagent's call, and a deletion without a timestamp counts.
+/// The row's run time counts from its call.
+#[test]
+fn a_resume_brings_back_the_cron_jobs_of_the_transcript() {
+    let now = now_ms();
+    let transcript = cron_transcript(now);
+
+    let core =
+        Core::new(Uuid::now_v7(), false).with_resumed_cron(resurrected_cron_jobs(&transcript, now));
     let before = now_ms();
     let lists = live_rows(core.resumed_live());
     let after = now_ms();
@@ -6020,9 +6029,71 @@ fn a_resume_brings_back_the_cron_jobs_of_the_transcript() {
 
     // Without a job there is no list.
     assert!(Core::new(Uuid::now_v7(), false)
-        .with_resumed_cron("", now)
+        .with_resumed_cron(vec![])
         .resumed_live()
         .is_empty());
+}
+
+/// The ids of the cron rows in the first event an adapter sent: it must be the list of rows.
+fn first_cron_ids(rx: &mut mpsc::Receiver<AdapterEvent>) -> Vec<String> {
+    let Ok(AdapterEvent::LiveSubagents(rows)) = rx.try_recv() else {
+        panic!("the first event is not the list of rows");
+    };
+    assert!(rows.iter().all(|r| r.kind == Some(LiveKind::Cron)));
+    rows.into_iter().map(|r| r.task_id).collect()
+}
+
+/// SPEC §8.1: the first event of a resumed process is the list of the cron jobs the CLI
+/// resurrects from the transcript, as the adapter reads it.
+#[tokio::test]
+async fn a_resumed_process_starts_with_the_cron_jobs_of_its_transcript() {
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let runtime = Uuid::new_v4();
+    let mut s = spec(Uuid::now_v7(), work.path(), runtime);
+    s.has_history = true;
+    let t = super::paths::transcript_path(config.path(), &s.workdir, &runtime);
+    std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+    std::fs::write(&t, cron_transcript(now_ms())).unwrap();
+    let (tx, mut rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    a.resume(&s).await.unwrap();
+    assert!(claude.commands()[0].args.contains(&"--resume".to_string()));
+    assert_eq!(first_cron_ids(&mut rx), ["11111111", "66666666"]);
+    a.kill().await.unwrap();
+}
+
+/// SPEC §8.1: a fork's copy resurrects the cron jobs of the source up to the fork point, so
+/// the first event of its process lists them; a job made after the point is not in it.
+#[tokio::test]
+async fn a_fork_starts_with_the_cron_jobs_of_the_copied_conversation() {
+    let (turns, ids) = two_turns();
+    let (source, runtime) = (Uuid::new_v4(), Uuid::new_v4());
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let from = super::paths::transcript_path(config.path(), work.path(), &source);
+    std::fs::create_dir_all(from.parent().unwrap()).unwrap();
+    let now = now_ms();
+    // The jobs, the conversation, then a job after the fork point.
+    let after = cron_transcript(now).replace("11111111", "99999999");
+    std::fs::write(&from, format!("{}\n{turns}\n{after}", cron_transcript(now))).unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let mut s = spec(Uuid::now_v7(), work.path(), runtime);
+    s.fork = Some(hqc_proto::frame::ForkFrom {
+        runtime_session_id: source.to_string(),
+        at_event_ids: vec![super::engine::record_event_id(&ids[1], 1)],
+    });
+    let (tx, mut rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    assert!(claude.commands()[0]
+        .args
+        .contains(&"--fork-session".to_string()));
+    assert_eq!(first_cron_ids(&mut rx), ["11111111", "66666666"]);
+    a.kill().await.unwrap();
 }
 
 /// The time to the next fire of a recurring job, [`next_cron_fire`], against the CLI's formula

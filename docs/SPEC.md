@@ -3547,15 +3547,20 @@ hex digits of the id as a fraction of 2^32 times half the interval to the match 
 by 30 minutes at most; a job of `*/N * * * *` whose interval is at least 5 minutes but under 5
 minutes 15 s (that is, `*/5`) fires 15 s short of that interval after the fire. When the process
 resumes the session (`--resume`: a restart of the worker, Restart session, a move, the next input
-after an unload) the CLI resurrects the session's cron jobs from the transcript and they keep
-firing (checked live on 2.1.312: a `*/2` job fired twice after a resume); a pending wakeup is not
-re-armed (its time passed with no fire). So the worker reads the transcript and seeds the rows by
-the CLI's rule, as the first list of the process: every `CronCreate` call of the main thread
-(`isSidechain` lines are skipped) whose successful result has a string `id`, that is not
+after an unload) or starts a copy of it (a fork, `--resume <copy> --fork-session`) the CLI
+resurrects the session's cron jobs from the transcript and they keep firing (checked live on
+2.1.312: a `*/2` job fired twice after a resume); a pending wakeup is not re-armed (its time passed
+with no fire). So the worker reads the transcript (for a copy, the part that is copied; only the
+lines with a `CronCreate` or `CronDelete` call and the results of those calls are parsed) and seeds
+the rows by the CLI's rule, as the first list of the process: every `CronCreate` call of the main
+thread (`isSidechain` lines are skipped) whose successful result has a string `id`, that is not
 `durable`, not named by a `CronDelete` call and has a string `cron` and `prompt`; a recurring job
 (all but `recurring: false`) created 7 days or more ago is left out, any other is due at the next
-fire counted from the resume; a one-shot job is left out when its `nextFireAt` is before the
-resume, else it is due then; `duration_ms` counts from the call's transcript timestamp; no
+fire counted from the resume; a one-shot job is kept while its `nextFireAt` is ahead of the resume,
+and is due then (the CLI computes the same time again from the call's timestamp, equal up to the
+call's delay); a `durable` job shows as a row while the process that created it runs and none after
+a resume, although the CLI keeps firing it from `.claude/scheduled_tasks.json` (the worker does not
+read that file); `duration_ms` counts from the call's transcript timestamp; no
 wakeup is seeded. A change of the wakeup or of a job
 sends the list again; none of them changes `session.state.subagents`, `background_tasks` or the
 state. The worker sends `subagents.live` directly, not through the outbox, as

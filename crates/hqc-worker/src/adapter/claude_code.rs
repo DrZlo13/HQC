@@ -61,7 +61,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use self::engine::{Action, Core};
+use self::engine::{resurrected_cron_jobs, Action, Core, CronJob};
 use self::process::{CommandSpec, ExitInfo, OsSpawner, Sig, SignalFn, Spawner};
 use super::{Adapter, AdapterEvent, AdapterFactory, EventSink};
 use crate::config::{Config, StartSpec};
@@ -810,7 +810,7 @@ impl ClaudeCodeAdapter {
         spec: &StartSpec,
         f: &ForkFrom,
         uuid: Uuid,
-    ) -> anyhow::Result<(Launch, RemoveOnDrop)> {
+    ) -> anyhow::Result<(Launch, RemoveOnDrop, Vec<CronJob>)> {
         let from: Uuid = f
             .runtime_session_id
             .parse()
@@ -841,7 +841,9 @@ impl ClaudeCodeAdapter {
         for u in copied {
             self.opts.own_records.add(uuid, u);
         }
-        Ok((Launch::Fork { at }, copy))
+        // The CLI resurrects the cron jobs of the copy's conversation as it does on a resume.
+        let cron = resurrected_cron_jobs(&text[..end], chrono::Utc::now().timestamp_millis());
+        Ok((Launch::Fork { at }, copy, cron))
     }
 
     async fn spawn(&mut self, spec: &StartSpec, why: &str) -> anyhow::Result<()> {
@@ -858,13 +860,13 @@ impl ClaudeCodeAdapter {
         let resume = transcript.as_ref().is_some_and(|p| p.exists());
         // A fork is made once, by the first start: after it the session has its transcript.
         // The fork copy goes with the process, like its ssh-agent below.
-        let (launch, fork_copy) = match (&spec.fork, resume) {
-            (_, true) => (Launch::Resume, None),
+        let (launch, fork_copy, mut cron_jobs) = match (&spec.fork, resume) {
+            (_, true) => (Launch::Resume, None, Vec::new()),
             (Some(f), false) => {
-                let (launch, copy) = self.fork(spec, f, uuid)?;
-                (launch, Some(copy))
+                let (launch, copy, cron) = self.fork(spec, f, uuid)?;
+                (launch, Some(copy), cron)
             }
-            (None, false) => (Launch::New, None),
+            (None, false) => (Launch::New, None, Vec::new()),
         };
         // T44: an ssh-agent of this process's own; it stops when the process has exited
         // (the monitor drops it), or right here if the spawn fails.
@@ -980,21 +982,22 @@ impl ClaudeCodeAdapter {
 
         // The CLI carries the session's cost over `--resume` from the transcript's last
         // `cost-state`; per-turn costs are counted from there (T27). It resurrects the
-        // session's cron jobs from it too (SPEC §8.1).
-        let resumed = match transcript.as_ref().filter(|_| resume) {
-            Some(p) => tokio::fs::read_to_string(p).await.ok(),
+        // session's cron jobs from it too (SPEC §8.1). The transcript is dropped after this.
+        let cost_baseline = match transcript.as_ref().filter(|_| resume) {
+            Some(p) => match tokio::fs::read_to_string(p).await {
+                Ok(t) => {
+                    cron_jobs = resurrected_cron_jobs(&t, chrono::Utc::now().timestamp_millis());
+                    hqc_claude_jsonl::last_cost_total(&t)
+                }
+                Err(_) => None,
+            },
             None => None,
         };
-        let cost_baseline = resumed
-            .as_deref()
-            .and_then(hqc_claude_jsonl::last_cost_total);
         let mut core = Core::new(self.session_id, spec.restricted)
             .with_policy(Arc::new(Policy::new(&spec.environment.permissions)))
             .with_cost_baseline(cost_baseline)
-            .with_new_conversation(launch.new_conversation());
-        if let Some(t) = &resumed {
-            core = core.with_resumed_cron(t, chrono::Utc::now().timestamp_millis());
-        }
+            .with_new_conversation(launch.new_conversation())
+            .with_resumed_cron(cron_jobs);
         if let Some(rules) = &spec.folder_rules {
             core = core.with_folder(rules.clone(), spec.workspace.clone());
         }

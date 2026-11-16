@@ -42,7 +42,7 @@
 //!   with its `description` and run time only, when they or a `description` change;
 //! - `system` `background_tasks_changed` (`tasks`: the CLI's list of the session's running
 //!   background tasks, subagents and commands, its subagents' too) →
-//!   [`AdapterEvent::BackgroundTasks`] with their number when it changes;
+//!   [`AdapterEvent::BackgroundTasks`] with the number of those not `ambient` when it changes;
 //! - `system` `task_started` with `is_backgrounded: false`, `task_type` `local_bash` or
 //!   `local_agent`, a `tool_use_id`, no `skip_transcript: true`, no `owned_by_subagent:
 //!   true` and no `parent_task_id` (a Bash call or a subagent of the agent itself in the
@@ -1167,19 +1167,19 @@ impl Core {
     }
 
     /// `system/background_tasks_changed` (2.1.312): `tasks`, the CLI's whole list of the
-    /// session's running background tasks, sent on every change and `[]` at the end. Their
-    /// number when it changed; a subagent count that went up. One that went down, or a subagent
-    /// of [`Core::held_ends`] that stopped counting, waits for the
+    /// session's running background tasks, sent on every change and `[]` at the end. The
+    /// number of [`Core::background_work`] when it changed; a subagent count that went up. One
+    /// that went down, or a subagent of [`Core::held_ends`] that stopped counting, waits for the
     /// next line of another kind ([`Core::recount`]): when the last command of a subagent the
     /// CLI already called ended leaves the list, the CLI lists the subagent again only on the
     /// next line, `[]` then `[subagent]`, and then starts it again (SPEC §8.1 **[verify]**:
     /// inferred from a capture where a second task of the subagent kept the list non-empty).
     fn on_background_tasks(&mut self, v: &Value) -> Vec<Action> {
-        let before = self.background.len();
+        let before = self.background_work();
         self.background = v["tasks"].as_array().cloned().unwrap_or_default();
         let mut out = Vec::new();
-        if self.background.len() != before {
-            let n = u32::try_from(self.background.len()).unwrap_or(u32::MAX);
+        let n = self.background_work();
+        if n != before {
             tracing::info!(session_id = %self.session_id, background_tasks = n, "background tasks");
             out.push(Action::Emit(AdapterEvent::BackgroundTasks(n)));
         }
@@ -1249,6 +1249,21 @@ impl Core {
         self.running_subagent_ids().len()
     }
 
+    /// The tasks of the latest `background_tasks_changed` list that are work: those without
+    /// `ambient: true`. 2.1.312 sets it on tasks that are no activity: its own housekeeping
+    /// (`skip_transcript`) and every live-update watcher, such as the one that follows the
+    /// comments on a page the agent published with the Artifact tool (`monitor_ws`,
+    /// `persistent`, no timeout, so it stays for the whole process). The SDK tells hosts to
+    /// leave them out of activity, and the VS Code tab does.
+    fn background_work(&self) -> u32 {
+        let n = self
+            .background
+            .iter()
+            .filter(|t| t["ambient"] != true)
+            .count();
+        u32::try_from(n).unwrap_or(u32::MAX)
+    }
+
     /// The `task_id`s of [`Core::running_subagents`].
     fn running_subagent_ids(&self) -> HashSet<&str> {
         let mut ids: HashSet<&str> = self.subagents.iter().map(String::as_str).collect();
@@ -1261,8 +1276,14 @@ impl Core {
         ids
     }
 
-    /// The subagent listed task `t` belongs to, unless that subagent has reported.
+    /// The subagent listed task `t` belongs to, unless that subagent has reported or `t` is
+    /// marked `ambient`: 2.1.312 gives the comment watcher of a page a subagent published the
+    /// subagent as `parent_task_id`, and the watcher stays for the whole process, so it would
+    /// keep a subagent that ended counted for good ([`Core::background_work`]).
     fn parent<'a>(&self, t: &'a Value) -> Option<&'a str> {
+        if t["ambient"] == true {
+            return None;
+        }
         t["parent_task_id"]
             .as_str()
             .filter(|p| !self.reported.contains(*p))

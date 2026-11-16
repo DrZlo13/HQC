@@ -54,10 +54,10 @@ pub enum AdapterEvent {
     /// title changes and on every progress of one of them.
     LiveSubagents(Vec<hqc_proto::event::LiveSubagent>),
     /// How many background tasks the runtime lists now, its subagents' included (Claude Code:
-    /// the `tasks` of `system/background_tasks_changed`, SPEC §8.1); sent as
-    /// `session.state.background_tasks`. The agent is not idle while it is above 0 (SPEC
-    /// §17.3), and a move tells the agent how many it stopped (SPEC §5.3). Reported when it
-    /// changes.
+    /// the `tasks` of `system/background_tasks_changed` without `ambient: true`, SPEC §8.1);
+    /// sent as `session.state.background_tasks`. The agent is not idle while it is above 0
+    /// (SPEC §17.3), and a move tells the agent how many it stopped (SPEC §5.3). Reported when
+    /// it changes.
     BackgroundTasks(u32),
     /// The output tokens per second the agent and its subagents spent over the last 20 s
     /// (Claude Code: the main agent's response while it streams, made exact by its

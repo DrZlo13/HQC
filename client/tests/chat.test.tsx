@@ -1545,6 +1545,40 @@ describe('live subagents', () => {
     }
   });
 
+  it('keeps the newest 200 steps of an open history and says earlier ones are not shown', async () => {
+    const { api, app } = setup('running', { subagents: 1 });
+    await mount(app);
+    const said = (n: number) =>
+      ev('event.agent.message', 0, (e) => {
+        delete e.seq;
+        e.event_id = `0199f3a2-7c10-7000-8000-${n.toString().padStart(12, '0')}`;
+        e.payload = { text: `Step ${n}.`, final: false };
+      });
+    const replies: SubagentHistory[] = [
+      { events: Array.from({ length: 199 }, (_, i) => said(i + 1)), truncated: false },
+      { events: [said(200), said(201), said(202)], truncated: false, continues: true },
+    ];
+    api.subagentHistory.mockImplementation(async () => replies.shift() ?? { events: [], truncated: false, continues: true });
+    const subagent = { task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000 };
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [subagent]))));
+    const panel = () => $('.live-agents li .live-agents-history')!;
+    const texts = () => [...panel().querySelectorAll('.msg-agent > .text')].map((m) => m.textContent!.trim());
+    const tick = (ms: number) => act(async () => void (await vi.advanceTimersByTimeAsync(ms)));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await act(async () => root.querySelector<HTMLButtonElement>('button.live-agents-opens')!.click());
+      await tick(0);
+      expect(texts()).toHaveLength(199);
+      expect(panel().querySelector('.live-agents-note')).toBeNull();
+      await tick(2000);
+      expect(texts()).toHaveLength(200);
+      expect([texts()[0], texts()[199]]).toEqual(['Step 3.', 'Step 202.']);
+      expect(panel().querySelector('.live-agents-note')!.textContent).toBe('Earlier steps are not shown.');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('fetches an open history again only while the page is shown, and at once when it is shown again', async () => {
     const { api, app } = setup('running', { subagents: 1 });
     await mount(app);

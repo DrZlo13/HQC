@@ -1096,7 +1096,8 @@ MCP calls (worker → hub → worker):
   without a transcript, and a runtime that keeps none, has no events. `after` is the `event_id` of
   the last event the client shows: when it is among the events of that page, the result holds
   only the ones after it, with `continues: true` and `truncated` false, for the client to append;
-  when it is not (more than 200 new ones, or the tail read moved past it), the whole page, without
+  when it is not (more than 200 new ones or more than 512 KiB of them, or the tail read moved past
+  it), the whole page, without
   `continues`. A worker that does not know `after` ignores it and sends the whole page, which the
   client takes in place of its own. A session the worker has not started is
   `error {unknown_session}`. As for `fs.stat`, `request_id` equals the frame's `id` and the hub

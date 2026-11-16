@@ -5943,6 +5943,88 @@ fn a_cron_fire_takes_the_job_due_next() {
     assert_eq!(ids, ["bbbbbbbb"], "the job due next was the 5-minute one");
 }
 
+/// A resume brings back the session's cron jobs as the CLI resurrects them from the
+/// transcript (checked live on 2.1.312: a `*/2` job kept firing after a resume): a recurring
+/// job made less than 7 days ago, due from `next_cron_fire` at the resume, and a one-shot job
+/// not yet due. Not a deleted one, a one 8 days old, a `durable` one (it lives in a file), a
+/// one-shot one in the past, nor a subagent's call. The row's run time counts from its call.
+#[test]
+fn a_resume_brings_back_the_cron_jobs_of_the_transcript() {
+    let now = now_ms();
+    let stamp = |ago_ms: i64| {
+        chrono::DateTime::from_timestamp_millis(now - ago_ms)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    };
+    let mut lines = Vec::new();
+    // A job: its `CronCreate` call, `ago_ms` before the resume, and the result of it.
+    let mut create = |id: &str,
+                      ago_ms: i64,
+                      recurring: bool,
+                      durable: bool,
+                      next: i64,
+                      side: bool| {
+        let call = format!("toolu_{id}");
+        lines.push(
+            json!({"type": "assistant", "isSidechain": side, "timestamp": stamp(ago_ms), "message": {"content": [
+                {"type": "tool_use", "id": call, "name": "CronCreate",
+                 "input": {"cron": "*/2 * * * *", "prompt": format!("prompt {id}"), "recurring": recurring}}]}})
+            .to_string(),
+        );
+        lines.push(
+            json!({"type": "user", "isSidechain": side, "timestamp": stamp(ago_ms), "message": {"content": [
+                {"type": "tool_result", "tool_use_id": call, "content": "ok"}]},
+                "toolUseResult": {"id": id, "humanSchedule": "Every 2 minutes", "recurring": recurring,
+                                  "durable": durable, "nextFireAt": next}})
+            .to_string(),
+        );
+    };
+    create("11111111", 3_600_000, true, false, now + 1, false);
+    create("22222222", 3_600_000, true, false, now + 1, false);
+    create("33333333", 8 * 86_400_000, true, false, now + 1, false);
+    create("44444444", 3_600_000, true, true, now + 1, false);
+    create("55555555", 3_600_000, false, false, now - 60_000, false);
+    create("66666666", 3_600_000, false, false, now + 3_600_000, false);
+    create("77777777", 3_600_000, true, false, now + 1, true);
+    lines.push(
+        json!({"type": "assistant", "timestamp": stamp(1_000), "message": {"content": [
+            {"type": "tool_use", "id": "toolu_del", "name": "CronDelete", "input": {"id": "22222222"}}]}})
+        .to_string(),
+    );
+    let transcript = lines.join("\n");
+
+    let core = Core::new(Uuid::now_v7(), false).with_resumed_cron(&transcript, now);
+    let before = now_ms();
+    let lists = live_rows(core.resumed_live());
+    let after = now_ms();
+    let [rows] = &lists[..] else {
+        panic!("{lists:?}")
+    };
+    let ids: Vec<_> = rows.iter().map(|r| r.task_id.as_str()).collect();
+    assert_eq!(ids, ["11111111", "66666666"]);
+    assert!(rows.iter().all(|r| r.kind == Some(LiveKind::Cron)));
+    let first = &rows[0];
+    assert_eq!(first.description, "prompt 11111111");
+    assert_eq!(first.activity.as_deref(), Some("Every 2 minutes"));
+    assert_eq!(first.call_id.as_deref(), Some("toolu_11111111"));
+    assert!(first.duration_ms >= 3_600_000, "{first:?}");
+    let due = next_cron_fire("*/2 * * * *", now, "11111111").unwrap();
+    let due_in = first.due_in_ms.unwrap() as i64;
+    assert!(
+        (due - after..=due - before).contains(&due_in),
+        "{due_in} against {}",
+        due - now
+    );
+    let one_shot = rows[1].due_in_ms.unwrap();
+    assert!((3_599_000..=3_600_000).contains(&one_shot), "{one_shot}");
+
+    // Without a job there is no list.
+    assert!(Core::new(Uuid::now_v7(), false)
+        .with_resumed_cron("", now)
+        .resumed_live()
+        .is_empty());
+}
+
 /// The time to the next fire of a recurring job, [`next_cron_fire`], against the CLI's formula
 /// (`Hmn`): the next match of the expression in local time, put off by (first 8 hex digits of
 /// the id / 2^32) * half the interval to the match after it, at most 30 minutes; `*/5` fires

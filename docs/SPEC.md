@@ -3545,7 +3545,18 @@ fire, which the adapter works out as the CLI does (`Hmn` with its default settin
 match of the expression after the fire in the machine's local time zone, put off by the first 8
 hex digits of the id as a fraction of 2^32 times half the interval to the match after it, but
 by 30 minutes at most; a job of `*/N * * * *` whose interval is at least 5 minutes but under 5
-minutes 15 s (that is, `*/5`) fires 15 s short of that interval after the fire. A change of the wakeup or of a job
+minutes 15 s (that is, `*/5`) fires 15 s short of that interval after the fire. When the process
+resumes the session (`--resume`: a restart of the worker, Restart session, a move, the next input
+after an unload) the CLI resurrects the session's cron jobs from the transcript and they keep
+firing (checked live on 2.1.312: a `*/2` job fired twice after a resume); a pending wakeup is not
+re-armed (its time passed with no fire). So the worker reads the transcript and seeds the rows by
+the CLI's rule, as the first list of the process: every `CronCreate` call of the main thread
+(`isSidechain` lines are skipped) whose successful result has a string `id`, that is not
+`durable`, not named by a `CronDelete` call and has a string `cron` and `prompt`; a recurring job
+(all but `recurring: false`) created 7 days or more ago is left out, any other is due at the next
+fire counted from the resume; a one-shot job is left out when its `nextFireAt` is before the
+resume, else it is due then; `duration_ms` counts from the call's transcript timestamp; no
+wakeup is seeded. A change of the wakeup or of a job
 sends the list again; none of them changes `session.state.subagents`, `background_tasks` or the
 state. The worker sends `subagents.live` directly, not through the outbox, as
 `agent.delta`, ignores a list read after the agent's process stopped and sends an empty list when it
@@ -5813,7 +5824,8 @@ session's schedules, and a worker sending one is refused. The hub counts the kep
 background tasks, keeps the wakeup and the cron jobs in the list (the agent is idle, they wait)
 and drops the rest; when it says the agent stopped, it drops the whole list. The client leads the lines with "Monitor: ", "Wakeup: ", "Cron: " and
 "Scheduled: ", counts a timer down to `due`, keeps its dot still, shows the block for a timer or a
-schedule alone, and opens the chat's schedules from a "Scheduled" line. No migration.
+schedule alone, and opens the chat's schedules from a "Scheduled" line. On a resume the worker seeds the cron
+rows from the transcript by the CLI's rule (§8.1). No migration.
 
 ### 0.166 → 0.167 (quick messages)
 §3 Project `quick_messages` (hub migration `0049_project_quick_messages`), §6 `PATCH

@@ -979,22 +979,27 @@ impl ClaudeCodeAdapter {
         }
 
         // The CLI carries the session's cost over `--resume` from the transcript's last
-        // `cost-state`; per-turn costs are counted from there (T27).
-        let cost_baseline = match transcript.as_ref().filter(|_| resume) {
-            Some(p) => tokio::fs::read_to_string(p)
-                .await
-                .ok()
-                .and_then(|t| hqc_claude_jsonl::last_cost_total(&t)),
+        // `cost-state`; per-turn costs are counted from there (T27). It resurrects the
+        // session's cron jobs from it too (SPEC §8.1).
+        let resumed = match transcript.as_ref().filter(|_| resume) {
+            Some(p) => tokio::fs::read_to_string(p).await.ok(),
             None => None,
         };
+        let cost_baseline = resumed
+            .as_deref()
+            .and_then(hqc_claude_jsonl::last_cost_total);
         let mut core = Core::new(self.session_id, spec.restricted)
             .with_policy(Arc::new(Policy::new(&spec.environment.permissions)))
             .with_cost_baseline(cost_baseline)
             .with_new_conversation(launch.new_conversation());
+        if let Some(t) = &resumed {
+            core = core.with_resumed_cron(t, chrono::Utc::now().timestamp_millis());
+        }
         if let Some(rules) = &spec.folder_rules {
             core = core.with_folder(rules.clone(), spec.workspace.clone());
         }
         let initialize = core.initialize();
+        let resumed_live = core.resumed_live();
         let core = Arc::new(Mutex::new(core));
         let io = Arc::new(Io {
             session_id: self.session_id,
@@ -1006,6 +1011,8 @@ impl ClaudeCodeAdapter {
             runtime: Mutex::new(uuid),
             own: self.opts.own_records.clone(),
         });
+        // The first list of the process: the cron jobs it resurrected.
+        let _ = io.run(resumed_live).await;
         let pid = spawned.pid;
         let live = Live::new(self.opts.own_records.clone(), uuid, pid);
         let killing = Arc::new(AtomicBool::new(false));

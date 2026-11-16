@@ -116,7 +116,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
 use hqc_proto::event::{
@@ -569,6 +569,23 @@ impl Core {
     /// ticker reads the transcript's title on each tick of it.
     pub fn fresh(&self) -> bool {
         self.fresh
+    }
+
+    /// The cron jobs the CLI resurrects from the session's `transcript` on `--resume`, at
+    /// `now` (epoch ms): [`resurrected_cron_jobs`]. A pending wakeup is not re-armed by a
+    /// resume (checked live on 2.1.312), so none is seeded.
+    pub fn with_resumed_cron(mut self, transcript: &str, now: i64) -> Self {
+        self.cron_jobs = resurrected_cron_jobs(transcript, now);
+        self
+    }
+
+    /// The list of rows to send when the process starts: only when [`Core::with_resumed_cron`]
+    /// found a job, nothing otherwise.
+    pub fn resumed_live(&self) -> Vec<Action> {
+        if self.cron_jobs.is_empty() {
+            return vec![];
+        }
+        vec![self.live_list()]
     }
 
     /// Whether turn number `turn` (from [`Core::interrupt`]) is still running.
@@ -2740,6 +2757,117 @@ pub fn preview(s: &str, limit: usize) -> String {
 /// Now, in epoch ms.
 fn epoch_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// The cron jobs the CLI resurrects from the session's `transcript` when it resumes it at
+/// `now` (epoch ms), as it picks them (`os` over the calls, results and deletions it collects
+/// from the transcript): every main-thread `CronCreate` call whose result, a successful one,
+/// has a string `id`, that is not `durable` (those live in a file of the project), is not named
+/// by a `CronDelete` call and has a string `cron` and `prompt`. A recurring job (all but
+/// `recurring: false`) is left out when it was created [`CRON_MAX_AGE_MS`] before `now` or
+/// earlier, else it fires next at [`next_cron_fire`] from `now` (the CLI sets its last fire to
+/// the resume); a one-shot job is left out when its time, the result's `nextFireAt`, is before
+/// `now`. A job's `createdAt` is its call's timestamp. The first call of an id counts.
+fn resurrected_cron_jobs(transcript: &str, now: i64) -> Vec<CronJob> {
+    // The calls in order: id, input, timestamp.
+    let mut calls: Vec<(String, Value, i64)> = Vec::new();
+    let mut results: HashMap<String, Value> = HashMap::new();
+    let mut deleted: HashSet<String> = HashSet::new();
+    for v in transcript
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+    {
+        if v["isSidechain"] == true {
+            continue;
+        }
+        match v["type"].as_str() {
+            Some("assistant") => {
+                let Some(at) = v["timestamp"]
+                    .as_str()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|t| t.timestamp_millis())
+                else {
+                    continue;
+                };
+                for b in blocks(&v).iter().filter(|b| b["type"] == "tool_use") {
+                    match (b["name"].as_str(), b["id"].as_str()) {
+                        (Some("CronCreate"), Some(id)) => {
+                            let input = if b["input"].is_object() {
+                                b["input"].clone()
+                            } else {
+                                json!({})
+                            };
+                            calls.push((id.to_owned(), input, at));
+                        }
+                        (Some("CronDelete"), _) => {
+                            if let Some(id) = b["input"]["id"].as_str() {
+                                deleted.insert(id.to_owned());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some("user") if v["toolUseResult"].is_object() => {
+                for b in blocks(&v) {
+                    if b["type"] == "tool_result" && b["is_error"] != true {
+                        if let Some(id) = b["tool_use_id"].as_str() {
+                            results.insert(id.to_owned(), v["toolUseResult"].clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut jobs: Vec<CronJob> = Vec::new();
+    for (call, input, created) in calls {
+        let Some(result) = results.get(&call) else {
+            continue;
+        };
+        let Some(id) = result["id"].as_str() else {
+            continue;
+        };
+        if result["durable"] == true
+            || deleted.contains(id)
+            || jobs.iter().any(|j| j.row.task_id == id)
+        {
+            continue;
+        }
+        let (Some(cron), Some(prompt)) = (input["cron"].as_str(), input["prompt"].as_str()) else {
+            continue;
+        };
+        let recurring = result["recurring"] != false;
+        let due = if recurring {
+            if now - created >= CRON_MAX_AGE_MS {
+                continue;
+            }
+            next_cron_fire(cron, now, id)
+        } else {
+            // 2.1.312 sends it with a fraction of a millisecond (live: 1794855129333.2852).
+            match result["nextFireAt"].as_f64() {
+                Some(t) if t as i64 >= now => Some(t as i64),
+                _ => continue,
+            }
+        };
+        let mut row = LiveAgent::new(
+            LiveKind::Cron,
+            id,
+            &preview(prompt, PREVIEW_LIMIT),
+            Some(&call),
+        );
+        row.activity = result["humanSchedule"].as_str().map(text);
+        let age = Duration::from_millis(u64::try_from(now - created).unwrap_or(0));
+        row.since = Instant::now().checked_sub(age).unwrap_or(row.since);
+        jobs.push(CronJob {
+            row,
+            cron: cron.to_owned(),
+            recurring,
+            created,
+            due,
+        });
+    }
+    jobs
 }
 
 /// The first minute after `after` (epoch ms) that the 5-field `cron` matches, in epoch ms, in

@@ -4591,8 +4591,24 @@ a.relay-peer {
   margin-right: -4px;
   align-self: center;
 }
+/* A timer waits, it does not run. */
+.live-agents-dot-still {
+  animation: none;
+}
 .live-agents-task {
   color: var(--text);
+}
+/* A line that opens something: a button that looks like the text of the line. */
+.live-agents-open {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.live-agents-open:hover .live-agents-task {
+  text-decoration: underline;
 }
 .live-agents-kind {
   color: var(--muted);

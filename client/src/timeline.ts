@@ -9,6 +9,7 @@ import type {
   DeliveryChange,
   EventOf,
   HqcEvent,
+  LiveSchedule,
   LiveSubagent,
   RequestCancel,
 } from "./proto";
@@ -78,6 +79,10 @@ export class Timeline {
   liveAgents: LiveSubagent[] = [];
   /** When that list came (`Date.now()`): its `duration_ms` were counted then. */
   liveAgentsAt = 0;
+  /** The session's schedules of the latest `schedules.live`, and when it came: its
+   *  `due_in_ms` were counted then. */
+  liveSchedules: LiveSchedule[] = [];
+  liveSchedulesAt = 0;
   version = 0;
 
   onChange(fn: () => void): () => void {
@@ -116,6 +121,11 @@ export class Timeline {
     if (ev.type === "subagents.live") {
       this.liveAgents = ev.payload.agents;
       this.liveAgentsAt = Date.now();
+      return;
+    }
+    if (ev.type === "schedules.live") {
+      this.liveSchedules = ev.payload.schedules;
+      this.liveSchedulesAt = Date.now();
       return;
     }
     // Clients see only stored events (SPEC §5.2); anything else without seq is dropped.
@@ -414,11 +424,13 @@ export class Timeline {
   }
 
   /** The socket dropped: deltas after the gap would not continue the buffered text, and the
-   *  subagents may have ended meanwhile (the next subscribe brings the hub's list). */
+   *  subagents and schedules may have ended meanwhile (the next subscribe brings the hub's
+   *  lists). */
   reset(): void {
-    if (!this.streaming && !this.liveAgents.length) return;
+    if (!this.streaming && !this.liveAgents.length && !this.liveSchedules.length) return;
     this.streaming = "";
     this.liveAgents = [];
+    this.liveSchedules = [];
     this.changed();
   }
 

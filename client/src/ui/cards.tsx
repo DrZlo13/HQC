@@ -364,6 +364,7 @@ export function EventView({ event, actions, queued }: { event: HqcEvent; actions
     case 'agent.delta':
       return <StreamingMessage text={event.payload.text} />;
     case 'subagents.live':
+    case 'schedules.live':
       // Above the input (LiveSubagents), never in the feed.
       return null;
     case 'agent.message':

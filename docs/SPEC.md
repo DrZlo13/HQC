@@ -5088,9 +5088,11 @@ send from a session in a lower mode (§7.1).
   the hub sets the session's `paused_at`. With no turn running it ends the agent's process at
   once as a restart does (`session.kill`) and starts nothing; with a turn running it lets the
   turn end and ends the process then, on the worker's `status` `idle` or `error`, or the
-  watchdog's turn loss. When the hub ends the process itself, it sets `paused_at` again: the
-  time the agent stopped. A process that ends another way (a restart for a change of provider or
-  browser, a worker restart, a crash) leaves the time of the pause. The agent's background
+  watchdog's turn loss. A kill the worker never got (its link was dead, it was away, the hub
+  restarted) goes after its next `hello` while the process was last reported alive. When the hub
+  ends the process itself, it sets `paused_at` again: the time the agent stopped. A process that
+  ends another way (a restart for a change of provider or browser, a worker restart, a crash)
+  leaves the time of the pause. The agent's background
   subagents and commands, and what it set to wake it up, end with the process. While `paused_at`
   is set the hub neither starts the agent nor delivers input to it, whatever asks for it (a
   worker's `hello`, a process that stopped, a schedule, a peer message, a move): inputs typed

@@ -45,9 +45,12 @@
 //!   ([`Core::stop_task`]); after them, in the same list, the main agent's background shell
 //!   commands of the latest
 //!   `background_tasks_changed` list (`task_type: local_bash`, not `ambient`, whose
-//!   `task_started` has come and was not a `Monitor` call's, of no subagent that counts), each
-//!   with its `description`, run time and `stoppable` only, when they or a `description`
-//!   change;
+//!   `task_started` has come, of no subagent that counts; `kind` `monitor` when a `Monitor`
+//!   call started it), each with its `description`, run time and `stoppable` only, when they
+//!   or a `description` change; then the wakeup the agent armed with `ScheduleWakeup` and its
+//!   `CronCreate` jobs (`kind` `wakeup` and `cron`, each with `due_in_ms`, not `stoppable`),
+//!   when a result of `ScheduleWakeup`, `CronCreate` or `CronDelete` or a `command_lifecycle`
+//!   of a wakeup or a cron fire changes them;
 //! - `system` `background_tasks_changed` (`tasks`: the CLI's list of the session's running
 //!   background tasks, subagents and commands, its subagents' too) →
 //!   [`AdapterEvent::BackgroundTasks`] with the number of those not `ambient` when it changes;
@@ -130,6 +133,19 @@ use crate::permissions::{FolderRules, Policy};
 
 /// `*_preview` limit (SPEC §4).
 pub const PREVIEW_LIMIT: usize = 4096;
+
+/// How far past now a cron job's due time may lie for it to be the job a fire belongs to
+/// (`oneShotMaxMs` of the CLI's defaults: it fires a one-shot job that much early at most).
+const CRON_FIRE_SLACK_MS: i64 = 90_000;
+/// The age at which a recurring cron job expires after its fire (`recurringMaxAgeMs` of the
+/// CLI's defaults, 7 days).
+const CRON_MAX_AGE_MS: i64 = 604_800_000;
+/// The CLI's `recurringCapMs`: the most a recurring job's fire is put off by its own offset.
+const CRON_OFFSET_CAP_MS: f64 = 1_800_000.0;
+/// The CLI's `cacheLeadMs`, and the 5 minutes (`g7n`) its prompt cache lives, which a job that
+/// runs every N minutes is kept inside of.
+const CRON_CACHE_LEAD_MS: i64 = 15_000;
+const CRON_CACHE_TTL_MS: i64 = 300_000;
 pub const ERROR_TEXT_LIMIT: usize = 300;
 
 /// A denial without text, sent with `interrupt: true`: what the "No" of the VS Code tab sends
@@ -236,9 +252,12 @@ struct Written {
     carried: bool,
 }
 
-/// A subagent of [`Core::live`], or a command of [`Core::live_commands`].
+/// A subagent of [`Core::live`], a command or a Monitor of [`Core::live_commands`], the wakeup
+/// of [`Core::wakeup_row`], or a job of [`Core::cron_jobs`].
 #[derive(Debug)]
 struct LiveAgent {
+    /// What the row is.
+    kind: LiveKind,
     task_id: String,
     /// `description` of its `task_started`; empty while the CLI's list counts it before that.
     /// A command's: `description` of its entry in the CLI's list.
@@ -255,8 +274,9 @@ struct LiveAgent {
 }
 
 impl LiveAgent {
-    fn new(task_id: &str, title: &str, call_id: Option<&str>) -> Self {
+    fn new(kind: LiveKind, task_id: &str, title: &str, call_id: Option<&str>) -> Self {
         Self {
+            kind,
             task_id: task_id.to_owned(),
             title: text(title),
             since: Instant::now(),
@@ -266,6 +286,22 @@ impl LiveAgent {
             call_id: call_id.map(str::to_owned),
         }
     }
+}
+
+/// A job of the agent's `CronCreate`, shown as a row ([`Core::cron_jobs`]).
+#[derive(Debug)]
+struct CronJob {
+    /// The row: its `task_id` is the job's id, its `title` the job's prompt, its `activity`
+    /// the schedule in words, its `since` when the result of `CronCreate` came.
+    row: LiveAgent,
+    /// The 5-field cron expression, in local time.
+    cron: String,
+    recurring: bool,
+    /// When the result of `CronCreate` came, in epoch ms: a recurring job lives
+    /// [`CRON_MAX_AGE_MS`] from it.
+    created: i64,
+    /// When the job fires next, in epoch ms; none while that is not known.
+    due: Option<i64>,
 }
 
 impl Pending {
@@ -304,9 +340,10 @@ pub struct Core {
     /// The subagents of the count last reported, in the order they started, with what the CLI
     /// said of each ([`AdapterEvent::LiveSubagents`]).
     live: Vec<LiveAgent>,
-    /// The main agent's background shell commands of [`Core::background`], in the order they
-    /// became rows, sent after [`Core::live`] ([`Core::update_live_commands`]). Apart from it:
-    /// they are no subagents and never change the subagent count.
+    /// The main agent's background shell commands and Monitor watchers of
+    /// [`Core::background`], in the order they became rows, sent after [`Core::live`]
+    /// ([`Core::update_live_commands`]). Apart from it: they are no subagents and never change
+    /// the subagent count.
     live_commands: Vec<LiveAgent>,
     /// Ids of the `Monitor` `tool_use` blocks of `assistant` lines, the agent's and its
     /// subagents', until the `task_started` that names one in `tool_use_id`.
@@ -315,6 +352,23 @@ pub struct Core {
     /// Monitor's task as `local_bash` without `ambient`, nothing in the list tells it from a
     /// command), and when the first came, until the task's `task_notification`.
     bash_tasks: HashMap<String, (bool, Instant)>,
+    /// Ids of the main agent's `ScheduleWakeup` `tool_use` blocks, until their result.
+    wakeup_calls: HashSet<String>,
+    /// The `reason` of each call of [`Core::wakeup_calls`].
+    wakeup_reasons: HashMap<String, String>,
+    /// When the wakeup the main agent armed last is due, in epoch ms (the `scheduledFor` of
+    /// its `ScheduleWakeup` result), until it starts or a later call replaces or stops it.
+    wakeup: Option<i64>,
+    /// The row of [`Core::wakeup`], sent after [`Core::live_commands`]; none exactly when
+    /// `wakeup` is none.
+    wakeup_row: Option<LiveAgent>,
+    /// The main agent's `CronCreate` calls until their result: call id → (`cron`, `prompt`).
+    cron_creates: HashMap<String, (String, String)>,
+    /// Ids of the main agent's `CronDelete` `tool_use` blocks, until their result.
+    cron_deletes: HashSet<String>,
+    /// The main agent's cron jobs, in the order they were created, sent after
+    /// [`Core::wakeup_row`].
+    cron_jobs: Vec<CronJob>,
     /// [`Core::live`] got a subagent or a title since it was last reported.
     live_changed: bool,
     /// A `background_tasks_changed` lowered [`Core::running_subagents`] below the count last
@@ -359,11 +413,6 @@ pub struct Core {
     /// The conversation is new (a new session, `/clear`) and its first model turn has not
     /// ended: the CLI writes its `ai-title` then.
     fresh: bool,
-    /// Ids of the main agent's `ScheduleWakeup` `tool_use` blocks, until their result.
-    wakeup_calls: HashSet<String>,
-    /// When the wakeup the main agent armed last is due, in epoch ms (the `scheduledFor` of
-    /// its `ScheduleWakeup` result), until it starts or a later call replaces or stops it.
-    wakeup: Option<i64>,
     /// The permission mode last reported by this process.
     permission_mode: Option<PermissionMode>,
     /// Message uuids read since the last [`Core::take_seen`].
@@ -445,6 +494,13 @@ impl Core {
             live_commands: Vec::new(),
             monitor_calls: HashSet::new(),
             bash_tasks: HashMap::new(),
+            wakeup_calls: HashSet::new(),
+            wakeup_reasons: HashMap::new(),
+            wakeup: None,
+            wakeup_row: None,
+            cron_creates: HashMap::new(),
+            cron_deletes: HashSet::new(),
+            cron_jobs: Vec::new(),
             live_changed: false,
             recount: false,
             background: Vec::new(),
@@ -465,8 +521,6 @@ impl Core {
             cleared: false,
             clearing: false,
             fresh: false,
-            wakeup_calls: HashSet::new(),
-            wakeup: None,
             permission_mode: None,
             seen: Vec::new(),
             quiet_tasks: HashMap::new(),
@@ -699,7 +753,9 @@ impl Core {
     }
 
     /// Stop task `task_id` alone, a `stoppable` row of [`AdapterEvent::LiveSubagents`], a
-    /// subagent or a command: `control_request {subtype: stop_task, task_id}`. The CLI answers
+    /// subagent, a command or a Monitor (2.1.312 registers a Monitor's task as `local_bash`, and
+    /// `stop_task` stops a task as its type does): `control_request {subtype: stop_task,
+    /// task_id}`. The CLI answers
     /// `success` with `{}`, also for a task it does not know or one that has ended, or an error
     /// with the reason it did not stop it; a stopped subagent then ends with `task_updated` and
     /// `task_notification` `stopped`, as any end of it (by the 2.1.312 code, not checked live); a
@@ -870,16 +926,36 @@ impl Core {
             }
         }
         // A Monitor's task is listed as a command ([`Core::bash_tasks`]), a subagent's too. A
-        // wakeup is the main agent's only (2.1.312 arms none for a subagent).
+        // wakeup and a cron job are the main agent's only (2.1.312 arms none for a subagent).
         if ty == "assistant" {
             for b in blocks(&v) {
-                if b["type"] == "tool_use" && b["name"] == "Monitor" {
-                    self.monitor_calls
-                        .extend(b["id"].as_str().map(str::to_owned));
-                }
-                if b["type"] == "tool_use" && b["name"] == "ScheduleWakeup" && !sub {
-                    self.wakeup_calls
-                        .extend(b["id"].as_str().map(str::to_owned));
+                let Some(id) = b["id"].as_str().filter(|_| b["type"] == "tool_use") else {
+                    continue;
+                };
+                match b["name"].as_str() {
+                    Some("Monitor") => {
+                        self.monitor_calls.insert(id.to_owned());
+                    }
+                    Some("ScheduleWakeup") if !sub => {
+                        self.wakeup_calls.insert(id.to_owned());
+                        self.wakeup_reasons.insert(
+                            id.to_owned(),
+                            preview(b["input"]["reason"].as_str().unwrap_or(""), PREVIEW_LIMIT),
+                        );
+                    }
+                    Some("CronCreate") if !sub => {
+                        self.cron_creates.insert(
+                            id.to_owned(),
+                            (
+                                b["input"]["cron"].as_str().unwrap_or("").to_owned(),
+                                preview(b["input"]["prompt"].as_str().unwrap_or(""), PREVIEW_LIMIT),
+                            ),
+                        );
+                    }
+                    Some("CronDelete") if !sub => {
+                        self.cron_deletes.insert(id.to_owned());
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1383,6 +1459,10 @@ impl Core {
         {
             return self.set_wakeup(None);
         }
+        // A cron job fired; the line names none (2.1.312).
+        if v["state"] == "started" && v["wakeup_source"] == "schedule_wakeup" {
+            return self.cron_fired(epoch_ms());
+        }
         let Some(uuid) = v["command_uuid"]
             .as_str()
             .and_then(|u| u.parse::<Uuid>().ok())
@@ -1418,18 +1498,6 @@ impl Core {
             self.turn += 1;
         }
         vec![Action::Emit(AdapterEvent::TurnEnded { carried, dropped })]
-    }
-
-    /// The wakeup now armed, `at` in epoch ms: [`AdapterEvent::Wakeup`] when it changed.
-    fn set_wakeup(&mut self, at: Option<i64>) -> Vec<Action> {
-        if self.wakeup == at {
-            return vec![];
-        }
-        tracing::info!(session_id = %self.session_id, scheduled_for = ?at, "wakeup");
-        self.wakeup = at;
-        vec![Action::Emit(AdapterEvent::Wakeup(
-            at.and_then(chrono::DateTime::from_timestamp_millis),
-        ))]
     }
 
     /// Subagent `task_id` started (`add`) or ended by the CLI's word: the new count when it
@@ -1629,23 +1697,24 @@ impl Core {
         new.sort();
         for id in new {
             let call = self.task_calls.get(id).map(String::as_str);
-            self.live.push(LiveAgent::new(id, "", call));
+            self.live
+                .push(LiveAgent::new(LiveKind::Agent, id, "", call));
             changed = true;
         }
         changed |= self.update_live_commands();
         changed.then(|| self.live_list())
     }
 
-    /// Brings [`Core::live_commands`] to the main agent's background shell commands of the
-    /// latest `background_tasks_changed` list: `task_type: local_bash`, not `ambient` (no
-    /// activity, the SDK says), its `task_started` come and not a Monitor's
-    /// ([`Core::bash_tasks`]; a task joins the list before its `task_started`, so a Monitor
-    /// never shows), and no subagent of [`Core::parent`] (none, or one that has reported): a
-    /// subagent that counts stands for its commands with its own row. A new one goes last, a
-    /// changed `description` replaces its row's, one that no longer qualifies goes. Whether
-    /// anything changed.
+    /// Brings [`Core::live_commands`] to the main agent's background shell commands and
+    /// Monitor watchers of the latest `background_tasks_changed` list: `task_type:
+    /// local_bash`, not `ambient` (no activity, the SDK says), its `task_started` come (a task
+    /// joins the list before it, and only that tells a Monitor's task from a command's,
+    /// [`Core::bash_tasks`]), and no subagent of [`Core::parent`] (none, or one that has
+    /// reported): a subagent that counts stands for its commands with its own row. A new one
+    /// goes last, a changed `description` replaces its row's, one that no longer qualifies
+    /// goes. Whether anything changed.
     fn update_live_commands(&mut self) -> bool {
-        let listed: Vec<(String, String, Instant)> = self
+        let listed: Vec<(String, String, Instant, LiveKind)> = self
             .background
             .iter()
             .filter(|t| {
@@ -1654,20 +1723,24 @@ impl Core {
             .filter_map(|t| {
                 let id = t["task_id"].as_str()?;
                 let (monitor, started) = self.bash_tasks.get(id)?;
-                (!monitor).then(|| {
-                    (
-                        id.to_owned(),
-                        t["description"].as_str().unwrap_or("").to_owned(),
-                        *started,
-                    )
-                })
+                let kind = if *monitor {
+                    LiveKind::Monitor
+                } else {
+                    LiveKind::Command
+                };
+                Some((
+                    id.to_owned(),
+                    t["description"].as_str().unwrap_or("").to_owned(),
+                    *started,
+                    kind,
+                ))
             })
             .collect();
         let before = self.live_commands.len();
         self.live_commands
-            .retain(|c| listed.iter().any(|(id, _, _)| *id == c.task_id));
+            .retain(|c| listed.iter().any(|(id, _, _, _)| *id == c.task_id));
         let mut changed = self.live_commands.len() != before;
-        for (id, description, started) in listed {
+        for (id, description, started, kind) in listed {
             // Without a description it is the whole command, which may run to any length; the
             // row shows one line of it.
             let title = preview(&description, PREVIEW_LIMIT);
@@ -1681,7 +1754,7 @@ impl Core {
                     // Its run time counts from its `task_started`, also for a command that
                     // becomes a row only when the subagent that left it reports.
                     let call = self.task_calls.get(&id).map(String::as_str);
-                    let mut c = LiveAgent::new(&id, "", call);
+                    let mut c = LiveAgent::new(kind, &id, "", call);
                     c.title = title;
                     c.since = started;
                     self.live_commands.push(c);
@@ -1708,7 +1781,8 @@ impl Core {
                 }
             }
             None => {
-                self.live.push(LiveAgent::new(id, title, call));
+                self.live
+                    .push(LiveAgent::new(LiveKind::Agent, id, title, call));
                 self.live_changed = true;
             }
         }
@@ -1731,15 +1805,22 @@ impl Core {
         vec![self.live_list()]
     }
 
-    /// [`Core::live`], then [`Core::live_commands`], as sent: the run time of each counted now;
-    /// a subagent and a command alike are `stoppable` ([`Core::stop_task`]).
+    /// [`Core::live`], [`Core::live_commands`], [`Core::wakeup_row`], then [`Core::cron_jobs`],
+    /// as sent: the run time of each, and the time to the fire of a wakeup and a job, counted
+    /// now; a subagent, a command and a Monitor are `stoppable` ([`Core::stop_task`]), a wakeup
+    /// and a job, no tasks of the CLI, are not.
     fn live_list(&self) -> Action {
+        let now = epoch_ms();
+        let due_in =
+            |due: Option<i64>| due.map(|d| u64::try_from(d.saturating_sub(now)).unwrap_or(0));
         Action::Emit(AdapterEvent::LiveSubagents(
             self.live
                 .iter()
-                .map(|a| (a, LiveKind::Agent))
-                .chain(self.live_commands.iter().map(|a| (a, LiveKind::Command)))
-                .map(|(a, kind)| LiveSubagent {
+                .chain(&self.live_commands)
+                .map(|a| (a, None))
+                .chain(self.wakeup_row.iter().map(|a| (a, due_in(self.wakeup))))
+                .chain(self.cron_jobs.iter().map(|j| (&j.row, due_in(j.due))))
+                .map(|(a, due_in_ms)| LiveSubagent {
                     task_id: a.task_id.clone(),
                     description: a.title.clone(),
                     activity: a.activity.clone(),
@@ -1747,11 +1828,99 @@ impl Core {
                     tool_uses: a.tool_uses,
                     duration_ms: u64::try_from(a.since.elapsed().as_millis()).unwrap_or(u64::MAX),
                     call_id: a.call_id.clone(),
-                    kind: Some(kind),
-                    stoppable: true,
+                    kind: Some(a.kind),
+                    due_in_ms,
+                    stoppable: matches!(
+                        a.kind,
+                        LiveKind::Agent | LiveKind::Command | LiveKind::Monitor
+                    ),
                 })
                 .collect(),
         ))
+    }
+
+    /// The wakeup now armed, `armed`: its due time in epoch ms and its row; none for none.
+    /// [`AdapterEvent::Wakeup`] when the time changed, then the list again.
+    fn set_wakeup(&mut self, armed: Option<(i64, LiveAgent)>) -> Vec<Action> {
+        if self.wakeup.is_none() && armed.is_none() {
+            return vec![];
+        }
+        let at = armed.as_ref().map(|a| a.0);
+        tracing::info!(session_id = %self.session_id, scheduled_for = ?at, "wakeup");
+        let mut out = Vec::new();
+        if self.wakeup != at {
+            out.push(Action::Emit(AdapterEvent::Wakeup(
+                at.and_then(chrono::DateTime::from_timestamp_millis),
+            )));
+        }
+        (self.wakeup, self.wakeup_row) = match armed {
+            Some((at, row)) => (Some(at), Some(row)),
+            None => (None, None),
+        };
+        out.push(self.live_list());
+        out
+    }
+
+    /// The result of the main agent's `CronCreate` call `call`, `result` its `tool_use_result`:
+    /// a job, with `nextFireAt` for its first due time (none: no time to show). The list again.
+    fn cron_created(
+        &mut self,
+        call: &str,
+        cron: &str,
+        prompt: &str,
+        result: &Value,
+    ) -> Vec<Action> {
+        let Some(id) = result["id"].as_str() else {
+            return vec![];
+        };
+        let mut row = LiveAgent::new(LiveKind::Cron, id, prompt, Some(call));
+        row.activity = result["humanSchedule"].as_str().map(text);
+        self.cron_jobs.retain(|j| j.row.task_id != id);
+        self.cron_jobs.push(CronJob {
+            row,
+            cron: cron.to_owned(),
+            recurring: result["recurring"] == true,
+            created: epoch_ms(),
+            due: result["nextFireAt"].as_i64(),
+        });
+        vec![self.live_list()]
+    }
+
+    /// A cron job fired at `now` (epoch ms), by `command_lifecycle` `started` with
+    /// `wakeup_source: schedule_wakeup`, which names no job: the one with the smallest due time,
+    /// when it is due within [`CRON_FIRE_SLACK_MS`] (any other such line is the CLI's notice of
+    /// tasks it missed). A one-shot job is gone, a recurring job older than
+    /// [`CRON_MAX_AGE_MS`] too (the CLI deletes it after this fire), another waits for its next
+    /// fire ([`next_cron_fire`]). The list again.
+    pub(super) fn cron_fired(&mut self, now: i64) -> Vec<Action> {
+        let Some((i, _)) = self
+            .cron_jobs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, j)| Some((i, j.due.filter(|d| *d <= now + CRON_FIRE_SLACK_MS)?)))
+            .min_by_key(|(_, due)| *due)
+        else {
+            return vec![];
+        };
+        let job = &mut self.cron_jobs[i];
+        if !job.recurring || now - job.created >= CRON_MAX_AGE_MS {
+            self.cron_jobs.remove(i);
+        } else {
+            job.due = next_cron_fire(&job.cron, now, &job.row.task_id);
+        }
+        vec![self.live_list()]
+    }
+
+    /// The result of the main agent's `CronDelete` call, `result` its `tool_use_result`: the
+    /// job it names is gone. The list again when there was one.
+    fn cron_deleted(&mut self, result: &Value) -> Vec<Action> {
+        let before = self.cron_jobs.len();
+        self.cron_jobs
+            .retain(|j| result["id"] != j.row.task_id.as_str());
+        if self.cron_jobs.len() == before {
+            return vec![];
+        }
+        vec![self.live_list()]
     }
 
     fn on_user(&mut self, v: &Value) -> Vec<Action> {
@@ -1767,13 +1936,28 @@ impl Core {
             let text = result_text(&block["content"]);
             let error = block["is_error"] == true;
             // The wakeup a `ScheduleWakeup` call armed, `scheduledFor: 0` for none (`stopped`);
-            // a failed call changed nothing.
+            // a failed call changed nothing. Likewise a job a `CronCreate` call made and one a
+            // `CronDelete` call removed.
             let call = block["tool_use_id"].as_str().unwrap_or("");
+            let reason = self.wakeup_reasons.remove(call);
+            let cron = self.cron_creates.remove(call);
+            let result = &v["tool_use_result"];
             if self.wakeup_calls.remove(call) && !error {
-                let at = v["tool_use_result"]["scheduledFor"]
-                    .as_i64()
-                    .filter(|t| *t > 0);
-                out.extend(self.set_wakeup(at));
+                let at = result["scheduledFor"].as_i64().filter(|t| *t > 0);
+                let armed = at.map(|at| {
+                    let reason = reason.unwrap_or_default();
+                    (
+                        at,
+                        LiveAgent::new(LiveKind::Wakeup, call, &reason, Some(call)),
+                    )
+                });
+                out.extend(self.set_wakeup(armed));
+            }
+            if let Some((cron, prompt)) = cron.filter(|_| !error) {
+                out.extend(self.cron_created(call, &cron, &prompt, result));
+            }
+            if self.cron_deletes.remove(call) && !error {
+                out.extend(self.cron_deleted(result));
             }
             out.push(self.emit(
                 record_event_id(&uuid, i),
@@ -2550,4 +2734,59 @@ pub fn preview(s: &str, limit: usize) -> String {
         end -= 1;
     }
     s[..end].to_owned()
+}
+
+/// Now, in epoch ms.
+fn epoch_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// The first minute after `after` (epoch ms) that the 5-field `cron` matches, in epoch ms, in
+/// the machine's local time zone as the CLI matches (`UWt`); none when it never matches.
+fn next_cron_match(cron: &croner::Cron, after: i64) -> Option<i64> {
+    let after = chrono::DateTime::from_timestamp_millis(after)?.with_timezone(&chrono::Local);
+    cron.find_next_occurrence(&after, false)
+        .ok()
+        .map(|t| t.timestamp_millis())
+}
+
+/// When the recurring cron job `id` with `cron` fires after its fire at `fire_time` (epoch ms),
+/// as the CLI works it out (`Hmn` with its default settings): the next match, put off by a
+/// share of the job's id (the first 8 hex digits as a fraction of 2^32) of half the interval to
+/// the match after it, at most 30 minutes; a job of `*/N * * * *` whose interval is 5 minutes
+/// to just under 5 minutes and 15 seconds fires 15 seconds short of an interval from
+/// `fire_time` instead, to keep inside its prompt cache. None when the expression is not one
+/// the CLI takes or never matches.
+pub(super) fn next_cron_fire(cron: &str, fire_time: i64, id: &str) -> Option<i64> {
+    let parsed = croner::parser::CronParser::builder()
+        .seconds(croner::parser::Seconds::Disallowed)
+        .year(croner::parser::Year::Disallowed)
+        .build()
+        .parse(cron.trim())
+        .ok()?;
+    let first = next_cron_match(&parsed, fire_time)?;
+    let Some(second) = next_cron_match(&parsed, first) else {
+        return Some(first);
+    };
+    let interval = second - first;
+    let every_n_minutes = {
+        let mut f = cron.split(' ');
+        f.next().is_some_and(|m| {
+            m.strip_prefix("*/")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        }) && f.eq(["*"; 4])
+    };
+    if every_n_minutes
+        && CRON_CACHE_LEAD_MS < interval
+        && interval >= CRON_CACHE_TTL_MS
+        && interval - CRON_CACHE_LEAD_MS < CRON_CACHE_TTL_MS
+    {
+        return Some(fire_time + interval - CRON_CACHE_LEAD_MS);
+    }
+    let share = id
+        .get(..8)
+        .and_then(|h| u32::from_str_radix(h, 16).ok())
+        .map_or(0.0, |n| f64::from(n) / 4_294_967_296.0);
+    let offset = (share * 0.5 * interval as f64).min(CRON_OFFSET_CAP_MS);
+    Some(first + offset.round() as i64)
 }

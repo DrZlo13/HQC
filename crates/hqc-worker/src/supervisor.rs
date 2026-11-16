@@ -1336,12 +1336,14 @@ impl Session {
             Cmd::Resync => {
                 self.send_state();
                 // A list sent while disconnected was lost; the next one may come only with
-                // the subagent's next step.
+                // the subagent's next step. Its age is added to the run times and taken off
+                // the time to a fire.
                 if let Some((agents, at)) = &self.live {
                     let age = u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX);
                     let mut agents = agents.clone();
                     for a in &mut agents {
                         a.duration_ms = a.duration_ms.saturating_add(age);
+                        a.due_in_ms = a.due_in_ms.map(|d| d.saturating_sub(age));
                     }
                     self.live_subagents(agents);
                 } else if self.live_cleared {

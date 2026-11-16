@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
-use hqc_proto::event::{EventKind, LiveSubagent};
+use hqc_proto::event::{EventKind, LiveKind, LiveSubagent};
 use hqc_worker::adapter::fake::{agent_event, agent_message, FakeAdapters, FakeCall};
 use hqc_worker::adapter::AdapterEvent;
 use hqc_worker::connection::Status;
@@ -3309,7 +3309,8 @@ async fn subagents_go_in_session_state() {
 // The runtime's list of subagents goes as `subagents.live`; the last one sent is sent again on
 // the next connect, its run times counted then; so is the runtime's empty list that followed a
 // non-empty one, since the hub keeps the last non-empty list while a background task runs; the
-// empty list sent when the agent is stopped leaves nothing to send again.
+// empty list sent when the agent is stopped leaves nothing to send again. The age of the list
+// is taken off the time to the fire of a wakeup too, down to 0.
 #[tokio::test]
 async fn live_subagents_are_sent_again_on_connect() {
     let env = Env::new();
@@ -3330,11 +3331,33 @@ async fn live_subagents_are_sent_again_on_connect() {
         call_id: None,
         kind: None,
         stoppable: true,
+        due_in_ms: None,
+    };
+    let wakeup = LiveSubagent {
+        task_id: "toolu_01Wake".into(),
+        description: "Check the build again".into(),
+        duration_ms: 1000,
+        call_id: Some("toolu_01Wake".into()),
+        kind: Some(LiveKind::Wakeup),
+        due_in_ms: Some(1500),
+        stoppable: false,
+        ..agent.clone()
+    };
+    let due = LiveSubagent {
+        task_id: "toolu_01Due".into(),
+        due_in_ms: Some(10),
+        ..wakeup.clone()
     };
     adapters
-        .emit(sid, AdapterEvent::LiveSubagents(vec![agent.clone()]))
+        .emit(
+            sid,
+            AdapterEvent::LiveSubagents(vec![agent.clone(), wakeup, due]),
+        )
         .await;
-    assert_eq!(live_agents(&mut c).await[0]["duration_ms"], 1000);
+    let first = live_agents(&mut c).await;
+    assert_eq!(first[0]["duration_ms"], 1000);
+    assert_eq!(first[0].get("due_in_ms"), None, "{first}");
+    assert_eq!(first[1]["due_in_ms"], 1500, "{first}");
     tokio::time::sleep(Duration::from_millis(50)).await;
     c.close().await;
     c = hub.accept().await;
@@ -3342,6 +3365,13 @@ async fn live_subagents_are_sent_again_on_connect() {
     let again = live_agents(&mut c).await;
     assert_eq!(again[0]["task_id"], "a1", "{again}");
     assert!(again[0]["duration_ms"].as_u64().unwrap() >= 1050, "{again}");
+    assert_eq!(again[0].get("due_in_ms"), None, "{again}");
+    assert!(again[1]["duration_ms"].as_u64().unwrap() >= 1050, "{again}");
+    // 1500 ms less than 50 ms and a little: not 1500, not 0 yet.
+    let left = again[1]["due_in_ms"].as_u64().unwrap();
+    assert!((1..=1450).contains(&left), "{again}");
+    // Due within the age: 0, not a wrapped number.
+    assert_eq!(again[2]["due_in_ms"], 0, "{again}");
     // Its subagents ended, the agent runs on: the empty list is sent again, on every connect.
     adapters
         .emit(sid, AdapterEvent::LiveSubagents(vec![]))

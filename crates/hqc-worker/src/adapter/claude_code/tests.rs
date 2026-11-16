@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use hqc_proto::event::{
     ApprovalCanonical, Author, CancelReason, ClarifyAnswer, ClarifyQuestion, Event, EventKind,
-    LiveKind, SessionState,
+    LiveKind, LiveSubagent, SessionState,
 };
 use hqc_proto::frame::{Runtime, SessionInput, SlashCommand};
 use serde_json::{json, Value};
@@ -16,7 +16,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::engine::{
-    Action, Core, COMMAND_TEXT_LIMIT, CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT,
+    next_cron_fire, Action, Core, COMMAND_TEXT_LIMIT, CONVERSATION_CLEARED,
+    CONVERSATION_CLEARED_TEXT,
 };
 use super::process::{CommandSpec, OsSpawner, Sig};
 use super::scripted::ScriptedClaude;
@@ -5614,11 +5615,28 @@ fn an_ambient_task_is_not_listed() {
     );
 }
 
+/// The rows of the lists `actions` send, in order; no line of the tests below that bring a
+/// wakeup, a job or a Monitor changes the subagent count.
+fn live_rows(actions: Vec<Action>) -> Vec<Vec<LiveSubagent>> {
+    let mut lists = Vec::new();
+    for e in emitted(actions) {
+        match e {
+            AdapterEvent::LiveSubagents(list) => lists.push(list),
+            AdapterEvent::Subagents(n) => panic!("the subagent count changed to {n}"),
+            _ => {}
+        }
+    }
+    lists
+}
+
 /// A background Bash call and a Monitor of the agent: 2.1.312 lists both as `local_bash`, the
-/// Monitor without `ambient`, each before its `task_started`. One row, the Bash call's, from its
-/// `task_started`; no list carries the Monitor, told apart by the call that started it.
+/// Monitor without `ambient`, each before its `task_started`. A row for each from its
+/// `task_started`, the Bash call's `command` and the Monitor's `monitor`, told apart by the call
+/// that started it; each goes when the CLI's list drops it. Both are `stoppable`: a Monitor's
+/// task is a `local_bash` one, which `stop_task` stops as a command's.
 #[test]
-fn a_monitor_of_the_agent_is_not_listed() {
+fn a_monitor_of_the_agent_is_listed() {
+    type MonitorRow = (LiveKind, String, Option<u64>, bool);
     let monitor = json!({"type": "assistant", "message": {"model": "claude-haiku-5-5",
         "role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01Watch",
             "name": "Monitor", "input": {"command": "tail -f run.log",
@@ -5635,24 +5653,357 @@ fn a_monitor_of_the_agent_is_not_listed() {
         r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bwatch1","task_type":"local_bash","description":"Watch the run's log"}]}"#.into(),
         r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#.into(),
     ];
-    let row = live_row(
-        "b2st7oc3z",
-        "Run the full pass over 1000 boards on cirunner",
-        None,
-    );
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let lists: Vec<Vec<Vec<MonitorRow>>> = lines
+        .iter()
+        .map(|l| {
+            live_rows(core.on_line(l))
+                .into_iter()
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(|r| (r.kind.unwrap(), r.task_id, r.due_in_ms, r.stoppable))
+                        .collect()
+                })
+                .collect()
+        })
+        .collect();
+    let run = (LiveKind::Command, "b2st7oc3z".to_string(), None, true);
+    let watch = (LiveKind::Monitor, "bwatch1".to_string(), None, true);
     assert_eq!(
-        live_lists(lines.iter().map(String::as_str)),
+        lists,
         [
             vec![],
             vec![],
             vec![],
-            vec![vec![row]],
+            vec![vec![run.clone()]],
             vec![],
-            vec![],
-            vec![vec![]],
-            vec![]
+            vec![vec![run, watch.clone()]],
+            vec![vec![watch]],
+            vec![vec![]]
         ]
     );
+}
+
+/// An `assistant` line of the main agent (`parent`: of a subagent) with a call of `tool`.
+fn tool_call(id: &str, tool: &str, input: Value, parent: Option<&str>) -> String {
+    json!({"type": "assistant", "message": {"model": "claude-haiku-5-5", "role": "assistant",
+        "content": [{"type": "tool_use", "id": id, "name": tool, "input": input}]},
+        "parent_tool_use_id": parent, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+    .to_string()
+}
+
+/// The `user` line with the result of call `id`, `data` its `tool_use_result`.
+fn tool_done(id: &str, error: bool, data: Value, parent: Option<&str>) -> String {
+    json!({"type": "user", "message": {"role": "user", "content": [{"tool_use_id": id,
+        "type": "tool_result", "is_error": error, "content": "ok"}]},
+        "parent_tool_use_id": parent, "session_id": CLI_SESSION, "uuid": Uuid::new_v4(),
+        "tool_use_result": data})
+    .to_string()
+}
+
+/// A `command_lifecycle` `started` of an input the CLI made itself (2.1.312: a wakeup names the
+/// one it fires by `scheduled_for`, a cron fire names none).
+fn fire(source: &str, scheduled_for: Option<i64>) -> String {
+    json!({"type": "command_lifecycle", "command_uuid": Uuid::new_v4(), "state": "started",
+        "wakeup_source": source, "scheduled_for": scheduled_for,
+        "uuid": Uuid::new_v4(), "session_id": CLI_SESSION})
+    .to_string()
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// A wakeup the main agent armed with `ScheduleWakeup` (lines of the live run `x6-wake-control`,
+/// 2.1.312) is a row from its result: its call as `task_id` and `call_id`, its `reason`, the
+/// time to its `scheduledFor`. A newer one replaces it (the CLI keeps one); the fire of an older
+/// one, a failed call and a subagent's call change nothing; its own fire and a stop
+/// (`scheduledFor: 0`) take it off. None of it changes the subagent count. It is no task of the
+/// CLI: not `stoppable`.
+#[test]
+fn a_wakeup_is_a_row_until_it_fires() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let arm =
+        |core: &mut Core, id: &str, reason: &str, at: i64, error: bool, parent: Option<&str>| {
+            core.on_line(&tool_call(
+                id,
+                "ScheduleWakeup",
+                json!({"delaySeconds": 70, "reason": reason, "prompt": "WAKEUP-FIRED"}),
+                parent,
+            ));
+            live_rows(core.on_line(&tool_done(
+                id,
+                error,
+                json!({"scheduledFor": at, "clampedDelaySeconds": 70, "wasClamped": false}),
+                parent,
+            )))
+        };
+    let due = now_ms() + 60_000;
+    let lists = arm(&mut core, "toolu_wake1", "probe", due, false, None);
+    assert_eq!(lists.len(), 1, "{lists:?}");
+    let [row] = &lists[0][..] else {
+        panic!("{lists:?}")
+    };
+    assert_eq!(row.kind, Some(LiveKind::Wakeup));
+    assert_eq!(row.task_id, "toolu_wake1");
+    assert_eq!(row.call_id.as_deref(), Some("toolu_wake1"));
+    assert_eq!(row.description, "probe");
+    assert!(!row.stoppable, "{row:?}");
+    assert!(row.duration_ms < 5_000, "{row:?}");
+    assert!(
+        (55_000..=60_000).contains(&row.due_in_ms.unwrap()),
+        "{row:?}"
+    );
+    // A failed call and a subagent's change nothing.
+    assert!(arm(&mut core, "toolu_failed", "no", due + 5, true, None).is_empty());
+    assert!(arm(
+        &mut core,
+        "toolu_sub",
+        "no",
+        due + 6,
+        false,
+        Some("toolu_agent")
+    )
+    .is_empty());
+    // A later one replaces it.
+    let later = due + 120_000;
+    let lists = arm(&mut core, "toolu_wake2", "again", later, false, None);
+    let [row] = &lists[0][..] else {
+        panic!("{lists:?}")
+    };
+    assert_eq!(
+        (row.task_id.as_str(), row.description.as_str()),
+        ("toolu_wake2", "again")
+    );
+    assert!(
+        (175_000..=180_000).contains(&row.due_in_ms.unwrap()),
+        "{row:?}"
+    );
+    // The fire of the first, older one: this one is still due. Another source fires none.
+    assert!(live_rows(core.on_line(&fire("loop_wakeup", Some(due)))).is_empty());
+    assert!(live_rows(core.on_line(&fire("schedule_wakeup", None))).is_empty());
+    // Its own fire.
+    assert_eq!(
+        live_rows(core.on_line(&fire("loop_wakeup", Some(later)))),
+        [vec![]]
+    );
+    assert!(live_rows(core.on_line(&fire("loop_wakeup", Some(later)))).is_empty());
+    // Stopped.
+    arm(&mut core, "toolu_wake3", "third", later, false, None);
+    assert_eq!(arm(&mut core, "toolu_stop", "x", 0, false, None), [vec![]]);
+    assert!(arm(&mut core, "toolu_stop2", "x", 0, false, None).is_empty());
+}
+
+/// A cron job of the agent (`CronCreate`, result `{id, humanSchedule, recurring, nextFireAt}`)
+/// is a row from its result: the job's id as `task_id`, its `prompt`, its schedule in words as
+/// `activity`, its call, the time to `nextFireAt` (none without one). A failed call and a
+/// subagent's change nothing; a successful `CronDelete` takes the job off, a failed one and one
+/// of an id no job has do not. It is no task of the CLI: not `stoppable`.
+#[test]
+fn a_cron_job_is_a_row_until_it_is_deleted() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let create = |core: &mut Core, id: &str, error: bool, data: Value, parent: Option<&str>| {
+        core.on_line(&tool_call(
+            id,
+            "CronCreate",
+            json!({"cron": "*/5 * * * *", "prompt": "Pull the CI status", "recurring": true}),
+            parent,
+        ));
+        live_rows(core.on_line(&tool_done(id, error, data, parent)))
+    };
+    let delete = |core: &mut Core, id: &str, job: &str, error: bool| {
+        core.on_line(&tool_call(id, "CronDelete", json!({"id": job}), None));
+        live_rows(core.on_line(&tool_done(id, error, json!({"id": job}), None)))
+    };
+    let data = |id: &str, next: Option<i64>| {
+        let mut d = json!({"id": id, "humanSchedule": "Every 5 minutes", "recurring": true,
+            "durable": false});
+        if let Some(n) = next {
+            d["nextFireAt"] = json!(n);
+        }
+        d
+    };
+    let lists = create(
+        &mut core,
+        "toolu_c1",
+        false,
+        data("1a2b3c4d", Some(now_ms() + 120_000)),
+        None,
+    );
+    let [row] = &lists[0][..] else {
+        panic!("{lists:?}")
+    };
+    assert_eq!(row.kind, Some(LiveKind::Cron));
+    assert_eq!(row.task_id, "1a2b3c4d");
+    assert_eq!(row.description, "Pull the CI status");
+    assert_eq!(row.activity.as_deref(), Some("Every 5 minutes"));
+    assert_eq!(row.call_id.as_deref(), Some("toolu_c1"));
+    assert!(!row.stoppable, "{row:?}");
+    assert!(
+        (115_000..=120_000).contains(&row.due_in_ms.unwrap()),
+        "{row:?}"
+    );
+    // Without `nextFireAt` there is no time to show; a failed call and a subagent's add nothing.
+    let lists = create(&mut core, "toolu_c2", false, data("5e6f7a8b", None), None);
+    assert_eq!(lists[0].len(), 2);
+    assert_eq!(lists[0][1].due_in_ms, None);
+    assert!(create(&mut core, "toolu_c3", true, data("badbadba", None), None).is_empty());
+    assert!(create(
+        &mut core,
+        "toolu_c4",
+        false,
+        data("cafecafe", None),
+        Some("toolu_agent")
+    )
+    .is_empty());
+    assert!(
+        delete(&mut core, "toolu_d1", "1a2b3c4d", true).is_empty(),
+        "failed"
+    );
+    assert!(
+        delete(&mut core, "toolu_d2", "ffffffff", false).is_empty(),
+        "unknown"
+    );
+    let lists = delete(&mut core, "toolu_d3", "1a2b3c4d", false);
+    assert_eq!(lists.len(), 1);
+    let ids: Vec<_> = lists[0].iter().map(|r| r.task_id.as_str()).collect();
+    assert_eq!(ids, ["5e6f7a8b"]);
+}
+
+/// The CLI fires a cron job with a `command_lifecycle` `started` with `wakeup_source:
+/// schedule_wakeup` that names no job: the one due next goes, a one-shot job off the list, a
+/// recurring job to its next fire (`*/5 * * * *`: 285 s from the fire). One not due within 90 s
+/// is the CLI's notice of tasks it missed: nothing changes. A recurring job 7 days old at its
+/// fire goes too.
+#[test]
+fn a_cron_fire_takes_the_job_due_next() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let create = |core: &mut Core, call: &str, id: &str, cron: &str, recurring: bool, next: i64| {
+        core.on_line(&tool_call(
+            call,
+            "CronCreate",
+            json!({"cron": cron, "prompt": id, "recurring": recurring}),
+            None,
+        ));
+        core.on_line(&tool_done(
+            call,
+            false,
+            json!({"id": id, "humanSchedule": cron, "recurring": recurring, "durable": false, "nextFireAt": next}),
+            None,
+        ));
+    };
+    let now = now_ms();
+    create(
+        &mut core,
+        "toolu_1",
+        "aaaaaaaa",
+        "30 14 28 2 *",
+        false,
+        now + 3_000,
+    );
+    create(
+        &mut core,
+        "toolu_2",
+        "80000000",
+        "*/5 * * * *",
+        true,
+        now + 1_000,
+    );
+    create(
+        &mut core,
+        "toolu_3",
+        "bbbbbbbb",
+        "0 9 * * *",
+        true,
+        now + 3_600_000,
+    );
+    let due_of = |lists: &[Vec<LiveSubagent>], id: &str| {
+        lists[0]
+            .iter()
+            .find(|r| r.task_id == id)
+            .map(|r| r.due_in_ms)
+    };
+    // The recurring one is due first; its next fire is 285 s on.
+    let lists = live_rows(core.on_line(&fire("schedule_wakeup", None)));
+    assert_eq!(lists[0].len(), 3);
+    assert!(
+        (284_000..=285_000).contains(&due_of(&lists, "80000000").unwrap().unwrap()),
+        "{lists:?}"
+    );
+    // The one-shot one is next, and goes.
+    let lists = live_rows(core.on_line(&fire("schedule_wakeup", None)));
+    let ids: Vec<_> = lists[0].iter().map(|r| r.task_id.as_str()).collect();
+    assert_eq!(ids, ["80000000", "bbbbbbbb"]);
+    // The rest is due in more than 90 s: a notice of missed tasks.
+    assert!(live_rows(core.on_line(&fire("schedule_wakeup", None))).is_empty());
+    // A recurring job a week old at its fire is not put off again.
+    let lists = live_rows(core.cron_fired(now + 604_800_000 + 3_600_000));
+    let ids: Vec<_> = lists[0].iter().map(|r| r.task_id.as_str()).collect();
+    assert_eq!(ids, ["bbbbbbbb"], "the job due next was the 5-minute one");
+}
+
+/// The time to the next fire of a recurring job, [`next_cron_fire`], against the CLI's formula
+/// (`Hmn`): the next match of the expression in local time, put off by (first 8 hex digits of
+/// the id / 2^32) * half the interval to the match after it, at most 30 minutes; `*/5` fires
+/// 15 s short of 5 minutes from the fire. The matches are found here minute by minute.
+#[test]
+fn the_next_fire_of_a_recurring_job_is_the_clis() {
+    use chrono::{Datelike, Local, TimeZone, Timelike};
+    let at = |ms: i64| Local.timestamp_millis_opt(ms).unwrap();
+    // The first minute after `ms` that `matches`, in epoch ms.
+    let next = |ms: i64, matches: &dyn Fn(chrono::DateTime<Local>) -> bool| {
+        let mut t = (ms / 60_000 + 1) * 60_000;
+        while !matches(at(t)) {
+            t += 60_000;
+        }
+        t
+    };
+    let fire = 1_794_000_030_000_i64;
+    type Matcher<'a> = &'a dyn Fn(chrono::DateTime<Local>) -> bool;
+    let hourly = |t: chrono::DateTime<Local>| t.minute() == 17;
+    let every_ten = |t: chrono::DateTime<Local>| t.minute().is_multiple_of(10);
+    let weekdays = |t: chrono::DateTime<Local>| {
+        t.hour() == 9 && t.minute() == 0 && (1..=5).contains(&t.weekday().num_days_from_sunday())
+    };
+    let cases: [(&str, Matcher, &str, f64); 5] = [
+        ("17 * * * *", &hourly, "80000000", 0.5),
+        ("17 * * * *", &hourly, "00000000", 0.0),
+        // Half an hour at most: 0.99999 * 0.5 * 1 h is capped.
+        ("17 * * * *", &hourly, "ffffffff", 1.0),
+        ("*/10 * * * *", &every_ten, "40000000", 0.25),
+        ("0 9 * * 1-5", &weekdays, "c0000000", 0.75),
+    ];
+    for (cron, matches, id, frac) in cases {
+        let first = next(fire, matches);
+        let interval = next(first, matches) - first;
+        let offset = (frac * 0.5 * interval as f64).min(1_800_000.0);
+        let got = next_cron_fire(cron, fire, id).unwrap();
+        assert!(
+            (got as f64 - (first as f64 + offset)).abs() <= 1.0,
+            "{cron} {id}: {got} for {first} + {offset}"
+        );
+    }
+    // An id that is not hex puts nothing off.
+    assert_eq!(
+        next_cron_fire("17 * * * *", fire, "zzzz"),
+        Some(next(fire, &hourly))
+    );
+    // `*/5 * * * *`: an interval of 5 minutes, the early shift, whatever the id.
+    for id in ["00000000", "80000000", "ffffffff"] {
+        assert_eq!(
+            next_cron_fire("*/5 * * * *", fire, id),
+            Some(fire + 285_000)
+        );
+    }
+    // `*/7` (gaps of 7 and 4 minutes) is no case of the early shift: the offset is that of any
+    // job, from the gap after the next match.
+    let seven = |t: chrono::DateTime<Local>| t.minute().is_multiple_of(7);
+    let first = next(fire, &seven);
+    let interval = next(first, &seven) - first;
+    let got = next_cron_fire("*/7 * * * *", fire, "80000000").unwrap();
+    assert_eq!(got, first + (0.25 * interval as f64).round() as i64);
+    // Not a cron expression: none.
+    assert_eq!(next_cron_fire("often", fire, "80000000"), None);
 }
 
 /// Subagent `A` with a command `c` of its own, and the agent's own command `m`, each listed

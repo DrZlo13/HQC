@@ -101,7 +101,8 @@ turn still runs: the session is paused and its agent stops when the turn ends (a
 paused).
 
 SPEC 0.161: the subagents of `event.subagents.live.json` are `stoppable`, and
-`hub.session.stop_task.json` stops the first of them alone.
+`hub.session.stop_task.json` stops the first of them alone. SPEC 0.168: so is its Monitor row;
+its wakeup and cron rows are not.
 
 Archived projects (§3 Project): `api.projects.archived.json` — `GET /api/projects?archived=1`, the
 projects with `archived_at`, which `api.projects.json` (the project bar) leaves out.

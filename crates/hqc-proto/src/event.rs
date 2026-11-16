@@ -180,7 +180,10 @@ pub struct SecretAsk {
 
 /// One subagent of `subagents.live` (SPEC §4, since 0.101), or (since 0.127) one background
 /// shell command of the agent, with only `task_id`, `description`, `duration_ms`, `call_id`,
-/// `kind` and `stoppable`.
+/// `kind` and `stoppable`; since 0.168 also a Monitor watcher (as a command), the wakeup the
+/// agent armed (`task_id` and `call_id` of its call, `description` its reason, `due_in_ms`) or a
+/// cron job of the agent (`task_id` its job id, `description` its prompt, `activity` its
+/// schedule in words, `call_id` of its `CronCreate`, `due_in_ms`), neither `stoppable`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveSubagent {
     pub task_id: String,
@@ -203,10 +206,16 @@ pub struct LiveSubagent {
     /// A subagent or a background command (since SPEC 0.141); absent from an older worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<LiveKind>,
-    /// The runtime stops it alone on `session.stop_task` (since SPEC 0.161): a subagent's row
-    /// and a command's; absent — false, every row of an older worker.
+    /// The runtime stops it alone on `session.stop_task` (since SPEC 0.161): a subagent's row,
+    /// a command's and (since SPEC 0.168) a Monitor's; absent — false, every row of an older
+    /// worker.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stoppable: bool,
+    /// Milliseconds until a wakeup or a cron job fires when the list was sent, by the worker's
+    /// clock, 0 once due (since SPEC 0.168); only on those rows, and on a cron job only while
+    /// its next fire is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_in_ms: Option<u64>,
 }
 
 /// What a row of `subagents.live` is.
@@ -215,6 +224,12 @@ pub struct LiveSubagent {
 pub enum LiveKind {
     Agent,
     Command,
+    /// A Monitor watcher of the agent (since SPEC 0.168).
+    Monitor,
+    /// The wakeup the agent armed with `ScheduleWakeup` (since SPEC 0.168).
+    Wakeup,
+    /// A job of the agent's `CronCreate` (since SPEC 0.168).
+    Cron,
     #[serde(other)]
     Unknown,
 }
@@ -908,6 +923,15 @@ mod tests {
             (Delivery::Failed, "failed"),
         ] {
             assert_eq!(serde_json::to_value(d).unwrap(), n);
+        }
+        for (k, n) in [
+            (LiveKind::Agent, "agent"),
+            (LiveKind::Command, "command"),
+            (LiveKind::Monitor, "monitor"),
+            (LiveKind::Wakeup, "wakeup"),
+            (LiveKind::Cron, "cron"),
+        ] {
+            assert_eq!(serde_json::to_value(k).unwrap(), n);
         }
     }
 

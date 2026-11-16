@@ -92,8 +92,8 @@ pub async fn resume(
 
 /// The end of a turn of a paused session, or a pause with no turn running: the agent's process
 /// ends as in a restart (`api::restart`), and nothing starts it again; `paused_at` becomes the
-/// time it stopped. With the worker away only the time is set. A session that is not paused
-/// stays as it is.
+/// time it stopped. With the worker away only the time is set, and the kill goes after its next
+/// `hello` (`worker_ws::after_hello`). A session that is not paused stays as it is.
 pub async fn stop_if_paused(app: &AppState, session_id: Uuid) -> anyhow::Result<()> {
     let worker: Option<Option<Uuid>> = sqlx::query_scalar(
         "UPDATE sessions SET paused_at = now() WHERE id = $1 AND paused_at IS NOT NULL

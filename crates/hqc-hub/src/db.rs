@@ -2196,6 +2196,19 @@ pub async fn sessions_with_pending_input(db: &PgPool, worker_id: Uuid) -> sqlx::
     .await
 }
 
+/// Paused sessions of the worker with no turn running whose process it last reported alive:
+/// the kill of their pause may have been lost (SPEC §17.3).
+pub async fn paused_sessions_to_stop(db: &PgPool, worker_id: Uuid) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT id FROM sessions WHERE worker_id = $1 AND paused_at IS NOT NULL
+           AND NOT turn_open AND process_state <> 'stopped'
+         ORDER BY id",
+    )
+    .bind(worker_id)
+    .fetch_all(db)
+    .await
+}
+
 /// Sessions that get `session.start` (`mode: resume`) after a reconnect: pending input, an
 /// open approval / clarify, or an answer the worker has not acknowledged (SPEC §5.2).
 pub async fn sessions_to_restart(db: &PgPool, worker_id: Uuid) -> sqlx::Result<Vec<Uuid>> {

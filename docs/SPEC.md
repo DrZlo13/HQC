@@ -1668,9 +1668,10 @@ the rest is marked "later"):
   `agent.thinking`, `tool.call`, `tool.result`, `attachment`, `peer.message` and `system` events
   before the message under new ids, at `seq` 1.., none of them an input to deliver, then `system
   forked_from`, all read by the owner; requests, statuses and usage stay with the source. Since
-  0.156 the copies go in without their search words, which the hub writes as soon as the copy
-  is in, without the answer waiting for them (§15). Since 0.82 a copy keeps its origin (`events.origin_id`, `origin_runtime`, not on the wire): the id
-  the runtime's record gave the event and the transcript that record was first written in. The
+  0.156 the copies go in without their search words, which the hub writes as soon as the copy is in,
+  without the answer waiting for them (§15). Since 0.82 a copy keeps its origin (`events.origin_id`,
+  `origin_runtime`, not on the wire): the id the runtime's record gave the event and the transcript
+  that record was first written in. The
   cut's events are each named by their origin, and the fork goes to the transcript of the newest
   one with only the events in it: a fork of a fork before a message of its copied history cuts
   in the transcript that history came from, which stays on the worker when the sessions between
@@ -3745,8 +3746,9 @@ older `ai-title`; either is sent only when it differs from the last one sent. At
 that names the new transcript after `/clear` the worker forgets the title the process sent, so
 the conversation after `/clear` is read like a new session's; forgotten at `conversation_reset`,
 a read between the two would take the old transcript's title back. A transcript over 4 MiB is
-not read every 2 s, only at the end of the turn: the CLI writes no `ai-title` for a first message under 10 characters
-(2.1.312) or when making one fails, and the reads would go on for the whole turn. Before 0.152 the
+not read every 2 s, only at the end of the turn: the CLI writes no `ai-title` for a first
+message under 10 characters (2.1.312) or when making one fails, and the reads would go on for
+the whole turn. Before 0.152 the
 transcript was read only at the end of a turn, so a new session got its title when its first
 turn ended.
 
@@ -4170,7 +4172,9 @@ record (§9.1), which stream-json does not carry, and for a compaction's summary
 that process's stdin, and the adapter reported the compaction. These four kinds of record are
 own also in a transcript the process wrote before its `/clear` (§8.1), until the process ends:
 the hub has moved the session to the new transcript, and such a record of the old one, read
-after the switch, would make it import the old one as a session of someone else's. Since 0.152 a
+after the switch, would make it import the old one as a session of someone else's. Only the
+records within the old transcript's length at the switch are: the CLI no longer writes it, and
+what is added later is another writer's (`--resume` of the old id, `w2-resume-old`). Since 0.152 a
 transcript the mirror has not read yet waits while a process of this worker in its folder has
 cleared its conversation (`/clear`, §8.1) and not named the new transcript: the CLI writes that
 one first, and in the gap the mirror took it for a session of someone else's and imported it
@@ -5670,9 +5674,9 @@ cleared" and resets the cost baseline; the first `system/init` after it with ano
 `session_id` makes that id the session's `runtime_session_id` (`session.state`, stored by the
 hub, resumed by the worker's next start, a move and a fork), the process's records and inputs go
 to the registry of own records under it, and a holder or another writer of that transcript
-releases the session (live run `w1-clear`, 2.1.312); the old transcript stays the process's own
-until it ends, so the output of a command run right before `/clear` is not imported as another
-session. The CLI writes the new transcript about 70 ms before that `init`: the worker marks the
+releases the session (live run `w1-clear`, 2.1.312); what the process wrote to the old
+transcript before the switch stays its own until it ends, so the output of a command run right
+before `/clear` is not imported as another session. The CLI writes the new transcript about 70 ms before that `init`: the worker marks the
 folder from `conversation_reset` to `init` or the `result` of that turn, and the mirror leaves a
 transcript there it has not read yet until then. The hub gives the events the
 session has when its `runtime_session_id` changes the old id as `origin_runtime`, so a fork
@@ -5696,9 +5700,9 @@ of the first model turn of a new session or after `/clear` while the process has
 sent before `/clear` is forgotten at the `init` that names the new transcript; a transcript over
 4 MiB is not read then) and at the end of every turn, the transcript's last `custom-title`
 winning over its `ai-title`, and the commands come from the CLI's answer to `initialize`
-(skipped before) and from `system commands_changed` with the first line of each description and its argument hint, before the
-first turn. New optional `command_info` `[{name, description?, argument_hint?}]` in
-`session.state` and, only in an answer about one session, in the session object (examples
+(skipped before) and from `system commands_changed` with the first line of each description
+and its argument hint, before the first turn. New optional `command_info`
+`[{name, description?, argument_hint?}]` in `session.state` and, only in an answer about one session, in the session object (examples
 `worker.session.state.json`, `api.session.json`); the client's `/` list shows the argument hint
 and the description after each name. An older hub or client ignores the field; from an older
 worker the hub keeps the names alone.

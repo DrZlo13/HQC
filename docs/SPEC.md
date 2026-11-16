@@ -3479,15 +3479,19 @@ as their `origin_runtime` (a fork before one of them cuts the old transcript, §
 own next start of the agent resumes it, and from that line on the records the process reads and
 the inputs it writes go to the registry of own records (§9.2) under the new id, which is live,
 while the old one is not; a holder or another writer of the new transcript releases the session
-(§9.3); the transcript the title is read from (below) is the new one. The CLI writes the new
-transcript before that `init` (`w1-clear`: its first records 12 ms after `conversation_reset`
-and about 70 ms before `init` on stdout): from `conversation_reset` until that `init` or the
-process's end the worker marks the transcript's folder in the registry, and the mirror does not
-read a transcript there it has not read before (§9.2). Before 0.152 the worker stayed on the old
-id: the mirror took the new transcript for another writer's (a session "imported from Claude
-Code" next to the hqc one, starting with the raw `<command-name>/clear</command-name>`), the
-header's session cost fell to the new total, and after an idle unload, a worker restart or a
-move the agent went on with the conversation before `/clear`.
+(§9.3); the transcript the title is read from (below) is the new one. The old transcript stays
+the process's own until the process ends, so that what the process wrote there last and the
+mirror reads only after the switch (the output of `/cost` right before `/clear`) is not taken
+for another writer's (§9.2). The CLI writes the new transcript before that `init` (`w1-clear`:
+its first records 12 ms after `conversation_reset` and about 70 ms before `init` on stdout):
+from `conversation_reset` until that `init`, the `result` of the turn `conversation_reset` came
+in or the process's end the worker marks the transcript's folder in the registry, and the mirror
+does not read a transcript there it has not read before (§9.2). Before 0.152 the worker stayed
+on the old id: the mirror took the new transcript for another writer's (a session "imported
+from Claude Code" next to the hqc one, starting with the raw
+`<command-name>/clear</command-name>`), the header's session cost fell to the new total, and
+after an idle unload, a worker restart or a move the agent went on with the conversation before
+`/clear`.
 
 Wakeups (since 0.152; live runs `x6-wake-*`, 2.1.312): the main agent's `ScheduleWakeup` call
 (`delaySeconds`, `prompt`, `reason`) arms a wakeup in the process; its `tool_result` line carries
@@ -3737,7 +3741,12 @@ model turn of a new conversation (a new session or the first turn after `/clear`
 `ai-title` then, and not in a fork, whose own title the hub keeps; a resumed transcript without
 one, tens of MB, is not read every 2 s; with the token rate, below) while the process has sent
 no title yet, and at the end of every turn, so a title a person gave is not taken back by an
-older `ai-title`; either is sent only when it differs from the last one sent. Before 0.152 the
+older `ai-title`; either is sent only when it differs from the last one sent. At the `init`
+that names the new transcript after `/clear` the worker forgets the title the process sent, so
+the conversation after `/clear` is read like a new session's; forgotten at `conversation_reset`,
+a read between the two would take the old transcript's title back. A transcript over 4 MiB is
+not read every 2 s, only at the end of the turn: the CLI writes no `ai-title` for a first message under 10 characters
+(2.1.312) or when making one fails, and the reads would go on for the whole turn. Before 0.152 the
 transcript was read only at the end of a turn, so a new session got its title when its first
 turn ended.
 
@@ -4158,12 +4167,16 @@ own even when unmatched: stream-json does not carry the attachment, and only hqc
 process's stdin. Its `timestamp` counts for the first pass's `since_ts` like any record's. Since
 0.152 the same holds, while the session's hqc process is alive, for a `system` `local_command`
 record (§9.1), which stream-json does not carry, and for a compaction's summary: only hqc writes
-that process's stdin, and the adapter reported the compaction. Since 0.152 a transcript the
-mirror has not read yet waits while a process of this worker in its folder has cleared its
-conversation (`/clear`, §8.1) and not named the new transcript: the CLI writes that one first,
-and in the gap the mirror took it for a session of someone else's and imported it (one `/clear`
-in about 25, `w1-clear`). The mark ends with the `system/init` that names it, from when the
-transcript is live, or with the process. The mirror **never emits** own records (the adapter
+that process's stdin, and the adapter reported the compaction. These four kinds of record are
+own also in a transcript the process wrote before its `/clear` (§8.1), until the process ends:
+the hub has moved the session to the new transcript, and such a record of the old one, read
+after the switch, would make it import the old one as a session of someone else's. Since 0.152 a
+transcript the mirror has not read yet waits while a process of this worker in its folder has
+cleared its conversation (`/clear`, §8.1) and not named the new transcript: the CLI writes that
+one first, and in the gap the mirror took it for a session of someone else's and imported it
+(one `/clear` in about 25, `w1-clear`). The mark ends with the `system/init` that names it, from
+when the transcript is live, with the `result` of the turn of `/clear`, or with the process. The
+mirror **never emits** own records (the adapter
 has sent them, including the prompt, as a hub `user.message` with its own `event_id`). The rule
 for foreign records:
 
@@ -5657,9 +5670,11 @@ cleared" and resets the cost baseline; the first `system/init` after it with ano
 `session_id` makes that id the session's `runtime_session_id` (`session.state`, stored by the
 hub, resumed by the worker's next start, a move and a fork), the process's records and inputs go
 to the registry of own records under it, and a holder or another writer of that transcript
-releases the session (live run `w1-clear`, 2.1.312). The CLI writes the new transcript about
-70 ms before that `init`: the worker marks the folder from `conversation_reset` to `init`, and
-the mirror leaves a transcript there it has not read yet until then. The hub gives the events the
+releases the session (live run `w1-clear`, 2.1.312); the old transcript stays the process's own
+until it ends, so the output of a command run right before `/clear` is not imported as another
+session. The CLI writes the new transcript about 70 ms before that `init`: the worker marks the
+folder from `conversation_reset` to `init` or the `result` of that turn, and the mirror leaves a
+transcript there it has not read yet until then. The hub gives the events the
 session has when its `runtime_session_id` changes the old id as `origin_runtime`, so a fork
 before a message of the conversation before `/clear` cuts the old transcript, and one before the
 first answer after `/clear` starts a new conversation without the source's events. The client's
@@ -5677,10 +5692,11 @@ time (live runs `x6-wake-*`).
 new session got its title when its first turn ended and a later `ai-title` took back a
 `/rename`, and the slash commands came as names with `system/init`. The adapter now sends a
 person's title, `system session_title_changed`, at once, reads the transcript's title every 2 s
-of the first model turn of a new session or after `/clear` while the process has none and at the
-end of every turn, the transcript's last `custom-title` winning over its `ai-title`, and the
-commands come from the CLI's answer to `initialize` (skipped before) and from `system
-commands_changed` with the first line of each description and its argument hint, before the
+of the first model turn of a new session or after `/clear` while the process has none (the title
+sent before `/clear` is forgotten at the `init` that names the new transcript; a transcript over
+4 MiB is not read then) and at the end of every turn, the transcript's last `custom-title`
+winning over its `ai-title`, and the commands come from the CLI's answer to `initialize`
+(skipped before) and from `system commands_changed` with the first line of each description and its argument hint, before the
 first turn. New optional `command_info` `[{name, description?, argument_hint?}]` in
 `session.state` and, only in an answer about one session, in the session object (examples
 `worker.session.state.json`, `api.session.json`); the client's `/` list shows the argument hint

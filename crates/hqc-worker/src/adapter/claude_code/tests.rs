@@ -5818,8 +5818,9 @@ fn a_cron_job_is_a_row_until_it_is_deleted() {
     let data = |id: &str, next: Option<i64>| {
         let mut d = json!({"id": id, "humanSchedule": "Every 5 minutes", "recurring": true,
             "durable": false});
+        // The CLI's `nextFireAt` has a fraction of a millisecond, as live on 2.1.312.
         if let Some(n) = next {
-            d["nextFireAt"] = json!(n);
+            d["nextFireAt"] = json!(n as f64 + 0.2852);
         }
         d
     };

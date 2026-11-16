@@ -1881,7 +1881,8 @@ impl Core {
             cron: cron.to_owned(),
             recurring: result["recurring"] == true,
             created: epoch_ms(),
-            due: result["nextFireAt"].as_i64(),
+            // 2.1.312 sends it with a fraction of a millisecond (live: 1794855129333.2852).
+            due: result["nextFireAt"].as_f64().map(|t| t as i64),
         });
         vec![self.live_list()]
     }

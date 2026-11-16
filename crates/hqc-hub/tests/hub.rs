@@ -2651,7 +2651,7 @@ async fn a_count_of_none_drops_the_kept_subagents() {
     next_live(&mut c).await;
     w.send(
         "session.state",
-        json!({"session_id": sid, "process_state": "stopped"}),
+        json!({"session_id": sid, "process_state": "stopped", "locked_by": "none"}),
     )
     .await;
     w.expect("ack").await;

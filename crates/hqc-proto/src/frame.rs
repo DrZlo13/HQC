@@ -128,7 +128,7 @@ pub enum WorkerFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         commands: Option<Vec<String>>,
         /// The commands of `commands`, in the same order, with what the runtime says of each
-        /// (since SPEC 0.151); a hub that knows the field takes it instead of `commands`.
+        /// (since SPEC 0.152); a hub that knows the field takes it instead of `commands`.
         /// Sent with `commands`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command_info: Option<Vec<SlashCommand>>,
@@ -336,7 +336,7 @@ pub struct MirrorEvent {
 /// The quiet period of SPEC §9.1/§9.3: a transcript written within it is live in VS Code.
 pub const MIRROR_RECENT_S: u64 = 30;
 
-/// A slash command of the runtime (since SPEC 0.151; Claude Code: the `commands` of its
+/// A slash command of the runtime (since SPEC 0.152; Claude Code: the `commands` of its
 /// answer to `initialize` and of `system/commands_changed`, SPEC §8.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlashCommand {
@@ -2377,7 +2377,7 @@ mod tests {
         };
         assert_eq!(commands(&old).unwrap()[0], "compact");
         assert_eq!(commands(&held), None);
-        // `command_info` (SPEC 0.151): additive too, the same commands with what the runtime
+        // `command_info` (SPEC 0.152): additive too, the same commands with what the runtime
         // says of each.
         let info = |f: &Envelope<WorkerFrame>| match &f.body {
             WorkerFrame::SessionState { command_info, .. } => command_info.clone(),

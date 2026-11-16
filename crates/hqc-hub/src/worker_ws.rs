@@ -778,7 +778,7 @@ async fn on_session_state(
     if let Some(t) = title.as_deref().and_then(runtime_title) {
         db::set_runtime_title(&app.db, session_id, &t).await?;
     }
-    // With what the runtime says of each since SPEC 0.151; an older worker sends the names.
+    // With what the runtime says of each since SPEC 0.152; an older worker sends the names.
     let commands = command_info.or_else(|| {
         commands.map(|c| {
             c.into_iter()

@@ -4666,7 +4666,7 @@ a.relay-peer {
   color: var(--muted);
 }
 
-/* What the runtime says of the command (SPEC 0.151): its arguments, then a line on it. */
+/* What the runtime says of the command (SPEC 0.152): its arguments, then a line on it. */
 .cmd-args {
   margin-left: 8px;
   color: var(--muted);

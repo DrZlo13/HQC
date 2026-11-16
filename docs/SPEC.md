@@ -544,7 +544,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the message came; absent when false; §6) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
-| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.137 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.137 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.151 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost |
+| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.137 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.137 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.152 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.137 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`), `call_id?`, `status?`, `task_id?` (since 0.135, only on `task_notification`) | hub or worker; codes below |
 
@@ -557,9 +557,9 @@ the client renders only them. The "source" column is the component that produces
 | `agent_exited` | worker | the agent process exited on its own with an error or mid-turn (§17.3) |
 | `policy_denied` | worker | a tool call was rejected by a `deny` rule from the worker's `[permissions]`, without asking the owner (§8.1, §14); the client shows "Blocked by worker policy" |
 | `task_notification` | worker (adapter; mirror) | since 0.69: a background task of the agent (a shell command, a subagent) finished or stopped; `text` is the runtime's summary of it (§8.1, §9.1). It comes when the task ends, before the answer of the turn the runtime then starts by itself. Since 0.135 `call_id` is the `call_id` of the `tool.call` that started the task, `status` how it ended as the runtime says it (Claude Code: `completed`, `failed`, `stopped`) and `task_id` the runtime's id of the task (Claude Code: a subagent's `agentId`), each absent when the runtime does not say; the card of a subagent's `Agent` call takes its end from it, and a subagent's notification (by `call_id` or by the `agentId` of its background launch, with a `status` that ends it) stands in the feed as the subagent's end card (§6). The client folds any other into a "Background task ·" line with the whole text on one line, without its Markdown marks, dimmed in italics like the start of a thinking, cut with an ellipsis where the line ends; opened, it shows all of it as Markdown |
-| `context_compacted` | worker (adapter; since 0.151 mirror) | since 0.69: the runtime compacted the session's context (`/compact`); since 0.118 `text` is the summary the runtime wrote, "Context compacted" without one (§8.1); since 0.151 the mirror gives the same line from the transcript's `compact_boundary` and its summary (§9.1); the client folds the summary into a "Context compacted" line that opens to all of it as Markdown, and draws one with the fixed text as a divider |
-| `conversation_cleared` | worker (adapter) | since 0.151: `/clear` started a new conversation in the same agent process, with a new transcript (Claude Code: `conversation_reset`, §8.1); `text` "Conversation cleared"; the session goes on in the new transcript, and the agent no longer has what was before the line in its context |
-| `command_output` | worker (mirror) | since 0.151: what a slash command printed (`/context`, `/cost` and the like), from the transcript (Claude Code: `<local-command-stdout>` and `<local-command-stderr>`, §9.1); `text` is the output, at most 4096 bytes |
+| `context_compacted` | worker (adapter; since 0.152 mirror) | since 0.69: the runtime compacted the session's context (`/compact`); since 0.118 `text` is the summary the runtime wrote, "Context compacted" without one (§8.1); since 0.152 the mirror gives the same line from the transcript's `compact_boundary` and its summary (§9.1); the client folds the summary into a "Context compacted" line that opens to all of it as Markdown, and draws one with the fixed text as a divider |
+| `conversation_cleared` | worker (adapter) | since 0.152: `/clear` started a new conversation in the same agent process, with a new transcript (Claude Code: `conversation_reset`, §8.1); `text` "Conversation cleared"; the session goes on in the new transcript, and the agent no longer has what was before the line in its context |
+| `command_output` | worker (mirror) | since 0.152: what a slash command printed (`/context`, `/cost` and the like), from the transcript (Claude Code: `<local-command-stdout>` and `<local-command-stderr>`, §9.1); `text` is the output, at most 4096 bytes |
 | `agent_start_failed` | hub | the agent failed to start 3 times in a row (or non-retryably); `pending` inputs became `failed` (§5.2) |
 | `input_rejected` | hub | the worker rejected an input other than as a failed start; the input became `failed` (§5.2) |
 | `ask_cancelled` | hub | in the asking session: a deferred `hqc_ask` was closed by `mcp.cancel` from the worker (§5.2), since 0.35 |
@@ -573,7 +573,7 @@ the client renders only them. The "source" column is the component that produces
 | `provider_refused` | worker (adapter) | since 0.144: `session.start.provider` names a provider this worker's `worker.toml` does not allow, or allows with another `base_url`; the agent starts on the runtime's own endpoint, and the text says which (§8.1, §14) |
 | `secret_given` | hub | since 0.147: a secret or an ssh key reached the session's agent (`POST /api/sessions/{id}/secrets`, `hqc_ssh_keygen`, §6, §7): the text names it and a key's fingerprint, never the value |
 | `browser_refused` | worker (adapter) | since 0.148: `session.start.browser` asks for the browser this worker does not give (no `browser = true` in its `worker.toml`, a session not of its owner or restricted); the agent starts without it (`--no-chrome`), and the text says why (§8.1, §14) |
-| `turn_interrupted` | worker (adapter; since 0.151 mirror) | since 0.137: an interrupt ended the turn — Stop, or "No" to a permission request (Claude Code: `result` with a `terminal_reason` `aborted_*`, §8.1); `text` "Interrupted"; one per turn, at its end, after its `usage`. Since 0.151 the mirror gives it for the line "[Request interrupted by user]" or "[Request interrupted by user for tool use]" the CLI writes into the transcript (§9.1) |
+| `turn_interrupted` | worker (adapter; since 0.152 mirror) | since 0.137: an interrupt ended the turn — Stop, or "No" to a permission request (Claude Code: `result` with a `terminal_reason` `aborted_*`, §8.1); `text` "Interrupted"; one per turn, at its end, after its `usage`. Since 0.152 the mirror gives it for the line "[Request interrupted by user]" or "[Request interrupted by user for tool use]" the CLI writes into the transcript (§9.1) |
 | `turn_ended_early` | worker (adapter) | since 0.137: the runtime ended the turn early for another reason — an error, the limit of turns or of budget, a hook (Claude Code: an error `result`, or a `terminal_reason` other than `completed`, `background_requested` and `tool_deferred`, §8.1); `text` "Turn ended early: " and the reason; one per turn, at its end, after its `usage` |
 | `transcript_missing` | worker (adapter) | since 0.100: a session with `session.start.has_history` has no transcript to resume (Claude Code deletes transcripts older than its `cleanupPeriodDays`, 30 days by default), so the agent starts without the earlier conversation (§8.1); the feed before it stays |
 | `worker_log` | worker | a warn/error line of the worker's log in its service session, the level is in the `level` field (§10.2); not counted as unread (§6), no push (§16) |
@@ -1267,7 +1267,7 @@ MCP calls (worker → hub → worker):
   `session.state`. The hub stores it on the session (only when it changed) and shows it in the
   session object (§6): names are trimmed, a leading `/` dropped, names with whitespace or
   control characters or longer than 100 characters dropped, duplicates removed, at most 500
-  kept. `command_info` (since 0.151) — the same commands in the same order as `[{name,
+  kept. `command_info` (since 0.152) — the same commands in the same order as `[{name,
   description?, argument_hint?}]`, what the runtime says of each (Claude Code: the first line of
   its description and its argument hint, §8.1), sent with `commands` (example
   `worker.session.state.json`); the hub takes it instead of `commands` and keeps the names by
@@ -1308,7 +1308,7 @@ MCP calls (worker → hub → worker):
   daily limit gets `error mirror_quota`, `retryable: true` (since 0.24, §9.1).
   `workspace_path` — the path from `mirror.set`, `cwd` — the transcript's folder by the rule of
   §9 (an absolute path),
-  `title` — the file's last `custom-title`, else its last `ai-title` (since 0.151; before, the
+  `title` — the file's last `custom-title`, else its last `ai-title` (since 0.152; before, the
   last `ai-title`), `recent` — the file was modified less than 30 s before the worker read the
   record, `held_by` — the transcript's holder at the time of reading, as in
   `session.state`. The hub looks the session up by worker and `runtime_session_id` and creates it
@@ -1675,7 +1675,7 @@ the rest is marked "later"):
   one with only the events in it: a fork of a fork before a message of its copied history cuts
   in the transcript that history came from, which stays on the worker when the sessions between
   never ran (the CLI writes a fork's transcript at its first message) or were deleted (§17.4).
-  Since 0.151 the events a session has when its runtime goes on in another transcript (`/clear`,
+  Since 0.152 the events a session has when its runtime goes on in another transcript (`/clear`,
   §8.1) get the one they were written in as `origin_runtime`: a fork before a message of the
   conversation before `/clear` cuts that transcript, one after the first answer after it the new
   one (before, every fork cut the new one, and the worker did not find the cut there); the cut
@@ -2266,9 +2266,9 @@ is not in `session.summary`: the client fetches the session object when it opens
 without a list. When the composer text is `/` followed by a name so far, the client lists the
 commands starting with that name (ignoring case): arrows move, Tab or Enter insert `/<name> `,
 Esc closes, a click or tap inserts. No list — no popup; only commands from the list are offered.
-`command_info` (since 0.151) — the same commands with what the runtime says of each,
+`command_info` (since 0.152) — the same commands with what the runtime says of each,
 `[{name, description?, argument_hint?}]` (`session.state.command_info`, §5.4; a list stored
-before 0.151 gives the names alone), only in an answer about one session (`GET
+before 0.152 gives the names alone), only in an answer about one session (`GET
 /api/sessions/{id}` and the other answers with one session object), not in `GET /api/sessions`
 and `GET /api/projects/{id}/sessions`: with descriptions a session's list is kilobytes. The
 client fetches the session object when it opens an idle chat without `command_info` (a session
@@ -3090,7 +3090,7 @@ initialized, and an `initialize` after it is taken as another client's and does 
 flag, so it must come first; the CLI handles stdin one line at a time, so an input written right
 after it waits until the `initialize` is handled, and the worker does not wait for the answer.
 The CLI answers `control_response` `success` (its commands, agents, models, account, `pid`) or
-`error` (`initialize: …` for a malformed field); since 0.151 the adapter takes the slash commands
+`error` (`initialize: …` for a malformed field); since 0.152 the adapter takes the slash commands
 from a `success` (below, "Slash commands"), which come before the first turn, and only logs an
 `error`.
 
@@ -3440,7 +3440,7 @@ its end; 2.1.312: each content block is a line, the lines of one response share 
 over the last 20 s per second, rounded; it is sent when it changes, directly, not through the
 outbox, 0 when the agent's process stops, and again after a reconnect when it is above 0. The CLI
 repeats on stdout every `control_response` the adapter sent to stdin; the adapter skips those lines,
-and (since 0.137) the CLI's answer to its `initialize`, which since 0.151 gives the slash commands
+and (since 0.137) the CLI's answer to its `initialize`, which since 0.152 gives the slash commands
 (below). `in_reply_to` = the `event_id` of the turn's
 input, as above, once its echo has come (since 0.69; before that, none); an input written into a
 running turn does not change it.
@@ -3459,11 +3459,11 @@ and a total below that baseline does not lower it. `usage.session_cost_usd` is
 `total_cost_usd` itself. After `/clear` (below) the CLI counts `total_cost_usd` from 0 again
 (live run `w1-clear` on 2.1.312: 0.00232649, then 0 for `/clear`, then 0.00232689; the new
 transcript's `cost-state` has 0.00232689, so a `--resume` of it goes on from there), and since
-0.151 the baseline goes back to none at `conversation_reset`: the turn after it cost 0.00232689,
+0.152 the baseline goes back to none at `conversation_reset`: the turn after it cost 0.00232689,
 not the 0.0000004 its total grew by over the last one before. The client's header adds the last
 `session_cost_usd` before each `system conversation_cleared` (§4).
 
-`/clear` (since 0.151; live run `w1-clear`, 2.1.312): the CLI goes on in a new conversation, its
+`/clear` (since 0.152; live run `w1-clear`, 2.1.312): the CLI goes on in a new conversation, its
 own transcript in the same folder, and keeps the process. It sends `conversation_reset`
 (`new_conversation_id`, `trigger: clear`, `user_message_uuid`, the old `session_id`; its own type,
 not a `system` subtype) and then `system/init` with the `session_id` of the new conversation,
@@ -3483,13 +3483,13 @@ while the old one is not; a holder or another writer of the new transcript relea
 transcript before that `init` (`w1-clear`: its first records 12 ms after `conversation_reset`
 and about 70 ms before `init` on stdout): from `conversation_reset` until that `init` or the
 process's end the worker marks the transcript's folder in the registry, and the mirror does not
-read a transcript there it has not read before (§9.2). Before 0.151 the worker stayed on the old
+read a transcript there it has not read before (§9.2). Before 0.152 the worker stayed on the old
 id: the mirror took the new transcript for another writer's (a session "imported from Claude
 Code" next to the hqc one, starting with the raw `<command-name>/clear</command-name>`), the
 header's session cost fell to the new total, and after an idle unload, a worker restart or a
 move the agent went on with the conversation before `/clear`.
 
-Wakeups (since 0.151; live runs `x6-wake-*`, 2.1.312): the main agent's `ScheduleWakeup` call
+Wakeups (since 0.152; live runs `x6-wake-*`, 2.1.312): the main agent's `ScheduleWakeup` call
 (`delaySeconds`, `prompt`, `reason`) arms a wakeup in the process; its `tool_result` line carries
 `tool_use_result {scheduledFor: <epoch ms>, clampedDelaySeconds, wasClamped}`, `scheduledFor: 0`
 when the call stopped the wakeup. When it fires the CLI starts a turn of its own, whose
@@ -3509,7 +3509,7 @@ Slash commands (since 0.28, T27): `system/init` comes before every turn of a pro
 terminal UI: `doctor`, `color`, `focus`, `reload-plugins` on 2.1.308). The adapter reports
 `slash_commands` without the terminal-only ones and the CLI's internal `__name` ones to the hub
 in `session.state.commands` (§5.4): once per process start, and again only when the list
-changes. Since 0.151 the list comes with what the CLI says of each command and before the first
+changes. Since 0.152 the list comes with what the CLI says of each command and before the first
 turn: the CLI's answer to `initialize` carries `commands`, `{name, description, argumentHint,
 aliases?, builtin?}` (2.1.312, 75 of them on the stand, 30 KB; names as the terminal shows them,
 a plugin's skill without its `plugin:` prefix, which is in `aliases`), and `system
@@ -3729,7 +3729,7 @@ until the CLI starts writing `ai-title` in this mode or the user renames them **
 later CLI versions. Such sessions get a title from the worker via `title.request` (§3 Session,
 since 0.25). On 2.1.312 the CLI writes `ai-title` in this mode during the first turn, before the
 turn's answer (live run `w1-clear`), and does not stream it: `system session_title_changed`
-(`title`) carries only a title a person gave (`/rename`). Since 0.151 that one is sent at once,
+(`title`) carries only a title a person gave (`/rename`). Since 0.152 that one is sent at once,
 trimmed, an empty one dropped; the transcript's title, its last non-empty `custom-title`
 (`{"type": "custom-title", "customTitle": "<title>", "sessionId": "<uuid>"}`, a person's:
 `/rename`, the VS Code tab's rename), else its last `ai-title`, is read every 2 s of the first
@@ -3737,7 +3737,7 @@ model turn of a new conversation (a new session or the first turn after `/clear`
 `ai-title` then, and not in a fork, whose own title the hub keeps; a resumed transcript without
 one, tens of MB, is not read every 2 s; with the token rate, below) while the process has sent
 no title yet, and at the end of every turn, so a title a person gave is not taken back by an
-older `ai-title`; either is sent only when it differs from the last one sent. Before 0.151 the
+older `ai-title`; either is sent only when it differs from the last one sent. Before 0.152 the
 transcript was read only at the end of a turn, so a new session got its title when its first
 turn ended.
 
@@ -3920,7 +3920,7 @@ Verified on 2.1.307: besides `user`/`assistant` the file has `attachment`,
 `queue-operation`, `system` and other records; the parser skips them, except `ai-title`, which
 it parses separately (the `aiTitle` field; the adapter takes the session title from it, §8.1),
 since 0.98 `attachment`, whose `queued_command` is a message typed during a turn (§9.1), and
-since 0.151 `custom-title` (the `customTitle` field: the title a person gave the session, with
+since 0.152 `custom-title` (the `customTitle` field: the title a person gave the session, with
 `/rename` or in the VS Code tab; it wins over `ai-title`, whichever came last, §8.1, §9.2) and
 `system` (`uuid`, `subtype`, `content`, `isSidechain`, `isMeta`, `timestamp`; the mirror uses
 `local_command` and `compact_boundary`, §9.1).
@@ -4018,7 +4018,7 @@ has `toolUseResult {questions, answers}`, `answers` keyed by the question's text
 chosen options; the CLI joins a multi-select answer with ", ", which the mirror splits back by the
 question's option labels, the longest label first, and any rest is one answer typed as "Other".
 A declined question (`is_error`, no `questions` in the record) stays a `tool.result`. Since
-0.151 the CLI's own lines of a `user` record are no message a person typed: the text
+0.152 the CLI's own lines of a `user` record are no message a person typed: the text
 "[Request interrupted by user]" or "[Request interrupted by user for tool use]" → `system
 turn_interrupted` "Interrupted" (§4); a slash command, which the CLI writes as
 `<command-name>/x</command-name> <command-message>…</command-message>
@@ -4041,7 +4041,7 @@ skipped.
 
 For an unknown `runtime_session_id` of this worker the hub creates a session in the
 workspace's project: `cwd` is the record's path relative to the workspace, the title is the
-frame's `title` field — since 0.151 the file's last `custom-title`, otherwise its last
+frame's `title` field — since 0.152 the file's last `custom-title`, otherwise its last
 `ai-title` — if present, otherwise "Session N" (§3 Session),
 `system session_created` "Session imported from Claude Code". The initial `locked_by` follows
 the frame's `recent` flag: the worker sets it if the file was modified less than 30 s before
@@ -4081,13 +4081,13 @@ and reports directories, inotify needs a watch per folder and does not see what 
 before the watch was set), offsets and rescans are needed anyway, and 2 s is much less than the
 30 s that matter for takeover. The offset advances only over processed complete lines; an
 incomplete line waits for the next pass; a file that got shorter is read again (`event_id`
-absorbs duplicates). Offsets, the file's last prompt and `ai-title` (since 0.151 also its last
+absorbs duplicates). Offsets, the file's last prompt and `ai-title` (since 0.152 also its last
 `custom-title`, a column the worker adds to a state file written before) are stored next to the
 `cwd` cache (`$HQC_HOME/mirror/mirror.sqlite3`); `mirror.event` goes through the outbox, like
 `event`. The `title` of a `mirror.event` is the `custom-title` when the file has one, otherwise
-the `ai-title` (since 0.151). A transcript the worker moves for a moved session (§8.1, since
+the `ai-title` (since 0.152). A transcript the worker moves for a moved session (§8.1, since
 0.75) gets its row at the new path before it is moved: `cwd` the new folder, the offset at the
-file's end, the old row's last prompt, `ai-title` and (since 0.151) `custom-title`. The mirror
+file's end, the old row's last prompt, `ai-title` and (since 0.152) `custom-title`. The mirror
 reads the row before the records, so it neither imports the file
 again nor counts it to the old folder by the `cwd` of its old records. When the file does not
 get there (its folder or the link fails), the row is removed again.
@@ -4141,7 +4141,7 @@ text of every input written to the process's stdin; a prompt record (a main-chai
 text) whose `uuid` stream-json did not name is its own if its typed text matches an input not
 yet matched (the input is consumed; the last 32 are kept). The typed text is the first text
 block, and for a slash command, which the CLI writes as
-`<command-name>/compact</command-name>…<command-args>…</command-args>` (since 0.151 also with
+`<command-name>/compact</command-name>…<command-args>…</command-args>` (since 0.152 also with
 `<command-message>` first, §9.1), the command with its arguments. This makes own records of
 the `/compact` command record (it is not in stream-json, 2.1.308) and of the prompt if its echo
 comes with a different `uuid` (see §9.3). Since 0.105 a
@@ -4156,9 +4156,9 @@ held nor taken for another writer. Since 0.98 a message typed during a turn (§9
 typed text (its first text block) like a prompt, and while the session's hqc process is alive it is
 own even when unmatched: stream-json does not carry the attachment, and only hqc writes to that
 process's stdin. Its `timestamp` counts for the first pass's `since_ts` like any record's. Since
-0.151 the same holds, while the session's hqc process is alive, for a `system` `local_command`
+0.152 the same holds, while the session's hqc process is alive, for a `system` `local_command`
 record (§9.1), which stream-json does not carry, and for a compaction's summary: only hqc writes
-that process's stdin, and the adapter reported the compaction. Since 0.151 a transcript the
+that process's stdin, and the adapter reported the compaction. Since 0.152 a transcript the
 mirror has not read yet waits while a process of this worker in its folder has cleared its
 conversation (`/clear`, §8.1) and not named the new transcript: the CLI writes that one first,
 and in the gap the mirror took it for a session of someone else's and imported it (one `/clear`
@@ -4324,7 +4324,7 @@ fields and broken files. The remaining records are holders; of several for one t
 The jsonl format is unofficial and changes between versions. The parser tolerates unknown
 record types, logs them and does not fail. One parser (`hqc-claude-jsonl`) serves import, the
 mirror and the adapter's title: `Message::is_main`, `stop_reason`, `blocks`, `first_cwd`,
-`last_ai_title`, since 0.151 `last_title` (the last `custom-title`, otherwise `last_ai_title`).
+`last_ai_title`, since 0.152 `last_title` (the last `custom-title`, otherwise `last_ai_title`).
 It is covered by fixtures from real files (one set per CLI version).
 
 ## 10. Permissions
@@ -5331,11 +5331,11 @@ send from a session in a lower mode (§7.1).
   background tasks of the session (`background_tasks_changed`, §8.1). Since 0.70 the worker's
   reconnect to the hub and a change of the holder of any transcript (§9.3: Claude Code in VS
   Code or a terminal on the same machine) do not count as the agent's activity; a holder of
-  the session's own transcript stops the agent anyway. Since 0.151 an agent that armed a wakeup
+  the session's own transcript stops the agent anyway. Since 0.152 an agent that armed a wakeup
   for itself (Claude Code: `ScheduleWakeup`, §8.1) is not idle before the wakeup is due: the
   timeout counts from the later of its last activity and that time, so a wakeup that never
   starts keeps the agent at most `idle_timeout` past it; the wakeup lives in the process and
-  dies with it, which before 0.151 an idle unload did before it fired.
+  dies with it, which before 0.152 an idle unload did before it fired.
 - Restart (since 0.130, `POST /api/sessions/{id}/restart`, §6): the hub sends `session.kill` and
   right after it `session.start` with `mode: resume`: the process ends and starts again at once,
   resuming its transcript, so its MCP servers and settings are read anew. A turn that runs is
@@ -5646,7 +5646,7 @@ call, the Running line, an approval card), so a cut command shows its first line
 count of the lines that follow reads "+N+ lines" when the preview is cut. 0.150–0.154 are taken
 by other pull requests.
 
-### 0.149 → 0.151 (`/clear` moves the session to its new transcript; a wakeup outlives an idle unload; a person's title at once, the CLI's during the turn, the slash commands with what they do; the mirror shows the CLI's service lines, command output and compactions)
+### 0.149 → 0.152 (`/clear` moves the session to its new transcript; a wakeup outlives an idle unload; a person's title at once, the CLI's during the turn, the slash commands with what they do; the mirror shows the CLI's service lines, command output and compactions)
 §4, §5.4, §6, §8.1, §9.2, §9.3: after `/clear` the CLI goes on in a new conversation with a
 transcript of its own, and the worker stayed on the old id: the mirror took the new transcript
 for another writer's and imported it as a second session that opened with a raw
@@ -5698,7 +5698,7 @@ context_compacted` with the summary, its id from the boundary's `uuid`; the `tit
 `mirror.event` is the file's last `custom-title`, else its `ai-title`, kept in a new column of
 the mirror's state file and copied when a transcript is moved. While the session's hqc process
 is alive, a `system local_command` record and a compaction's summary are its own, not another
-writer's. 0.150 is taken by another pull request.
+writer's. 0.150 and 0.151 are taken by other pull requests.
 
 ### 0.136 → 0.137 (Stop spares background subagents; an interrupted or early-ended turn says so; a queued input stands after the turn it waited through)
 §8.1: Stop killed the agent's background subagents and workflows along with the turn: the worker

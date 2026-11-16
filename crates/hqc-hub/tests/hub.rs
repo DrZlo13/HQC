@@ -1849,7 +1849,7 @@ async fn runtime_commands_are_kept_on_the_session() {
     hub.finish().await;
 }
 
-/// SPEC 0.151: `session.state.command_info` is taken over `commands`, cleaned like it (one line,
+/// SPEC 0.152: `session.state.command_info` is taken over `commands`, cleaned like it (one line,
 /// at most 200 characters, empty absent), and given only in the session object, not in the
 /// lists.
 #[tokio::test]

@@ -1156,7 +1156,7 @@ export interface SessionInfo {
   /** The runtime's slash commands without `/`, for completing `/` in the composer (T27);
    *  absent until a process of the session reported them. */
   commands?: string[];
-  /** The same commands with what the runtime says of each (since SPEC 0.151): only in the
+  /** The same commands with what the runtime says of each (since SPEC 0.152): only in the
    *  hub's answer about one session, not in its lists. */
   command_info?: SlashCommand[];
   /** The session whose agent started this one with `hqc_spawn` (SPEC §7), while it exists. */
@@ -1221,7 +1221,7 @@ export function parseModelProvider(v: unknown): ModelProvider {
   };
 }
 
-/** A slash command of the runtime (`command_info`, SPEC 0.151). */
+/** A slash command of the runtime (`command_info`, SPEC 0.152). */
 export interface SlashCommand {
   name: string;
   /** One line on what it does. */

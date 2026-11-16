@@ -62,7 +62,7 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<Vec<String>>,
     /// The commands of `commands`, in the same order, with what the runtime says of each
-    /// (`session.state.command_info`, since SPEC 0.151); the client shows them in the `/`
+    /// (`session.state.command_info`, since SPEC 0.152); the client shows them in the `/`
     /// list. Only in an answer about one session, not in the lists (`GET /api/sessions`,
     /// `GET /api/projects/{id}/sessions`): kilobytes per session there.
     #[serde(default, skip_serializing_if = "Option::is_none")]

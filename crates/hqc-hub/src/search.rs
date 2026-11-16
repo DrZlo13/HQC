@@ -1,6 +1,7 @@
 //! Search (SPEC §15): one query behind `GET /api/search` and `hqc_search_history`.
 //!
-//! - What is searched: `events.search_words`, the weighted tsvector of migration `0037`: the
+//! - What is searched: `events.search_words`, the weighted tsvector of migration `0037` (a
+//!   trigger since `0048`, a fork's copy written later: [`crate::db::index_copied`]): the
 //!   text of `user.message`, `agent.message`, `peer.message`, `system` and the answers of
 //!   `clarify.response` (weight A), a `tool.call`'s tool and arguments (B), a `tool.result`'s
 //!   output (D); and session titles (A). `/` and `.` are read as spaces there and in the

@@ -17,6 +17,9 @@
 //!   copies' ids are in no transcript and the source fork's own transcript may not exist (the
 //!   CLI writes it at its first message) or its session may be gone. The worker's history is the CLI's:
 //!   requests, statuses and usage of the source are not copied.
+//! - The copy goes in without its search words; a task writes them as soon as it is in, the
+//!   answer not waiting for it ([`db::index_copied`]), and none goes into `search_vocab`, which
+//!   has them from the source.
 
 use serde_json::json;
 use uuid::Uuid;
@@ -115,7 +118,15 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
         let f = json!({"runtime_session_id": source, "at_event_ids": cuts});
         db::set_session_fork(&app.db, id, &f).await?;
         let also = above.map(|a| a.seq);
-        db::copy_events(&app.db, s.id, id, at.seq, also, COPIED, &runtime).await?;
+        let n = db::copy_events(&app.db, s.id, id, at.seq, also, COPIED, &runtime).await?;
+        // The copy's search words, without the answer waiting for them (SPEC §15): written
+        // with the copy, those of a long session kept the user waiting for seconds.
+        let pool = app.db.clone();
+        tokio::spawn(async move {
+            if let Err(e) = db::index_copied(&pool, id, n).await {
+                tracing::warn!(session_id = %id, error = %e, "a fork's copy not indexed for search");
+            }
+        });
     }
     let new = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
     let from = crate::peers::address(app, s).await?;

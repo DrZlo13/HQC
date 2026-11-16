@@ -40,10 +40,14 @@ enum MenuBuilder {
 
     // MARK: - Go menu
 
-    // Go ▸ up and down the session column and the project rail.
+    // Go ▸ back and forward in the page's history, up and down the session column and the
+    // project rail.
     private static func goMenuItem() -> NSMenuItem {
         let item = NSMenuItem(title: "Go", action: nil, keyEquivalent: "")
         let menu = NSMenu(title: "Go")
+        menu.addItem(actionItem(.back))
+        menu.addItem(actionItem(.forward))
+        menu.addItem(.separator())
         menu.addItem(actionItem(.previousSession))
         menu.addItem(actionItem(.nextSession))
         menu.addItem(.separator())
@@ -141,18 +145,6 @@ enum MenuBuilder {
                                 keyEquivalent: "r")
         reload.target = nil
         menu.addItem(reload)
-
-        let back = NSMenuItem(title: "Back",
-                              action: #selector(MainViewController.goBack(_:)),
-                              keyEquivalent: "[")
-        back.target = nil
-        menu.addItem(back)
-
-        let forward = NSMenuItem(title: "Forward",
-                                 action: #selector(MainViewController.goForward(_:)),
-                                 keyEquivalent: "]")
-        forward.target = nil
-        menu.addItem(forward)
 
         menu.addItem(.separator())
 

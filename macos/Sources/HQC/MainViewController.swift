@@ -335,11 +335,13 @@ final class MainViewController: NSViewController {
     // MARK: - Shortcut actions
 
     // Runs a shortcut action in the active tab; New Session in Project opens its project's
-    // new session in the tab of its server.
+    // new session in the tab of its server, Back and Forward step the active tab's history.
     func perform(_ action: ShortcutAction) {
-        if action == .newSessionInProject {
-            openNewSessionInProject()
-            return
+        switch action {
+        case .newSessionInProject: return openNewSessionInProject()
+        case .back: return goBack(nil)
+        case .forward: return goForward(nil)
+        default: break
         }
         guard let tab = activeTab else { return }
         // The new session's message field takes the focus only inside a focused web view.
@@ -357,7 +359,8 @@ final class MainViewController: NSViewController {
         tab.openNewSession(project: target.projectID)
     }
 
-    // MARK: - Menu actions (responder chain targets)
+    // MARK: - Reload, back, forward and zoom: View menu items (responder chain targets), the
+    // title bar's arrows and the Back and Forward shortcuts
 
     @objc func reloadCurrent(_ sender: Any?) {
         activeTab?.reload()

@@ -5,7 +5,8 @@
 // session actions do nothing.
 extension ShortcutAction {
 
-    // None for New Session in Project: MainViewController opens its project's address instead.
+    // None for New Session in Project, Back and Forward: MainViewController opens the project's
+    // address or steps the web view's history instead.
     var script: String? {
         switch self {
         case .newSession: return Self.newSessionScript
@@ -15,6 +16,7 @@ extension ShortcutAction {
         case .nextSession: return Self.sessionStepScript(1)
         case .previousProject: return Self.projectStepScript(-1)
         case .nextProject: return Self.projectStepScript(1)
+        case .back, .forward: return nil
         }
     }
 

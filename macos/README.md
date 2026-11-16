@@ -6,7 +6,7 @@ sites open in the default browser; the app never opens a second window.
 
 The window's title bar is the colour of the page's project bar (of the page itself where the
 client shows none) and holds, after the window buttons, ‹ › (the page's back and forward, as
-⌘[ ⌘]) and the breadcrumbs of the open session, `project › session › state`, or the open
+Back and Forward in the Go menu) and the breadcrumbs of the open session, `project › session › state`, or the open
 project's name; with two or more servers, a switch between them on the right.
 
 ## Requirements
@@ -31,9 +31,10 @@ Settings… (⌘,) holds:
 - **Shortcuts**: the app's own shortcuts, working while the app is active; New Session in
   Project works from any app, and brings the window up. They act on the active tab's page
   through the client's own controls (New Session in Project: on its project's server tab, by
-  the page address); each is also an item in the File or Go menu. To change one, click its
-  button, then press a key with at least one of ⌘ ⌃ ⌥; Esc cancels, Delete clears it. A
-  shortcut recorded for one action is taken off any other action that had it.
+  the page address; Back and Forward: the page's history, as ‹ ›); each is also an item in the
+  File or Go menu. To change one, click its button, then press a key with at least one of ⌘ ⌃
+  ⌥; Esc cancels, Delete clears it. A shortcut recorded for one action is taken off any other
+  action that had it.
 
   | action | default | menu | what it does |
   |---|---|---|---|
@@ -42,6 +43,7 @@ Settings… (⌘,) holds:
   | Archive Session | ⌃⌘A | File | archives the open session, as its row's menu does (with Undo) |
   | Previous Session / Next Session | ⌥⌘↑ / ⌥⌘↓ | Go | the row above or below in the session column |
   | Previous Project / Next Project | ⌃⌘↑ / ⌃⌘↓ | Go | the project above or below on the project bar |
+  | Back / Forward | ⌘[ / ⌘] | Go | the page's previous or next address, as ‹ › in the window's bar |
 
   Where the session column is not shown (a narrow window, the search page) the session
   shortcuts other than the two New Session ones do nothing; below 900 px the client has no

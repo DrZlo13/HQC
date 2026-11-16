@@ -77,6 +77,8 @@ enum ShortcutAction: String, CaseIterable {
     case nextSession
     case previousProject
     case nextProject
+    case back
+    case forward
 
     var title: String {
         switch self {
@@ -87,6 +89,8 @@ enum ShortcutAction: String, CaseIterable {
         case .nextSession: return "Next Session"
         case .previousProject: return "Previous Project"
         case .nextProject: return "Next Project"
+        case .back: return "Back"
+        case .forward: return "Forward"
         }
     }
 
@@ -105,6 +109,8 @@ enum ShortcutAction: String, CaseIterable {
         case .nextSession: return Shortcut(keyCode: kVK_DownArrow, flags: [.option, .command], key: Self.down)
         case .previousProject: return Shortcut(keyCode: kVK_UpArrow, flags: [.control, .command], key: Self.up)
         case .nextProject: return Shortcut(keyCode: kVK_DownArrow, flags: [.control, .command], key: Self.down)
+        case .back: return Shortcut(keyCode: kVK_ANSI_LeftBracket, flags: [.command], key: "[")
+        case .forward: return Shortcut(keyCode: kVK_ANSI_RightBracket, flags: [.command], key: "]")
         }
     }
 

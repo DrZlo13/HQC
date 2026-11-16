@@ -2531,8 +2531,9 @@ async fn a_worker_restart_drops_the_kept_subagents() {
 /// SPEC §4: the empty list goes directly and is lost with a broken link, and a worker that
 /// reconnects without a restart repeats only a list that is not empty. A `session.state` that
 /// counts no subagent but a background task keeps the list, which holds the agent's background
-/// commands; one that counts neither drops the kept list, and so does deleting the session; the
-/// subscribers get an empty list, a new subscriber none.
+/// commands; one that counts neither drops the kept list but its wakeups and cron jobs, one that
+/// says the agent stopped drops all, and so does deleting the session; the subscribers get an
+/// empty list, a new subscriber none.
 #[tokio::test]
 async fn a_count_of_none_drops_the_kept_subagents() {
     let hub = TestHub::start().await;
@@ -2639,6 +2640,22 @@ async fn a_count_of_none_drops_the_kept_subagents() {
         backlog.iter().all(|e| e["type"] != "subagents.live"),
         "{backlog:?}"
     );
+    // A stopped agent's timers died with its process: its `session.state` drops them, its
+    // empty list may have been lost with the link.
+    w.event(agent_event(
+        &sid,
+        "subagents.live",
+        json!({ "agents": timers }),
+    ))
+    .await;
+    next_live(&mut c).await;
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "stopped"}),
+    )
+    .await;
+    w.expect("ack").await;
+    assert_eq!(next_live(&mut c).await["payload"]["agents"], json!([]));
 
     w.event(live()).await;
     assert_eq!(

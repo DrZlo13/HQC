@@ -203,7 +203,8 @@ pub struct LiveSubagent {
     /// `task_started`; since SPEC 0.135); absent before that comes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
-    /// A subagent or a background command (since SPEC 0.141); absent from an older worker.
+    /// A subagent or a background command (since SPEC 0.141), a Monitor watcher, a wakeup or a
+    /// cron job (since SPEC 0.168); absent from an older worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<LiveKind>,
     /// The runtime stops it alone on `session.stop_task` (since SPEC 0.161): a subagent's row,
@@ -291,8 +292,9 @@ pub enum EventKind {
         reset: bool,
     },
     /// The subagents the agent runs now, the whole list in the order they started, then (since
-    /// SPEC 0.127) its background shell commands; empty: none (since SPEC 0.101). Transport
-    /// only, never stored (SPEC §4, §5.2).
+    /// SPEC 0.127) its background shell commands, and (since SPEC 0.168) its Monitor watchers,
+    /// its wakeup and its cron jobs; empty: none (since SPEC 0.101). Transport only, never
+    /// stored (SPEC §4, §5.2).
     #[serde(rename = "subagents.live")]
     SubagentsLive { agents: Vec<LiveSubagent> },
     /// The output tokens per second the agent and its subagents spent over the last 20 s

@@ -145,7 +145,8 @@ export interface LiveSubagent {
   /** `call_id` of the `tool.call` that started it (since 0.135); absent before the runtime
    *  names it. */
   call_id?: string;
-  /** A subagent or a background command (since 0.141); absent from an older worker. */
+  /** A subagent or a background command (since 0.141), a Monitor watcher, a wakeup or a cron
+   *  job (since 0.168); absent from an older worker. */
   kind?: LiveKind;
   /** Since 0.161: it can be stopped alone (`POST .../tasks/{task_id}/stop`), a subagent's row,
    *  a command's and (since 0.168) a Monitor's; absent from an older worker. */
@@ -159,7 +160,8 @@ export interface LiveSubagent {
 export const LIVE_KINDS = ['agent', 'command', 'monitor', 'wakeup', 'cron'] as const;
 export type LiveKind = (typeof LIVE_KINDS)[number];
 /** The whole list: the subagents in the order they started, then (since 0.127) the agent's
- *  background commands; empty: none. Transport only. */
+ *  background commands, and (since 0.168) its watchers, wakeup and cron jobs; empty: none.
+ *  Transport only. */
 export interface SubagentsLive {
   agents: LiveSubagent[];
 }

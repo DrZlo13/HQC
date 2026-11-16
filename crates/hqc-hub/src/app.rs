@@ -262,10 +262,10 @@ impl AppState {
         self.notify(Notice::Live { session_id, event });
     }
 
-    /// The session's agent runs no subagent and no background task any more, though no empty
-    /// list from the worker may say so (SPEC §4): its worker restarted, its `session.state`
-    /// counts neither subagents nor background tasks, or it was deleted. A kept list is dropped
-    /// and the session's subscribers get an empty `subagents.live`, as from the worker.
+    /// The session's agent runs nothing any more, though no empty list from the worker may say
+    /// so (SPEC §4): its worker restarted, its `session.state` says it stopped, or it was
+    /// deleted. A kept list is dropped and the session's subscribers get an empty
+    /// `subagents.live`, as from the worker.
     pub fn drop_live_agents(&self, session_id: Uuid) {
         let mut lists = self.live_agents.lock().unwrap();
         if lists.remove(&session_id).is_some() {
@@ -276,7 +276,7 @@ impl AppState {
         }
     }
 
-    /// The session's agent is idle and runs no subagent and no background task (its
+    /// The session's agent is alive and runs no subagent and no background task (its
     /// `session.state` counts neither, SPEC §4): what its worker lists beside them stays
     /// until the worker says otherwise, that is the wakeups and the cron jobs the agent
     /// armed, which wait for their time while it is idle; the rest of the kept list goes, as

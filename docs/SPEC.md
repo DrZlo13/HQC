@@ -622,7 +622,9 @@ Rules:
   session of that worker), when `session.state` reports both `subagents` and (since 0.127)
   `background_tasks` 0 (§5.4), since the list holds the agent's background commands too (§8.1)
   (since 0.168 the wakeup and the cron jobs of the agent stay in it: they wait while the agent is
-  idle, and the worker's empty list ends them), and when the session is deleted; a client that falls behind gets an empty list when none is
+  idle), when `session.state` says the agent stopped (since 0.168: its wakeup and cron jobs died
+  with its process, and its empty list may have been lost with the link), and when the session is
+  deleted; a client that falls behind gets an empty list when none is
   kept. Since 0.127 the worker sends an empty list that followed a non-empty one again on every
   connect (§8.1), so one lost with the link while a background task still runs is made up for.
 - `schedules.live` (since 0.168) goes to clients the same way and is not saved either, but the hub
@@ -3542,8 +3544,8 @@ created 7 days or more ago (the CLI deletes it after that fire); any other waits
 fire, which the adapter works out as the CLI does (`Hmn` with its default settings): the next
 match of the expression after the fire in the machine's local time zone, put off by the first 8
 hex digits of the id as a fraction of 2^32 times half the interval to the match after it, but
-by 30 minutes at most; a job of `*/N * * * *` whose interval is 5 minutes up to 5 minutes less
-15 s fires at 15 s short of that interval from the fire. A change of the wakeup or of a job
+by 30 minutes at most; a job of `*/N * * * *` whose interval is at least 5 minutes but under 5
+minutes 15 s (that is, `*/5`) fires 15 s short of that interval after the fire. A change of the wakeup or of a job
 sends the list again; none of them changes `session.state.subagents`, `background_tasks` or the
 state. The worker sends `subagents.live` directly, not through the outbox, as
 `agent.delta`, ignores a list read after the agent's process stopped and sends an empty list when it
@@ -5809,7 +5811,7 @@ a next run (§16); it goes to a session's subscribers on subscribe and on every 
 session's schedules, and a worker sending one is refused. The hub counts the kept list's
 `due_in_ms` down as it does `duration_ms` and, when `session.state` counts neither subagents nor
 background tasks, keeps the wakeup and the cron jobs in the list (the agent is idle, they wait)
-and drops the rest. The client leads the lines with "Monitor: ", "Wakeup: ", "Cron: " and
+and drops the rest; when it says the agent stopped, it drops the whole list. The client leads the lines with "Monitor: ", "Wakeup: ", "Cron: " and
 "Scheduled: ", counts a timer down to `due`, keeps its dot still, shows the block for a timer or a
 schedule alone, and opens the chat's schedules from a "Scheduled" line. No migration.
 

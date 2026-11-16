@@ -86,13 +86,14 @@ impl Drop for Live {
     }
 }
 
-/// A transcript the live process wrote before its `/clear`, in [`OwnRecords`] until the
-/// process ends: the mirror may read what it wrote there last only after the switch.
+/// A transcript the live process wrote before its `/clear`, in [`OwnRecords`] up to its
+/// length at the switch (`until`) until the process ends: the mirror may read what it wrote
+/// there last only after the switch.
 struct Earlier(Arc<OwnRecords>, Uuid);
 
 impl Earlier {
-    fn new(own: Arc<OwnRecords>, uuid: Uuid) -> Self {
-        own.begin_earlier(uuid);
+    fn new(own: Arc<OwnRecords>, uuid: Uuid, until: u64) -> Self {
+        own.begin_earlier(uuid, until);
         Self(own, uuid)
     }
 }
@@ -1373,8 +1374,12 @@ async fn monitor(
                     for a in &actions {
                         if let Action::Emit(AdapterEvent::RuntimeSessionId(r)) = a {
                             if let Ok(new) = r.parse::<Uuid>() {
+                                let until = match io.transcript() {
+                                    Some(p) => tokio::fs::metadata(p).await.map_or(0, |m| m.len()),
+                                    None => 0,
+                                };
                                 io.moved_to(new);
-                                earlier.push(Earlier::new(io.own.clone(), live.1));
+                                earlier.push(Earlier::new(io.own.clone(), live.1, until));
                                 live = Live::new(io.own.clone(), new, live.2);
                             }
                         }

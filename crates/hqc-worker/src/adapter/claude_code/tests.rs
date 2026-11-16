@@ -6534,7 +6534,8 @@ async fn a_cleared_folder_is_unmarked_when_the_turn_of_clear_ends() {
 /// What the process wrote to its transcript right before `/clear` and the mirror reads only
 /// after the switch stays the process's (SPEC §9.2): the output of `/cost` there is no
 /// `mirror.event`, which the hub, with the session on the new transcript, would import as a
-/// session of someone else's. A question holds the scripted CLI after the switch.
+/// session of someone else's. A record another writer adds there after the switch is a
+/// `mirror.event`. A question holds the scripted CLI after the switch.
 #[tokio::test]
 async fn a_command_output_before_clear_is_the_processs_after_the_switch() {
     let (old, new) = (Uuid::new_v4(), Uuid::new_v4());
@@ -6560,7 +6561,8 @@ async fn a_command_output_before_clear_is_the_processs_after_the_switch() {
     let transcript = super::paths::transcript_path(config.path(), &workdir, &old);
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
     // The shape of 2.1.312.
-    let output = json!({"parentUuid": null, "isSidechain": false, "uuid": Uuid::new_v4(),
+    let first_uuid = Uuid::new_v4();
+    let output = json!({"parentUuid": null, "isSidechain": false, "uuid": first_uuid,
         "timestamp": "2026-11-16T10:00:00.000Z", "cwd": workdir.display().to_string(),
         "sessionId": old, "type": "system", "subtype": "local_command",
         "content": "<local-command-stdout>Total cost: $0.0123</local-command-stdout>",
@@ -6585,10 +6587,28 @@ async fn a_command_output_before_clear_is_the_processs_after_the_switch() {
         Arc::new(crate::mirror::store::Store::memory()),
         own.clone(),
     );
-    mirror.set(workdir, true, vec![]);
+    mirror.set(workdir.clone(), true, vec![]);
     let out = mirror.poll(std::time::Instant::now(), std::time::SystemTime::now());
     assert!(
         !out.iter()
+            .any(|o| matches!(o, crate::mirror::Output::Event(_))),
+        "{out:?}"
+    );
+    // Another writer of the old transcript after the switch (`--resume` of the old id,
+    // `w2-resume-old`): what it adds is not the process's.
+    let later = json!({"parentUuid": first_uuid, "isSidechain": false, "uuid": Uuid::new_v4(),
+        "timestamp": "2026-11-16T10:01:00.000Z", "cwd": workdir.display().to_string(),
+        "sessionId": old, "type": "system", "subtype": "local_command",
+        "content": "<local-command-stdout>Total cost: $0.0456</local-command-stdout>",
+        "level": "info", "isMeta": false});
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    std::io::Write::write_all(&mut f, format!("{later}\n").as_bytes()).unwrap();
+    let out = mirror.poll(std::time::Instant::now(), std::time::SystemTime::now());
+    assert!(
+        out.iter()
             .any(|o| matches!(o, crate::mirror::Output::Event(_))),
         "{out:?}"
     );

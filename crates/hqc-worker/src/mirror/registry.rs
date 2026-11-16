@@ -43,6 +43,8 @@ struct Entry {
     live: u32,
     /// Live processes that wrote the transcript and went on in another after `/clear`.
     earlier: u32,
+    /// The transcript's length when the last of them went on in another one.
+    earlier_until: u64,
     /// Their pids, when known: their entries in Claude Code's session registry are not
     /// another holder (SPEC §9.3).
     pids: Vec<u32>,
@@ -121,9 +123,13 @@ impl OwnRecords {
     }
 
     /// The live process of transcript `session` went on in another one after `/clear`: what
-    /// it wrote there stays its own until it ends ([`OwnRecords::of_live_process`]).
-    pub fn begin_earlier(&self, session: Uuid) {
-        self.lock().entry(session).or_default().earlier += 1;
+    /// it wrote there, the file's first `until` bytes, stays its own until it ends
+    /// ([`OwnRecords::of_live_process`]).
+    pub fn begin_earlier(&self, session: Uuid, until: u64) {
+        let mut m = self.lock();
+        let e = m.entry(session).or_default();
+        e.earlier += 1;
+        e.earlier_until = e.earlier_until.max(until);
     }
 
     /// That process is gone.
@@ -133,12 +139,13 @@ impl OwnRecords {
         }
     }
 
-    /// A process of this worker writes the transcript now ([`OwnRecords::is_live`]) or wrote
-    /// it before its `/clear` and still runs.
-    pub fn of_live_process(&self, session: Uuid) -> bool {
+    /// A process of this worker writes the transcript now ([`OwnRecords::is_live`]), or it
+    /// still runs and wrote the record ending at byte `end` before its `/clear`: a record
+    /// added after the switch is another writer's (`--resume` of the old id).
+    pub fn of_live_process(&self, session: Uuid, end: u64) -> bool {
         self.lock()
             .get(&session)
-            .is_some_and(|e| e.live > 0 || e.earlier > 0)
+            .is_some_and(|e| e.live > 0 || (e.earlier > 0 && end <= e.earlier_until))
     }
 
     /// A process with its transcript in `folder` cleared its conversation (`/clear`): a

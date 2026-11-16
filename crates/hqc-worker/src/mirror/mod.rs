@@ -540,7 +540,7 @@ impl Mirror {
             // message typed during a turn: only the adapter writes that process's stdin, and
             // the hub has the input already. Also in a transcript that process wrote before its
             // `/clear`: what it wrote there last may be read only after the switch.
-            let reported = self.own.of_live_process(runtime)
+            let reported = self.own.of_live_process(runtime, end)
                 && (map::is_task_notification(&rec)
                     || map::is_queued_prompt(&rec)
                     || map::is_local_command(&rec)

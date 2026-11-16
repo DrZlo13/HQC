@@ -1,7 +1,7 @@
 import AppKit
 
 // Settings, shown as a sheet on the main window: the server list (a table with Name/Address
-// columns plus add/remove/edit) and the app's shortcuts.
+// columns plus add/remove/edit), the app's shortcuts and how long a notification card stays.
 final class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
 
     private let store: ServerStore
@@ -12,6 +12,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let recorders = ShortcutAction.allCases.map { ShortcutRecorder(action: $0) }
     // The project New Session in Project opens, next to its recorder.
     private let projectPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    // How long a notification card other than a permission request stays on screen.
+    private let lifetimeValue = NSTextField(labelWithString: "")
+    private let lifetimeStepper = NSStepper()
 
     // Private pasteboard type used only for intra-table drag-to-reorder of servers.
     private let serverRowType = NSPasteboard.PasteboardType("io.github.drzlo13.hqc.settings.server-row")
@@ -21,14 +24,14 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         self.store = store
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 660),
             // Not closable: it is a sheet, closed by Done; ⌘W (performClose:) must not close it.
             styleMask: [.titled, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "Settings"
-        window.contentMinSize = NSSize(width: 480, height: 520)
+        window.contentMinSize = NSSize(width: 480, height: 580)
 
         super.init(window: window)
 
@@ -120,6 +123,28 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         shortcutsGrid.rowAlignment = .firstBaseline
         shortcutsGrid.translatesAutoresizingMaskIntoConstraints = false
 
+        // How long a notification card other than a permission request stays on screen.
+        let notificationsLabel = NSTextField(labelWithString: "Notifications")
+        notificationsLabel.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        notificationsLabel.translatesAutoresizingMaskIntoConstraints = false
+        lifetimeStepper.minValue = Double(Notifier.lifetimeRange.lowerBound)
+        lifetimeStepper.maxValue = Double(Notifier.lifetimeRange.upperBound)
+        lifetimeStepper.increment = 1
+        lifetimeStepper.valueWraps = false
+        lifetimeStepper.integerValue = Notifier.lifetime
+        lifetimeStepper.target = self
+        lifetimeStepper.action = #selector(changeLifetime)
+        lifetimeValue.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        lifetimeValue.alignment = .right
+        lifetimeValue.stringValue = "\(Notifier.lifetime) s"
+        // As wide as "120 s", so the stepper does not move with the value.
+        lifetimeValue.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        let lifetimeRow = NSStackView(views: [NSTextField(labelWithString: "Stay on screen"), lifetimeValue,
+                                              lifetimeStepper])
+        lifetimeRow.orientation = .horizontal
+        lifetimeRow.spacing = 8
+        lifetimeRow.translatesAutoresizingMaskIntoConstraints = false
+
         // "Done" closes the settings sheet.
         let closeButton = NSButton(title: "Done", target: self, action: #selector(closeSettings))
         closeButton.bezelStyle = .rounded
@@ -130,6 +155,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         contentView.addSubview(buttonStack)
         contentView.addSubview(shortcutsLabel)
         contentView.addSubview(shortcutsGrid)
+        contentView.addSubview(notificationsLabel)
+        contentView.addSubview(lifetimeRow)
         contentView.addSubview(closeButton)
 
         NSLayoutConstraint.activate([
@@ -148,7 +175,13 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             shortcutsGrid.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
             shortcutsGrid.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -16),
 
-            closeButton.topAnchor.constraint(equalTo: shortcutsGrid.bottomAnchor, constant: 20),
+            notificationsLabel.topAnchor.constraint(equalTo: shortcutsGrid.bottomAnchor, constant: 20),
+            notificationsLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+
+            lifetimeRow.topAnchor.constraint(equalTo: notificationsLabel.bottomAnchor, constant: 8),
+            lifetimeRow.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+
+            closeButton.topAnchor.constraint(equalTo: lifetimeRow.bottomAnchor, constant: 20),
             closeButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
             closeButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -14)
         ])
@@ -282,6 +315,14 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     // A project picked saves it as the target; None clears it.
     @objc private func pickNewSessionProject() {
         NewSessionTarget.save(projectPopup.selectedItem?.representedObject as? NewSessionTarget)
+    }
+
+    // MARK: - Notifications
+
+    // The stepper saves the time a card stays; the next card takes it.
+    @objc private func changeLifetime() {
+        Notifier.lifetime = lifetimeStepper.integerValue
+        lifetimeValue.stringValue = "\(Notifier.lifetime) s"
     }
 
     // MARK: - Actions

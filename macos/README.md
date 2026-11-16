@@ -50,6 +50,9 @@ Settings… (⌘,) holds:
   project bar, and the project shortcuts do nothing either. The project of New Session in
   Project is picked in the menu next to its shortcut, from the projects of every server the app
   is signed in to; with None it only brings the window up.
+- **Notifications**: Stay on screen, how long a notification card other than a permission
+  request stays (1–120 s, 5 s by default); a new card takes the new time, a card replaced in
+  place keeps its own.
 
 Closing the window hides it, so the pages keep their state; a click on the Dock icon shows it
 again, ⌘Q quits. The Dock icon shows how many sessions have something unread on all servers,
@@ -58,20 +61,33 @@ icon marks with its light dot.
 
 ## Notifications
 
-The app shows macOS notifications for the events the hub sends a browser push for: permission
-requests, questions, the agent's final reply (not of a room's agent), a post in an agents' room
-and input that failed, worded as the push, with
-the project's name on top and the session's title under it. Every server notifies, also one
-whose tab is not open. They come only while the app runs (its window may be closed); a click
-opens the session. Nothing is shown for the session you are looking at. macOS asks once for
-permission.
+The app draws its own notification cards for the events the hub sends a browser push for:
+permission requests, questions, the agent's final reply (not of a room's agent), a post in an
+agents' room and input that failed. Every server notifies, also one whose tab is not open. They
+come only while the app runs (its window may be closed), each with the system alert sound.
+Nothing is shown for the session you are looking at. The cards are not macOS notifications:
+they do not go to Notification Center, System Settings ▸ Notifications does not change them
+(macOS asks once for permission only for the number on the Dock icon), and Focus and screen
+sharing neither hide them nor silence their sound.
 
-A permission request has Allow and Deny buttons (not a publication: that one is allowed only
-on its card), which answer it without opening the app; when the request has no such option or
-the hub refuses the answer, the session opens instead. A request answered elsewhere disappears
-from Notification Center, also one shown before the page reloaded or the app last quit, once
-the page is connected again.
+A card looks like a macOS banner before Big Sur: a translucent rounded card at the top right of
+the screen with the menu bar, under it, in the system's light or dark appearance, over every app
+and full-screen space; a new one slides in on top and the others move down. It shows the
+project's tile (its colour and letters), the project's name and what happened (Permission,
+Question, Reply, Message or Failed), the session's title, and then a permission request's tool
+and its whole command or description (up to 6 lines), a question and how many more there are,
+or the reply, post or failure (up to 4 lines). A click on a card opens the session.
 
-With the Alerts style (System Settings ▸ Notifications ▸ HQC) a notification stays on screen
-until it is dismissed; the app takes every one away after 5 s except permission requests,
-which stay until they are answered.
+A permission request has Allow and Deny always visible in a column on the right (not a
+publication: that one is allowed only on its card), which answer it without opening the app or
+taking the focus from the app you are in, and the card goes; when the request has no such option
+or the hub refuses the answer, the session opens instead. Its card stays until the request is
+answered, here, in the client or elsewhere, also one shown before the page reloaded, once the page
+is connected again. Every other card goes after the time set in Settings (5 s by default) from
+when it appears; while the pointer is over a card it stays, and the time starts again when the
+pointer leaves. With the pointer over a card, × at its top left corner closes it without an
+answer. While the pointer is over the cards they hold still, so a button never moves under it: a
+new card waits, a card that goes leaves its gap, a card replaced by a longer one that no longer
+fits its place waits too, and the cards settle when the pointer leaves or the last one goes;
+cards that do not fit on the screen wait in order and come in as room frees up, and a waiting
+card's time starts when it is shown.

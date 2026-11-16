@@ -28,7 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         ShortcutMonitor.shared.start()
 
-        // macOS notifications for what the hub would push, while the app runs.
+        // The app's own notification cards for what the hub would push, while the app runs.
         Notifier.shared.isShowing = { [weak self] serverID in
             guard NSApp.isActive, let window = self?.windowController?.window, window.isVisible else { return false }
             return self?.mainViewController?.selectedServerID == serverID

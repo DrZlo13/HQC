@@ -263,6 +263,10 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
             title: m["title"] as? String ?? "",
             subtitle: m["subtitle"] as? String ?? "",
             body: m["body"] as? String ?? "",
+            tool: m["tool"] as? String,
+            more: m["more"] as? Int ?? 0,
+            color: (m["color"] as? String).flatMap(Self.color(hex:)),
+            glyph: m["glyph"] as? String ?? "",
             viewing: m["viewing"] as? Bool ?? false,
             requestID: m["request_id"] as? String,
             allowOption: m["allow_option"] as? String,
@@ -280,6 +284,13 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
         let alpha = parts.count == 4 ? parts[3] : 1
         guard alpha > 0 else { return nil }
         return NSColor(srgbRed: parts[0] / 255, green: parts[1] / 255, blue: parts[2] / 255, alpha: alpha)
+    }
+
+    // A `#RRGGBB` colour; nil for anything else.
+    private static func color(hex: String) -> NSColor? {
+        guard hex.count == 7, hex.hasPrefix("#"), let v = UInt32(hex.dropFirst(), radix: 16) else { return nil }
+        return NSColor(srgbRed: CGFloat((v >> 16) & 0xFF) / 255, green: CGFloat((v >> 8) & 0xFF) / 255,
+                       blue: CGFloat(v & 0xFF) / 255, alpha: 1)
     }
 
     // MARK: - WKUIDelegate

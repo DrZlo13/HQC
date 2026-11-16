@@ -5,11 +5,12 @@
 // `session.summary` (each socket's first `summary` is a fresh baseline: what happened while
 // it was not connected is not notified); when both grew, it reads the new events and posts
 // each one the hub sends a push for (crates/hqc-hub/src/push.rs on_event; all of them count
-// as unread, crates/hqc-hub/src/state.rs UNREAD_FILTER) to the `hqcNotify` handler, worded as
-// the push: the project's name as the title, the session's title (sw.js describe() for an
-// untitled one) under it. A session mirrored from a CLI outside hqc (`held_by`) gets no push
-// from the hub and none here. On every `requests` frame it posts the tags of all the open
-// requests, `{open: [tag]}`: the app takes away the permission requests not among them.
+// as unread, crates/hqc-hub/src/state.rs UNREAD_FILTER) to the `hqcNotify` handler for the
+// app's card: the project's name, colour and tile letters, the session's title (sw.js
+// describe() for an untitled one) and the event's whole text. A session mirrored from a CLI
+// outside hqc (`held_by`) gets no push from the hub and none here. On every `requests` frame
+// it posts the tags of all the open requests, `{open: [tag]}`: the app takes away the
+// permission requests not among them.
 //
 // The same names make the window bar's breadcrumbs: the script posts `{crumbs}` to the
 // `hqcChrome` handler (ChromeScript) — on `#/s/<id>` the session's project, its title and its
@@ -46,7 +47,8 @@ enum NotificationScript {
           const everOpen = new Set();
           // The sessions with an open permission request in the last `requests` frame.
           let asking = new Set();
-          // Project id -> name, from the client's own projects call.
+          // Project id -> its name, colour (`#RRGGBB`) and the letters of its tile, from the
+          // client's own projects call.
           const projects = new Map();
           let projectsLoad = null;
           // The workers' service sessions (`system`) and every session id the list call knew,
@@ -111,10 +113,25 @@ enum NotificationScript {
             }
           };
 
-          // The project names, named as the client names them (projectName(): "Personal" for
-          // the personal project), the archived projects too (the first call leaves them out,
-          // client/src/api.ts archivedProjects()); read once, and again for a project not known
-          // yet.
+          // The project colours (client/src/theme.ts PROJECT_COLORS); one not known is the first.
+          const COLORS = {
+            teal: '#3FB8A8', plum: '#B57BD6', blue: '#6E9BFF', rose: '#E77A9A',
+            moss: '#8DBA5B', coral: '#F08A5D', cyan: '#4FC3E8', slate: '#8A93A6',
+          };
+          // The first letters of a name (client/src/ui/sessions.ts projectInitials()).
+          const initials = (name, personal) => {
+            if (personal) return name.slice(0, 1).toUpperCase();
+            const words = name.split(/[\\s\\-_./]+/).filter(Boolean);
+            if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+            return (words[0] || name).slice(0, 2).toUpperCase();
+          };
+
+          // The projects, named as the client names them (projectName(): "Personal" for the
+          // personal project), with their colour and what their tile shows (ui/Appearance.tsx
+          // ProjectGlyph(): the emoji or letters set for it, else the first letters of the name;
+          // for an image, the letters), the archived projects too (the first call leaves them
+          // out, client/src/api.ts archivedProjects()); read once, and again for a project not
+          // known yet.
           const projectList = (url) =>
             fetch(url)
               .then((res) => (res.ok ? res.json() : null))
@@ -125,7 +142,14 @@ enum NotificationScript {
               projectsLoad = Promise.all([projectList('/api/projects'), projectList('/api/projects?archived=1')])
                 .then(([live, archived]) => {
                   for (const p of [...live, ...archived]) {
-                    if (p && typeof p.id === 'string') projects.set(p.id, p.is_personal ? 'Personal' : p.name);
+                    if (!p || typeof p.id !== 'string') continue;
+                    const name = p.is_personal ? 'Personal' : String(p.name || '');
+                    const icon = p.icon && (p.icon.kind === 'emoji' || p.icon.kind === 'letters') ? String(p.icon.value || '') : '';
+                    projects.set(p.id, {
+                      name,
+                      color: COLORS[p.color] || COLORS.teal,
+                      glyph: icon || initials(name, p.is_personal),
+                    });
                   }
                 })
                 .finally(() => {
@@ -135,9 +159,9 @@ enum NotificationScript {
             }
             return projectsLoad;
           };
-          const projectName = async (id) => {
+          const projectOf = async (id) => {
             if (id && !projects.has(id)) await loadProjects();
-            return (id && projects.get(id)) || '';
+            return (id && projects.get(id)) || null;
           };
 
           // The session open in the page (`#/s/<id>`), if any.
@@ -181,15 +205,16 @@ enum NotificationScript {
           // open project; a part not known (yet) is left out.
           const chrome = window.webkit.messageHandlers.hqcChrome;
           let lastCrumbs = null;
+          const nameOf = (id) => (projects.get(id) || {}).name || '';
           const postCrumbs = () => {
             const session = openSession();
             const project = openProject();
             let crumbs = [];
             if (session) {
               const s = summaries.get(session);
-              if (s) crumbs = [projects.get(s.project_id) || '', s.title || '', status(s)].filter(Boolean);
+              if (s) crumbs = [nameOf(s.project_id), s.title || '', status(s)].filter(Boolean);
             } else if (project) {
-              crumbs = [projects.get(project) || ''].filter(Boolean);
+              crumbs = [nameOf(project)].filter(Boolean);
             }
             const key = JSON.stringify(crumbs);
             if (!chrome || key === lastCrumbs) return;
@@ -277,22 +302,29 @@ enum NotificationScript {
           };
 
           // One notification per request; other events of a session replace each other (SPEC §16).
-          // A permission request (not a publication: the client publishes only on a click on its
-          // card) carries the options of the card's Allow and Deny buttons.
+          // The card's text is the whole description, question or message, up to 600
+          // characters; a permission request names its tool, a question counts the ones after
+          // the first. A permission request (not a publication: the client publishes only on a
+          // click on its card) carries the options of the card's Allow and Deny buttons.
           const post = (id, project, title, e) => {
             const p = e.payload || {};
             const request = e.type === 'approval.request' || e.type === 'clarify.request';
             const tag = request && p.request_id ? `${id}:${p.request_id}` : `${id}:${e.type}`;
             const subtitle = title || describe(e).title;
+            const name = project ? project.name : '';
             const m = {
               session_id: id,
               tag,
               type: e.type,
-              title: project || subtitle,
-              subtitle: project ? subtitle : '',
-              body: (hubBody(e) || describe(e).body || '').slice(0, 300),
+              title: name || subtitle,
+              subtitle: name ? subtitle : '',
+              body: clip(describe(e).body, 600),
+              color: project ? project.color : COLORS.teal,
+              glyph: project ? project.glyph : initials(subtitle, false),
               viewing: openSession() === id,
             };
+            if (e.type === 'approval.request') m.tool = String(p.tool || 'tool');
+            if (e.type === 'clarify.request' && Array.isArray(p.questions)) m.more = Math.max(0, p.questions.length - 1);
             if (e.type === 'approval.request' && p.request_id) {
               // Answered or gone already: an earlier `requests` frame listed it, the last one not.
               if (everOpen.has(tag) && !lastOpen.has(tag)) return;
@@ -323,7 +355,7 @@ enum NotificationScript {
                 if (pushed(e, id)) fresh.push(e);
               }
               if (!fresh.length) return;
-              const project = await projectName(projectId);
+              const project = await projectOf(projectId);
               for (const e of fresh) post(id, project, title, e);
             } catch {}
           };
@@ -346,8 +378,8 @@ enum NotificationScript {
             }
           };
 
-          // The open requests, whole: a permission request in Notification Center no longer among
-          // them was answered or went away.
+          // The open requests, whole: a permission request no longer among them was answered or
+          // went away, and its card goes.
           const opened = (requests) => {
             const open = new Set();
             const permission = new Set();

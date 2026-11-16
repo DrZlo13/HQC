@@ -171,6 +171,10 @@ describe('examples/wire', () => {
     expect(s.favorite_at).toBe('2026-10-22T09:30:00Z');
     expect(sys.favorite_at).toBeUndefined();
     expect(one.type === 'session.summary' && one.session.favorite_at).toBe('2026-10-22T09:30:00Z');
+    // SPEC 0.160: paused while its turn runs, in the session and its summary; absent: not paused.
+    expect(s.paused_at).toBe('2026-10-22T10:00:01Z');
+    expect(sys.paused_at).toBeUndefined();
+    expect(one.type === 'session.summary' && one.session.paused_at).toBe('2026-10-22T10:00:01Z');
     // The model of `agent`; absent: the runtime's default.
     expect(s.model).toBe('sonnet');
     expect(sys.model).toBeUndefined();

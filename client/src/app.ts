@@ -446,6 +446,7 @@ export class AppState {
         output_per_s: s.output_per_s,
         foreground_calls: s.foreground_calls,
         favorite_at: s.favorite_at,
+        paused_at: s.paused_at,
       });
     }
     // A session created elsewhere: fetch the list again for its title.

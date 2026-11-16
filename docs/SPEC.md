@@ -556,7 +556,7 @@ the client renders only them. The "source" column is the component that produces
 | `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind}` | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; since 0.174 `reason?` — why the runtime asks (Claude Code: `decision_reason`, at most 1024 bytes), `display_name?` — the runtime's name of the tool (at most 256 bytes), both absent when blank, and `human_only?` — `true` when only a person may answer it (§8.1): its `options` are `once` and `deny`, it has no `rule_suggestions`, and the hub's `auto_approve` leaves it to the owner (§10.1); absent when false. The client shows `reason` under the card's title and names the tool by `display_name` when there is one, an MCP server's tool as `<tool> (<server>)` (the runtime's `display_name` of one drops the server); `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for; the hub drops it from a worker's event |
 | `approval.response` | `request_id`, `option_id`, `by` (user id or `auto`), `message?` (the user's text instead of the call, only with a `deny`/`deny_always` option, §10.1) | client, or the hub with `auto_approve` |
 | `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived, since 0.174 withdrawn — the runtime withdrew its request, §8.1; the client says "withdrawn") | adapter, worker or hub. An answer from another device is not a cancellation: the first answer closes the request, the second gets `409 request_closed` (§10.1) |
-| `clarify.request` | `request_id`, `questions[{id, text, header?, options?: [string], option_descriptions?: [string], multi?: bool, required?: bool, input?: "integer" \| "number"}]` | Claude Code adapter: the `AskUserQuestion` tool arrives as `can_use_tool`, the answer goes into `updatedInput.answers` (verified on 2.1.307 with `--permission-prompt-tool stdio`, §8.1). Since 0.69 `header` is the question's short label and `option_descriptions` what each option means, in the order and number of `options`, `""` for an option without one; each is absent when empty. The client shows `header` above the question, each description under its option, and an "Other" field: its text is the answer (with `multi`, an item of the array beside the checked labels); "Other" chosen with nothing typed is sent as `"Other"`, as the VS Code tab does. As in the tab, "Answer" stays disabled until every question has an answer: an option picked, a text typed (not only spaces) or "Other" chosen. ACP agents have no source for it. Since 0.174 also an MCP server's request for input (Claude Code: `elicitation`, §8.1), with `server?` — the server that asks, `message?` — its text, `url?` — the page it sends the person to, then with no `questions`; a question of its form carries `required: true` for a field the server requires and `input` (`integer`, `number`) for a free-text field whose answer must read as one, both absent otherwise and in the agent's questions; the client heads the card "<server> asks", shows the text above the questions, "required" beside a required question's header, the link (only an http, https or mailto one as a link, labelled with the address it opens, a host in its punycode form), no "Other", the submit button ("Done" for a link, the card then saying "Done"; unlike the agent's questions it waits only for what the form's schema says, which a server on the MCP SDK checks the answer against, refusing one that does not match (§8.1): every `required` question answered, an `integer` answer an optional minus and digits, a `number` one that JavaScript's `Number()` reads as a finite number; a field neither required nor answered may stay empty) and "Decline" |
+| `clarify.request` | `request_id`, `questions[{id, text, header?, options?: [string], option_descriptions?: [string], multi?: bool, required?: bool, input?: "integer" \| "number"}]` | Claude Code adapter: the `AskUserQuestion` tool arrives as `can_use_tool`, the answer goes into `updatedInput.answers` (verified on 2.1.307 with `--permission-prompt-tool stdio`, §8.1). Since 0.69 `header` is the question's short label and `option_descriptions` what each option means, in the order and number of `options`, `""` for an option without one; each is absent when empty. The client shows `header` above the question, each description under its option, and an "Other" field: its text is the answer (with `multi`, an item of the array beside the checked labels); "Other" chosen with nothing typed is sent as `"Other"`, as the VS Code tab does. As in the tab, "Answer" stays disabled until every question has an answer: an option picked, a text typed (not only spaces) or "Other" chosen. ACP agents have no source for it. Since 0.174 also an MCP server's request for input (Claude Code: `elicitation`, §8.1), with `server?` — the server that asks, `message?` — its text, `url?` — the page it sends the person to, then with no `questions`; a question of its form carries `required: true` for a field the server requires and `input` (`integer`, `number`) for a free-text field whose answer must read as one, both absent otherwise and in the agent's questions; the client heads the card "<server> asks", shows the text above the questions, "required" beside a required question's header, the link (only an http, https or mailto one as a link, labelled with the address it opens, a host in its punycode form), no "Other", the submit button ("Done" for a link, the card then saying "Done"; unlike the agent's questions it waits only for what the form's schema says, which a server on the MCP SDK checks the answer against, refusing one that does not match (§8.1): every `required` question answered, an `integer` answer an optional minus and digits, at most 2^53 − 1 in size, a `number` one written in decimal (an optional minus, digits with an optional point, an optional exponent) that JavaScript's `Number()` reads as a finite number; a field neither required nor answered may stay empty) and "Decline" |
 | `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`), `action?` (since 0.174, only for a request with `server`: `accept` — the answers, also none, are the input; `decline` — the person declined, `answers` empty; the client shows "Declined") | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
@@ -3760,13 +3760,17 @@ asks: a safety check, an ask rule, a hook) as `reason`, cut to 1024 bytes, and i
 `display_name` (the CLI's name of the tool, `Bash` for Bash on 2.1.307) as `display_name`, cut to
 256 bytes. `matched_ask_rule` and `suppress_always_allow_rule` were not seen live (**[verify]**).
 
-A withdrawn request (since 0.174): the CLI sends `{"type": "control_cancel_request",
-"request_id"}` when it stops waiting for a request of its own (the wait was aborted: the turn
-stopped, the call or the subagent ended). For an open `can_use_tool` or `elicitation` the adapter
-sends `approval.cancel` / `clarify.cancel {withdrawn}` and forgets the request, so an answer that
-comes later is not written to the CLI (which drops one anyway) and gets an error result; another
-`request_id` is ignored. Before, such a card stayed open until the turn's `result` or, for a
-background subagent, its `task_notification`.
+A withdrawn request (since 0.174): the CLI sends `{"type": "control_cancel_request", "request_id"}`
+when it stops waiting for a request of its own (the wait was aborted: the turn stopped, the call or
+the subagent ended). For an open `can_use_tool` or `elicitation` the adapter sends `approval.cancel`
+/ `clarify.cancel {withdrawn}` and forgets the request, so an answer that comes later is not written
+to the CLI (which drops one anyway) and gets an error result; another `request_id` is ignored.
+Before, such a card stayed open until the turn's `result` or, for a background subagent, its
+`task_notification`. While a Stop or a denial that stops the turn is being carried out, a request
+the turn's end would cancel (the main agent's or a foreground subagent's) is cancelled `stopped`
+when the CLI withdraws it; a background subagent's and an MCP server's request are still
+`withdrawn`. The turn is no longer being stopped once it ends, also when it ends with no `result`
+(a carried input cancelled before it started).
 
 An MCP server asks for input (since 0.174, **[verify]** on a live CLI): `control_request
 {subtype: elicitation}` (`mcp_server_name`, `message`, `mode?` `form`/`url`, `url?`,
@@ -5062,63 +5066,61 @@ shown as far as it goes and marked cut. An Edit with `replace_all` is marked "Al
 A call's row in the feed, opened, shows the same change in place of its arguments, and its
 result only if the call failed. Another call's opened row shows its arguments as indented JSON,
 each line of a string on a line of its own; a preview cut at 4 KB is shown as far as it goes and
-marked cut. The request goes to
-**the worker owner**; a collaborator with `write` sees the request but cannot answer it.
-Since 0.174 so does an MCP server's `clarify.request` (with `server`, §4, §8.1): the server runs
-with the worker owner's credentials (§11.1), and a collaborator's answer, say an accepted deploy
-confirmation, would be given in the owner's name; anyone else gets `403`. The agent's own
-questions are answered by anyone with `write`. The first answer wins: it closes the request,
-every device sees the `approval.response` event, and the client removes the buttons. A second
-answer (from another device) gets `409 request_closed`; no cancel event is written in that case.
-Expiry, `POST /stop`, a worker restart and archiving produce `approval.cancel`, and the client
-removes the buttons.
-On expiry and archiving the hub writes the `approval.cancel` event and sends the worker an
-`approval.response` frame with the `canonical: deny` option, so the adapter closes the request in
-the runtime (§5.3; since 0.69 that deny also ends the runtime's turn, §8.1); on a worker restart,
-only the event (§5.2). On `POST /stop` the hub cancels with `stopped` the requests it holds itself
-(a move, §7; a secret), then sends `session.stop`. Since 0.161 it leaves the runtime's approvals
-and questions to a connected worker: the adapter cancels those of the interrupted turn when the
-turn ends (below), and a background subagent's stay open, as the subagent goes on (§8.1); with no
-worker connected the hub cancels them with `stopped` too, with the event and the frame it sends on
-expiry. The adapter and the worker's supervisor do
-not emit a cancel on `session.stop` itself. Since 0.69 the Claude Code adapter cancels a request of the main agent
-or of a foreground subagent still open when the runtime's turn ends with
-`approval.cancel`/`clarify.cancel {stopped}`: after "No" to one of two parallel calls the CLI
-ends the turn and no longer waits for the other (before, the adapter forgot it and the card
-stayed open, since Claude's requests do not expire). A subagent's request carries `agent_id`,
-the `task_id` of the subagent's `task_started` (the main agent's has none; checked live on
-2.1.312). A foreground subagent (`task_started` with `is_backgrounded: false`, not moved to the
-background since) cannot outlive the main turn, so its request goes as the main agent's; every
-other subagent's request (a background one's, a nested one's) stays open: a background
-subagent's outlives the main turn's `result`, and the CLI still waits for its answer (checked
-live on 2.1.312). A subagent's request still open when its `task_notification` comes (the
-subagent ended) is cancelled there the same way, whichever comes first, that or the main
-turn's `result`; a notification without the subagent's report that comes while the latest
-`background_tasks_changed` list holds the subagent or a task of it is no end (§8.1), and the
-cancel waits with it. Since 0.174 a request the runtime withdraws (Claude Code:
-`control_cancel_request`, §8.1) gets `approval.cancel`/`clarify.cancel {withdrawn}` from the
-adapter at once, the main agent's and a subagent's alike. The hub stores
-a worker's cancel only if it closes an open request, in the transaction that closes it, so a
-cancel that fails to be stored leaves the request open for the worker's resend: one it closed
-already (a stopped process's, `stop` with no worker connected, an answer that crossed the cancel)
-keeps its own event. The hub cancels an open `clarify` the same way: a
-`clarify.cancel` event and a `clarify.response` frame with `answers: {}`; the adapter answers
-the runtime `deny`, and the turn continues without answers. Since 0.161 a `clarify` cancelled
-with `worker_restart` or `stopped` keeps its card open in its session's feed while no
-`user.message`, stored or not stored yet, stands after its `clarify.cancel`, and while the
-session takes input (not archived, not held by VS Code, §9.3): the runtime no longer waits for
-the answer, so Answer sends it as the user's ordinary message (`POST /input`, §6) in the words
-of the VS Code tab for an earlier question it shows again (extension 2.1.319): `Answering your
-earlier question "<question>": <answer>` for one question, `Answering your earlier questions:`
-and a line `- "<question>": <answer>` for each of several, in their order, the items of a
-`multi` answer joined by ", "; as on an open card, Answer waits for an answer to every
-question (0.131). The first `user.message` after the cancel decides the card, as the tab reads
-its history: one that begins with `Answering your earlier question "<question>": ` or
-`Answering your earlier questions:` and a line `- "<question>": ` of the card's questions shows
-those answers and "Answers sent", "Cancelled: …" instead while its `POST /input` has failed
-(discarded, the message leaves the card open again); any other closes the card with
-"Cancelled: …", and so does a `peer.message` after the cancel. A `clarify` cancelled otherwise
-(expiry, archiving) stays closed.
+marked cut. The request goes to **the worker owner**; a collaborator with `write` sees the request
+but cannot answer it. Since 0.174 so does an MCP server's `clarify.request` (with `server`, §4,
+§8.1): the server runs with the worker owner's credentials (§11.1), and a collaborator's answer, say
+an accepted deploy confirmation, would be given in the owner's name; anyone else gets `403`. The
+agent's own questions are answered by anyone with `write`. The first answer wins: it closes the
+request, every device sees the `approval.response` event, and the client removes the buttons. A
+second answer (from another device) gets `409 request_closed`; no cancel event is written in that
+case. Expiry, `POST /stop`, a worker restart and archiving produce `approval.cancel`, and the client
+removes the buttons. On expiry and archiving the hub writes the `approval.cancel` event and sends
+the worker an `approval.response` frame with the `canonical: deny` option, so the adapter closes the
+request in the runtime (§5.3; since 0.69 that deny also ends the runtime's turn, §8.1); on a worker
+restart, only the event (§5.2). On `POST /stop` the hub cancels with `stopped` the requests it holds
+itself (a move, §7; a secret), then sends `session.stop`. Since 0.161 it leaves the runtime's
+approvals and questions to a connected worker: the adapter cancels those of the interrupted turn
+when the turn ends (below), and a background subagent's stay open, as the subagent goes on (§8.1);
+with no worker connected the hub cancels them with `stopped` too, with the event and the frame it
+sends on expiry. The adapter and the worker's supervisor do not emit a cancel on `session.stop`
+itself. Since 0.69 the Claude Code adapter cancels a request of the main agent or of a foreground
+subagent still open when the runtime's turn ends with `approval.cancel`/`clarify.cancel {stopped}`:
+after "No" to one of two parallel calls the CLI ends the turn and no longer waits for the other
+(before, the adapter forgot it and the card stayed open, since Claude's requests do not expire). A
+subagent's request carries `agent_id`, the `task_id` of the subagent's `task_started` (the main
+agent's has none; checked live on 2.1.312). A foreground subagent (`task_started` with
+`is_backgrounded: false`, not moved to the background since) cannot outlive the main turn, so its
+request goes as the main agent's; every other subagent's request (a background one's, a nested
+one's) stays open: a background subagent's outlives the main turn's `result`, and the CLI still
+waits for its answer (checked live on 2.1.312). A subagent's request still open when its
+`task_notification` comes (the subagent ended) is cancelled there the same way, whichever comes
+first, that or the main turn's `result`; a notification without the subagent's report that comes
+while the latest `background_tasks_changed` list holds the subagent or a task of it is no end
+(§8.1), and the cancel waits with it. Since 0.174 a request the runtime withdraws (Claude Code:
+`control_cancel_request`, §8.1) gets `approval.cancel`/`clarify.cancel {withdrawn}` from the adapter
+at once, the main agent's and a subagent's alike (`stopped` for the main agent's and a foreground
+subagent's while a Stop or a denial that stops the turn is carried out, §8.1). The hub stores a
+worker's cancel only if it closes an open request, in the transaction that closes it, so a cancel
+that fails to be stored leaves the request open for the
+worker's resend: one it closed already (a stopped process's, `stop` with no worker connected, an
+answer that crossed the cancel) keeps its own event. The hub cancels an open `clarify` the same way:
+a `clarify.cancel` event and a `clarify.response` frame with `answers: {}`; the adapter answers the
+runtime `deny`, and the turn continues without answers. Since 0.161 a `clarify` (an agent's
+question; not an MCP server's request, which a message does not answer, §8.1) cancelled with
+`worker_restart` or `stopped` keeps its card open in its session's feed while no `user.message`,
+stored or not stored yet, stands after its `clarify.cancel`, and while the session takes input (not
+archived, not held by VS Code, §9.3): the runtime no longer waits for the answer, so Answer sends it
+as the user's ordinary message (`POST /input`, §6) in the words of the VS Code tab for an earlier
+question it shows again (extension 2.1.319): `Answering your earlier question "<question>":
+<answer>` for one question, `Answering your earlier questions:` and a line `- "<question>":
+<answer>` for each of several, in their order, the items of a `multi` answer joined by ", "; as on
+an open card, Answer waits for an answer to every question (0.131). The first `user.message` after
+the cancel decides the card, as the tab reads its history: one that begins with `Answering your
+earlier question "<question>": ` or `Answering your earlier questions:` and a line `- "<question>":
+` of the card's questions shows those answers and "Answers sent", "Cancelled: …" instead while its
+`POST /input` has failed (discarded, the message leaves the card open again); any other closes the
+card with "Cancelled: …", and so does a `peer.message` after the cancel. A `clarify` cancelled
+otherwise (expiry, archiving) stays closed.
 **Where requests are shown** (since 0.41, T37). A request is shown and answered not only in its
 own feed:
 - In every session that waits on its session through an open `hqc_ask` (§7.1), directly or
@@ -6422,7 +6424,9 @@ card shows the reason under its title and names the tool by `display_name`, an M
 as `<tool> (<server>)` as before: the CLI's `display_name` of one drops the server. §4, §8.1, §10.1:
 `control_cancel_request` of the CLI was not read, so a card the CLI no longer waited for stayed
 open until the turn's end or, for a background subagent, its end; the adapter now closes it with
-the new cancel reason `withdrawn` ("Cancelled: withdrawn") and writes no later answer. §4,
+the new cancel reason `withdrawn` ("Cancelled: withdrawn") and writes no later answer, except
+while a Stop or a denial that stops the turn is carried out: the requests of the aborted turn that
+its end would cancel are then `stopped`, so a question can be answered by a message. §4,
 §5.3, §6, §8.1: an MCP server's request for input (`elicitation`) got `error`, which the CLI
 takes as `cancel`, and never reached the person; it is now a `clarify.request` with `server?`,
 `message?` and, for a link, `url?`: a form's properties are its questions, its answer goes back

@@ -630,7 +630,8 @@ describe('model', () => {
     const soon = Math.floor(Date.now() / 1000) + 2 * 3600;
     const limits = { status: 'rejected', rate_limit_type: 'five_hour', resets_at: soon, reported_at: '' };
     (api as any).workers = vi.fn(async () => [{ id: 'wk1', name: 'drzlo-mac', limits }]);
-    app.sessions.set('s1', { ...app.sessions.get('s1')!, provider: { id: 'pr1', label: 'GLM' } });
+    // On the session object the hub serves too: the chat fetches it again on opening.
+    app.sessions.get('s1')!.provider = { id: 'pr1', label: 'GLM' };
     await mount(app);
     await act(async () => new Promise((r) => setTimeout(r, 10)));
     expect($('.limit-notice')).toBeNull();

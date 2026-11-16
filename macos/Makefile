@@ -6,6 +6,11 @@ BIN_NAME  := HQC
 BUNDLE_ID := io.github.drzlo13.hqc
 APP       := $(APP_NAME).app
 
+# The signing identity, ad-hoc (`-`) by default. macOS ties what it lets an ad-hoc signed app do
+# (Full Disk Access) to that one build; with a certificate of your own it stays across builds:
+# `make build SIGN_IDENTITY="<certificate name>"`.
+SIGN_IDENTITY ?= -
+
 # The app icon is made at build time from the web client's icon (not committed).
 ICON_SRC  := ../client/public/icon-512.png
 ICONSET   := .build/AppIcon.iconset
@@ -33,7 +38,7 @@ $(ICON): $(ICON_SRC)
 	iconutil -c icns "$(ICONSET)" -o "$(ICON)"
 
 .PHONY: build
-build: $(ICON) ## Build a release HQC.app bundle (compile + assemble + ad-hoc sign)
+build: $(ICON) ## Build a release HQC.app bundle (compile + assemble + sign: ad-hoc, or SIGN_IDENTITY)
 	@echo "==> Building release binary..."
 	swift build -c release
 	@echo "==> Assembling $(APP)..."
@@ -78,8 +83,8 @@ build: $(ICON) ## Build a release HQC.app bundle (compile + assemble + ad-hoc si
 		'</dict>' \
 		'</plist>' \
 		> "$(APP)/Contents/Info.plist"
-	@echo "==> Ad-hoc signing..."
-	codesign --force --deep --sign - "$(APP)" || true
+	@echo "==> Signing ($(SIGN_IDENTITY))..."
+	codesign --force --deep --sign "$(SIGN_IDENTITY)" "$(APP)" || true
 	@echo "==> Done. Created $(APP) (run: open $(APP))"
 
 .PHONY: run

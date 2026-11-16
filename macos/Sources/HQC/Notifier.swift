@@ -86,13 +86,57 @@ final class Notifier {
         center.requestAuthorization(options: [.badge]) { granted, error in
             NSLog("%@", "HQC badge: granted=\(granted) error=\(error.map { "\($0)" } ?? "nil")")
         }
+        // A Focus or a shared screen starts and ends at any moment: looked at every 2 s.
+        RunLoop.main.add(Timer(timeInterval: 2, repeats: true) { [weak self] _ in
+            self?.refreshQuiet()
+        }, forMode: .common)
+    }
+
+    // While a Focus is on, or the screen is shared, recorded or mirrored, the cards are hidden and
+    // silent, as macOS's own notifications are: a card that goes after its time is dropped, also
+    // one on screen, and a permission request waits and comes back when it ends, if it is still
+    // open then.
+    private func refreshQuiet() {
+        let quiet = Self.focusIsOn() || Self.screenIsShared()
+        guard quiet != cards.isQuiet else { return }
+        if quiet { cards.removeAll { $0.event.type != "approval.request" } }
+        cards.isQuiet = quiet
+    }
+
+    // Whether a Focus is on: macOS lists the Focus on now, turned on by hand or by a trigger
+    // (the Sleep schedule among them), here or on another device that shares Focus, in
+    // `storeAssertionRecords` of this file and takes it away when the Focus goes off; one on by
+    // its own time schedule on this Mac is not listed. Reading the file needs Full Disk
+    // Access; without it the Focus is taken as off.
+    private static func focusIsOn() -> Bool {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/DoNotDisturb/DB/Assertions.json")
+        guard let data = try? Data(contentsOf: url),
+              let file = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let stores = file["data"] as? [[String: Any]] else { return false }
+        return stores.contains { ($0["storeAssertionRecords"] as? [Any])?.isEmpty == false }
+    }
+
+    // SkyLight's private SLSIsScreenWatcherPresent, looked up at run time: true while the screen
+    // is shared, recorded or sent over AirPlay.
+    private static let screenWatcherPresent: (@convention(c) () -> Bool)? = {
+        guard let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY),
+              let symbol = dlsym(handle, "SLSIsScreenWatcherPresent") else { return nil }
+        return unsafeBitCast(symbol, to: (@convention(c) () -> Bool).self)
+    }()
+
+    private static func screenIsShared() -> Bool {
+        screenWatcherPresent?() == true || CGDisplayIsInMirrorSet(CGMainDisplayID()) != 0
     }
 
     // Shows one event of a session, with macOS's notification sound. Skipped when the user is
-    // looking at that session now. The identifier is `<server id>:<tag>`, so a later event with
+    // looking at that session now; while quiet (refreshQuiet) a permission request waits, without
+    // a sound, and any other event is skipped. The identifier is `<server id>:<tag>`, so a later event with
     // the same tag replaces the earlier card in its place.
     func notify(server: Server, event: PageEvent) {
         if event.viewing, isShowing?(server.id) == true { return }
+        refreshQuiet()
+        if cards.isQuiet, event.type != "approval.request" { return }
         let identifier = "\(server.id.uuidString):\(event.tag)"
         let serverID = server.id
         let session = event.sessionID
@@ -122,7 +166,7 @@ final class Notifier {
                 }
             }
         }
-        if let sound = Self.sound { AudioServicesPlaySystemSound(sound) }
+        if !cards.isQuiet, let sound = Self.sound { AudioServicesPlaySystemSound(sound) }
     }
 
     // The requests the hub lists open for a server, as tags: that server's permission request

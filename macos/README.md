@@ -17,7 +17,7 @@ macOS 14 or later and Swift 5.9 or newer (Xcode or its command line tools). No d
 
 | command | what it does |
 |---|---|
-| `make build` | builds `HQC.app` here (release build, icon from `../client/public/icon-512.png`, ad-hoc signature) |
+| `make build` | builds `HQC.app` here (release build, icon from `../client/public/icon-512.png`, ad-hoc signature; `SIGN_IDENTITY="<certificate>"` signs it with a certificate of yours, so Full Disk Access given to one build stays for the next) |
 | `make run` | quits a running copy, builds, then opens `HQC.app` |
 | `make clean` | removes `.build` and `HQC.app` |
 
@@ -67,9 +67,16 @@ agents' room and input that failed. Every server notifies, also one whose tab is
 come only while the app runs (its window may be closed), each with the sound macOS plays for a
 notification.
 Nothing is shown for the session you are looking at. The cards are not macOS notifications:
-they do not go to Notification Center, System Settings ▸ Notifications does not change them
-(macOS asks once for permission only for the number on the Dock icon), and Focus and screen
-sharing neither hide them nor silence their sound.
+they do not go to Notification Center, and System Settings ▸ Notifications does not change them
+(macOS asks once for permission only for the number on the Dock icon).
+
+While a Focus is on (Do Not Disturb or another; turned on here or on another device that shares
+Focus, by hand, by the Sleep schedule or another trigger; a Focus's own time schedule on this Mac
+is not seen), or the screen is shared, recorded, sent over AirPlay or mirrored, no card is on screen
+and none makes a sound: a card that goes after its time is dropped, also one already on screen,
+and a permission request waits and comes when that ends, if it is still open. The app sees the
+Focus only with Full Disk Access (System Settings ▸ Privacy & Security ▸ Full Disk Access); without
+it a Focus hides nothing.
 
 A card looks like a macOS banner before Big Sur: a translucent rounded card at the top right of
 the screen with the menu bar, under it, in the system's light or dark appearance, over every app

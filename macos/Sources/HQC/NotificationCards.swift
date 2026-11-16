@@ -34,6 +34,12 @@ final class NotificationCards {
     // While every card's pointer state is checked at once: their changes are not taken one by one.
     private var checking = false
 
+    // While a Focus is on or the screen is shared (Notifier): no card is on screen, also under
+    // the pointer; the cards that were wait with the new ones and come in, in order, when it ends.
+    var isQuiet = false {
+        didSet { if isQuiet != oldValue { settle() } }
+    }
+
     // Shows a card for an event, or puts the event into the card with the same identifier in its
     // place. A card with a lifetime goes that long after it is shown, or after the pointer last
     // left it; without one it stays until it is removed or closed.
@@ -112,7 +118,7 @@ final class NotificationCards {
     // `pointerCheck` (it can leave through a gap, where no card hears it, and a card that moved
     // or changed under a still pointer hears nothing either); otherwise stacks the cards.
     private func settle() {
-        if pointerOverStack() {
+        if !isQuiet, pointerOverStack() {
             if !held {
                 held = true
                 heldArea = shown.reduce(NSRect.null) { $0.union($1.panel.frame) }
@@ -149,9 +155,10 @@ final class NotificationCards {
         let room = area.height - 2 * Self.margin
         var used: CGFloat = 0
         var stack: [NotificationCard] = []
-        // The first card is shown whatever its height.
+        // The first card is shown whatever its height; none while quiet.
+        let quiet = isQuiet
         let fits = { (card: NotificationCard) -> Bool in
-            stack.isEmpty || used + Self.spacing + card.size.height <= room
+            !quiet && (stack.isEmpty || used + Self.spacing + card.size.height <= room)
         }
         let take = { (card: NotificationCard) in
             used += (stack.isEmpty ? 0 : Self.spacing) + card.size.height

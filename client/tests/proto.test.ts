@@ -271,6 +271,7 @@ describe('examples/wire', () => {
       ['tool.result', undefined],
     ]);
     expect(h.truncated).toBe(false);
+    expect(h.continues).toBe(true);
     const sp = parseSearchPage(load('api.search.json'));
     expect(sp.results.map((h) => [h.address, h.seq, h.archived])).toEqual([
       ['hqc/hqc-run-the-tests', 42, false],

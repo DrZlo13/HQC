@@ -4,6 +4,7 @@
   "payload": {
     "request_id": "h-25",
     "session_id": "0199f3a2-7c10-7000-8000-000000000001",
-    "task_id": "a52af2b436ded4cea"
+    "task_id": "a52af2b436ded4cea",
+    "after": "0199f3a2-7c10-7000-8000-000000000130"
   }
 }

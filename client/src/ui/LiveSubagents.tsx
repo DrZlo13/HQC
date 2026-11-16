@@ -21,11 +21,14 @@ import { count, retryLabel } from './labels';
 /** How often an open history is fetched again. */
 const REFRESH_MS = 2000;
 
+/** Most events an open history keeps, as many as the worker sends in one page (SPEC §5.3). */
+const MAX_SUBAGENT_HISTORY = 200;
+
 /** What a subagent's line needs to open its history (since 0.175): `load` fetches the history,
- *  `actions` draw it as the feed does. A command's line (`kind: command`), a Monitor's, a
- *  wakeup's and a cron job's open none. */
+ *  only what came after event `after` when it is given; `actions` draw it as the feed does. A
+ *  command's line (`kind: command`), a Monitor's, a wakeup's and a cron job's open none. */
 export interface SubagentHistoryOpener {
-  load(taskId: string): Promise<SubagentHistory>;
+  load(taskId: string, after?: string): Promise<SubagentHistory>;
   actions: ChatActions;
 }
 
@@ -223,11 +226,14 @@ function countdown(dueInMs: number | undefined, age: number): string {
 }
 
 /** What subagent `taskId` has done, newest at the bottom, fetched again `REFRESH_MS` after each
- *  answer while it is open and the page is not hidden, and at once when the page is shown again;
- *  it stays at the bottom while the user has not scrolled up. */
+ *  answer while it is open and the page is not hidden, and at once when the page is shown again,
+ *  each time only what came after its last event; it stays at the bottom while the user has not
+ *  scrolled up. */
 function HistoryPanel({ taskId, history }: { taskId: string; history: SubagentHistoryOpener }) {
   const [page, setPage] = useState<SubagentHistory | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The page shown, for the fetches: its last event is where the next one goes on from.
+  const held = useRef<SubagentHistory | null>(null);
   // The chat makes a new opener on every render: the fetches follow the line, not it.
   const load = useRef(history.load);
   load.current = history.load;
@@ -239,11 +245,12 @@ function HistoryPanel({ taskId, history }: { taskId: string; history: SubagentHi
       clearTimeout(next);
       busy = true;
       void load
-        .current(taskId)
+        .current(taskId, held.current?.events.at(-1)?.event_id)
         .then(
           (p) => {
             if (!alive) return;
-            setPage(p);
+            held.current = held.current && p.continues ? appended(held.current, p) : p;
+            setPage(held.current);
             setError(null);
           },
           (e: Error) => {
@@ -306,6 +313,18 @@ function HistoryPanel({ taskId, history }: { taskId: string; history: SubagentHi
       </div>
     </div>
   );
+}
+
+/** `page` with the events of `more`, a reply with `continues`, after it: an event it already
+ *  shows is not added again, only the newest `MAX_SUBAGENT_HISTORY` stay, and it is `truncated`
+ *  when it dropped any or already was. Nothing new: `page` itself. */
+function appended(page: SubagentHistory, more: SubagentHistory): SubagentHistory {
+  const shown = new Set(page.events.map((e) => e.event_id));
+  const added = more.events.filter((e) => !shown.has(e.event_id));
+  if (!added.length) return page;
+  const events = [...page.events, ...added];
+  const drop = Math.max(0, events.length - MAX_SUBAGENT_HISTORY);
+  return { events: events.slice(drop), truncated: page.truncated || drop > 0 };
 }
 
 /** `155.3k tokens · 188 tools · 4m 13s`; what the subagent has not reported yet is left out,

@@ -787,7 +787,7 @@ export function Chat({
           onStop={stopTask}
           asking={new Set(open.flatMap((r) => (r.type === 'approval.request' && r.payload.subagent ? [r.payload.subagent.task_id] : [])))}
           history={{
-            load: (taskId) => app.api.subagentHistory(sessionId, taskId),
+            load: (taskId, after) => app.api.subagentHistory(sessionId, taskId, after),
             actions,
           }}
         />

@@ -2042,14 +2042,22 @@ pub async fn stop_task(
     Ok(Json(json!({ "sent": sent })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SubagentHistoryQuery {
+    /// The `event_id` of the last event the client shows, passed on to the worker.
+    pub after: Option<Uuid>,
+}
+
 /// What subagent `task_id` of the session has done (since SPEC 0.175): the worker's
 /// `session.subagent_history`, read from the subagent's transcript when asked and stored
-/// nowhere. A `task_id` that is not 1 to 64 bytes of `[A-Za-z0-9_-]`: `400`; the session's
-/// worker offline `409 worker_offline`, no answer `504 worker_timeout`.
+/// nowhere; `?after=` goes with it. A `task_id` that is not 1 to 64 bytes of `[A-Za-z0-9_-]`, or
+/// an `after` that is not a UUID: `400`; the session's worker offline `409 worker_offline`, no
+/// answer `504 worker_timeout`.
 pub async fn subagent_history(
     State(app): State<AppState>,
     user: CurrentUser,
     Path((id, task_id)): Path<(Uuid, String)>,
+    Query(q): Query<SubagentHistoryQuery>,
 ) -> ApiResult<Json<api::SubagentHistoryPage>> {
     let s = session_for(&app, &user, id, Action::Read).await?;
     if !hqc_proto::frame::valid_history_task_id(&task_id) {
@@ -2065,6 +2073,7 @@ pub async fn subagent_history(
             request_id,
             session_id: id,
             task_id,
+            after: q.after,
         })
     })
     .await?

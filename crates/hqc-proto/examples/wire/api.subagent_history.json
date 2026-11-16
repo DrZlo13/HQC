@@ -17,5 +17,6 @@
       "payload": { "call_id": "toolu_02", "result_preview": "test result: ok. 12 passed", "error": false }
     }
   ],
-  "truncated": false
+  "truncated": false,
+  "continues": true
 }

@@ -1333,7 +1333,7 @@ mod tests {
         roundtrip::<EventPage>(include_str!("../examples/wire/api.events.json"));
         let h: SubagentHistoryPage =
             roundtrip(include_str!("../examples/wire/api.subagent_history.json"));
-        assert!(h.events.iter().all(|e| e.seq.is_none()) && !h.truncated);
+        assert!(h.events.iter().all(|e| e.seq.is_none()) && !h.truncated && h.continues);
         let sp: SearchPage = roundtrip(include_str!("../examples/wire/api.search.json"));
         assert!(sp.results[0].seq.is_some() && sp.results[1].seq.is_none());
         assert!(sp.results[1].archived && sp.next_cursor.is_some());

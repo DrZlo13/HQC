@@ -21,6 +21,7 @@ import {
   type SessionState,
   type SlashCommand,
   type SpawnedBy,
+  type SubagentHistory,
 } from '../src/proto';
 import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, modelName, shownModel } from '../src/ui/labels';
 import { limitNotice } from '../src/ui/limits';
@@ -128,7 +129,9 @@ function setup(
     // POST /api/sessions/{id}/stop.
     stop: vi.fn(async () => {}),
     // GET /api/sessions/{id}/subagents/{task_id}/history: nothing done yet unless a test says.
-    subagentHistory: vi.fn(async (_id: string, _task: string) => ({ events: [] as HqcEvent[], truncated: false })),
+    subagentHistory: vi.fn(
+      async (_id: string, _task: string, _after?: string): Promise<SubagentHistory> => ({ events: [], truncated: false }),
+    ),
     sessions: vi.fn(async () => []),
     projects: vi.fn(async () => []),
     workspaces: vi.fn(async () => [
@@ -1457,7 +1460,7 @@ describe('live subagents', () => {
     try {
       await act(async () => opens[0].click());
       await flush();
-      expect(api.subagentHistory).toHaveBeenCalledWith('s1', 'a52af2b436ded4cea');
+      expect(api.subagentHistory).toHaveBeenCalledWith('s1', 'a52af2b436ded4cea', undefined);
       expect(opens[0].getAttribute('aria-expanded')).toBe('true');
       expect(panel()!.querySelector('.thinking summary')!.textContent).toContain('The nets come from the netlist.');
       expect(panel()!.querySelector('.tool-group.tool-ok .tool-peek')!.textContent).toContain('cargo test -p import');
@@ -1489,6 +1492,54 @@ describe('live subagents', () => {
       await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [subagent, command]))));
       expect(root.querySelector('button.live-agents-opens')!.getAttribute('aria-expanded')).toBe('false');
       expect(panel()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fetches an open history again after its last event, appends what came since, and takes a whole page in its place', async () => {
+    const { api, app } = setup('running', { subagents: 1 });
+    await mount(app);
+    const said = (id: string, text: string) =>
+      ev('event.agent.message', 0, (e) => {
+        delete e.seq;
+        e.event_id = `0199f3a2-7c10-7000-8000-0000000002${id}`;
+        e.payload = { text, final: false };
+      });
+    const replies: SubagentHistory[] = [
+      { events: [said('e1', 'One.'), said('e2', 'Two.')], truncated: false },
+      // What came after e2, with e2 again.
+      { events: [said('e2', 'Two.'), said('e3', 'Three.')], truncated: false, continues: true },
+      // Nothing new.
+      { events: [], truncated: false, continues: true },
+      // e3 is no longer in the worker's page: the whole page.
+      { events: [said('e8', 'Eight.'), said('e9', 'Nine.')], truncated: true },
+    ];
+    api.subagentHistory.mockImplementation(async () => replies.shift()!);
+    const subagent = { task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000 };
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [subagent]))));
+    const panel = () => $('.live-agents li .live-agents-history')!;
+    const texts = () => [...panel().querySelectorAll('.msg-agent > .text')].map((m) => m.textContent!.trim());
+    const tick = (ms: number) => act(async () => void (await vi.advanceTimersByTimeAsync(ms)));
+    // The `after` of the latest fetch.
+    const after = () => api.subagentHistory.mock.lastCall![2];
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await act(async () => root.querySelector<HTMLButtonElement>('button.live-agents-opens')!.click());
+      await tick(0);
+      expect(after()).toBeUndefined();
+      expect(texts()).toEqual(['One.', 'Two.']);
+      await tick(2000);
+      expect(after()).toBe('0199f3a2-7c10-7000-8000-0000000002e2');
+      expect(texts()).toEqual(['One.', 'Two.', 'Three.']);
+      const shown = panel().innerHTML;
+      await tick(2000);
+      expect(after()).toBe('0199f3a2-7c10-7000-8000-0000000002e3');
+      expect(panel().innerHTML).toBe(shown);
+      await tick(2000);
+      expect(after()).toBe('0199f3a2-7c10-7000-8000-0000000002e3');
+      expect(texts()).toEqual(['Eight.', 'Nine.']);
+      expect(panel().querySelector('.live-agents-note')!.textContent).toBe('Earlier steps are not shown.');
     } finally {
       vi.useRealTimers();
     }

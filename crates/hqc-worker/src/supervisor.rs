@@ -266,11 +266,12 @@ enum Cmd {
         id: String,
         task_id: String,
     },
-    /// `session.subagent_history`: what subagent `task_id` has done.
+    /// `session.subagent_history`: what subagent `task_id` has done, after event `after`.
     SubagentHistory {
         id: String,
         request_id: String,
         task_id: String,
+        after: Option<Uuid>,
     },
     Kill {
         id: String,
@@ -542,6 +543,7 @@ impl Supervisor {
                         id,
                         request_id: r.request_id,
                         task_id: r.task_id,
+                        after: r.after,
                     },
                 )
             }
@@ -1068,8 +1070,13 @@ const SUBAGENT_TRANSCRIPT_TAIL: u64 = 4 * 1024 * 1024;
 /// events in session `session` ([`crate::mirror::map::subagent_events`]). The file is opened as
 /// `hqc_attach` opens one (no symlink in its last component, a regular file: a FIFO would hang
 /// the blocking thread), and only its last [`SUBAGENT_TRANSCRIPT_TAIL`] bytes are read, the
-/// line cut at their start left out and `truncated` set. No such file, no events.
-fn subagent_history(path: Option<PathBuf>, session: Uuid) -> SubagentHistoryResult {
+/// line cut at their start left out and `truncated` set. No such file, no events. When event
+/// `after` is among the events, only the ones after it, with `continues` and not `truncated`.
+fn subagent_history(
+    path: Option<PathBuf>,
+    session: Uuid,
+    after: Option<Uuid>,
+) -> SubagentHistoryResult {
     use std::io::{Read, Seek, SeekFrom};
     let mut bytes = Vec::new();
     let mut cut = false;
@@ -1092,13 +1099,20 @@ fn subagent_history(path: Option<PathBuf>, session: Uuid) -> SubagentHistoryResu
     }
     let (mut events, truncated) =
         crate::mirror::map::subagent_events(&String::from_utf8_lossy(&bytes));
+    // The client holds the page up to `after`; the ids come from the records' uuids, so the
+    // same event has the same id in every read.
+    let at = after.and_then(|a| events.iter().rposition(|e| e.event_id == a));
+    if let Some(i) = at {
+        events.drain(..=i);
+    }
     for e in &mut events {
         e.session_id = session;
         e.author = hqc_proto::event::Author::Agent { id: session };
     }
     SubagentHistoryResult {
         events,
-        truncated: truncated || cut,
+        truncated: at.is_none() && (truncated || cut),
+        continues: at.is_some(),
     }
 }
 
@@ -1369,17 +1383,19 @@ impl Session {
                 id,
                 request_id,
                 task_id,
+                after,
             } => {
                 // Off the session's loop: a subagent's transcript runs to megabytes.
                 let path = self.adapter.subagent_transcript(&task_id);
                 let (link, session) = (self.link.clone(), self.id);
                 tokio::spawn(async move {
                     let history =
-                        tokio::task::spawn_blocking(move || subagent_history(path, session))
+                        tokio::task::spawn_blocking(move || subagent_history(path, session, after))
                             .await
                             .unwrap_or_else(|_| SubagentHistoryResult {
                                 events: vec![],
                                 truncated: false,
+                                continues: false,
                             });
                     link.reply(
                         &id,

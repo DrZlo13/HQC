@@ -574,7 +574,7 @@ the client renders only them. The "source" column is the component that produces
 | `turn_lost` | hub | the turn was lost: the agent process stopped mid-turn, the worker restarted, or there have been no turn events from the worker for a long time (watchdog, "no events for N s"; §17.3) |
 | `agent_exited` | worker | the agent process exited on its own with an error or mid-turn (§17.3) |
 | `policy_denied` | worker | a tool call was rejected by a `deny` rule from the worker's `[permissions]`, without asking the owner (§8.1, §14); the client shows "Blocked by worker policy" |
-| `task_notification` | worker (adapter; mirror) | since 0.69: a background task of the agent (a shell command, a subagent) finished or stopped; `text` is the runtime's summary of it (§8.1, §9.1). It comes when the task ends, before the answer of the turn the runtime then starts by itself. Since 0.135 `call_id` is the `call_id` of the `tool.call` that started the task, `status` how it ended as the runtime says it (Claude Code: `completed`, `failed`, `stopped`) and `task_id` the runtime's id of the task (Claude Code: a subagent's `agentId`), each absent when the runtime does not say; the card of a subagent's `Agent` call takes its end from it, and a subagent's notification (by `call_id` or by the `agentId` of its background launch, with a `status` that ends it) stands in the feed as the subagent's end card (§6). Since 0.175 `usage` is what the task spent (Claude Code: the notification's `usage`), absent when the runtime does not say, the end card shows it (§6), and the task's output file follows the notification as an `attachment` (§8.1). The client folds any other into a "Background task ·" line ("Background task failed ·" for `status` `failed`, "Background task stopped ·" for `stopped`, since 0.175) with the whole text on one line, without its Markdown marks, dimmed in italics like the start of a thinking, cut with an ellipsis where the line ends, and (since 0.175) with `usage` at its right end as `· <tokens> tokens · <n> tools · <run time>`, as the row above the input has it (§6); opened, it shows all of it as Markdown |
+| `task_notification` | worker (adapter; mirror) | since 0.69: a background task of the agent (a shell command, a subagent) finished or stopped; `text` is the runtime's summary of it (§8.1, §9.1). It comes when the task ends, before the answer of the turn the runtime then starts by itself. Since 0.135 `call_id` is the `call_id` of the `tool.call` that started the task, `status` how it ended as the runtime says it (Claude Code: `completed`, `failed`, `stopped`) and `task_id` the runtime's id of the task (Claude Code: a subagent's `agentId`), each absent when the runtime does not say; the card of a subagent's `Agent` call takes its end from it, and a subagent's notification (by `call_id` or by the `agentId` of its background launch, with a `status` that ends it) stands in the feed as the subagent's end card (§6). Since 0.175 `usage` is what the task spent (Claude Code: the notification's `usage`), absent when the runtime does not say, the end card shows it (§6), and the task's output file follows the notification as an `attachment` (§8.1) (adapter only: a mirrored session's notification has neither `usage` nor the attachment). The client folds any other into a "Background task ·" line ("Background task failed ·" for `status` `failed`, "Background task stopped ·" for `stopped`, since 0.175) with the whole text on one line, without its Markdown marks, dimmed in italics like the start of a thinking, cut with an ellipsis where the line ends, and (since 0.175) with `usage` at its right end as `· <tokens> tokens · <n> tools · <run time>`, as the row above the input has it (§6); opened, it shows all of it as Markdown |
 | `context_compacted` | worker (adapter; since 0.162 mirror) | since 0.69: the runtime compacted the session's context (`/compact`); since 0.118 `text` is the summary the runtime wrote, "Context compacted" without one (§8.1); since 0.162 the mirror gives the same line from the transcript's `compact_boundary` and its summary (§9.1); the client folds the summary into a "Context compacted" line that opens to all of it as Markdown, and draws one with the fixed text as a divider. Since 0.173 the adapter's carries, when the runtime said, `trigger` (`auto` \| `manual`), `pre_tokens` (the context's tokens before) and `post_tokens` (after; absent when the runtime did not count them) — the mirror's carries none of them —, and the client's line reads "Context compacted · auto · 153k tokens freed", leaving out what is absent |
 | `compaction_failed` | worker (adapter) | since 0.173: a compaction the runtime started failed; `text` is "Compaction failed: " and the runtime's error, "Compaction failed" without one (§8.1) |
 | `conversation_cleared` | worker (adapter) | since 0.162: `/clear` started a new conversation in the same agent process, with a new transcript (Claude Code: `conversation_reset`, §8.1); `text` "Conversation cleared"; the session goes on in the new transcript, and the agent no longer has what was before the line in its context |
@@ -1082,18 +1082,25 @@ MCP calls (worker → hub → worker):
   request, §8.1). The client sends a `stoppable` row of the session's `subagents.live` (§4).
   Like `session.kill` it is acked also when no agent runs; what the runtime answers (stopped,
   refused) is only in the worker's log, and the task's end comes as any end of it.
-- `session.subagent_history` {request_id, session_id, task_id} → `result {request_id, events[],
-  truncated}` (since 0.175) — what subagent `task_id` of `subagents.live` (§4) has done, for the
-  history the client opens under its line (§6); nothing is stored. `task_id` is 1 to 64 bytes of
-  `[A-Za-z0-9_-]`, since the worker reads a file by it, else `error {invalid_frame}`. The worker
+- `session.subagent_history` {request_id, session_id, task_id, after?} → `result {request_id,
+  events[], truncated, continues?}` (since 0.175) — what subagent `task_id` of `subagents.live`
+  (§4) has done, for the history the client opens under its line (§6); nothing is stored.
+  `task_id` is 1 to 64 bytes of `[A-Za-z0-9_-]`, since the worker reads a file by it, else
+  `error {invalid_frame}`. The worker
   reads the subagent's transcript (Claude Code: §8.1), only its last 4 MiB, since one runs to
   100 MB and the client asks every 2 s, and answers with the newest events it maps
   from it, at most 200 that take at most 512 KiB as JSON together (an event over that alone is
   left out), so the reply stays under the hub's 1 MiB per message (§20), oldest first, without
   `seq`, in the session and by its agent, and `truncated` when any was left out or the start of
   the file was not read; a subagent
-  without a transcript, and a runtime that keeps none, has no events. A session the worker has not started is `error {unknown_session}`. As for `fs.stat`,
-  `request_id` equals the frame's `id` and the hub waits 10 s for the answer.
+  without a transcript, and a runtime that keeps none, has no events. `after` is the `event_id` of
+  the last event the client shows: when it is among the events of that page, the result holds
+  only the ones after it, with `continues: true` and `truncated` false, for the client to append;
+  when it is not (more than 200 new ones, or the tail read moved past it), the whole page, without
+  `continues`. A worker that does not know `after` ignores it and sends the whole page, which the
+  client takes in place of its own. A session the worker has not started is
+  `error {unknown_session}`. As for `fs.stat`, `request_id` equals the frame's `id` and the hub
+  waits 10 s for the answer.
 - `session.steer` {session_id, text} — intervene in a turn without interrupting it, if the
   runtime supports it (Hermes: `/steer`, §8.2.1); otherwise `error`.
 - `session.kill` {session_id} — terminate the agent process.
@@ -1786,12 +1793,13 @@ the rest is marked "later"):
   `subagents.live`: Claude Code stops a task of the session by its id, and the session is the
   user's own. A `task_id` longer than 128 bytes or with U+0000: `400 bad_request`; service
   session: `409 system_session`
-- `GET /api/sessions/{id}/subagents/{task_id}/history` → `{events[], truncated}` (since 0.175;
-  `read` level, as `GET .../events`; `api.subagent_history.json`): the worker's
-  `session.subagent_history` result without `request_id` (§5.3), asked for each time and stored
-  nowhere. A `task_id` that is not 1 to 64 bytes of `[A-Za-z0-9_-]`: `400 bad_request`, the worker
-  not asked; worker offline `409 worker_offline`, no answer `504 worker_timeout`, refused by the
-  worker `400 invalid_path`
+- `GET /api/sessions/{id}/subagents/{task_id}/history[?after=<event_id>]` → `{events[],
+  truncated, continues?}` (since 0.175; `read` level, as `GET .../events`;
+  `api.subagent_history.json`): the worker's `session.subagent_history` result without
+  `request_id` (§5.3), `after` passed on to it, asked for each time and stored nowhere. A
+  `task_id` that is not 1 to 64 bytes of `[A-Za-z0-9_-]`: `400 bad_request`, an `after` that is
+  not a UUID: `400`, the worker not asked; worker offline `409 worker_offline`, no answer
+  `504 worker_timeout`, refused by the worker `400 invalid_path`
 - `POST /api/sessions/{id}/fork` {event_id} → `201` and the new session object (since 0.80;
   `manage` level): a new session in the same project, workspace, worker and `cwd`, with the
   source's model, `permission_mode` and `auto_approve`, titled "<title> (fork)", whose
@@ -2451,8 +2459,12 @@ stop button, a button that opens under it what the subagent has done (`GET
 results, text), newest at the bottom, in a box at most 40 % of the window's height that scrolls,
 opens at its bottom and stays there while the user has not scrolled up; "Earlier steps are not
 shown." above it when `truncated`. While it is open it is fetched again 2 s after each answer,
-not while the page is hidden, and at once when it is shown again; a second click closes it, one
-is open at a time, and it goes with its line when the subagent ends.
+not while the page is hidden, and at once when it is shown again, each time with `after` the
+`event_id` of the last event it shows (the first time without): a reply with `continues` is
+appended to it (an event it shows already is not added again), of which the newest 200 stay, and
+it is `truncated` once any was dropped; a reply without `continues` takes its place. An older hub
+passes no `after`. A second click closes it, one is open at a time, and it goes with its line
+when the subagent ends.
 The same on a phone, as wide as the block.
 `background_tasks` (since 0.104): the background tasks the runtime lists for the agent now,
 from `session.state` (§5.4); absent — 0. A command the agent left running in the background
@@ -4144,7 +4156,9 @@ gives none. It is opened as `hqc_attach` opens one (§7): a symlink in its last 
 anything but a regular file (a FIFO would hang the read), gives none. Of a file over 4 MiB only
 the last 4 MiB are read, the line cut at their start left out, and the reply is `truncated`. The
 reply keeps the newest of them, at most 200 that take at most 512 KiB as JSON
-together; one over that alone is left out, and the ones before it are kept.
+together; one over that alone is left out, and the ones before it are kept. With `after` among
+them, only the ones after it, with `continues` and not `truncated`; the ids it compares are of §3,
+from the records' `uuid`, so one event has the same id in every read.
 Since 0.173 the worker reports what the main agent waits on as `session.state.activity` (§5.4),
 whenever it changes, a new thinking estimate at most once per 2 s (the CLI sends one with every
 piece of a thinking, about ten a second), and none when the agent's process stops. `system`
@@ -6516,10 +6530,14 @@ new `GET /api/sessions/{id}/subagents/{task_id}/history` asks the worker with th
 100 MB), opened as `hqc_attach` opens a file (no symlink, no FIFO), and answers with its newest
 events (`{events[], truncated}`), at most 200 and 512 KiB as JSON, so that the reply never
 reaches the hub's 1 MiB per message, past which the hub drops the worker's link; stored nowhere.
-§6: every row of `subagents.live` whose `kind` (§4, since 0.141) is `agent`, or none the client
-knows, is a subagent's and opens, also when the chat has not loaded its `Agent` call or it was
-started by a subagent; a command's, a Monitor's, a wakeup's and a cron job's (since 0.169) do not.
-A worker before 0.175 does not know the frame (`error {invalid_frame}`, `400 invalid_path` to the
+A refresh passes `after`, the `event_id` of the last event the client shows, and the worker then
+answers only the events after it with `continues: true` when its page still holds it, which the
+client appends (an older worker ignores `after` and sends the whole page, which the client takes
+in its place; an older hub passes none). §6: every row of `subagents.live` whose `kind` (§4,
+since 0.141) is `agent`, or none the client knows, is a subagent's and opens, also when the chat
+has not loaded its `Agent` call or it was started by a subagent; a command's, a Monitor's, a
+wakeup's and a cron job's (since 0.169) do not. A
+worker before 0.175 does not know the frame (`error {invalid_frame}`, `400 invalid_path` to the
 client), and one before 0.141 does not mark its commands, whose lines then open to that error
 too. No migration.
 

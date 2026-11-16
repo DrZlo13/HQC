@@ -1016,6 +1016,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'request_id');
     str(p, 'session_id');
     str(p, 'task_id');
+    optStr(p, 'after');
   },
   'session.kill': (p) => void str(p, 'session_id'),
   'session.permission_mode': (p) => {
@@ -1860,15 +1861,21 @@ export function parseWorkspaceConflict(v: unknown): WorkspaceConflict | null {
 
 /** `GET /api/sessions/{id}/subagents/{task_id}/history` (since 0.175): what a subagent has
  *  done, from its transcript on the worker: its last 200 events, oldest first, without `seq`;
- *  `truncated` when it did more. */
+ *  `truncated` when it did more. `continues`: asked with `?after=`, the events are only the
+ *  ones after that event, to append to the page shown; absent, the whole page. */
 export interface SubagentHistory {
   events: HqcEvent[];
   truncated: boolean;
+  continues?: boolean;
 }
 
 export function parseSubagentHistory(v: unknown): SubagentHistory {
   const o = obj(v, 'subagent history');
-  return { events: arr(o, 'events').map(parseEvent), truncated: bool(o, 'truncated') };
+  return {
+    events: arr(o, 'events').map(parseEvent),
+    truncated: bool(o, 'truncated'),
+    continues: optBool(o, 'continues'),
+  };
 }
 
 /** `{events: [...], last_seq}` of `GET /api/sessions/{id}/events`; events stay raw so that

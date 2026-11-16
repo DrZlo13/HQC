@@ -3478,8 +3478,8 @@ async fn a_task_output_becomes_an_attachment() {
 }
 
 // SPEC 0.175: `session.subagent_history` answers with the events of the subagent's transcript,
-// in the session and by its agent; a subagent without a transcript has none; a `task_id` that
-// could name another file is refused.
+// in the session and by its agent, after `after` only the later ones when it holds it; a
+// subagent without a transcript has none; a `task_id` that could name another file is refused.
 #[tokio::test]
 async fn a_subagents_history_comes_from_its_transcript() {
     let env = Env::new();
@@ -3536,6 +3536,23 @@ async fn a_subagents_history_comes_from_its_transcript() {
         assert!(e.get("seq").is_none(), "{e}");
     }
     assert_eq!(f["payload"]["truncated"], false);
+    assert!(f["payload"].get("continues").is_none(), "{f}");
+
+    // After an event of the page: only the later ones, to append; after one it does not hold:
+    // the whole page.
+    let page = events.clone();
+    let mut again = ask("a52af2b436ded4cea");
+    again["after"] = page[0]["event_id"].clone();
+    c.frame("session.subagent_history", again.clone()).await;
+    let f = c.expect("result").await;
+    assert_eq!(f["payload"]["events"], json!(page[1..]), "{f}");
+    assert_eq!(f["payload"]["continues"], true);
+    assert_eq!(f["payload"]["truncated"], false);
+    again["after"] = json!(Uuid::new_v4());
+    c.frame("session.subagent_history", again).await;
+    let f = c.expect("result").await;
+    assert_eq!(f["payload"]["events"], json!(page), "{f}");
+    assert!(f["payload"].get("continues").is_none(), "{f}");
 
     c.frame("session.subagent_history", ask("a55949578b136436b"))
         .await;

@@ -3378,9 +3378,10 @@ async fn a_silent_call_with_heartbeats_keeps_its_turn() {
 }
 
 /// SPEC §5.3, §6 (since 0.175): `GET .../subagents/{task_id}/history` asks the session's worker
-/// with `session.subagent_history` and answers with its `result` without `request_id`; a
-/// `task_id` that is not 1 to 64 bytes of `[A-Za-z0-9_-]` is refused and the worker not asked;
-/// the worker offline: `409 worker_offline`.
+/// with `session.subagent_history` and answers with its `result` without `request_id`; `?after=`
+/// goes into the frame; a `task_id` that is not 1 to 64 bytes of `[A-Za-z0-9_-]`, or an `after`
+/// that is not a UUID, is refused and the worker not asked; the worker offline:
+/// `409 worker_offline`.
 #[tokio::test]
 async fn a_subagents_history_comes_from_the_worker() {
     let hub = TestHub::start().await;
@@ -3409,6 +3410,27 @@ async fn a_subagents_history_comes_from_the_worker() {
     assert_eq!(s, 200, "{v}");
     assert_eq!(v, json!({"events": [call], "truncated": true}));
 
+    // `?after=` goes to the worker, and its `continues` to the client.
+    let after = call["event_id"].as_str().unwrap();
+    let answer = async {
+        let f = w.expect("session.subagent_history").await;
+        assert_eq!(
+            f["payload"],
+            json!({"request_id": f["id"], "session_id": sid, "task_id": task, "after": after})
+        );
+        let result =
+            json!({"request_id": f["id"], "events": [], "truncated": false, "continues": true});
+        w.reply(&f["id"], "result", result).await;
+        w
+    };
+    let next = format!("{url}?after={after}");
+    let ((s, v), mut w) = tokio::join!(hub.get(&next), answer);
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        v,
+        json!({"events": [], "truncated": false, "continues": true})
+    );
+
     let long = "a".repeat(65);
     for bad in ["a.b", "a%2Fb", "a%20b", long.as_str()] {
         let (s, v) = hub
@@ -3416,6 +3438,8 @@ async fn a_subagents_history_comes_from_the_worker() {
             .await;
         assert_eq!(s, 400, "{bad:?}: {v}");
     }
+    let (s, v) = hub.get(&format!("{url}?after=toolu_02")).await;
+    assert_eq!(s, 400, "{v}");
     w.expect_silence(Duration::from_millis(200)).await;
 
     w.close().await;

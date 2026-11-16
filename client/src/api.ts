@@ -601,9 +601,11 @@ export class Api {
   }
 
   /** What subagent `taskId` (a `task_id` of `subagents.live`) has done, read from its
-   *  transcript on the worker; `409 worker_offline`, `504 worker_timeout`. */
-  async subagentHistory(id: string, taskId: string): Promise<SubagentHistory> {
-    return parseSubagentHistory(await this.req('GET', `/api/sessions/${enc(id)}/subagents/${enc(taskId)}/history`));
+   *  transcript on the worker; `after`: the `event_id` of the last event shown, for only the
+   *  ones after it (`continues`); `409 worker_offline`, `504 worker_timeout`. */
+  async subagentHistory(id: string, taskId: string, after?: string): Promise<SubagentHistory> {
+    const q = after ? `?${new URLSearchParams({ after })}` : '';
+    return parseSubagentHistory(await this.req('GET', `/api/sessions/${enc(id)}/subagents/${enc(taskId)}/history${q}`));
   }
 
   async retry(id: string): Promise<void> {

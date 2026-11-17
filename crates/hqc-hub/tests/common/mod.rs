@@ -881,6 +881,15 @@ impl FakeWorker {
         }
     }
 
+    /// Every frame that comes, each within `d` of the one before.
+    pub async fn within(&mut self, d: Duration) -> Vec<Value> {
+        let mut out = Vec::new();
+        while let Some(f) = self.recv_within(d).await {
+            out.push(f);
+        }
+        out
+    }
+
     /// Wait until the hub closes the connection.
     pub async fn expect_closed(&mut self) {
         let deadline = tokio::time::Instant::now() + WAIT;

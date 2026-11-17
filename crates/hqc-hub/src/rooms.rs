@@ -11,7 +11,8 @@
 //!   ([`owner_message`]). It counts as the owner's, not as a post: it ends the count of the
 //!   members' posts, and the hub's line in front of it in an agent's input names its sender.
 //! - Such an input goes to the agent without a peer header: the hub puts its own lines, which
-//!   name an agent by its address, in front of its text, `[hqc room` in the texts it puts there
+//!   name an agent by its name in the room with its address, the name stripped of what could
+//!   forge a hub line ([`clean_name`]), in front of its text, `[hqc room` in the texts it puts there
 //!   escaped ([`input_text`]); the feed keeps the text as sent. In front go the other agents'
 //!   posts since the agent's previous input from the room, in a conversation the owner's
 //!   messages too; their files go with it, and they cap it to the lowest cap kept with those
@@ -34,9 +35,15 @@
 //!   (`room_stopped`). Its runtime's own reply, an input from the room that fails delivery and
 //!   `POST /stop` of the room write `room_stopped` too. In `council` nobody is woken but by the
 //!   owner's or a non-member's message, and while the room is archived by none but the owner's.
+//! - A round of the room ends when, in a conversation, every agent but the last message's author
+//!   passed ([`quiet_end`]), the posts limit or any other `room_stopped` was written, or the
+//!   owner stopped the room; in a council, when no agent has a turn open or an input waiting
+//!   ([`council_ended`]). Every end goes through [`round_ended`]: each session that is none of the
+//!   room's agents and wrote in it gets a `peer.message` from the room with how it ended and
+//!   what came in the room since its previous notice or its first message.
 //! - All of it is decided and stored under the room's [`lock`].
 
-use hqc_proto::{api::RoomMode, event::Chain, frame::PermissionMode};
+use hqc_proto::{api::RoomMode, event::Chain, frame::PermissionMode, mcp::MAX_ARGS};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -125,7 +132,7 @@ fn files_of(payload: Option<&Value>) -> Vec<Uuid> {
 /// for the owner's message) with the event's text, `room {session_id, seq}` and as files the
 /// event's, then those of the messages that go in front of it ([`room_block`]), each once. The
 /// input is capped by the cap kept with a post for an agent whose own mode is above it, and by
-/// the posts that go in front of it ([`posts_cap`]); it carries the chain of a non-member's message
+/// the posts that go in front of it ([`entries_cap`]); it carries the chain of a non-member's message
 /// or a post on ([`chain_of`]), the owner's message starts one. Its id is derived from the agent
 /// and the event, so a repeat stores nothing twice.
 async fn wake(
@@ -175,7 +182,7 @@ async fn wake(
         .await?;
         // Kept in the input's chain: the turn on it, and what the turn sends and posts, carry it.
         if let Some(low) =
-            posts_cap(m, &block).filter(|(c, _)| cap.as_ref().is_none_or(|(k, _)| c < k))
+            entries_cap(m, &block).filter(|(c, _)| cap.as_ref().is_none_or(|(k, _)| c < k))
         {
             cap = Some(low);
         }
@@ -320,11 +327,16 @@ fn next_after(members: &[SessionRow], after: Uuid, skip: Option<Uuid>) -> Option
         .find(|m| Some(m.id) != skip)
 }
 
-/// The cap of agent `m`'s input from a room, not stored yet, with `block` in front of it
-/// ([`room_block`]): the lowest cap kept with the posts there when it is below the agent's own
-/// mode, named by the first post with it (its chain's `capped_by`, else its author). Their text
-/// never runs above the mode of the agent that wrote it (T40). The owner's messages carry none.
-fn posts_cap(m: &SessionRow, block: &[BlockEntry]) -> Option<(PermissionMode, String)> {
+/// The cap of session `m`'s input, not stored yet, with `block` in front of it ([`room_block`]),
+/// or of its notice with the entries it carries ([`notify`], which leaves out the owner's
+/// messages and the reader's own that its own mode capped): the lowest cap kept with the posts and
+/// the messages there when it is below the session's own mode, named by the first with it (its
+/// chain's `capped_by`, else its author). Their text never runs above the mode of the session that
+/// wrote it (T40).
+fn entries_cap<'a>(
+    m: &SessionRow,
+    block: impl IntoIterator<Item = &'a BlockEntry>,
+) -> Option<(PermissionMode, String)> {
     let mut low: Option<(PermissionMode, String)> = None;
     for post in block {
         let Some(c) = post
@@ -431,9 +443,12 @@ pub async fn input_text(
             let from = if e.owner {
                 "message from your owner".to_string()
             } else if e.outsider {
-                format!("message from {}", escape(&e.address))
+                format!(
+                    "message from {}",
+                    named(e.name.as_deref(), &escape(&e.address))
+                )
             } else {
-                format!("post from {}", e.address)
+                format!("post from {}", named(e.name.as_deref(), &e.address))
             };
             out.push_str(&format!(
                 "[hqc room {address} | {from}]\n{}\n\n",
@@ -445,20 +460,64 @@ pub async fn input_text(
     let from_id = p.payload["from_session_id"]
         .as_str()
         .and_then(|v| v.parse::<Uuid>().ok());
-    // An agent by the address the hub stored with the input, not by its title: any session of
-    // the owner may rename it.
+    // The sender by its current title with the address the hub stored with the input.
     let from = if from_id == Some(room.id) {
-        "your owner"
+        "your owner".to_string()
     } else {
-        p.payload["from"].as_str().unwrap_or("?")
+        let title = match from_id {
+            Some(id) => db::session(&app.db, id).await?.map(|f| f.title),
+            None => None,
+        };
+        named(title.as_deref(), p.payload["from"].as_str().unwrap_or("?"))
     };
+    let me = label(app, s).await?;
     out.push_str(&format!(
         "[hqc room {address} | from {from} | your final message is posted to the room, where the \
          other agents read it: do not message them | reply exactly {NO_REPLY} to post nothing | \
-         your session's title is your name in the room: do not rename it]\n\n"
+         your name in the room is {me}: do not rename your session]\n\n"
     ));
     out.push_str(&escape(p.payload["text"].as_str().unwrap_or_default()));
     Ok(Some(out))
+}
+
+/// A session's title as a name in a hub line: every `|`, `[`, `]`, `"` and control character a
+/// space, runs of whitespace one space, trimmed, so a title cannot close the line, open another
+/// or leave the quotes the hub puts round a name ([`named`]).
+fn clean_name(title: &str) -> String {
+    title
+        .chars()
+        .map(|c| {
+            if matches!(c, '|' | '[' | ']' | '"') || c.is_control() {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Session `s` by its name in the room, in double quotes, its address alone when the name is
+/// nothing once cleaned ([`clean_name`]).
+async fn label(app: &AppState, s: &SessionRow) -> anyhow::Result<String> {
+    let name = clean_name(&s.title);
+    if name.is_empty() {
+        peers::address(app, s).await
+    } else {
+        Ok(format!("\"{name}\""))
+    }
+}
+
+/// A session in a hub line: `"name" (address)`, the address alone when the name is none or empty
+/// once cleaned ([`clean_name`]). The quotes keep a name that reads "your owner" from passing for
+/// the hub's own `your owner`.
+fn named(title: Option<&str>, address: &str) -> String {
+    match title.map(clean_name).filter(|n| !n.is_empty()) {
+        Some(n) => format!("\"{n}\" ({address})"),
+        None => address.to_string(),
+    }
 }
 
 /// `text` with every `[hqc room` (any ASCII case) replaced by `[hqc-room-text`: every line of the
@@ -497,10 +556,14 @@ struct BlockEntry {
     owner: bool,
     /// A non-member's message, not a post either ([`NON_MEMBER`]).
     outsider: bool,
+    /// The message of the session the entry is read by, in a notice ([`notify`]); never in an
+    /// agent's block.
+    mine: bool,
     text: String,
-    /// A post's author's address, as the hub stored it with the post: its name in the hub's
-    /// lines.
+    /// A post's author's address, as the hub stored it with the post.
     address: String,
+    /// The author's current title, its name in the hub's lines ([`named`]); none for the owner.
+    name: Option<String>,
     chain: Option<Value>,
     /// Its `artifact_ids`.
     files: Option<Value>,
@@ -519,11 +582,12 @@ async fn room_block(
     owner_messages: bool,
 ) -> anyhow::Result<Vec<BlockEntry>> {
     Ok(sqlx::query_as(&format!(
-        "SELECT e.type = 'user.message' AS owner, ({NON_MEMBER}) AS outsider,
+        "SELECT e.type = 'user.message' AS owner, ({NON_MEMBER}) AS outsider, false AS mine,
                 COALESCE(e.payload ->> 'text', '') AS text,
-                COALESCE(e.payload ->> 'from', '?') AS address, e.chain,
+                COALESCE(e.payload ->> 'from', '?') AS address, a.title AS name, e.chain,
                 e.payload -> 'artifact_ids' AS files
          FROM events e
+         LEFT JOIN sessions a ON a.id::text = e.payload ->> 'from_session_id'
          WHERE e.session_id = $1 AND e.seq < $3
            AND ((e.type = 'peer.message' AND e.payload ->> 'from_session_id' <> $2::text
                  AND ($5 OR NOT ({NON_MEMBER})))
@@ -776,7 +840,12 @@ async fn runtime_line(
     text: &str,
 ) -> anyhow::Result<()> {
     let text = crate::push::clip(text.trim(), MAX_RUNTIME_TEXT);
-    events::system(app, room, ROOM_STOPPED, &format!("{}: {text}", s.title)).await?;
+    let line = format!("{}: {text}", s.title);
+    events::system(app, room, ROOM_STOPPED, &line).await?;
+    // A council's round ends with the last turn ([`council_ended`]).
+    if is_conversation(room) {
+        round_ended(app, room, &line).await?;
+    }
     Ok(())
 }
 
@@ -828,7 +897,7 @@ async fn after_post(
             ),
         )
         .await?;
-        return Ok(());
+        return round_ended(app, room, &format!("the agents posted {max} times")).await;
     }
     let members = db::room_members(&app.db, room.id).await?;
     match next_after(&members, s.id, None) {
@@ -866,10 +935,18 @@ async fn decide(
     s: &SessionRow,
     ended: &str,
 ) -> anyhow::Result<()> {
-    if !is_conversation(room)
-        || room.archived
-        || speaker(app, room.id, i64::MAX).await? != Some(s.id)
-    {
+    if room.archived {
+        return Ok(());
+    }
+    if !is_conversation(room) {
+        return council_ended(app, room).await;
+    }
+    let speaker = speaker(app, room.id, i64::MAX).await?;
+    if speaker != Some(s.id) {
+        // Nobody is left to speak: every agent but the last message's author passed.
+        if speaker.is_none() {
+            return quiet_end(app, room).await;
+        }
         return Ok(());
     }
     let waiting: bool = sqlx::query_scalar(
@@ -942,17 +1019,12 @@ async fn decide(
     if passed {
         return pass_on(app, room, s.id).await;
     }
-    events::system(
-        app,
-        room,
-        ROOM_STOPPED,
-        &format!(
-            "{}'s turn {ended}; the agents go on when you write",
-            s.title
-        ),
-    )
-    .await?;
-    Ok(())
+    let line = format!(
+        "{}'s turn {ended}; the agents go on when you write",
+        s.title
+    );
+    events::system(app, room, ROOM_STOPPED, &line).await?;
+    round_ended(app, room, &line).await
 }
 
 /// Input `row` of agent `session_id`, acknowledged without opening a turn (SPEC §17.2): joined to
@@ -1024,14 +1096,267 @@ pub async fn input_failed(
     let Some(room) = db::session(&app.db, room_id).await? else {
         return Ok(());
     };
-    events::system(
-        app,
-        &room,
-        ROOM_STOPPED,
-        &format!("{} did not get the message: {reason}", s.title),
+    let line = format!("{} did not get the message: {reason}", s.title);
+    events::system(app, &room, ROOM_STOPPED, &line).await?;
+    if is_conversation(&room) {
+        round_ended(app, &room, &line).await
+    } else {
+        council_ended(app, &room).await
+    }
+}
+
+/// The end of a conversation's round for want of a speaker: every agent but the author of the
+/// room's last message passed ([`all_passed`]), and that message, the owner's or a non-member's
+/// too, ends with them ([`round_ended`]). Under the room's [`lock`].
+async fn quiet_end(app: &AppState, room: &SessionRow) -> anyhow::Result<()> {
+    let Some(last) = last_message(app, room.id, i64::MAX).await? else {
+        return Ok(());
+    };
+    let members = db::room_members(&app.db, room.id).await?;
+    if members.is_empty() || !all_passed(&members, &last) {
+        return Ok(());
+    }
+    let reason = match members.iter().find(|m| Some(m.id) == last.author) {
+        Some(author) => {
+            // The name as the reason ends up ([`round_ended`] cleans it), the address when that
+            // is nothing.
+            let name = clean_name(&author.title);
+            let name = if name.is_empty() {
+                peers::address(app, author).await?
+            } else {
+                name
+            };
+            format!("every agent but {name} passed")
+        }
+        None => "every agent passed".to_string(),
+    };
+    round_ended(app, room, &reason).await
+}
+
+/// The end of a council's round: no agent has a turn open or an input from the room waiting for
+/// its worker, so every agent's turn on the message has ended, each having posted, passed,
+/// stopped or been lost ([`round_ended`]). Under the room's [`lock`].
+async fn council_ended(app: &AppState, room: &SessionRow) -> anyhow::Result<()> {
+    let busy: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM sessions m
+             WHERE m.room_id = $1 AND NOT m.archived
+               AND (m.turn_open OR EXISTS (
+                    SELECT 1 FROM events i
+                    WHERE i.session_id = m.id AND i.type = 'peer.message'
+                      AND i.delivery = 'pending'
+                      AND i.payload -> 'room' ->> 'session_id' = $1::text)))",
     )
+    .bind(room.id)
+    .fetch_one(&app.db)
     .await?;
+    if busy {
+        return Ok(());
+    }
+    round_ended(app, room, "every agent answered").await
+}
+
+/// A round of room `room` ended for `reason`: every session that is none of its agents and wrote
+/// in it, the first message of the session that made it with `hqc_room` or an `hqc_send` into it,
+/// gets a `peer.message` from the room with how it ended and what came in the room since its
+/// previous notice or its first message (SPEC §7.1.1), as a send of the room wakes it (`delivery:
+/// pending`; [`notify`]). The owner, a person who reads the feed, gets none, nor a session that
+/// is archived or gone. The notice is stored under the room's [`lock`], which the caller holds,
+/// with the end that caused it, so one end tells a session once. Its chain is the last post's
+/// moved on ([`peers::moved_on`]), else that of the session's message, and holds whatever the
+/// limits; it is capped by the posts it carries ([`entries_cap`]), as an agent's input is. The
+/// reason is cleaned like a name ([`clean_name`]).
+pub async fn round_ended(app: &AppState, room: &SessionRow, reason: &str) -> anyhow::Result<()> {
+    let senders: Vec<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT sender FROM (
+             SELECT (e.payload ->> 'from_session_id')::uuid AS sender, min(e.seq) AS first
+             FROM events e WHERE e.session_id = $1 AND {NON_MEMBER} GROUP BY 1) w
+         ORDER BY first"
+    ))
+    .bind(room.id)
+    .fetch_all(&app.db)
+    .await?;
+    if senders.is_empty() {
+        return Ok(());
+    }
+    let address = peers::address(app, room).await?;
+    let notice_seq: i64 =
+        sqlx::query_scalar("SELECT COALESCE(max(seq), 0) FROM events WHERE session_id = $1")
+            .bind(room.id)
+            .fetch_one(&app.db)
+            .await?;
+    // One line with no `|`, `[`, `]` or `"` and no hub mark in it: the reason carries agents'
+    // titles.
+    let reason = escape(&clean_name(reason));
+    for id in senders {
+        let Some(sender) = db::session(&app.db, id).await?.filter(|s| !s.archived) else {
+            continue;
+        };
+        notify(app, room, &sender, &address, &reason, notice_seq).await?;
+    }
     Ok(())
+}
+
+/// The notice of [`round_ended`] to `sender`, when it is due: everything in the room after its
+/// previous notice (`notice_seq`), or, never told, after its first message there (that message
+/// itself left out), oldest first, as an agent's block has it ([`room_block`]), its own messages
+/// under "message from you". Due when anything came since; a session never told gets the reason
+/// alone when nothing did.
+async fn notify(
+    app: &AppState,
+    room: &SessionRow,
+    sender: &SessionRow,
+    address: &str,
+    reason: &str,
+    notice_seq: i64,
+) -> anyhow::Result<()> {
+    // Its first message in the room, and its latest with the chain it carried.
+    let first: i64 = sqlx::query_scalar(
+        "SELECT min(seq) FROM events
+         WHERE session_id = $1 AND type = 'peer.message' AND payload ->> 'from_session_id' = $2::text",
+    )
+    .bind(room.id)
+    .bind(sender.id)
+    .fetch_one(&app.db)
+    .await?;
+    let latest: Option<Value> = sqlx::query_scalar(
+        "SELECT chain FROM events
+         WHERE session_id = $1 AND type = 'peer.message' AND payload ->> 'from_session_id' = $2::text
+         ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(room.id)
+    .bind(sender.id)
+    .fetch_one(&app.db)
+    .await?;
+    let previous: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(max((payload ->> 'notice_seq')::bigint), 0) FROM events
+         WHERE session_id = $1 AND type = 'peer.message' AND payload ->> 'from_session_id' = $2::text
+           AND payload ? 'notice_seq'",
+    )
+    .bind(sender.id)
+    .bind(room.id)
+    .fetch_one(&app.db)
+    .await?;
+    let never_told = previous == 0;
+    let entries: Vec<BlockEntry> = sqlx::query_as(&format!(
+        "SELECT e.type = 'user.message' AS owner, ({NON_MEMBER}) AS outsider,
+                COALESCE(e.payload ->> 'from_session_id' = $2::text, false) AS mine,
+                COALESCE(e.payload ->> 'text', '') AS text,
+                COALESCE(e.payload ->> 'from', '?') AS address, a.title AS name, e.chain,
+                e.payload -> 'artifact_ids' AS files
+         FROM events e
+         LEFT JOIN sessions a ON a.id::text = e.payload ->> 'from_session_id'
+         WHERE e.session_id = $1 AND e.type IN ('peer.message', 'user.message') AND e.seq > $3
+         ORDER BY e.seq"
+    ))
+    .bind(room.id)
+    .bind(sender.id)
+    .bind(if never_told { first } else { previous })
+    .fetch_all(&app.db)
+    .await?;
+    if entries.is_empty() && !never_told {
+        return Ok(());
+    }
+    let text = notice_text(address, reason, &entries);
+    // The last post's chain moved on, else its message's; the limits aside, as a post is stored.
+    let posts = || entries.iter().filter(|e| !e.owner && !e.outsider);
+    let last = posts().next_back().and_then(|p| p.chain.clone()).or(latest);
+    let chain = last
+        .and_then(|c| serde_json::from_value(c).ok())
+        .map(|c| peers::moved_on(Some(c), false, PermissionMode::AllowAll, address));
+    let id = once_id(
+        "room.notice",
+        sender.id,
+        &format!("{}:{notice_seq}", room.id),
+    );
+    let payload = json!({
+        "from_session_id": room.id,
+        "from": address,
+        "text": text,
+        "mode": "send",
+        "notice_seq": notice_seq,
+    });
+    // Everything the notice carries but the owner's messages can bring a cap: another session's
+    // message too, which the reader would run as its own mode. The reader's own message only
+    // when another session capped it (it was written in a turn that session started); its cap by
+    // the reader's own mode is none to the reader.
+    let me = peers::address(app, sender).await?;
+    let capped = entries.iter().filter(|e| {
+        !e.owner
+            && (!e.mine
+                || e.chain
+                    .as_ref()
+                    .and_then(|c| c.get("capped_by"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|by| by != me))
+    });
+    let chain = made_chain(sender, id, chain, entries_cap(sender, capped));
+    store(app, sender, id, room.id, payload, Some("pending"), chain).await?;
+    delivery::kick(app, sender.id, false).await;
+    Ok(())
+}
+
+/// The text of a notice of room `address`: the line with `reason`, then the `entries` under the
+/// lines of an agent's block, from the newest back while they fit the limit of a text of
+/// `hqc_send` ([`MAX_ARGS`]); the older ones are left out, their count in the first line. The
+/// newest alone over the limit is cut instead.
+fn notice_text(address: &str, reason: &str, entries: &[BlockEntry]) -> String {
+    let part = |e: &BlockEntry, text: &str| {
+        let from = if e.owner {
+            "message from your owner".to_string()
+        } else if e.mine {
+            "message from you".to_string()
+        } else if e.outsider {
+            format!(
+                "message from {}",
+                named(e.name.as_deref(), &escape(&e.address))
+            )
+        } else {
+            format!("post from {}", named(e.name.as_deref(), &e.address))
+        };
+        format!("[hqc room {address} | {from}]\n{}\n\n", escape(text))
+    };
+    let head = |left_out: usize| match left_out {
+        0 => format!("[hqc room {address} | the discussion ended: {reason}]\n\n"),
+        1 => format!(
+            "[hqc room {address} | the discussion ended: {reason} | 1 earlier entry left out]\n\n"
+        ),
+        n => format!(
+            "[hqc room {address} | the discussion ended: {reason} | {n} earlier entries left \
+             out]\n\n"
+        ),
+    };
+    let budget = MAX_ARGS.saturating_sub(head(entries.len()).len());
+    let (mut kept, mut size) = (Vec::new(), 0);
+    for e in entries.iter().rev() {
+        let p = part(e, &e.text);
+        if size + p.len() > budget {
+            if kept.is_empty() {
+                // As many characters as their UTF-8 bytes fit what is left (the `…` takes three);
+                // halved while the escaped text still overflows.
+                let left = budget.saturating_sub(part(e, "").len()).saturating_sub(3);
+                let mut n = e
+                    .text
+                    .char_indices()
+                    .map(|(i, c)| i + c.len_utf8())
+                    .take_while(|&end| end <= left)
+                    .count();
+                let mut p = part(e, &crate::push::clip(&e.text, n));
+                while p.len() > budget && n > 0 {
+                    n /= 2;
+                    p = part(e, &crate::push::clip(&e.text, n));
+                }
+                kept.push(p);
+            }
+            break;
+        }
+        size += p.len();
+        kept.push(p);
+    }
+    kept.reverse();
+    format!("{}{}", head(entries.len() - kept.len()), kept.concat())
+        .trim_end()
+        .to_string()
 }
 
 /// The chain of the turn of agent `session_id` on its input `input` (SPEC §7.1): the input's

@@ -644,6 +644,8 @@ describe('header', () => {
     const meta = $('.chat-meta')!.textContent!;
     expect(meta).toContain('drzlo-mac');
     expect($('.chat-path .mono')!.textContent).toBe('~/work/hqc');
+    // The row is one line and the path may end in an ellipsis: the whole of it on hover.
+    expect($('.chat-path .mono')!.getAttribute('title')).toBe('~/work/hqc');
     expect($('.chat-path button')!.getAttribute('aria-label')).toBe('Copy path');
     // The model of the last usage that names one, the sum of cost_usd.
     expect($('.chat-model')!.textContent).toBe('Opus 5.5');
@@ -690,6 +692,7 @@ describe('header', () => {
     await mount(app);
     expect($('.chat-spawned')!.textContent).toBe('started by hqc/planner');
     expect($('.chat-spawned a')!.getAttribute('href')).toBe('#/s/s0');
+    expect($('.chat-spawned a')!.getAttribute('title')).toBe('hqc/planner');
     expect($('.chat-meta .chat-spawned'), 'in the meta row on a computer').not.toBeNull();
   });
 

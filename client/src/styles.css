@@ -2543,9 +2543,16 @@ select.input {
   overflow-wrap: anywhere;
 }
 
+/* One line, so the header keeps its height while parts of the row come and go. When the row is
+   too long the address of "started by" and the folder give way, each to an ellipsis (the whole
+   text on hover), and so does a turn's capped mode; the other parts keep their width, and only a
+   window too narrow even for them cuts the row at its end. `clip`, not `hidden`: a clipped box
+   is no scroll box, so WebKit does not scroll it to a focused link. */
 .chat-meta {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  overflow: clip;
   align-items: center;
   gap: 8px;
   font-size: 12px;
@@ -2556,15 +2563,33 @@ select.input {
   color: var(--border);
 }
 
+/* At its narrowest the folder still holds its copy button (24px) and the gap before it. */
 .chat-path {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  min-width: 0;
+  min-width: 28px;
 }
 .chat-path .mono {
   color: var(--text2);
-  overflow-wrap: anywhere;
+  min-width: 0;
+  overflow: clip;
+  text-overflow: ellipsis;
+}
+/* "Copied" would make the button, and the row, 2px taller for a moment. */
+.chat-path .btn-copy {
+  flex: none;
+  height: 24px;
+}
+/* The row clips: a focus ring drawn outside a box would be cut off. */
+.chat-spawned a:focus-visible,
+.chat-path .btn-copy:focus-visible {
+  outline-offset: -2px;
+}
+/* On a computer a turn's capped mode gives way with the address and the folder, but keeps the
+   mode's name. */
+.chat:not(.chat-phone) .chat-meta .perm-capped {
+  min-width: 5em;
 }
 
 .chat-cost {
@@ -2585,7 +2610,8 @@ select.input {
 .chat-spawned {
   color: var(--muted);
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: clip;
+  text-overflow: ellipsis;
 }
 .chat-spawned a {
   color: var(--text2);
@@ -4981,7 +5007,7 @@ a.relay-peer {
   padding-left: 46px; /* the back button, 44px, and the header's gap */
   font-size: 12px;
   white-space: nowrap;
-  overflow: hidden;
+  overflow: clip;
   text-overflow: ellipsis;
 }
 

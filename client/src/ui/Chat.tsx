@@ -427,7 +427,7 @@ export function Chat({
   const spawned = info?.spawned_by && (
     <span class="chat-spawned">
       started by{' '}
-      <a class="mono" href={`#/s/${info.spawned_by.session_id}`}>
+      <a class="mono" href={`#/s/${info.spawned_by.session_id}`} title={info.spawned_by.address}>
         {info.spawned_by.address}
       </a>
     </span>
@@ -482,6 +482,8 @@ export function Chat({
           <h1 class="chat-title">{info?.title || 'Session'}</h1>
           <div class="chat-meta">
             {pill}
+            {/* Next to the state: the row is one line, and its end is what a narrow window cuts. */}
+            {conn}
             {agents && (
               <span class="chat-agents" title="Subagents the agent runs now">
                 {agents}
@@ -501,7 +503,9 @@ export function Chat({
                     {/* Held elsewhere, the worker is in the pill: nothing to part the path from. */}
                     {!locked && <span class="sep">/</span>}
                     <span class="chat-path">
-                      <span class="mono">{homePath(path)}</span>
+                      <span class="mono" title={homePath(path)}>
+                        {homePath(path)}
+                      </span>
                       <CopyButton text={path} label="Copy path" />
                     </span>
                   </>
@@ -538,7 +542,6 @@ export function Chat({
                 )}
               </>
             )}
-            {conn}
           </div>
         </div>
         {system && (

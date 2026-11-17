@@ -223,7 +223,9 @@ export function NewSessionChat({
                   <>
                     {worker && <span class="sep">/</span>}
                     <span class="chat-path">
-                      <span class="mono">{homePath(path)}</span>
+                      <span class="mono" title={homePath(path)}>
+                        {homePath(path)}
+                      </span>
                     </span>
                   </>
                 )}

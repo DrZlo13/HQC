@@ -7,12 +7,13 @@
 import { Fragment, type ComponentChildren } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import type { Api } from '../api';
+import { PROJECT_COLORS } from '../theme';
 import { ARTIFACT_KINDS, type ArtifactKind, type EventOf, type HqcEvent } from '../proto';
 import { AttachmentView } from './attachments';
-import { UsageParts, type ChatActions } from './cards';
+import { UsageParts, type ChatActions, type RoomAgent } from './cards';
 import { askResult, hqcTool, peerArgs, sendResult, splitReply, type Block, type ReplyFile } from './feed';
 import { IconArrowIn, IconArrowOut } from './icons';
-import { formatTime } from './labels';
+import { formatTime, modelName } from './labels';
 import { CopyButton, Markdown } from './Markdown';
 
 /** `ChatActions.peerMessage` over the events API: the event at `seq` of a session, kept once
@@ -129,9 +130,12 @@ const kindOf = (k: string | undefined): ArtifactKind | undefined =>
   (ARTIFACT_KINDS as readonly string[]).includes(k ?? '') ? (k as ArtifactKind) : undefined;
 
 /** "↙ Question from X" / "↙ Message from X": a `peer.message` that came into this session;
- *  `queued`: it waits for a turn of its own (`Item.queued`), said while it is `pending`. */
+ *  `queued`: it waits for a turn of its own (`Item.queued`), said while it is `pending`. In a
+ *  room, a post of one of its agents is a chat message of its own (`RoomPost`). */
 export function PeerMessageBlock({ event, actions, queued }: { event: EventOf<'peer.message'>; actions: ChatActions; queued?: boolean }) {
   const p = event.payload;
+  const agent = actions.roomAgent?.(p.from_session_id);
+  if (agent) return <RoomPost event={event} agent={agent} actions={actions} />;
   return (
     <Relay
       dir="in"
@@ -143,6 +147,34 @@ export function PeerMessageBlock({ event, actions, queued }: { event: EventOf<'p
       <Markdown class="text" text={p.text} />
       <Files ids={p.artifact_ids} actions={actions} />
     </Relay>
+  );
+}
+
+/** An agent's post in its room: its name in a color of its own (by its place among the room's
+ *  agents, from the project colors), its model muted beside it, then the text and files. */
+function RoomPost({
+  event,
+  agent,
+  actions,
+}: {
+  event: EventOf<'peer.message'>;
+  agent: RoomAgent;
+  actions: ChatActions;
+}) {
+  const p = event.payload;
+  const color = PROJECT_COLORS[agent.index % PROJECT_COLORS.length].hex;
+  return (
+    <article class="msg-agent room-post">
+      <div class="room-post-head">
+        <span class="room-post-name" style={{ color }}>
+          {agent.name ?? p.from ?? `session ${p.from_session_id.slice(-8)}`}
+        </span>
+        {agent.model && <span class="room-post-model">{modelName(agent.model)}</span>}
+        <span class="room-post-when">{formatTime(event.ts)}</span>
+      </div>
+      <Markdown class="text" text={p.text} />
+      <Files ids={p.artifact_ids} actions={actions} />
+    </article>
   );
 }
 

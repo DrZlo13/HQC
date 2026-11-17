@@ -124,6 +124,8 @@ function setup(
     background: vi.fn(async () => {}),
     // POST /api/sessions/{id}/tasks/{task_id}/stop.
     stopTask: vi.fn(async () => {}),
+    // POST /api/sessions/{id}/stop.
+    stop: vi.fn(async () => {}),
     sessions: vi.fn(async () => []),
     projects: vi.fn(async () => []),
     workspaces: vi.fn(async () => [
@@ -907,18 +909,22 @@ describe('header', () => {
     expect(line.querySelector('a')!.getAttribute('href')).toBe('#/s/s0');
   });
 
-  it('a room: its mode in place of the model, its agents linked with their states, an agent\'s post from it; no model or permission switch', async () => {
+  it('a room: its mode in place of the model, its agents linked with their states, an agent\'s post as its message; no model or permission switch', async () => {
     const post = ev('event.peer.message', 2, (e) => {
       e.payload = { from_session_id: 'm1', from: 'glazes/opus', mode: 'send', text: 'Cone 6 is **fine**' };
       delete e.chain;
     });
-    const { app } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0], post] });
+    const second = ev('event.peer.message', 3, (e) => {
+      e.payload = { from_session_id: 'm2', from: 'glazes/sonnet', mode: 'send', text: 'Agreed' };
+      delete e.chain;
+    });
+    const { app } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0], post, second] });
     app.projects.set('p1', { id: 'p1', name: 'Glazes', slug: 'glazes', description: '', is_personal: false, color: 'blue', quick_messages: [], created_at: '2026-10-20T10:00:00Z' });
     const room = app.sessions.get('s1')!;
     const member = (id: string, title: string, more: Partial<SessionInfo>) =>
       app.sessions.set(id, { ...room, id, title, slug: title.toLowerCase(), room_mode: undefined, room_id: 's1', ...more });
-    member('m1', 'Opus', { state: 'waiting' });
-    member('m2', 'Sonnet', { state: 'idle', subagents: 1 });
+    member('m1', 'Opus', { state: 'waiting', model: 'claude-opus-5-5' });
+    member('m2', 'Sonnet', { state: 'idle', subagents: 1, model: 'claude-sonnet-5-5' });
     member('m9', 'Elsewhere', { room_id: 'r9' });
     await mount(app);
     expect($('.chat-room')!.textContent).toBe('Room · Council');
@@ -929,11 +935,17 @@ describe('header', () => {
     ]);
     // The agent's post in the room: a message from its session, linked. The first chat of a
     // run renders its history later than the 50 ms `mount` waits.
-    for (let i = 0; i < 20 && !$('.relay'); i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
-    expect($('.relay-label')!.textContent).toBe('Message from');
-    expect($('.relay-peer')!.textContent).toBe('Opus');
-    expect($('.relay-peer')!.getAttribute('href')).toBe('#/s/m1');
-    expect($('.relay .text strong')!.textContent).toBe('fine');
+    for (let i = 0; i < 20 && !$('.room-post'); i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    // A chat message of the agent, not a relay from another session.
+    expect($('.relay')).toBeNull();
+    for (let i = 0; i < 20 && root.querySelectorAll('.room-post').length < 2; i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    const names = [...root.querySelectorAll<HTMLElement>('.room-post-name')];
+    expect(names.map((n) => n.textContent)).toEqual(['Opus', 'Sonnet']);
+    // Each agent has a color of its own; the model is muted beside the name, if it has one.
+    expect(names[0].style.color).not.toBe('');
+    expect(names[0].style.color).not.toBe(names[1].style.color);
+    expect([...root.querySelectorAll('.room-post-model')].map((m) => m.textContent)).toEqual(['Opus 5.5', 'Sonnet 5.5']);
+    expect($('.room-post .text strong')!.textContent).toBe('fine');
     // Nothing for its menu: no "More".
     expect($('.btn-more')).toBeNull();
     render(null, root);
@@ -944,8 +956,8 @@ describe('header', () => {
     expect(root.querySelectorAll('.chat-room-agent')).toHaveLength(2);
   });
 
-  it("a room's pill has its agents' state, as the list does; no Stop: the room has nothing to stop", async () => {
-    const { app } = setup('idle', { room_mode: 'conversation', commands: [], history: [HISTORY[0]] });
+  it("a room's pill has its agents' state, as the list does; Stop stops them while one runs or waits", async () => {
+    const { app, api } = setup('idle', { room_mode: 'conversation', commands: [], history: [HISTORY[0]] });
     const room = app.sessions.get('s1')!;
     const member = (id: string, state: SessionState) =>
       app.sessions.set(id, { ...room, id, title: id, slug: id, room_mode: undefined, room_id: 's1', state });
@@ -954,13 +966,59 @@ describe('header', () => {
     await mount(app);
     expect($('.pill')!.textContent).toBe('Running');
     expect($('.pill')!.classList.contains('state-running')).toBe(true);
-    expect($('.btn-stop')).toBeNull();
+    // The room's own state is idle; the agents' decide.
+    expect(app.sessions.get('s1')!.state).toBe('idle');
+    await act(async () => $('.btn-stop')!.click());
+    expect(api.stop).toHaveBeenCalledWith('s1');
     render(null, root);
     // One of them waits for the owner: the room does.
     member('m2', 'waiting');
     await mount(app);
     expect($('.pill')!.textContent).toBe('Waiting for reply');
+    expect($('.btn-stop')).not.toBeNull();
+    render(null, root);
+    // Nobody works: nothing to stop.
+    member('m1', 'idle');
+    member('m2', 'idle');
+    await mount(app);
     expect($('.btn-stop')).toBeNull();
+  });
+
+  it("a room's feed has a line for each agent at work, in the agents' order, with the command it runs", async () => {
+    const { app, api } = setup('idle', { room_mode: 'conversation', commands: [], history: [HISTORY[0]] });
+    const room = app.sessions.get('s1')!;
+    const member = (id: string, title: string, state: SessionState) =>
+      app.sessions.set(id, { ...room, id, title, slug: id, room_mode: undefined, room_id: 's1', state });
+    // Registered out of order: the lines go by id.
+    member('m3', 'Haiku', 'queued');
+    member('m2', 'Sonnet', 'running');
+    member('m1', 'Opus', 'running');
+    member('m4', 'Fable', 'idle');
+    // Opus runs a command (for a minute); the others have no call open.
+    // Opus has a long history: more than the newest page.
+    const own = (id: string) => (id === 'm1' ? [...Array.from({ length: 150 }, (_, i) => ev('event.agent.message', i + 1)), ev('event.tool.call', 151, (e) => {
+      e.ts = new Date(Date.now() - 60_000).toISOString();
+      e.payload = { call_id: 'c1', tool: 'Bash', args_preview: '{"command":"make test"}' };
+    })] : id === 's1' ? [HISTORY[0]] : []);
+    const page = (id: string, after: number, before = Number.MAX_SAFE_INTEGER, limit = 200) => {
+      const events = own(id).filter((e) => e.seq! > after && e.seq! < before).slice(-limit);
+      const seqs = events.map((e) => e.seq!);
+      return { events, invalid: [], maxSeq: Math.max(0, ...seqs), minSeq: seqs[0], count: events.length };
+    };
+    api.events.mockImplementation(async (id: string, after: number) => page(id, after));
+    api.eventsBefore.mockImplementation(async (id: string, before?: number, limit?: number) => page(id, 0, before, limit));
+    await mount(app);
+    for (let i = 0; i < 20 && root.querySelectorAll('.activity').length < 3; i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    const lines = [...root.querySelectorAll('.activity')];
+    expect(lines.map((l) => l.textContent!.replace(/\d+:\d\d$/, 'M:SS'))).toEqual(['Opus · Runningmake testM:SS', 'Sonnet is working', 'Haiku · Input queued']);
+    // The room's own line is gone: it is never at work itself.
+    expect(root.querySelectorAll('.feed > .activity')).toHaveLength(3);
+    // The agents' chats load the newest page only, not their older history.
+    expect(api.eventsBefore.mock.calls.filter(([id]) => id === 'm1')).toHaveLength(1);
+    // The agents' chats stay open while the room's does, and close with it.
+    expect(app.chat('m1').isOpen).toBe(true);
+    await act(async () => render(null, root));
+    expect(app.chat('m1').isOpen).toBe(false);
   });
 
   it('a room without a workspace has no "More" on a computer or a phone, unless a phone has Retry for it', async () => {

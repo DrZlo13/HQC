@@ -130,6 +130,21 @@ export function Chat({
   // The worker's service session (SPEC §10.2): requests and log lines, no input.
   const system = info?.system ?? false;
   const t = chat.timeline;
+  // A room's agents: their chats stay open while the room's is, the newest page and the live
+  // events only, for the running command each one's activity line names.
+  const room = info?.room_mode;
+  // Its mode stands where a session names its model, and its agents' sessions go under the line.
+  const members = room ? app.roomMembers(sessionId) : [];
+  const memberIds = members.map((m) => m.id).join(' ');
+  const memberChats = useMemo(() => (memberIds ? memberIds.split(' ').map((id) => app.chat(id)) : []), [app, memberIds]);
+  useEffect(() => {
+    for (const c of memberChats) void c.open({ older: false });
+    return () => memberChats.forEach((c) => c.close());
+  }, [memberChats]);
+  useSubscription((fn) => {
+    const offs = memberChats.map((c) => c.timeline.onChange(fn));
+    return () => offs.forEach((off) => off());
+  }, [memberChats]);
 
   // The folder of the session, for the header and the requests' "outside the working folder".
   useEffect(() => {
@@ -194,6 +209,12 @@ export function Chat({
     hotkeyRequest: firstApproval?.payload.request_id,
     sheetRequest,
     findSession: (ref) => app.findSession(ref),
+    roomAgent: room
+      ? (id) => {
+          const i = members.findIndex((m) => m.id === id);
+          return i < 0 ? undefined : { index: i, name: members[i].title || undefined, model: members[i].model };
+        }
+      : undefined,
     peerMessage,
     giveSecret: !system && app.takesSecrets(info?.worker_id)
       ? async (requestId, f) => void (await app.api.giveSecret(sessionId, f, requestId))
@@ -455,13 +476,10 @@ export function Chat({
   const model = info?.provider ? undefined : shownModel(info?.model, usage.model);
   const cost = info?.provider ? undefined : usage.cost;
   // Running, as in the list, while a background subagent or task works after the turn; a room,
-  // as in the list, with its agents' state (Stop goes by the room's own).
+  // as in the list, with its agents' state (and Stop stops them all).
   const shown = info?.room_mode ? app.shown(info).state : info && atWorkAfterTurn(info) ? 'running' : state;
   const pill = <StatePill state={shown} timeline={t} where={locked ? `In ${holder}${worker ? ` on ${worker}` : ''}` : undefined} pausing={!!info && pausingAfterTurn(info)} />;
   const agents = agentsLabel(info?.subagents);
-  // A room: its mode where a session names its model, and its agents' sessions under the line.
-  const room = info?.room_mode;
-  const members = room ? app.roomMembers(sessionId) : [];
   const conn = app.offline && <span class="conn-lost">offline</span>;
   // In the meta row on a computer; on a phone, where the row has no room for the address beside
   // a running session's buttons, the header's last line, under the buttons too.
@@ -635,7 +653,7 @@ export function Chat({
             Retry
           </button>
         )}
-        {!system && STOPPABLE.has(state) &&
+        {!system && STOPPABLE.has(room ? shown : state) &&
           (phone ? (
             <button type="button" class="icon-btn icon-btn-round btn-stop" aria-label="Stop the agent" onClick={stop}>
               <IconStop size={14} />
@@ -714,7 +732,11 @@ export function Chat({
           {requestsOnly && items.length === 0 && <div class="empty">No requests</div>}
           {t.streaming && <StreamingMessage text={t.streaming} />}
           <FeedBlocks blocks={under} actions={actions} />
-          {!system && <ActivityLine state={state} timeline={t} foreground={info?.foreground_calls} onBackground={toBackground} />}
+          {!system && !room && <ActivityLine state={state} timeline={t} foreground={info?.foreground_calls} onBackground={toBackground} />}
+          {room &&
+            members.map((m, i) => (
+              <ActivityLine key={m.id} state={m.state} timeline={memberChats[i].timeline} name={m.title || m.slug} />
+            ))}
           {!system && <WaitedRequests app={app} sessionId={sessionId} />}
         </div>
       </div>

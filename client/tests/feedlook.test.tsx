@@ -283,6 +283,14 @@ describe('joined the turn', () => {
 });
 
 describe('the one-column gutter', () => {
+  it("an agent's post in its room has the agent text's dot, not the arrow of a message from another session", () => {
+    const post = (s: number, from: string) =>
+      ev('event.peer.message', (e) => ((e.seq = s), (e.ts = at(s)), (e.payload.from_session_id = from)));
+    show([post(1, 'm1'), post(2, 'elsewhere')], { roomAgent: (sid) => (sid === 'm1' ? { index: 0 } : undefined) });
+    const marks = [...root.querySelectorAll('.feed-block > .feed-mark')].map((m) => m.className.replace('feed-mark feed-mark-', ''));
+    expect(marks).toEqual(['dot', 'relay']);
+  });
+
   it('a mark for every item but the user plates and the service lines, which span the feed', () => {
     const seq = (s: number) => (e: any) => ((e.seq = s), (e.ts = at(s)));
     const agentCall = (s: number, call_id: string, args: object) =>

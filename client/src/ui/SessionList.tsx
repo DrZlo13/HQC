@@ -34,7 +34,7 @@ import {
   IconGlobe,
   IconTrash,
 } from './icons';
-import { agentsLabel, formatWhen, homePath } from './labels';
+import { ROOM_MODE_LABELS, agentsLabel, formatWhen, homePath } from './labels';
 import { newSessionWhere } from './NewSession';
 import { MoveSession, confirmDeleteProject } from './ProjectSettings';
 import { RequestsLink } from './requests';
@@ -394,7 +394,9 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       menuOpen={menu?.id === s.id}
       hover={phone || reorder ? undefined : hoverOn(s.id)}
       // A desktop row is dragged onto a project of the bar to move it there; its buttons go.
-      onDragStart={phone || reorder ? undefined : hideRowButtons}
+      // A room has no folder to move; its row stays where it is.
+      onDragStart={phone || reorder || s.room_mode ? undefined : hideRowButtons}
+      room={roomTip(app, s)}
       onPrefetch={() => app.prefetchChat(s.id)}
       onMenu={(x, y) => openMenu(s.id, x, y)}
     />
@@ -587,17 +589,26 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   );
 }
 
+/** What a room's row says of it, in the tooltip of its icon: "Room · Conversation · Opus,
+ *  Sonnet" (the names of its agents); undefined for a session. */
+export function roomTip(app: AppState, s: SessionInfo): string | undefined {
+  if (!s.room_mode) return undefined;
+  const names = app.roomMembers(s.id).map((m) => m.title || m.slug);
+  return ['Room', ROOM_MODE_LABELS[s.room_mode], ...(names.length ? [names.join(', ')] : [])].join(' · ');
+}
+
 function titleOf(s: SessionInfo): string {
   return s.title || s.slug || s.id.slice(-8);
 }
 
 /** A session's menu, the same on a desktop row and a phone row: Open in new tab, favorites,
- *  then Rename, Move to project…, Folder rules, then Restart session and Pause session (not for
- *  an archived, a service, a VS Code-driven session or one whose worker is offline), or for a
- *  paused session Resume session alone, Archive and Delete… (a step of its own). */
+ *  then Rename, Move to project… (not for a room), Folder rules, then Restart session and Pause
+ *  session (not for an archived, a service, a VS Code-driven session, a room or one whose worker
+ *  is offline), or for a paused session Resume session alone, Archive and Delete… (a step of its
+ *  own). */
 function sessionMenu(app: AppState, s: SessionInfo, on: { onMove: () => void; onAskDelete: () => void }): MenuEntry[] {
   const rules = rulesHref(s);
-  const restartable = !s.archived && !s.system && s.state !== 'locked_vscode' && s.state !== 'worker_offline';
+  const restartable = !s.archived && !s.system && !s.room_mode && s.state !== 'locked_vscode' && s.state !== 'worker_offline';
   const paused = !!s.paused_at;
   return [
     { label: 'Open in new tab', icon: <IconOpenNew />, cls: 'btn-open-tab', href: `#/s/${s.id}`, newTab: true },
@@ -609,7 +620,7 @@ function sessionMenu(app: AppState, s: SessionInfo, on: { onMove: () => void; on
     },
     'sep',
     { label: 'Rename', icon: <IconRename />, cls: 'btn-rename', onSelect: () => rename(app, s) },
-    { label: 'Move to project…', icon: <IconMove />, cls: 'btn-move', onSelect: on.onMove },
+    ...(s.room_mode ? [] : [{ label: 'Move to project…', icon: <IconMove />, cls: 'btn-move', onSelect: on.onMove }]),
     ...(rules ? [{ label: 'Folder rules', icon: <IconShield />, cls: 'btn-rules', href: rules }] : []),
     'sep',
     ...(restartable && !paused
@@ -841,6 +852,7 @@ export function SessionRow({
   menuOpen,
   hover,
   onDragStart,
+  room,
   onPrefetch,
   onMenu,
 }: {
@@ -861,6 +873,8 @@ export function SessionRow({
   /** A desktop row of the live list: it can be dragged onto a project of the bar
    *  (`SESSION_DRAG`), and this runs as the drag starts. */
   onDragStart?: () => void;
+  /** A room's row: the tooltip of its icon (`roomTip`). */
+  room?: string;
   /** Loads the newest page of the chat before it is opened. */
   onPrefetch: () => void;
   onMenu?: (x: number, y: number) => void;
@@ -883,6 +897,11 @@ export function SessionRow({
           {s.browser && (
             <span class="session-browser" title="The agent has your browser">
               <IconGlobe />
+            </span>
+          )}
+          {room && (
+            <span class="session-room" title={room}>
+              <IconRoom size={14} />
             </span>
           )}
           {draft && !current && <span class="session-draft">Draft</span>}

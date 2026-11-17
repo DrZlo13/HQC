@@ -89,14 +89,14 @@ export interface NewSessionOptions {
 /** `POST /api/projects/{id}/rooms`: a room and one member session per agent, at least one. The
  *  workspace, folder and permission mode are its agents', with the defaults of a new session;
  *  an agent's absent `model` is the runtime's default, its `provider_id` one the workspace's
- *  worker allows, as for a new session. */
+ *  worker allows, as for a new session; its `name` is what the room's feed calls it. */
 export interface NewRoom {
   title?: string;
   mode: RoomMode;
   workspace_id?: string;
   cwd?: string;
   permission_mode?: PermissionMode;
-  agents: { model?: string; provider_id?: string; system_prompt?: string }[];
+  agents: { name?: string; model?: string; provider_id?: string; system_prompt?: string }[];
 }
 
 /** The filters, order and page of `GET /api/search` (SPEC §15). */

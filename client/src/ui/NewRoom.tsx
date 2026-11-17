@@ -25,6 +25,8 @@ const MODE_NOTES: Record<RoomMode, string> = {
 /** An agent of the form; `key` keeps a row's fields with it when a row above is removed. */
 interface AgentRow {
   key: number;
+  /** What the room's feed calls the agent; empty: the hub names it. */
+  name: string;
   model?: string;
   /** A provider instead of a Claude model, as on a new session. */
   provider_id?: string;
@@ -39,8 +41,8 @@ export function NewRoom({ app, projectId, phone = false }: { app: AppState; proj
   const [cwd, setCwd] = useState('');
   const [permission, setPermission] = useState<PermissionMode | undefined>(undefined);
   const [agents, setAgents] = useState<AgentRow[]>([
-    { key: 0, prompt: '' },
-    { key: 1, prompt: '' },
+    { key: 0, name: '', prompt: '' },
+    { key: 1, name: '', prompt: '' },
   ]);
   const nextKey = useRef(2);
   const [busy, setBusy] = useState(false);
@@ -57,6 +59,14 @@ export function NewRoom({ app, projectId, phone = false }: { app: AppState; proj
   // An agent's provider that this workspace's worker does not allow is neither shown nor sent,
   // as on a new session.
   const allowed = (id: string | undefined) => providers.find((p) => p.id === id)?.id;
+  // What the hub titles each agent left unnamed: its provider's label, else its model as typed,
+  // else "default", numbered among the unnamed agents that have the same one.
+  const titles = agents.map((a, i) => {
+    const label = (id: string | undefined, m: string | undefined) => providers.find((p) => p.id === allowed(id))?.label ?? (m?.trim() || 'default');
+    const mine = label(a.provider_id, a.model);
+    const before = agents.slice(0, i).filter((x) => !x.name.trim() && label(x.provider_id, x.model) === mine).length;
+    return before ? `${mine} ${before + 1}` : mine;
+  });
   const edit = (key: number, patch: Partial<AgentRow>) => setAgents((cur) => cur.map((a) => (a.key === key ? { ...a, ...patch } : a)));
 
   const create = async (e: Event) => {
@@ -71,7 +81,7 @@ export function NewRoom({ app, projectId, phone = false }: { app: AppState; proj
         workspace_id: ws,
         cwd: folder && folder !== '.' ? folder : undefined,
         permission_mode: permission,
-        agents: agents.map((a) => ({ model: a.model, provider_id: allowed(a.provider_id), system_prompt: a.prompt.trim() || undefined })),
+        agents: agents.map((a) => ({ name: a.name.trim() || undefined, model: a.model, provider_id: allowed(a.provider_id), system_prompt: a.prompt.trim() || undefined })),
       });
       replaceHash(`#/s/${s.id}`);
     } catch (err) {
@@ -179,6 +189,16 @@ export function NewRoom({ app, projectId, phone = false }: { app: AppState; proj
                     Remove
                   </button>
                 </div>
+                <label class="field">
+                  <span class="field-label">Name</span>
+                  <input
+                    class="input room-agent-name-input"
+                    name="agent_name"
+                    placeholder={titles[i]}
+                    value={a.name}
+                    onInput={(e) => edit(a.key, { name: (e.currentTarget as HTMLInputElement).value })}
+                  />
+                </label>
                 <ModelField
                   value={a.model}
                   onChange={(model) => edit(a.key, { model, provider_id: undefined })}
@@ -204,7 +224,7 @@ export function NewRoom({ app, projectId, phone = false }: { app: AppState; proj
                 class="btn btn-small btn-add-agent"
                 onClick={() => {
                   const key = nextKey.current++;
-                  setAgents((cur) => [...cur, { key, prompt: '' }]);
+                  setAgents((cur) => [...cur, { key, name: '', prompt: '' }]);
                 }}
               >
                 <IconPlus size={13} />

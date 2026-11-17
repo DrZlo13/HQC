@@ -15,7 +15,7 @@ import { useSubscription } from './hooks';
 import { IconChevronDown, IconPlus, IconSearch, IconSettings } from './icons';
 import { ProjectUndo, RailRun } from './ProjectRail';
 import { RequestsLink } from './requests';
-import { PhoneTile, SessionRow, WorkersLine, newProject } from './SessionList';
+import { PhoneTile, SessionRow, WorkersLine, newProject, roomTip } from './SessionList';
 import { bucketOf, groupSessions } from './sessions';
 
 const VIEWS: { id: PhoneView; label: string; detail?: string }[] = [
@@ -224,6 +224,7 @@ function Sessions({ app }: { app: AppState }) {
                 compact={compact}
                 project={app.project(s.project_id)}
                 dragging={false}
+                room={roomTip(app, s)}
                 onPrefetch={() => app.prefetchChat(s.id)}
               />
             ))}

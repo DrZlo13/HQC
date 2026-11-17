@@ -797,6 +797,7 @@ fn task_notification_is_the_adapters_while_it_runs() {
             call_id: Some("toolu_01DNPTCZTgycgC11D8VMjfaD".into()),
             status: Some("completed".into()),
             task_id: Some("b1b20u6dl".into()),
+            from_session_id: None,
             fork: None,
         }
     );
@@ -1237,6 +1238,7 @@ fn a_compaction_is_one_line_with_its_summary() {
             call_id: None,
             status: None,
             task_id: None,
+            from_session_id: None,
             fork: None,
         }
     );

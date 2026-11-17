@@ -4,7 +4,8 @@
 //! connection is woken to send them. Everything else (`agent.delta`, `subagents.live`,
 //! `tokens.rate`, replies to hub frames, `session.state`, `mcp.cancel`) is sent directly when
 //! connected and dropped otherwise: the hub resends pending inputs after `hello` and the
-//! supervisor resends `session.state` on connect.
+//! supervisor resends `session.state` on connect. A session's state and an input's `ack` keep
+//! their place among the outbox entries ([`Direct::after`]).
 
 use std::sync::Arc;
 
@@ -21,6 +22,23 @@ use crate::outbox::Outbox;
 pub struct Direct {
     pub id: Option<String>,
     pub frame: WorkerFrame,
+    /// `Some(seq)`: on the connection it was queued on, the frame goes after the outbox
+    /// entries up to local `seq`, the last one written when it was queued, and before those
+    /// written later (SPEC §5.2): a session's state and an input's `ack` ([`after_events`]).
+    pub after: Option<i64>,
+}
+
+/// Whether direct frame `f` keeps its place among the outbox entries (SPEC §5.2): a session's
+/// state (`stopped` right after a turn must not overtake its final answer) and an input's `ack`
+/// (the next input's must not overtake the final answer and `status` of the turn before it, the
+/// ack of an input taken at a turn's end must not come after its `status idle`: the hub decides
+/// at a turn's end whether an input still waits, §7.1.1, and opens a turn on an ack after it).
+fn after_events(f: &WorkerFrame) -> bool {
+    match f {
+        WorkerFrame::SessionState { .. } => true,
+        WorkerFrame::Ack(a) => a.event_id.is_some(),
+        _ => false,
+    }
 }
 
 #[derive(Clone)]
@@ -176,13 +194,21 @@ impl HubLink {
 
     /// A reply to the hub frame `id`.
     pub fn reply(&self, id: &str, frame: WorkerFrame) {
-        let _ = self.direct.send(Direct {
-            id: Some(id.to_string()),
-            frame,
-        });
+        self.direct(Some(id.to_string()), frame);
     }
 
     pub fn send(&self, frame: WorkerFrame) {
-        let _ = self.direct.send(Direct { id: None, frame });
+        self.direct(None, frame);
+    }
+
+    fn direct(&self, id: Option<String>, frame: WorkerFrame) {
+        let after = after_events(&frame).then(|| {
+            self.outbox.last_seq().unwrap_or_else(|e| {
+                // Not known: the whole outbox goes before the frame.
+                tracing::error!("reading the outbox: {e:#}");
+                i64::MAX
+            })
+        });
+        let _ = self.direct.send(Direct { id, frame, after });
     }
 }

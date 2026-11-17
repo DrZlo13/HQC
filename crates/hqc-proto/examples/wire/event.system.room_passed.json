@@ -1,0 +1,13 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000112",
+  "seq": 43,
+  "ts": "2026-10-22T10:00:00Z",
+  "author": { "kind": "system" },
+  "type": "system",
+  "payload": {
+    "text": "opus passed",
+    "code": "room_passed",
+    "from_session_id": "0199f3a2-7c10-7000-8000-000000000002"
+  }
+}

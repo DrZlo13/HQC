@@ -5,7 +5,7 @@
   "cwd": ".",
   "permission_mode": "ask",
   "agents": [
-    {"model": "opus", "system_prompt": "You defend the simplest design that works."},
+    {"name": "Minimalist", "model": "opus", "system_prompt": "You defend the simplest design that works."},
     {"provider_id": "0199f3a2-7c10-7000-8000-0000000000c4", "system_prompt": "You look for what breaks under load."},
     {}
   ]

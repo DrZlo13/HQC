@@ -359,11 +359,14 @@ pub struct CreateRoomRequest {
     pub agents: Vec<RoomAgent>,
 }
 
-/// An agent of [`CreateRoomRequest`]: its model (absent or empty — the runtime's default) or
+/// An agent of [`CreateRoomRequest`]: its name, the title of its session (absent or empty — its
+/// model's or provider's label), its model (absent or empty — the runtime's default) or
 /// provider, as for [`CreateSessionRequest`], and the system prompt its runtime gets
 /// (`--append-system-prompt` for Claude Code).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RoomAgent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1511,6 +1514,7 @@ mod tests {
             roundtrip(include_str!("../examples/wire/api.room.request.json"));
         assert_eq!(r.mode, RoomMode::Council);
         assert_eq!(r.agents.len(), 3);
+        assert_eq!(r.agents[0].name.as_deref(), Some("Minimalist"));
         assert_eq!(
             r.agents[2],
             RoomAgent::default(),

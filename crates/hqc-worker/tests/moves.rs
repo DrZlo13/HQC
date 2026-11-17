@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use common::*;
 use hqc_proto::event::EventKind;
-use hqc_proto::frame::{Hello, LockedBy, ProcessState, WorkerFrame};
+use hqc_proto::frame::{Ack, Hello, LockedBy, ProcessState, WorkerFrame};
 use hqc_worker::adapter::claude_code::paths::encode_project_dir;
 use hqc_worker::adapter::fake::{agent_event, agent_message, FakeAdapters, FakeCall};
 use hqc_worker::adapter::AdapterEvent;
@@ -18,6 +18,7 @@ use hqc_worker::connection::{Connection, Status};
 use hqc_worker::link::HubLink;
 use hqc_worker::mirror::store::Store;
 use hqc_worker::outbox::Outbox;
+use hqc_worker::supervisor::Inbound;
 use hqc_worker::token::Secret;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
@@ -839,47 +840,7 @@ async fn the_answer_goes_before_the_stop_at_shutdown() {
     let mut hub = FakeHub::start().await;
     for i in 0..20 {
         let dir = tempfile::tempdir().unwrap();
-        let outbox = Arc::new(Outbox::open(&dir.path().join("outbox")).unwrap());
-        let (link, direct) = HubLink::new(outbox);
-        let (inbound, _inbound) = mpsc::channel(16);
-        let (status_tx, mut status) = watch::channel(Status::Connecting);
-        let hello = Hello {
-            protocol_version: hqc_proto::PROTOCOL_VERSION,
-            boot_id: Uuid::new_v4(),
-            capabilities: json!({}),
-            environments: vec![],
-            env_bindings: vec![],
-            allowed_roots: vec![],
-            allow_foreign_sessions: false,
-            share_local_models: false,
-            local_models: vec![],
-            providers: vec![],
-            session_secrets: false,
-            browser: false,
-            machine_id: None,
-        };
-        let conn = Connection::new(
-            hub.url(),
-            Secret::new(TOKEN),
-            hello,
-            link.clone(),
-            direct,
-            inbound,
-            status_tx,
-            fast_conn(),
-        );
-        let stop = CancellationToken::new();
-        let task = tokio::spawn(conn.run(stop.clone()));
-        let mut c = hub.accept().await;
-        c.handshake().await;
-        tokio::time::timeout(
-            WAIT,
-            status.wait_for(|s| matches!(s, Status::Connected { .. })),
-        )
-        .await
-        .expect("connected")
-        .unwrap();
-
+        let (link, stop, task, _inbound, mut c) = bare_connection(&mut hub, dir.path()).await;
         // The answer, the agent's stop and the worker's: no await in between.
         let sid = Uuid::now_v7();
         let answer = agent_message(sid, "done");
@@ -917,4 +878,102 @@ async fn the_answer_goes_before_the_stop_at_shutdown() {
             .expect("connection stopped")
             .unwrap();
     }
+}
+
+/// The same order for an input's `ack`: the next input's goes after the final answer of the turn
+/// before it, written to the outbox first, as `session.state` does; a room decides at a turn's
+/// end whether an input still waits (SPEC §5.2, §7.1.1). Written together, the connection picks
+/// between the outbox and a direct frame at random, so many rounds.
+#[tokio::test]
+async fn the_answer_goes_before_the_next_inputs_ack() {
+    let mut hub = FakeHub::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (link, stop, task, _inbound, mut c) = bare_connection(&mut hub, dir.path()).await;
+    let sid = Uuid::now_v7();
+    for i in 0..50 {
+        // The answer, then the next input's ack: no await in between.
+        let answer = agent_message(sid, "done");
+        let answer_id = answer.event_id;
+        link.event(answer).unwrap();
+        let frame = format!("f-{i}");
+        link.reply(
+            &frame,
+            WorkerFrame::Ack(Ack {
+                event_id: Some(Uuid::now_v7()),
+                seq: None,
+                joined: false,
+            }),
+        );
+        let mut answered = false;
+        loop {
+            let f = c.recv().await;
+            if f["type"] == "event" && event_id(&f) == answer_id {
+                answered = true;
+                c.ack_event(&f, 1).await;
+            } else if f["type"] == "ack" && f["id"] == frame.as_str() {
+                assert!(answered, "input {i}: its ack before the answer before it");
+                break;
+            }
+        }
+    }
+    stop.cancel();
+    tokio::time::timeout(WAIT, task)
+        .await
+        .expect("connection stopped")
+        .unwrap();
+}
+
+/// A connection to `hub` alone, without a worker around it, its outbox in `dir`, connected: its
+/// link, its stop, its task, the receiver of what it hands on and the hub's side.
+async fn bare_connection(
+    hub: &mut FakeHub,
+    dir: &Path,
+) -> (
+    HubLink,
+    CancellationToken,
+    tokio::task::JoinHandle<()>,
+    mpsc::Receiver<Inbound>,
+    HubConn,
+) {
+    let outbox = Arc::new(Outbox::open(&dir.join("outbox")).unwrap());
+    let (link, direct) = HubLink::new(outbox);
+    let (inbound, inbound_rx) = mpsc::channel(16);
+    let (status_tx, mut status) = watch::channel(Status::Connecting);
+    let hello = Hello {
+        protocol_version: hqc_proto::PROTOCOL_VERSION,
+        boot_id: Uuid::new_v4(),
+        capabilities: json!({}),
+        environments: vec![],
+        env_bindings: vec![],
+        allowed_roots: vec![],
+        allow_foreign_sessions: false,
+        share_local_models: false,
+        local_models: vec![],
+        providers: vec![],
+        session_secrets: false,
+        browser: false,
+        machine_id: None,
+    };
+    let conn = Connection::new(
+        hub.url(),
+        Secret::new(TOKEN),
+        hello,
+        link.clone(),
+        direct,
+        inbound,
+        status_tx,
+        fast_conn(),
+    );
+    let stop = CancellationToken::new();
+    let task = tokio::spawn(conn.run(stop.clone()));
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    tokio::time::timeout(
+        WAIT,
+        status.wait_for(|s| matches!(s, Status::Connected { .. })),
+    )
+    .await
+    .expect("connected")
+    .unwrap();
+    (link, stop, task, inbound_rx, c)
 }

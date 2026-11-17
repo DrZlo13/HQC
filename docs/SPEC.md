@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.156, 2026-11-17. Status: the architecture agreed after six reviews and a survey of
+Version 0.163, 2026-11-17. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2073,9 +2073,11 @@ forking…" and its "Fork from here" is disabled; the client asks for no second 
 same message meanwhile. A run of tool calls is "N tool calls ·
 time" and the call's line when it is one, else the tools it called, each once, in the order
 first called ("(Bash, Read, chrome-devtools/take_screenshot)", an MCP tool as
-`<server>/<tool>`); a Skill call's line names its skill; thinking and tool lines are fainter
-than the text, and an open thinking block is prose in the feed's font. Since 0.135 a subagent has
-two cards in the project's colour, two lines each at any width, which never wrap: a long text is cut
+`<server>/<tool>`); a Skill call's line names its skill, a SendMessage call's line (since 0.163)
+says what it sent: its `summary`, else its plain-text `message` on one line; thinking and tool
+lines are fainter than the text, and an open thinking block is prose in the feed's font. Since
+0.135 a subagent has two cards in the project's colour, two lines each at any width, which never
+wrap: a long text is cut
 with an ellipsis. Its start: a call of `Agent` (`Task` in older Claude Code) is no row of a run: it
 ends the run before it and is a card of its own (tinted background and border), its result inside
 it. Its first line is a small agent icon, "Agent started:" dimmed (since 0.141; before it only the
@@ -5341,6 +5343,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.156 → 0.163 (a SendMessage row says what was sent)
+§6 client layout: a SendMessage call (the agent writing to a subagent it runs or to a teammate)
+was a row of just "SendMessage": its arguments are `to`, `summary` and `message`, none of them a
+key the row reads. Its line (its row, the header of a group of one call, the Running line, an
+approval card) is now its `summary`, else its plain-text `message` on one line. Claude Code
+2.1.312 previews the call the same way, but by the message's first line ("A 5-10 word summary
+shown as a one-line preview in the UI. Defaults to the first line of a plain-text message").
+0.157–0.162 are taken by open pull requests.
 
 ### 0.149 → 0.156 (a fork is quick, and says so while it is made)
 §6, §15: the events a fork copies go in without their search words and the hub writes them

@@ -2,8 +2,8 @@
 //!
 //! - The target is an address `<project-slug>/<session-slug>` or an id of a session of the
 //!   caller's owner, not archived, not a worker's service session, not a room; anything else is
-//!   `not_found`. The calling session itself, a blank text and a target driven from VS Code
-//!   are refused at once.
+//!   `not_found`. The calling session itself, another agent of the caller's room, a blank text
+//!   and a target driven from VS Code are refused at once.
 //! - The message is a `peer.message` in the target, authored by the calling agent, with the
 //!   chain of the caller's current turn moved on ([`next_chain`]). Its `event_id` is derived
 //!   from the caller and the call's `request_id` ([`message_id`]): a call the worker sends
@@ -153,6 +153,17 @@ async fn checked_target(
         return Err(err(
             error_code::INVALID_ARGS,
             "that is this session itself; send to another one",
+        ));
+    }
+    // The agents of a room speak in the room (SPEC §7.1.1): what one sends another goes past
+    // the room, and its answer never reaches the room either.
+    if caller.room_id.is_some() && t.room_id == caller.room_id {
+        return Err(err(
+            error_code::INVALID_ARGS,
+            format!(
+                "{to} is another agent of your room: your final message is posted to the room, \
+                 and the other agents read it there; answer there, not in a message to them"
+            ),
         ));
     }
     if t.locked_by == "vscode" {

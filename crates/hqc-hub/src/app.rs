@@ -61,7 +61,7 @@ pub struct Inner {
     /// SPEC §5.4), and when; in memory: the next turn on the worker reports them again.
     pub limits: Mutex<HashMap<Uuid, (hqc_proto::frame::Limits, chrono::DateTime<chrono::Utc>)>>,
     /// `(what, owner)` -> a lock held while a cap is counted and the row it counts is
-    /// written ([`AppState::owner_lock`]).
+    /// written ([`AppState::owner_lock`]); `("room", room)` -> a room's ([`crate::rooms::lock`]).
     owner_locks: Mutex<HashMap<(&'static str, Uuid), OwnerLock>>,
     /// The text of the answer being written ([`AppState::live_text`]).
     live: Mutex<LiveText>,
@@ -171,7 +171,8 @@ impl AppState {
 
     /// Serializes the creations of `what` (spawned sessions, schedules) of one owner, so that
     /// a cap counted before an insert holds for parallel calls (SPEC §20). The hub is one
-    /// process (SPEC §2), so a lock in memory is enough.
+    /// process (SPEC §2), so a lock in memory is enough. Rooms take theirs here too, keyed by
+    /// the room ([`crate::rooms::lock`]).
     pub async fn owner_lock(
         &self,
         what: &'static str,

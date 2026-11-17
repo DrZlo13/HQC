@@ -2694,7 +2694,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   derived from it, so a repeat answers the same address and completes a hand-on cut short. The
   agents' inputs made from it continue the caller's chain, and their posts the chains of their
   turns (§7.1.1), so the caller's chain limits reach through the room. When the room's round
-  ends, the room sends the caller how it ended and what was said there since its previous
+  ends, the room sends the caller how it ended and its last two entries since its previous
   notice or its first message there (§7.1.1, a room's notice); the tool's description and `hqc_send`'s say so, so the caller does not poll
   the room.
 - `hqc_list_sessions(project?)` — addresses, titles, statuses. Since 0.33 (T30): `project` is
@@ -3306,23 +3306,24 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   (`from_session_id` the room, `from` its address, author the room, `delivery: pending`, so it
   starts a turn there as a send does, with the send's header), with `notice_seq`, the room's
   last `seq` when the round ended, and no `room`: the line `[hqc room <room> | the discussion
-  ended: <reason>]`, then, oldest first, everything in the room after the session's previous
-  notice from it, or, never told, after its first message there: the posts under `[hqc room
-  <room> | post from "<name>" (<address>)]`, the owner's messages under `[hqc room <room> |
-  message from your owner]`, other sessions' under `[hqc room <room> | message from "<title>"
-  (<address>)]`, its own under `[hqc room <room> | message from you]`, as in an agent's input,
-  so it reads what the posts answer and loses none written between two of its messages. Over
-  64 KiB (`MAX_ARGS`) the oldest are left out and the first line ends `| N earlier entries left
-  out`; the newest alone over it is cut. A session never told is told at the first round end
+  ended: <reason>]`, then, oldest first, the last two entries of the room after the session's
+  previous notice from it, or, never told, after its first message there (user decision,
+  2026-11-18: the whole discussion is not worth carrying, the session reads the rest itself if it
+  needs it): a post under `[hqc room <room> | post from "<name>" (<address>)]`, the owner's
+  message under `[hqc room <room> | message from your owner]`, another session's under `[hqc room
+  <room> | message from "<title>" (<address>)]`, its own under `[hqc room <room> | message from
+  you]`, as in an agent's input. When more came, the first line ends `| N earlier entries left
+  out, read them with hqc_read`; over 64 KiB (`MAX_ARGS`) the older of the two is left out too,
+  and the newest alone over it is cut. A session never told is told at the first round end
   after its message, with the reason alone when nothing came after it; one with nothing in the
   room since its previous notice is not told again; it is told of every later round with
   something in it, the owner's too; neither is the owner told, who reads the feed, nor an archived or deleted session. The
   notice continues the chain
-  of the last post it carries, else of the session's message, moved on, whatever the chain's
-  limits (as a post is stored), so a loop of notices and sends ends at the limits on the
+  of the last post since that boundary, else of the session's message, moved on, whatever the
+  chain's limits (as a post is stored), so a loop of notices and sends ends at the limits on the
   session's own sends; its cap is the lowest kept with the posts and other sessions' messages
-  it carries and with its own messages capped by another session, where below the session's
-  mode (T40). It is stored under the room's lock with the end that caused it, once
+  since that boundary, shown or left out (the turn can read the left-out ones), and with its own
+  messages capped by another session, where below the session's mode (T40). It is stored under the room's lock with the end that caused it, once
   per session and end (its `event_id` derived from the room and `notice_seq`).
 
 ### 7.2 Requirements for the hqc MCP server
@@ -6129,9 +6130,9 @@ a person's message starts a chain in a room, the owner's message joining a runni
 input made from a non-member's message or a post continues its chain, a post is stored whatever
 its `hops` (only the posts limit stops a conversation), and it counts once in the chain's
 messages, the inputs made from it not counted (§7.1.1). When a round ends, the room sends every
-session that wrote in it and is none of its agents how it ended and what was said there since
-its previous notice or its first message there, under the lowest cap of what it carries (a
-room's notice, `notice_seq`, §4, §7.1.1); the descriptions of `hqc_room` and `hqc_send` say
+session that wrote in it and is none of its agents how it ended and the room's last two entries
+since its previous notice or its first message there (the rest is read with `hqc_read`), under
+the lowest cap of everything said there since then (a room's notice, `notice_seq`, §4, §7.1.1); the descriptions of `hqc_room` and `hqc_send` say
 so. The agents see each other by their names in the room, quoted, next to their addresses, a
 name stripped of `|`, `[`, `]`, `"` and control characters, and each is told its own name. An
 agent's session keeps its name in the room (`hqc_rename` without `session` from it is

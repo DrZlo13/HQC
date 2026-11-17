@@ -346,7 +346,8 @@ open, according to the live sessions registry on the worker, §9.3; in the API s
 in `session.summary` it is the field `held_by?`), `vscode_held_at` (nullable; since when the
 transcript has been held; not part of the API session object), `system` (bool: the worker's
 service session, §10.2; the API session object carries only `system: true`), `spawned_by`
-(nullable; since 0.37, T34: the session whose agent created this one with `hqc_spawn`, §7;
+(nullable; since 0.37, T34: the session whose agent created this one with `hqc_spawn`, §7, and
+since 0.172 a room's agent's room, or the session whose agent made a room with `hqc_room`;
 cleared when that session is deleted) and `spawn_chain_id` (nullable: the chain of that call,
 §7.1, kept for the spawn limits of §20; not part of the API session object),
 `permission_mode` (nullable `ask` | `auto` | `allow_all`; since 0.42, T38, `allow_all` since
@@ -559,7 +560,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`) | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
-| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input: as on a `user.message`, §17.2), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
+| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input: as on a `user.message`, §17.2), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.161 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`), `call_id?`, `status?`, `task_id?` (since 0.135, only on `task_notification`), `from_session_id?` (since 0.172, only on `room_passed`: the agent that passed) | hub or worker; codes below |
@@ -580,7 +581,7 @@ the client renders only them. The "source" column is the component that produces
 | `input_rejected` | hub | the worker rejected an input other than as a failed start; the input became `failed` (§5.2) |
 | `ask_cancelled` | hub | in the asking session: a deferred `hqc_ask` was closed by `mcp.cancel` from the worker (§5.2), since 0.35 |
 | `peer_evicted` | hub | in the target session: the send buffer was over its limit and its oldest messages were dropped unread (§7.1), since 0.35 |
-| `room_stopped` | hub | since 0.172, in a room: the agents stopped waking each other until the owner writes (§7.1.1). In a `conversation`: their posts after the owner's last message reached the limit (once per owner's message), the speaker's turn ended without a post ("<agent>'s turn ended without a post; the agents go on when you write") or was lost ("<agent>'s turn was lost (<why>); the agents go on when you write"), or the speaker's runtime wrote its reply itself ("<agent>: <the reply>", the reply cut to 200 characters). In both modes: the owner stopped the room (`POST /stop`, "Stopped"), or an input from the room failed delivery ("<agent> did not get the message: <reason>", §5.2). In a `council`: an agent's runtime wrote its reply itself ("<agent>: <the reply>") |
+| `room_stopped` | hub | since 0.172, in a room: the agents stopped waking each other until the owner writes (§7.1.1). In a `conversation`: their posts after the owner's last message (or a non-member's: `hqc_room`'s first message, an `hqc_send` into the room, §7) reached the limit (once per owner's message), the speaker's turn ended without a post ("<agent>'s turn ended without a post; the agents go on when you write") or was lost ("<agent>'s turn was lost (<why>); the agents go on when you write"), or the speaker's runtime wrote its reply itself ("<agent>: <the reply>", the reply cut to 200 characters). In both modes: the owner stopped the room (`POST /stop`, "Stopped"), or an input from the room failed delivery ("<agent> did not get the message: <reason>", §5.2). In a `council`: an agent's runtime wrote its reply itself ("<agent>: <the reply>") |
 | `room_passed` | hub | since 0.172, in a room: an agent answered `NO_REPLY`, "<agent> passed", `from_session_id` the agent (§7.1.1); the client shows it as a quiet line |
 | `session_taken_over` | hub | the session was taken over (`POST /takeover`, §9.3) |
 | `forked_from` | hub | since 0.80: the end of a forked session's copied history (§6 `POST /api/sessions/{id}/fork`); `text` "Forked from <address> before the message of <time>"; since 0.134 the hub also puts it in front of the first input after it, for the agent (§6) |
@@ -2061,7 +2062,8 @@ new tab, Add to (Remove from) favorites, Rename, Move to project…, Folder rule
 workspace), Restart session and (since 0.160) Pause session (§17.3; not for an archived, a
 service, a VS Code-driven session or one whose worker is offline), or for a paused session Resume
 session in their place, Archive, and Delete…, which asks in a second step of the menu with the focus on
-Cancel. A desktop row (not in Reorder) can also be dragged onto another project on the bar, whose
+Cancel. Since 0.172 the chat header's "⋯" starts with the same Rename for a session that is not
+archived, a room and a room's agent included. A desktop row (not in Reorder) can also be dragged onto another project on the bar, whose
 tile or row is ringed while the row is over it: dropped there, the session moves
 (`POST /api/sessions/{id}/move`) into that project's one `ready` folder on the session's worker,
 or, with none or several, "Move to project…" opens over the list with that project chosen; a
@@ -2614,7 +2616,12 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   target wakes on sends; by default since 0.55) or `buffered` (the send buffer, §7.1); since 0.47 (T42) also
   `with_reply`: the send goes back with the reply to the target's open ask (§7.1). Since 0.54
   (T51) also `message_seq`: the `seq` of the `peer.message` in the session it went to (the
-  asker's for `with_reply`), from which the sender's client shows its delivery (§6).
+  asker's for `with_reply`), from which the sender's client shows its delivery (§6). Since 0.172
+  `session` may be a room the caller is not an agent of: the message goes into the room and the
+  room hands it to its agents (§7.1.1), `delivery: queued`, the message in the room
+  `delivered_at` when it is stored (the sender's card shows it delivered; the agents' answers stay
+  in the room); an agent of the room sending to its
+  own room, and `hqc_ask` to any room, are `invalid_args`.
 - `hqc_ask(text, session, timeout_s?)` — a message that waits for a reply. To the agent's own
   session: an immediate error. Since 0.35 (T32): the result is `{from, reply}` — the
   target's address and the text of its final answer; `timeout_s` is at least 1 and at most
@@ -2698,6 +2705,26 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   deleted automatically. A branch outlives its worktree (§13.2), so a default name used again
   (a slug taken again after its session was deleted) is refused by the worker; the agent gives
   `branch` then.
+- `hqc_room(project, workspace?, title?, mode?, agents, message)` (since 0.172) — create a room
+  of the owner (§7.1.1) as `POST /api/projects/{id}/rooms` does, checked the same way, and
+  return its address at once, not waiting for the agents. `project` and `workspace` as for
+  `hqc_spawn`; `mode` `conversation` (absent) or `council`; `agents` (at least one) each
+  `{name?, model?, provider?, prompt?}`, `prompt` its system prompt (as `system_prompt` of the
+  API), `model` and `provider` as for `hqc_spawn` (both: `invalid_args`; neither: the caller's
+  model and provider, a workspace whose machine does not allow that provider runs them on the
+  runtime's own endpoint); the agents' sessions run in `ask`, as a spawned session does. The
+  room records the caller as `spawned_by`; each of its agents counts as a spawned session in
+  the caller's chain in the limits (§20), the room itself does not, and a call over a limit
+  creates nothing. `message` (not blank) is the room's first message: a `peer.message` from the
+  calling session in the room, with the caller's chain moved on (§7.1), handed to the agents as
+  the owner's message is (in a `conversation` the first agent, in a `council` every agent), its
+  line naming the caller's address as a session's that is not one of the room's agents
+  (§7.1.1); the posts
+  limit of a conversation counts from it as from the owner's message, and its `room_stopped`
+  line names it. Once per call, as `hqc_spawn`: the room's id and the message's `event_id` are
+  derived from it, so a repeat answers the same address and completes a hand-on cut short. The
+  agents' inputs made from it continue the caller's chain, and their posts the chains of their
+  turns (§7.1.1), so the caller's chain limits reach through the room.
 - `hqc_list_sessions(project?)` — addresses, titles, statuses. Since 0.33 (T30): `project` is
   a slug or an id of the owner's project (another owner's or an unknown one: `not_found`); the
   result is `{sessions: [{address, title, status, subagents?, current?}], truncated}`: the owner's
@@ -2862,7 +2889,7 @@ and does not change on rename.
 A tool is listed in `tools/list` only once its task lands (iteration 3: `hqc_list_sessions`
 since 0.33, T30; `hqc_attach` since 0.34, T31; `hqc_send`, `hqc_ask` since 0.35, T32;
 `hqc_search_history` since 0.36, T33; `hqc_spawn` since 0.37, T34; `hqc_schedule` since 0.38, T35;
-`hqc_move` since 0.76; `hqc_rename` since 0.103; `hqc_secret` and `hqc_ssh_keygen` since 0.147,
+`hqc_move` since 0.76; `hqc_rename` since 0.103; `hqc_room` since 0.172; `hqc_secret` and `hqc_ssh_keygen` since 0.147,
 listed by the worker's MCP server only with `HQC_SECRET_TOOLS=1` in its environment, which the
 worker sets for a session that may have secrets); the list is shared by the worker's MCP
 server and the hub (`hqc_proto::mcp::TOOLS`), the hub's implementations are a registry next
@@ -3098,8 +3125,14 @@ own model and system prompt; what an agent writes at the end of its turn goes to
 itself, so the agent needs no tool for it (user decision, 2026-11-15). The room is a session with
 no workspace, no worker and no agent (`agent.runtime: none`, `room_mode`, §3 Session): no
 process starts for it, it takes no `model`, `permission_mode`, `browser` or pause (`409 room`, §6), and
-it is no target of `hqc_send`, `hqc_ask`, `hqc_rename` with `session` or an agent's schedule
-(`not_found`, as a service session). An agent of a room sends nothing to another agent of the
+it is no target of `hqc_rename` with `session` or an agent's schedule (`not_found`, as a service
+session), nor of `hqc_ask` (`invalid_args`: a room answers no ask, §7). Since 0.172 it is a target of `hqc_send` from a session that is not one of
+its agents (user decision, 2026-11-17): the message goes into the room as `hqc_room`'s first message does (§7) — a
+`peer.message` from the sender in the room, its chain moved on as a send's, its files with it —
+and the room hands it to its agents as the owner's message (in a `conversation` the speaker, else
+the first agent; in a `council` every agent); the posts limit counts from it. An archived room is
+`not_found` to a send, as an archived session is. An agent of the room sends nothing to its own room (`invalid_args`: its final
+message is posted there). An agent of a room sends nothing to another agent of the
 same room with `hqc_send` or `hqc_ask`, nor schedules it one with `hqc_schedule` (its own session
 it may): `invalid_args` "<target's address> is another agent of
 your room: your final message is posted to the room, and the other agents read it there; answer
@@ -3139,9 +3172,12 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   room <room address> | since your last turn]`; oldest first, per post the line `[hqc room
   <room address> | post from <agent's address>]`, per owner's message (in a `conversation`
   only: in a `council` every agent gets each of them) the line `[hqc room <room address> |
-  message from your owner]`, its text and an empty line, as the worker's block of buffered
+  message from your owner]`, per message of a session that is not one of the room's agents (the
+  one that made the room with `hqc_room`, or one that sent with `hqc_send`, §7; in a `conversation`
+  only, as the owner's) the line `[hqc room <room address> | message from <its address>]`, its
+  text and an empty line, as the worker's block of buffered
   sends (§7.1); and `---`; then the line `[hqc room <room address> | from
-  <your owner | the sending agent's address> | your final message is posted to the room, where
+  <your owner | the sending session's address> | your final message is posted to the room, where
   the other agents read it: do not message them | reply exactly NO_REPLY to post nothing | your
   session's title is your name in the room: do not rename it]`, an empty line and the text. An agent is named by the address the hub stored with the
   post or the input (`from`), not by its title, which any session of the owner may change
@@ -3182,7 +3218,7 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   (below). Such a turn's `NO_REPLY` or reply the runtime wrote itself writes nothing: a pass
   would count on the room's last message, and the runtime's reply would stop the room. A post
   wakes nobody by itself.
-- `council`: nobody is woken but by the owner's message; each agent sees the other agents' posts
+- `council`: nobody is woken but by the owner's message or a non-member's; each agent sees the other agents' posts
   with its next input from the room (above).
 - `conversation`: the agents speak one at a time, in the room's order, the first after the
   last (user decision, 2026-11-16). The speaker is the agent the room woke last (its latest
@@ -3202,7 +3238,7 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   the owner wrote last) decides: its latest post that is no aside goes to the next agent after
   it as the owner's message does, from the posting
   agent (`room.seq` the post's) with the post's files, while at most 20 posts (the `hops` limit
-  of a chain, above and §20) follow the owner's last message before it, else the room gets
+  of a chain, above and §20) follow the owner's last message before it (or a non-member's, §7), else the room gets
   `system room_stopped` instead; without a post, its pass goes on with the room's last post that
   is no aside, or owner's message, to the next agent after the passer that is not that message's author, from
   its author (the room for the owner's message), and once every agent but that author passed
@@ -3231,25 +3267,44 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   person's message does (`joined`, §17.2): the turn's final message answers both and is one
   post.
 - Notifications (§16): an agent's final message pushes nothing; its post in the room does, under
-  the room's title with the body "<agent's title>: <text>", and the click opens the room. The
-  agent's approval requests and questions push as in any session.
+  the room's title with the body "<agent's title>: <text>", and the click opens the room; so does
+  a non-member's message there, with its sender's title. The agent's approval requests and
+  questions push as in any session.
 - The client lists only the room: an agent's session (`room_id`) is in no list or count; the
   room's state there is its agents' (one needs the owner — needs you, else one runs —
-  running), its row has the room's icon, and the room's header names its agents with their
-  state, each a link to its session, and has Stop (`POST /stop` of the room). A room has no
-  Restart and no Move, in its menu or by dragging its row. The room's feed
+  running), its row has the room's icon in place of the state dot, in the dot's colors, and the
+  room's header names its agents with their state, each a link to its session, has Stop (`POST
+  /stop` of the room) and the room's cost, the sum of its agents' (each as its own header counts
+  it, one with a provider left out), "$X this room". A room has no
+  Restart, no Pause and no Move, in its menu or by dragging its row. The room's feed
   shows its agents' open approval requests and questions, an agent's post under its agent's
   title in place of "Message from", a pass as a quiet line, and at its bottom a line per agent at
   work, as a session's feed shows its own agent's work (§6); on the project bar the rate and the
-  count of agents at work of a room are those of its running agents (§6). "New room" takes a
-  name for each agent (`name`, §6). Search (§15) leaves out an agent's inputs from the room, which the room has: the
+  count of agents at work of a room are those of its running agents (§6). "New room" opens a
+  window like a new session's (`#/p/<id>/new-room`): chips over the input — one per agent, which
+  opens its name (`name`, §6), model and prompt, "+ Agent", then the mode, the workspace, the
+  folder and the permissions — and the first message creates the room (`POST
+  /api/projects/{id}/rooms` without a title: "Room N") and goes in as its first message. Search (§15) leaves out an agent's inputs from the room, which the room has: the
   owner's message in a room is found once, in the room, and the rest of an agent's session (its
   commands, their output, its messages) is found there, by its address.
-- Each input from the room and each post carries a chain of its own, as a person's input does,
-  and the turn on an input starts a chain of its own for what it sends. The owner's message
-  carries no cap (T39). A post keeps in its chain the cap that its agent's `hqc_send` would
-  carry (above: the lower of its mode and the cap of its turn, `capped_by` as there), decided
-  when the post is stored. An input made from an agent's post carries that cap, but only to an
+- Only a person's message starts a chain in a room (§7.1): each input made from the owner's
+  message starts a chain of its own, as a person's input does. An input made from a non-member's
+  message (`hqc_room`'s first message, an `hqc_send` into the room) continues the chain stored
+  with it, its sender's moved on; an agent's post is stored with the chain its agent's `hqc_send`
+  would carry from that turn (the turn's chain moved on), and an input made from a post continues
+  it. So a loop through a room with no person in it — an outside session writing in, an agent of
+  the room answering it with `hqc_send`, and so on, or a post waking the next agent, which writes
+  to that session — ends at the chain's limits (§7.1, §20) as any loop of sends does. The owner's
+  message that joins an agent's running turn (§17.2) gives that turn's post the chain of the input
+  made from it, moved on, not the chain of the input that opened the turn. A post is stored and
+  wakes the next agent whatever its `hops`: only the posts limit stops a conversation, and the
+  chain's limits refuse the agents' own sends, spawns and schedules. A post or a message into a
+  room counts once in its chain's messages (§20): the inputs the room makes from it for its agents
+  are not counted. The owner's
+  message carries no cap (T39); a non-member's message carries its sender's cap to the inputs
+  made from it, as a post does. A post keeps in its chain the cap that its agent's `hqc_send`
+  would carry (above: the lower of its mode and the cap of its turn, `capped_by` as there),
+  decided when the post is stored. An input made from an agent's post carries that cap, but only to an
   agent whose own mode, when the post is stored, is above it (the mode the user asked for, else
   the one its worker reported, `allow_all` while neither is known): a capped input never joins a
   running turn (§17.2), and agents in the same mode keep joining. In both modes the posts that
@@ -5976,7 +6031,7 @@ send from a session in a lower mode (§7.1).
   | `hqc_ask.timeout_s` (§7) | 1 … `ask_timeout_s` (600 s), larger cut to it | `0`: `error invalid_args` |
   | `hqc_list_sessions` (§7) | 200 sessions per call | `truncated: true` |
   | search query (§15, since 0.36): `GET /api/search`, `hqc_search_history` | `q` 1–200 characters, no U+0000 (since 0.119), fuzzy at least 3; 50 hits per page (the tool 20); 5 s `statement_timeout` | `400 bad_request` / `mcp.result` `error invalid_args` |
-  | `hqc_spawn` (§7, since 0.37): sessions spawned in one chain (§7.1; a human's turn is one chain); since 0.61 (T47) the owner's ephemeral worktrees still being made count in both spawn limits, in every chain, as the sessions they will get (no limit of their own) | 5 | `mcp.result` `error limit_exceeded`, nothing is created |
+  | `hqc_spawn` (§7, since 0.37): sessions spawned in one chain (§7.1; a human's turn is one chain); since 0.61 (T47) the owner's ephemeral worktrees still being made count in both spawn limits, in every chain, as the sessions they will get (no limit of their own); since 0.172 each agent of a room made with `hqc_room` counts as a session (the room does not), in both spawn limits | 5 | `mcp.result` `error limit_exceeded`, nothing is created |
   | … sessions spawned per owner | 20 in the last hour (sliding, by `created_at`; deleted sessions no longer count); since 0.39 counted and created under a per-owner lock, so parallel calls cannot overshoot | same |
   | `hqc_attach` file (§7, since 0.34) | a regular file of at most 100 MB, inside the session's workspace and `allowed_roots` after resolving symlinks; streamed, exactly the size of the open handle | `mcp.result` `error invalid_args` from the worker, nothing is uploaded |
   | `PUT /worker/artifacts` (§5.4) | 100 MB (`Content-Length` checked first, then the stream); a session of this worker | `413 too_large` / `404` |
@@ -6102,15 +6157,28 @@ input from the room that fails delivery is a `room_stopped` line in the room; `P
 room stops its agents and leaves their inputs as they are, and a turn on a message from before
 its "Stopped" posts nothing unless a later one joined it. The hub decides and stores what a room
 does under one lock per room. A room is no
-target of `hqc_send` and takes no model, permission mode, browser or pause (`409 room`); an agent
-of a room sends or schedules nothing to another agent of it (`invalid_args`), and the room line tells it that the
+target of `hqc_ask` (`invalid_args`), of `hqc_rename` with `session` or of a schedule
+(`not_found`), and takes no model, permission mode, browser or pause (`409 room`); an agent of
+a room sends or schedules nothing to another agent of it (`invalid_args`), and the room line tells it that the
 other agents read its final message in the room. The
 session object has `room_mode?` and `room_id?`; `system_prompt` of an agent is written on
 creation for the first time, at most 32 KiB (`400`), a NUL in it replaced. A room's input that
-reaches a running turn joins it (`joined`, §4, §17.2); an agent's final message pushes nothing, its post in the room does, named by its agent (§16). The client
-lists only the room, with its agents' state and the room's icon, names the agents in the room's
-header with Stop, shows a line per agent at work at the bottom of the room's feed and a post
-under its agent's title, and has no Restart or Move for a room. An
+reaches a running turn joins it (`joined`, §4, §17.2); an agent's final message pushes nothing, its post in the room does, named by its agent, and so does a non-member's message there, named by its sender (§16). The client
+lists only the room, with its agents' state on the room's icon in place of the state dot, names
+the agents in the room's header with Stop and the sum of their costs ("$X this room"), shows a
+line per agent at work at the bottom of the room's feed and a post under its agent's title, has
+no Restart, Pause or Move for a room, and opens "New room" as a window like a new session's: chips over
+the input for each agent (its name, model and prompt), the mode, the workspace, the folder and
+the permissions, the first message creating the room. §6: the chat header's "⋯" starts with
+Rename, for a room and an agent too. §7, §20: `hqc_room` makes a room as `hqc_spawn` makes a
+session, each agent counted as a spawned session, its first message a `peer.message` from the
+caller that counts as the owner's message does; `hqc_send` to a room from a session that is not one
+of its agents posts into it the same way (an agent of the room sends nothing to its own room),
+under the line `[hqc room <room> | message from <its address>]` in front of a later input. Only
+a person's message starts a chain in a room, the owner's message joining a running turn too; an
+input made from a non-member's message or a post continues its chain, a post is stored whatever
+its `hops` (only the posts limit stops a conversation), and it counts once in the chain's
+messages, the inputs made from it not counted (§7.1.1). An
 agent's session keeps its name in the room (`hqc_rename` without `session` from it is
 `invalid_args`, and the room line says so, §7); a post carries the files its turn attached
 since the input or the agent's previous final message, whichever came later, so a second post

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.156, 2026-11-17. Status: the architecture agreed after six reviews and a survey of
+Version 0.159, 2026-11-17. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -626,7 +626,14 @@ Transport: one persistent WebSocket connection from the worker to the hub, JSON 
 
 Every frame: `{id, type, payload}`. The response to a request frame:
 `{id, type: "ack"|"result"|"error", payload}` with the same `id` (to `hello` — `hello.ack`
-or `error`). Fields with `?` — as in §4.
+or `error`). Fields with `?` — as in §4. Since 0.159 the hub's frame ids are unique across its
+connections (`h-<connection>-<n>`): the worker answers a frame of an earlier connection after
+reconnecting under that frame's id (an input it held until the agent took it), and such an
+answer matches no frame of the new connection; the hub re-sends what is still pending (§5.2),
+and the worker answers a re-sent input its agent already took with the same `ack` from memory
+(the last 256 of each session) instead of running it again. With `h-<n>` counted from 1 on
+each connection it matched another frame of the new one, and the hub credited that frame's
+input or `session.start` with it.
 
 - `ack` {event_id?, seq?}: to an `event` — `{event_id, seq}` (§5.2), to a `session.input` —
   `{event_id}` of the delivered input, otherwise an empty `{}`.
@@ -5341,6 +5348,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.156 → 0.159 (an answer to an earlier connection answers no frame of the new one)
+§5: the hub numbered its frames to a worker from `h-1` on each connection, and a worker answers
+a frame under its id even after reconnecting: an input it held through a hub restart is
+acknowledged when the agent takes it. On a test hub such an `ack` came under the id of a frame
+the new connection had given to another session's input, and the hub marked that input
+delivered and joined to a turn although its agent never got it; after a restart of that session
+the hub did not send it again. The ids are now `h-<connection>-<n>`, `<connection>` the random
+low bits of the connection's id; an answer to an earlier connection matches no frame and is
+dropped, and the hub re-sends what is still pending, as before. 0.157 and 0.158 are taken by
+other pull requests.
 
 ### 0.149 → 0.156 (a fork is quick, and says so while it is made)
 §6, §15: the events a fork copies go in without their search words and the hub writes them

@@ -978,6 +978,126 @@ describe('composer', () => {
   });
 });
 
+describe('quick messages', () => {
+  const MESSAGES = ['Continue', 'Run the tests\nand fix what fails'];
+  const area = () => $('.composer-input') as HTMLTextAreaElement;
+  const type = (text: string) =>
+    act(() => {
+      area().value = text;
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  /** A chat whose project has `messages`; sending reaches the hub as `api.input`. */
+  async function chat(messages: string[]) {
+    const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+    app.projects.set('p1', { id: 'p1', name: 'hqc', slug: 'hqc', description: '', is_personal: false, color: 'teal', quick_messages: messages, created_at: '2026-10-01T00:00:00Z' });
+    // GET /api/projects/{id}, which opening the list asks for: the hub's list, which another
+    // device may have changed.
+    Object.assign(api, { input: vi.fn(() => new Promise(() => {})), project: vi.fn(async () => app.project('p1')) });
+    await mount(app);
+    return api as unknown as { input: ReturnType<typeof vi.fn>; project: ReturnType<typeof vi.fn> };
+  }
+  const open = () => act(async () => $('.composer .btn-quick')!.click());
+  const items = () => [...root.querySelectorAll('button.quick-item')];
+
+  it('is a button after attach; it opens the messages, each on one line with its whole text as the title', async () => {
+    await chat(MESSAGES);
+    const row = $('.composer .composer-row')!;
+    expect([...row.children].map((c) => c.getAttribute('aria-label'))).toEqual(['Attach files', 'Quick messages', 'Message', 'Send']);
+    const button = $('.btn-quick')!;
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(button.getAttribute('aria-controls')).toBeNull();
+    expect($('.quick-popup')).toBeNull();
+    await open();
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    expect(button.getAttribute('aria-controls')).toBe('composer-quick');
+    expect(items().map((i) => i.textContent)).toEqual(['Continue', 'Run the tests']);
+    expect(items().map((i) => i.getAttribute('title'))).toEqual(MESSAGES);
+    expect($('.quick-edit a')!.textContent).toBe('Edit quick messages');
+    expect($('.quick-edit a')!.getAttribute('href')).toBe('#/p/p1/settings');
+    await open();
+    expect($('.quick-popup')).toBeNull();
+  });
+
+  it('sends the exact text of the pressed message and leaves the typed text and the files alone', async () => {
+    const api = await chat(MESSAGES);
+    await type('a draft');
+    const input = $('input[type=file]') as HTMLInputElement;
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'note.txt', { type: 'text/plain' })], configurable: true });
+    await act(async () => void input.dispatchEvent(new Event('change', { bubbles: true })));
+    await vi.waitFor(() => expect($('.composer-files .attachment-chip')?.textContent).toContain('note.txt'));
+    await open();
+    await act(async () => (items()[1] as HTMLElement).click());
+    await vi.waitFor(() => expect(api.input).toHaveBeenCalledTimes(1));
+    expect(api.input).toHaveBeenCalledWith('s1', MESSAGES[1], expect.any(String), []);
+    expect($('.quick-popup')).toBeNull();
+    expect(area().value).toBe('a draft');
+    expect($('.composer-files .attachment-chip')?.textContent).toContain('note.txt');
+  });
+
+  it('closes on Esc and on a press outside it, and keeps the focus in the field', async () => {
+    await chat(MESSAGES);
+    area().focus();
+    await open();
+    await act(async () => void document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+    expect($('.quick-popup')).toBeNull();
+    await open();
+    await act(async () => void $('.feed')!.dispatchEvent(new Event('pointerdown', { bubbles: true })));
+    expect($('.quick-popup')).toBeNull();
+    // The press on its button and on an item leaves the focus where it is.
+    await open();
+    for (const el of [$('.btn-quick')!, items()[0]]) {
+      const e = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+      el.dispatchEvent(e);
+      expect(e.defaultPrevented).toBe(true);
+    }
+    expect(document.activeElement).toBe(area());
+  });
+
+  it('shows the kept list at once on opening and the hub\'s when its answer comes', async () => {
+    const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+    const project = { id: 'p1', name: 'hqc', slug: 'hqc', description: '', is_personal: false, color: 'teal' as const, quick_messages: ['Continue'], created_at: '2026-10-01T00:00:00Z' };
+    app.projects.set('p1', project);
+    let answer!: () => void;
+    Object.assign(api, {
+      project: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            answer = () => resolve({ ...project, quick_messages: ['Continue', 'Added on the phone'] });
+          }),
+      ),
+    });
+    await mount(app);
+    await open();
+    expect((api as unknown as { project: ReturnType<typeof vi.fn> }).project).toHaveBeenCalledWith('p1');
+    expect(items().map((i) => i.textContent)).toEqual(['Continue']);
+    await act(async () => answer());
+    expect(items().map((i) => i.textContent)).toEqual(['Continue', 'Added on the phone']);
+  });
+
+  it('is never open together with the list of completions: each closes the other', async () => {
+    const { app, api } = setup('idle', { history: HISTORY.slice(0, 3), commands: ['compact', 'context'] });
+    app.projects.set('p1', { id: 'p1', name: 'hqc', slug: 'hqc', description: '', is_personal: false, color: 'teal', quick_messages: MESSAGES, created_at: '2026-10-01T00:00:00Z' });
+    Object.assign(api, { project: vi.fn(async () => app.project('p1')) });
+    await mount(app);
+    await type('/co');
+    expect($('#composer-commands')).not.toBeNull();
+    await open();
+    expect($('#composer-commands')).toBeNull();
+    expect($('.quick-popup')).not.toBeNull();
+    await type('/con');
+    expect($('.quick-popup')).toBeNull();
+    expect($('#composer-commands')).not.toBeNull();
+  });
+
+  it('with no messages says where to add them, with the same link', async () => {
+    await chat([]);
+    await open();
+    expect(items()).toEqual([]);
+    expect($('.quick-edit')!.textContent).toBe('No quick messages yet — add them in project settings');
+    expect($('.quick-edit a')!.getAttribute('href')).toBe('#/p/p1/settings');
+  });
+});
+
 describe('phone (Mobile-Session)', () => {
   it('the open request is a bottom sheet in place of the composer, with the text answer', async () => {
     const { api, app } = setup('waiting');

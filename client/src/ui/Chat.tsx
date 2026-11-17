@@ -17,7 +17,7 @@ import { useSubscription } from './hooks';
 import { copyText } from '../clipboard';
 import { ContextMenu } from './ContextMenu';
 import { ComposerSecret } from './secrets';
-import { IconArchive, IconAttach, IconKey, IconBack, IconCode, IconCopy, IconLock, IconMore, IconPanel, IconQuote, IconSearch, IconSend, IconShield, IconStop } from './icons';
+import { IconArchive, IconAttach, IconBolt, IconKey, IconBack, IconCode, IconCopy, IconLock, IconMore, IconPanel, IconQuote, IconSearch, IconSend, IconShield, IconStop } from './icons';
 import { MODE_LABELS, STATE_LABELS, agentsLabel, formatCost, homePath, modeConfirm, modelName, shownModel } from './labels';
 import { LiveSubagents } from './LiveSubagents';
 import { CopyButton } from './Markdown';
@@ -125,6 +125,7 @@ export function Chat({
   useSubscription((fn) => app.onChange(fn), [app]);
 
   const info = app.sessions.get(sessionId);
+  const project = info && app.project(info.project_id);
   const state = info?.state ?? 'unknown';
   // The worker's service session (SPEC §10.2): requests and log lines, no input.
   const system = info?.system ?? false;
@@ -757,6 +758,17 @@ export function Chat({
             setFiles([]);
           }}
           giveSecret={!system && app.takesSecrets(info?.worker_id) ? (f) => app.api.giveSecret(sessionId, f) : undefined}
+          quick={
+            project && {
+              messages: project.quick_messages ?? [],
+              refresh: () => void app.refreshProject(project.id).catch(() => {}),
+              send: (text) => {
+                stick.current = true;
+                chat.send(text, []);
+              },
+              settingsHref: `#/p/${project.id}/settings`,
+            }
+          }
         />
       )}
       {viewing && (
@@ -1131,6 +1143,7 @@ export function Composer({
   autoFocus = false,
   wait,
   giveSecret,
+  quick,
 }: {
   onSend: (text: string) => void;
   placeholder?: string;
@@ -1156,6 +1169,10 @@ export function Composer({
   /** "Secret" beside attach (SPEC 0.147): only where the session's worker takes secrets. The
    *  answer's `note` goes into the text; the value goes nowhere else. */
   giveSecret?: (f: SecretFields) => Promise<SecretGiven>;
+  /** The project's quick messages: a button beside the field opens them, one press of a message
+   *  sends it (`send`) and leaves the field's text and files as they are. `settingsHref` is where
+   *  the list is edited. */
+  quick?: { messages: string[]; send: (text: string) => void; refresh: () => void; settingsHref: string };
 }) {
   const [text, setText] = useState(initial);
   const typed = useRef(false);
@@ -1206,10 +1223,44 @@ export function Composer({
   useLayoutEffect(() => {
     list.current?.children[active]?.scrollIntoView?.({ block: 'nearest' });
   }, [active, popup]);
+  const [quickOpen, setQuickOpen] = useState(false);
+  const quickList = useRef<HTMLUListElement>(null);
+  const quickButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!quickOpen) return;
+    const doc = area.current?.ownerDocument ?? document;
+    const away = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (!quickList.current?.contains(t) && !quickButton.current?.contains(t)) setQuickOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      // A message of the list had the focus: it goes with the list, back to the opener.
+      if (quickList.current?.contains(doc.activeElement)) quickButton.current?.focus();
+      setQuickOpen(false);
+    };
+    doc.addEventListener('pointerdown', away);
+    doc.addEventListener('keydown', esc, true);
+    return () => {
+      doc.removeEventListener('pointerdown', away);
+      doc.removeEventListener('keydown', esc, true);
+    };
+  }, [quickOpen]);
   const edit = (t: string) => {
     // In the same update as the text: a key right after typing moves from the first match.
     setPick(0);
     setText(t);
+    // Typing is for the slash popup now: the two are never open together.
+    setQuickOpen(false);
+  };
+  const toggleQuick = () => {
+    // Opening hides the slash popup until the text changes.
+    setClosedAt(text);
+    // The list on show is the one kept here; what another device changed comes with the answer.
+    if (!quickOpen) quick?.refresh();
+    setQuickOpen(!quickOpen);
   };
   const insert = (c: string) => {
     edit(`/${c} `);
@@ -1262,6 +1313,20 @@ export function Composer({
       onClick={() => setSecretOpen(!secretOpen)}
     >
       <IconKey />
+    </button>
+  );
+  const quickButtonEl = quick && (
+    <button
+      ref={quickButton}
+      type="button"
+      class={`icon-btn btn-quick ${quickOpen ? 'is-on' : ''}`}
+      aria-label="Quick messages"
+      title="Quick messages"
+      aria-expanded={quickOpen}
+      aria-controls={quickOpen ? 'composer-quick' : undefined}
+      onClick={toggleQuick}
+    >
+      <IconBolt />
     </button>
   );
   const send = (
@@ -1353,6 +1418,34 @@ export function Composer({
             ))}
           </ul>
         )}
+        {quick && quickOpen && (
+          <ul class="cmd-popup quick-popup" id="composer-quick" aria-label="Quick messages" ref={quickList}>
+            {quick.messages.map((m, i) => (
+              <li key={i}>
+                <button
+                  type="button"
+                  class="cmd-item quick-item"
+                  title={m}
+                  onClick={() => {
+                    quick.send(m);
+                    setQuickOpen(false);
+                  }}
+                >
+                  {m.trim().split('\n')[0]}
+                </button>
+              </li>
+            ))}
+            <li class="quick-edit">
+              {quick.messages.length === 0 ? (
+                <>
+                  No quick messages yet — <a href={quick.settingsHref}>add them in project settings</a>
+                </>
+              ) : (
+                <a href={quick.settingsHref}>Edit quick messages</a>
+              )}
+            </li>
+          </ul>
+        )}
         {(files.length > 0 || reading > 0) && (
           <div class="composer-files">
             {reading > 0 && (
@@ -1391,6 +1484,7 @@ export function Composer({
         <div class="composer-row">
           {attach}
           {secretButton}
+          {quickButtonEl}
           {textarea}
           {send}
         </div>

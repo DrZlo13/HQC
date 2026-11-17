@@ -165,6 +165,12 @@ export const IconAttach = ({ size = 17 }: { size?: number }) => (
   </Svg>
 );
 
+export const IconBolt = ({ size = 17 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M11 2.5L4.5 11h4.5l-1 6.5L15.5 9H11z" />
+  </Svg>
+);
+
 export const IconArchive = ({ size = 16 }: { size?: number }) => (
   <Svg size={size}>
     <rect x="3" y="4" width="14" height="4" rx="1" />

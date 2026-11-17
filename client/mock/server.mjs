@@ -742,6 +742,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     const p = {
       id: randomUUID(), owner_id: userId, name, slug, description,
       is_personal: false, color: COLORS[projects.size % COLORS.length], created_at: now(), updated_at: now(),
+      quick_messages: [],
     };
     projects.set(p.id, p);
     return p;
@@ -767,7 +768,13 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       icons.delete(pr.id);
       body.icon = { kind: body.icon.kind, value: body.icon.kind === 'letters' ? body.icon.value.toUpperCase() : body.icon.value };
     }
-    for (const k of ['name', 'description', 'default_workspace_id', 'color', 'icon']) if (body?.[k] !== undefined) pr[k] = body[k];
+    const quick = body?.quick_messages;
+    if (quick !== undefined) {
+      if (quick.length > 100) throw fail(400, 'bad_request', 'more than 100 quick messages');
+      if (quick.some((m) => !m.trim())) throw fail(400, 'bad_request', 'a quick message is blank');
+      if (quick.some((m) => [...m].length > 10000)) throw fail(400, 'bad_request', 'a quick message is longer than 10000 characters');
+    }
+    for (const k of ['name', 'description', 'default_workspace_id', 'color', 'icon', 'quick_messages']) if (body?.[k] !== undefined) pr[k] = body[k];
     pr.updated_at = now();
     return pr;
   });

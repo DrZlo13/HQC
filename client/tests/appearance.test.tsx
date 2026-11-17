@@ -127,7 +127,7 @@ it('opens the project settings from the column\'s "⋯": appearance, workspaces,
   await until('settings page', () => $('.project-settings'));
   expect($('.project-settings .bar .title')!.textContent).toBe('Project settings');
   expect($('.project-settings .bar .state')!.textContent).toBe('Personal');
-  expect($$('.project-settings h2').map((h) => h.textContent)).toEqual(['Appearance', 'Workspaces']);
+  expect($$('.project-settings h2').map((h) => h.textContent)).toEqual(['Appearance', 'Quick messages', 'Workspaces']);
   // The personal project gets an appearance, but no rename or delete (SPEC §3).
   expect($('.ps-look .ps-color')!.textContent).toBe('Slate');
   const row = await until('workspace row', () => $('.workspace-row'));
@@ -141,6 +141,138 @@ it('opens the project settings from the column\'s "⋯": appearance, workspaces,
   expect(button('Import from Claude Code')).toBeDefined();
   expect($('.btn-rename-project')).toBeNull();
   expect($('.btn-delete-project')).toBeNull();
+});
+
+it("keeps the project's quick messages: an added, an edited and a deleted one each leave the whole list on the hub", async () => {
+  const pid = app.me!.personal_project_id;
+  location.hash = `#/p/${pid}/settings`;
+  await until('quick messages', () => $('.quick-messages'));
+  const stored = async () => (await app.api.projects()).find((p) => p.id === pid)!.quick_messages;
+  const type = async (text: string) => {
+    const area = await until('the form', () => $<HTMLTextAreaElement>('.quick-input'));
+    area.value = text;
+    area.dispatchEvent(new win.Event('input', { bubbles: true }) as unknown as Event);
+    await new Promise((r) => setTimeout(r, 10));
+  };
+  const save = async () => {
+    $<HTMLButtonElement>('.btn-quick-save')!.click();
+    await until('the form closed', () => !$('.quick-form'));
+  };
+  const texts = () => $$('.quick-text').map((t) => t.textContent);
+  expect(texts()).toEqual([]);
+
+  for (const text of ['Continue', 'Run the tests\nand fix what fails']) {
+    $<HTMLButtonElement>('.btn-quick-add')!.click();
+    await type(text);
+    await save();
+  }
+  expect(await stored()).toEqual(['Continue', 'Run the tests\nand fix what fails']);
+  expect(texts()).toEqual(['Continue', 'Run the tests\nand fix what fails']);
+
+  // A blank text is not saved.
+  $<HTMLButtonElement>('.btn-quick-add')!.click();
+  await type('   ');
+  expect($<HTMLButtonElement>('.btn-quick-save')!.disabled).toBe(true);
+  $<HTMLButtonElement>('.btn-quick-cancel')!.click();
+  await until('the form closed', () => !$('.quick-form'));
+
+  // Edited in place: the form starts from the text, the order stays.
+  $$('.btn-quick-edit')[0].click();
+  expect(await until('the form', () => $<HTMLTextAreaElement>('.quick-input')).then((a) => a.value)).toBe('Continue');
+  await type('Continue, please');
+  await save();
+  expect(await stored()).toEqual(['Continue, please', 'Run the tests\nand fix what fails']);
+
+  $$('.btn-quick-delete')[0].click();
+  await until('deleted', () => texts().length === 1);
+  expect(await stored()).toEqual(['Run the tests\nand fix what fails']);
+  $$('.btn-quick-delete')[0].click();
+  await until('deleted', () => texts().length === 0);
+  expect(await stored()).toEqual([]);
+});
+
+it("sends the hub's list with the one change: what another device added is kept, and an error shows", async () => {
+  const pid = app.me!.personal_project_id;
+  location.hash = `#/p/${pid}/settings`;
+  await until('quick messages', () => $('.quick-messages'));
+  await app.api.patchProject(pid, { quick_messages: [] });
+  await app.refreshProject(pid);
+  const texts = () => $$('.quick-text').map((t) => t.textContent);
+  const type = async (text: string) => {
+    const area = await until('the form', () => $<HTMLTextAreaElement>('.quick-input'));
+    area.value = text;
+    area.dispatchEvent(new win.Event('input', { bubbles: true }) as unknown as Event);
+    await new Promise((r) => setTimeout(r, 10));
+  };
+  const stored = async () => (await app.api.projects()).find((p) => p.id === pid)!.quick_messages;
+  const add = async (text: string) => {
+    $<HTMLButtonElement>('.btn-quick-add')!.click();
+    await type(text);
+    $<HTMLButtonElement>('.btn-quick-save')!.click();
+    await until('the form closed', () => !$('.quick-form'));
+  };
+  await add('mine');
+  expect(texts()).toEqual(['mine']);
+
+  // Another device adds one and drops nothing of ours; this page has not heard of it.
+  await app.api.patchProject(pid, { quick_messages: ['mine', 'from the phone'] });
+  expect(texts()).toEqual(['mine']);
+  await add('second');
+  expect(await stored()).toEqual(['mine', 'from the phone', 'second']);
+  expect(texts()).toEqual(['mine', 'from the phone', 'second']);
+
+  // An edit replaces the message it started from, wherever it is now; one gone is added.
+  $$('.btn-quick-edit')[2].click();
+  await type('second, edited');
+  await app.api.patchProject(pid, { quick_messages: ['from the phone', 'mine', 'second'] });
+  $<HTMLButtonElement>('.btn-quick-save')!.click();
+  await until('the form closed', () => !$('.quick-form'));
+  expect(await stored()).toEqual(['from the phone', 'mine', 'second, edited']);
+  $$('.btn-quick-edit')[0].click();
+  await type('gone');
+  await app.api.patchProject(pid, { quick_messages: ['mine', 'second, edited'] });
+  $<HTMLButtonElement>('.btn-quick-save')!.click();
+  await until('the form closed', () => !$('.quick-form'));
+  expect(await stored()).toEqual(['mine', 'second, edited', 'gone']);
+
+  // A delete removes the message it was pressed on; one the hub no longer has sends nothing.
+  await app.api.patchProject(pid, { quick_messages: ['mine', 'second, edited', 'gone', 'later'] });
+  $$('.btn-quick-delete')[1].click();
+  await until('deleted', () => texts().join('|') === 'mine|gone|later');
+  expect(await stored()).toEqual(['mine', 'gone', 'later']);
+  await app.api.patchProject(pid, { quick_messages: ['mine', 'later'] });
+  $$('.btn-quick-delete')[1].click();
+  await until('refreshed', () => texts().length === 2);
+  expect(await stored()).toEqual(['mine', 'later']);
+
+  // An open form holds the other buttons; Cancel clears an error.
+  $$('.btn-quick-edit')[0].click();
+  await until('the form', () => $('.quick-form'));
+  expect([...$$('.btn-quick-edit'), ...$$('.btn-quick-delete'), $<HTMLButtonElement>('.btn-quick-add')!].every((b) => (b as HTMLButtonElement).disabled)).toBe(true);
+  await type('x'.repeat(10001));
+  $<HTMLButtonElement>('.btn-quick-save')!.click();
+  await until('the hub\'s refusal', () => $('.quick-messages .error-text'));
+  expect($('.quick-messages .error-text')!.textContent).toContain('longer than 10000 characters');
+  expect($('.quick-form')).not.toBeNull();
+  $<HTMLButtonElement>('.btn-quick-cancel')!.click();
+  await until('closed', () => !$('.quick-form') && !$('.quick-messages .error-text'));
+
+  // The list changes under an open edit: the form follows its message by text, and stands at the
+  // end when the message is gone, with its text and a working Cancel.
+  $$('.btn-quick-edit')[1].click();
+  await type('later, edited');
+  await app.api.patchProject(pid, { quick_messages: ['new first', 'mine', 'later'] });
+  await app.refreshProject(pid);
+  await until('the form in place of its row', () => texts().join('|') === 'new first|mine');
+  expect($('.btn-quick-add')).not.toBeNull();
+  await app.api.patchProject(pid, { quick_messages: ['mine'] });
+  await app.refreshProject(pid);
+  await until('the form at the end', () => texts().join('|') === 'mine' && !$('.btn-quick-add'));
+  expect($<HTMLTextAreaElement>('.quick-input')!.value).toBe('later, edited');
+  $<HTMLButtonElement>('.btn-quick-cancel')!.click();
+  await until('closed', () => !$('.quick-form') && !$<HTMLButtonElement>('.btn-quick-add')!.disabled);
+  await app.api.patchProject(pid, { quick_messages: [] });
+  await app.refreshProject(pid);
 });
 
 it('previews in the dialog, changes nothing on Cancel and saves color and icon', async () => {

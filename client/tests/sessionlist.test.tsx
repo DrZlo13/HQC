@@ -216,8 +216,8 @@ function makeApp(list = LIST, api = hubApi()) {
   const socket = { onState: () => () => {} } as unknown as HubSocket;
   const app = new AppState(api as unknown as Api, socket);
   app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom' };
-  app.projects.set('p0', { id: 'p0', name: 'Personal', slug: 'personal', description: '', is_personal: true, color: 'slate', created_at: at(100) });
-  app.projects.set('p1', { id: 'p1', name: 'physics-mp', slug: 'physics-mp', description: '', is_personal: false, color: 'blue', icon: { kind: 'emoji', value: '⚛️' }, created_at: at(90) });
+  app.projects.set('p0', { id: 'p0', name: 'Personal', slug: 'personal', description: '', is_personal: true, color: 'slate', quick_messages: [], created_at: at(100) });
+  app.projects.set('p1', { id: 'p1', name: 'physics-mp', slug: 'physics-mp', description: '', is_personal: false, color: 'blue', quick_messages: [], icon: { kind: 'emoji', value: '⚛️' }, created_at: at(90) });
   app.currentProjectId = 'p1';
   app.conn = 'open';
   const ws = (id: string, worker: string, path: string) => ({
@@ -864,7 +864,7 @@ describe('a session row dragged onto the project bar', () => {
       moveSession: vi.fn(move),
     };
     const app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
-    app.projects.set('p2', { id: 'p2', name: 'kiln', slug: 'kiln', description: '', is_personal: false, color: 'moss', created_at: at(80) });
+    app.projects.set('p2', { id: 'p2', name: 'kiln', slug: 'kiln', description: '', is_personal: false, color: 'moss', quick_messages: [], created_at: at(80) });
     await mount(
       <>
         <ProjectRail app={app} />
@@ -1120,7 +1120,7 @@ describe('ProjectRail', () => {
     const app = makeApp();
     // As `/api/me` brings it: `setLookName` would ask the hub.
     app.me = { ...app.me!, look: 'compact' };
-    app.projects.set('p2', { id: 'p2', name: 'ukuetis_controller_backend', slug: 'ukuetis', description: '', is_personal: false, color: 'moss', created_at: at(80) });
+    app.projects.set('p2', { id: 'p2', name: 'ukuetis_controller_backend', slug: 'ukuetis', description: '', is_personal: false, color: 'moss', quick_messages: [], created_at: at(80) });
     await mount(<ProjectRail app={app} />);
     const rows = () => [...root.querySelectorAll<HTMLElement>('.rail-project')];
     expect(rows().map((r) => [r.querySelector('.rail-glyph')!.textContent, r.querySelector('.rail-name')!.textContent])).toEqual([
@@ -1242,8 +1242,8 @@ describe('ProjectRail', () => {
       sess('etch', 'Etching', 'running', at(0.5), { project_id: 'p2', unread: 2 }),
     ]);
     app.me = { ...app.me!, look: 'compact' };
-    app.projects.set('p2', { id: 'p2', name: 'boards', slug: 'boards', description: '', is_personal: false, color: 'moss', created_at: at(80) });
-    app.projects.set('p3', { id: 'p3', name: 'kiln', slug: 'kiln', description: '', is_personal: false, color: 'coral', created_at: at(70) });
+    app.projects.set('p2', { id: 'p2', name: 'boards', slug: 'boards', description: '', is_personal: false, color: 'moss', quick_messages: [], created_at: at(80) });
+    app.projects.set('p3', { id: 'p3', name: 'kiln', slug: 'kiln', description: '', is_personal: false, color: 'coral', quick_messages: [], created_at: at(70) });
     await mount(<ProjectRail app={app} />);
     const rows = [...root.querySelectorAll('.rail-item')].map((i) => [
       i.querySelector('.rail-name')!.textContent,
@@ -1290,6 +1290,7 @@ describe("the project bar's order", () => {
     slug: name,
     description: '',
     is_personal: false,
+    quick_messages: [],
     color: 'moss',
     created_at: at(created),
     ...more,
@@ -1443,6 +1444,7 @@ describe('the project bar: search, menu, archive', () => {
     slug: name,
     description: '',
     is_personal: false,
+    quick_messages: [],
     color: 'moss',
     created_at: at(80),
     ...more,
@@ -2421,8 +2423,8 @@ describe('favorites', () => {
   it('the rail: favorite projects first, in the hub\'s order; the context menu of a tile marks one', async () => {
     const api = hubApi();
     const app = makeApp(LIST, api);
-    app.projects.set('p2', { id: 'p2', name: 'boards', slug: 'boards', description: '', is_personal: false, color: 'moss', created_at: at(80), favorite_at: at(5) });
-    app.projects.set('p3', { id: 'p3', name: 'kiln', slug: 'kiln', description: '', is_personal: false, color: 'coral', created_at: at(70) });
+    app.projects.set('p2', { id: 'p2', name: 'boards', slug: 'boards', description: '', is_personal: false, color: 'moss', quick_messages: [], created_at: at(80), favorite_at: at(5) });
+    app.projects.set('p3', { id: 'p3', name: 'kiln', slug: 'kiln', description: '', is_personal: false, color: 'coral', quick_messages: [], created_at: at(70) });
     await mount(<ProjectRail app={app} />);
     const order = () => [...root.querySelectorAll('.rail-project')].map((r) => r.getAttribute('aria-label'));
     expect(order()).toEqual(['boards', 'Personal', 'physics-mp', 'kiln']);
@@ -3817,6 +3819,7 @@ describe('a phone (< 900 px)', () => {
     slug: name,
     description: '',
     is_personal: false,
+    quick_messages: [],
     color: 'moss',
     created_at: at(80),
     ...more,

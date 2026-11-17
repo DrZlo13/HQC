@@ -95,12 +95,13 @@ A 12-megapixel photo takes about a second. libheif is LGPL-3.0; its license is i
     phone's first screen, the projects; `NewSession.tsx` — a new session as a chat window with
     its chips; `ContextMenu.tsx` — the client's menus;
   - `ProjectSettings.tsx` — the project settings page (`#/p/<id>/settings`): Appearance, the
-    project's workspaces (add from the worker's folder tree, import from Claude Code, "VS Code
+    project's quick messages (a list, an add and edit form; every save sends the whole list on top of
+    the hub's current one), workspaces (add from the worker's folder tree, import from Claude Code, "VS Code
     sessions", make default, remove), rename and delete; `Appearance.tsx` — the project's tile
     (`ProjectGlyph`) and the "Project appearance" dialog (icon, color, a live preview in the app
     theme; a full-screen sheet on a phone);
   - `Chat.tsx` — the composer completes `/` from the session's `commands` (T27: arrows, Tab or
-    Enter, Esc, a tap);
+    Enter, Esc, a tap); its bolt button opens the project's quick messages, a press of one sends it;
   - `Chat.tsx` — the header (state pill, worker, path, model and cost from `usage`,
     "Stop", the "More" menu), the feed, a bar in place of the input field while VS Code holds the
     session, the live subagents and background commands over the input (`LiveSubagents.tsx`),

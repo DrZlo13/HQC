@@ -1352,6 +1352,8 @@ export interface Project {
   favorite_at?: string;
   /** Since when it is archived: off the project bar, found by its search. */
   archived_at?: string;
+  /** The texts the chat's quick-message button sends to the agent, in the user's order. */
+  quick_messages: string[];
 }
 
 /** A project's icon (T49); `url` of an image changes with the image. */
@@ -1381,6 +1383,7 @@ export function parseProject(v: unknown): Project {
     created_at: str(o, 'created_at'),
     favorite_at: optStr(o, 'favorite_at'),
     archived_at: optStr(o, 'archived_at'),
+    quick_messages: optStrArr(o, 'quick_messages') ?? [],
   };
 }
 

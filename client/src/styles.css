@@ -4757,7 +4757,7 @@ a.relay-peer {
   line-height: 1.45;
   padding: 4.2px 6px;
 }
-:root.feed-column .composer:not(.composer-phone) :is(.btn-attach, .btn-send) {
+:root.feed-column .composer:not(.composer-phone) :is(.btn-attach, .btn-secret, .btn-quick, .btn-send) {
   width: 28px;
   height: 28px;
 }
@@ -5301,6 +5301,30 @@ button.ps-look {
   padding: 14px 14px 12px 16px;
 }
 
+.quick-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 12px;
+  padding: 12px 14px;
+}
+
+.quick-text {
+  flex: 1 1 12em;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+.quick-input {
+  resize: vertical;
+}
+
 .workspace-main {
   display: flex;
   flex-wrap: wrap;
@@ -5408,6 +5432,21 @@ button.ps-look {
   height: 48px;
   border-radius: 12px;
   font-size: 15px;
+}
+
+/* A quick message on a phone: its text across the card, Edit and Delete side by side under it. */
+.is-phone .quick-row {
+  flex-direction: column;
+  align-items: stretch;
+}
+.is-phone .quick-text {
+  flex: none;
+}
+.is-phone .quick-row .ps-buttons {
+  flex-direction: row;
+}
+.is-phone .quick-row .ps-buttons > .btn {
+  flex: 1;
 }
 
 /* ---- folder rules (T48, Rules, MRules2) ---- */
@@ -7626,6 +7665,32 @@ button.ps-look {
 }
 .btn-secret.is-on {
   color: var(--accent);
+}
+.btn-quick {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  color: var(--muted);
+}
+.btn-quick.is-on {
+  color: var(--accent);
+}
+.quick-edit {
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.composer-phone .quick-edit {
+  padding: 10px 12px;
+  font-size: 15px;
+}
+.quick-item {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: none;
+  text-align: left;
+  font-family: var(--sans);
 }
 .composer-wrap:has(> .composer-secret) {
   flex-wrap: wrap;

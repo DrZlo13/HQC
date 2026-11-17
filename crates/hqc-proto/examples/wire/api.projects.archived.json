@@ -10,7 +10,8 @@
       "color": "moss",
       "created_at": "2026-09-02T10:00:00Z",
       "updated_at": "2026-11-09T18:20:00Z",
-      "archived_at": "2026-11-09T18:20:00Z"
+      "archived_at": "2026-11-09T18:20:00Z",
+      "quick_messages": []
     }
   ]
 }

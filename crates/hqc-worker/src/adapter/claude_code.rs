@@ -5,6 +5,8 @@
 //!   not the call: `--resume <uuid>` if `<config>/projects/<encoded cwd>/<uuid>.jsonl`
 //!   exists (the worker restarted, or the process ran before), else `--session-id <uuid>`
 //!   (a process that never got a prompt left no transcript to resume).
+//! - Every process gets `control_request {subtype: initialize}` first
+//!   ([`engine::Core::initialize`]).
 //! - `stop` sends `control_request {subtype: interrupt}`; if no `result` follows within
 //!   [`ClaudeOptions::stop_grace`], the process group gets SIGINT; if the turn still runs
 //!   another `stop_grace` later, SIGTERM, and SIGKILL 5 s after that, so a process stuck in a
@@ -909,6 +911,7 @@ impl ClaudeCodeAdapter {
         if let Some(rules) = &spec.folder_rules {
             core = core.with_folder(rules.clone(), spec.workspace.clone());
         }
+        let initialize = core.initialize();
         let core = Arc::new(Mutex::new(core));
         let io = Arc::new(Io {
             session_id: self.session_id,
@@ -989,7 +992,11 @@ impl ClaudeCodeAdapter {
             anyhow::bail!("claude exited right after start ({info}): {}", tail.trim());
         }
         let _ = proc.started.send(true);
+        // The first line of its stdin, before any input can come (SPEC §8.1): the CLI takes
+        // `initialize` only before the first user message.
+        let init = proc.io.run(vec![initialize]).await;
         self.proc = Some(proc);
+        init?;
         if generated {
             let _ = self
                 .events
@@ -1192,6 +1199,15 @@ impl Adapter for ClaudeCodeAdapter {
         };
         tracing::info!(session_id = %self.session_id, ?call_id, "moving a call to the background");
         let action = lock(&p.core).background(call_id);
+        p.io.run(vec![action]).await
+    }
+
+    async fn stop_task(&mut self, task_id: &str) -> anyhow::Result<()> {
+        let Ok(p) = self.running() else {
+            return Ok(());
+        };
+        tracing::info!(session_id = %self.session_id, ?task_id, "stopping a task");
+        let action = lock(&p.core).stop_task(task_id);
         p.io.run(vec![action]).await
     }
 

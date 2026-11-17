@@ -2,7 +2,9 @@
 //! pipes. It waits for the first stdin line (the prompt) before playing, and after each
 //! `control_request` waits for one more stdin line (the answer), like the real CLI. After
 //! the script it stays "running" until signalled (a signal it [`ScriptedClaude::ignoring`]
-//! is recorded and survived). Every stdin line, command and signal is recorded.
+//! is recorded and survived). Every stdin line, command and signal is recorded; a
+//! `control_request` `initialize` is no prompt or answer, like the real CLI's handshake, and is
+//! recorded apart ([`ScriptedClaude::initialize`]).
 
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -16,8 +18,35 @@ use super::process::{CommandSpec, ExitInfo, Sig, Spawned, Spawner};
 #[derive(Default)]
 struct State {
     stdin: Vec<Value>,
+    /// Each `initialize` request with the number of [`State::stdin`] lines before it.
+    initialize: Vec<(usize, Value)>,
     commands: Vec<CommandSpec>,
     signals: Vec<Sig>,
+}
+
+/// Reads stdin up to the next line that is not an `initialize` request and records what it
+/// read; `None` at EOF.
+async fn next_line(
+    rd: &mut BufReader<tokio::io::DuplexStream>,
+    state: &Mutex<State>,
+) -> Option<()> {
+    loop {
+        let mut line = String::new();
+        if rd.read_line(&mut line).await.ok()? == 0 {
+            return None;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            return Some(());
+        };
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+        if v["type"] == "control_request" && v["request"]["subtype"] == "initialize" {
+            let before = s.stdin.len();
+            s.initialize.push((before, v));
+            continue;
+        }
+        s.stdin.push(v);
+        return Some(());
+    }
 }
 
 #[derive(Clone)]
@@ -54,6 +83,12 @@ impl ScriptedClaude {
         self.lock().stdin.clone()
     }
 
+    /// The `initialize` requests read, each with the number of [`ScriptedClaude::stdin`] lines
+    /// read before it.
+    pub fn initialize(&self) -> Vec<(usize, Value)> {
+        self.lock().initialize.clone()
+    }
+
     pub fn commands(&self) -> Vec<CommandSpec> {
         self.lock().commands.clone()
     }
@@ -78,40 +113,18 @@ impl Spawner for ScriptedClaude {
         let mut stop = sig_rx.clone();
         tokio::spawn(async move {
             let mut rd = BufReader::new(script_in);
-            let record = |line: &str| {
-                if let Ok(v) = serde_json::from_str(line) {
-                    state
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .stdin
-                        .push(v);
-                }
-            };
             let play = async {
-                let mut line = String::new();
-                if rd.read_line(&mut line).await.ok()? == 0 {
-                    return None::<()>;
-                }
-                record(&line);
+                next_line(&mut rd, &state).await?;
                 for out in script.iter() {
                     script_out.write_all(out.as_bytes()).await.ok()?;
                     script_out.write_all(b"\n").await.ok()?;
                     if out.contains("\"control_request\"") {
-                        line.clear();
-                        if rd.read_line(&mut line).await.ok()? == 0 {
-                            return None;
-                        }
-                        record(&line);
+                        next_line(&mut rd, &state).await?;
                     }
                 }
                 // Idle: keep recording stdin (e.g. an interrupt) until EOF.
-                loop {
-                    line.clear();
-                    if rd.read_line(&mut line).await.ok()? == 0 {
-                        return None;
-                    }
-                    record(&line);
-                }
+                while next_line(&mut rd, &state).await.is_some() {}
+                None::<()>
             };
             tokio::select! {
                 _ = play => {}

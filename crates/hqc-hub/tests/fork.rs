@@ -306,6 +306,184 @@ async fn a_fork_before_a_message_written_during_the_answer_leaves_out_its_own_an
     hub.finish().await;
 }
 
+/// SPEC §6: a message that came while a turn ran and waited for a turn of its own stands after
+/// the turn it waited through; a fork before it keeps that turn: its calls and its answer, the
+/// newest cut.
+#[tokio::test]
+async fn a_fork_before_a_message_that_waited_for_its_turn_keeps_the_turn_it_waited_through() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    let m1 = input(&hub, &mut w, &sid, "Run the tests.").await;
+    w.event(agent_event(
+        &sid,
+        "tool.call",
+        json!({"call_id": "c1", "tool": "Bash", "args_preview": "{\"command\":\"make test\"}"}),
+    ))
+    .await;
+    // A slash command written meanwhile waits for the end of the turn (SPEC §17.2).
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "/cost"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let m2 = r["event"].clone();
+    let si = w.expect("session.input").await;
+    w.event(agent_event(
+        &sid,
+        "tool.result",
+        json!({"call_id": "c1", "result_preview": "ok", "error": false}),
+    ))
+    .await;
+    let a1 = agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "Tests pass.", "final": true, "in_reply_to": m1["event_id"]}),
+    );
+    w.event(a1.clone()).await;
+    w.event(agent_event(
+        &sid,
+        "status",
+        json!({"state": "idle", "in_reply_to": m1["event_id"]}),
+    ))
+    .await;
+    w.reply(&si["id"], "ack", json!({"event_id": m2["event_id"]}))
+        .await;
+    w.event(agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "Total cost: $0.01", "final": true, "in_reply_to": m2["event_id"]}),
+    ))
+    .await;
+
+    let f = fork(&hub, &sid, &m2).await;
+    let fs = ack_start(&mut w, &f).await;
+    assert_eq!(
+        fs["payload"]["fork"]["at_event_ids"],
+        json!([a1["event_id"]])
+    );
+    let shown: Vec<(Value, Value)> = hub
+        .events(&f)
+        .await
+        .iter()
+        .map(|e| (e["type"].clone(), e["payload"]["text"].clone()))
+        .collect();
+    assert_eq!(
+        &shown[1..5],
+        [
+            (json!("user.message"), json!("Run the tests.")),
+            (json!("tool.call"), Value::Null),
+            (json!("tool.result"), Value::Null),
+            (json!("agent.message"), json!("Tests pass.")),
+        ]
+    );
+    assert_eq!(shown.len(), 6, "{shown:?}");
+    hub.finish().await;
+}
+
+/// SPEC §6: a message written during the agent's text that the agent took only after that turn
+/// stands after the turn, as any message that waited does; a fork before it keeps the whole
+/// turn, not only the text being written when it came.
+#[tokio::test]
+async fn a_fork_before_a_message_written_during_the_text_that_waited_keeps_the_whole_turn() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    let m1 = input(&hub, &mut w, &sid, "Run the tests.").await;
+    w.event(agent_event(
+        &sid,
+        "agent.delta",
+        json!({"text": "Let me run them."}),
+    ))
+    .await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "And the linter."}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let m2 = r["event"].clone();
+    assert_eq!(m2["payload"]["during_text"], true);
+    // The worker holds it to the end of the turn.
+    let si = w.expect("session.input").await;
+    let said = agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "Let me run them.", "final": false}),
+    );
+    w.event(said.clone()).await;
+    w.event(agent_event(
+        &sid,
+        "tool.call",
+        json!({"call_id": "c1", "tool": "Bash", "args_preview": "{\"command\":\"make test\"}"}),
+    ))
+    .await;
+    w.event(agent_event(
+        &sid,
+        "tool.result",
+        json!({"call_id": "c1", "result_preview": "ok", "error": false}),
+    ))
+    .await;
+    let a1 = agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "Tests pass.", "final": true, "in_reply_to": m1["event_id"]}),
+    );
+    w.event(a1.clone()).await;
+    w.event(agent_event(
+        &sid,
+        "status",
+        json!({"state": "idle", "in_reply_to": m1["event_id"]}),
+    ))
+    .await;
+    w.reply(&si["id"], "ack", json!({"event_id": m2["event_id"]}))
+        .await;
+    w.event(agent_event(
+        &sid,
+        "tool.call",
+        json!({"call_id": "c2", "tool": "Bash", "args_preview": "{\"command\":\"make lint\"}"}),
+    ))
+    .await;
+    w.event(agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "Lint is clean.", "final": true, "in_reply_to": m2["event_id"]}),
+    ))
+    .await;
+
+    let f = fork(&hub, &sid, &m2).await;
+    let fs = ack_start(&mut w, &f).await;
+    assert_eq!(
+        fs["payload"]["fork"]["at_event_ids"],
+        json!([a1["event_id"], said["event_id"]])
+    );
+    let shown: Vec<(Value, Value)> = hub
+        .events(&f)
+        .await
+        .iter()
+        .map(|e| (e["type"].clone(), e["payload"]["text"].clone()))
+        .collect();
+    assert_eq!(
+        &shown[1..6],
+        [
+            (json!("user.message"), json!("Run the tests.")),
+            (json!("agent.message"), json!("Let me run them.")),
+            (json!("tool.call"), Value::Null),
+            (json!("tool.result"), Value::Null),
+            (json!("agent.message"), json!("Tests pass.")),
+        ]
+    );
+    assert_eq!(shown.len(), 7, "{shown:?}");
+    hub.finish().await;
+}
+
 /// A fork of a fork: before a message of its copied history it cuts in the transcript that
 /// history was first written in, by the ids the runtime gave it, even with the fork between
 /// never run and the first session deleted; before a message after its own turns, in its own

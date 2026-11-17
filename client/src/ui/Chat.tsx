@@ -166,6 +166,13 @@ export function Chat({
     timeline: t,
     approve: (r, o, m) => chat.approve(r, o, m),
     answer: (r, a) => chat.answer(r, a),
+    // Only where the input is: the hub refuses one of an archived session or one VS Code holds.
+    send:
+      !system && !info?.archived && state !== 'locked_vscode'
+        ? (text) => {
+            chat.send(text);
+          }
+        : undefined,
     resend: (op) => chat.resend(op),
     discard: (op) => chat.discard(op),
     artifacts,
@@ -393,6 +400,7 @@ export function Chat({
 
   const stop = () => act(() => chat.stop(), 'Not stopped');
   const toBackground = (callId: string) => void act(() => chat.background(callId), 'Not moved to the background');
+  const stopTask = (taskId: string) => act(() => chat.stopTask(taskId), 'Not stopped');
   // T38: Ask at once, Auto and Allow all after a one-line confirmation.
   const setMode = (mode: PermissionMode) => {
     const line = modeConfirm(mode);
@@ -666,7 +674,7 @@ export function Chat({
       )}
       {/* The list also holds the agent's background commands, which only background_tasks counts. */}
       {((info?.subagents ?? 0) > 0 || (info?.background_tasks ?? 0) > 0) && (
-        <LiveSubagents agents={t.liveAgents} receivedAt={t.liveAgentsAt} />
+        <LiveSubagents agents={t.liveAgents} receivedAt={t.liveAgentsAt} onStop={stopTask} />
       )}
       {locked && (
         <div class="composer-wrap">
@@ -1409,8 +1417,8 @@ function firstShown(blocks: ReturnType<typeof buildFeed>, from: number): number 
 }
 
 /** Index of the first of the last blocks that are inputs come while the text being written now
- *  was (`during_text`, stored after the last event that ended a text) or messages not stored
- *  yet. */
+ *  was (`during_text`, stored after the last event that ended a text), inputs waiting for a turn
+ *  of their own (`queued`, still `pending`) or messages not stored yet. */
 function underText(blocks: ReturnType<typeof buildFeed>, t: Timeline): number {
   const evs = t.events();
   let ended = 0;
@@ -1426,7 +1434,8 @@ function underText(blocks: ReturnType<typeof buildFeed>, t: Timeline): number {
     const b = blocks[i - 1];
     if (b.kind !== 'item') break;
     const it = b.item;
-    if (!(it.kind === 'pending' || (it.kind === 'event' && duringText(it) && it.event.seq! > ended))) break;
+    const queued = it.kind === 'event' && it.queued && it.event.delivery === 'pending';
+    if (!(it.kind === 'pending' || queued || (it.kind === 'event' && duringText(it) && it.event.seq! > ended))) break;
     i--;
   }
   return i;

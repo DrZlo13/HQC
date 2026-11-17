@@ -179,8 +179,8 @@ pub struct SecretAsk {
 }
 
 /// One subagent of `subagents.live` (SPEC §4, since 0.101), or (since 0.127) one background
-/// shell command of the agent, with only `task_id`, `description`, `duration_ms`, `call_id` and
-/// `kind`.
+/// shell command of the agent, with only `task_id`, `description`, `duration_ms`, `call_id`,
+/// `kind` and `stoppable`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveSubagent {
     pub task_id: String,
@@ -203,6 +203,10 @@ pub struct LiveSubagent {
     /// A subagent or a background command (since SPEC 0.141); absent from an older worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<LiveKind>,
+    /// The runtime stops it alone on `session.stop_task` (since SPEC 0.161): a subagent's row
+    /// and a command's; absent — false, every row of an older worker.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stoppable: bool,
 }
 
 /// What a row of `subagents.live` is.
@@ -247,7 +251,13 @@ pub enum EventKind {
     },
     /// Transport only, never stored (SPEC §4, §5.2).
     #[serde(rename = "agent.delta")]
-    AgentDelta { text: String },
+    AgentDelta {
+        text: String,
+        /// The runtime abandoned the attempt that wrote the text so far (since SPEC 0.161): the
+        /// hub and clients drop that text; `text` is empty. Absent when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reset: bool,
+    },
     /// The subagents the agent runs now, the whole list in the order they started, then (since
     /// SPEC 0.127) its background shell commands; empty: none (since SPEC 0.101). Transport
     /// only, never stored (SPEC §4, §5.2).
@@ -270,6 +280,10 @@ pub enum EventKind {
         /// balance is too low"; since SPEC 0.67); absent when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         runtime: bool,
+        /// An interrupt cut the reply off before the runtime finished it (Stop, "No" to a
+        /// permission request; since SPEC 0.161); absent when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        interrupted: bool,
     },
     #[serde(rename = "agent.thinking")]
     AgentThinking { text: String },
@@ -766,6 +780,37 @@ mod tests {
         ));
         assert!(serde_json::to_value(&plain).unwrap()["payload"]
             .get("joined")
+            .is_none());
+    }
+
+    /// SPEC 0.161: a reply an interrupt cut off carries `interrupted: true`; any other leaves
+    /// it out.
+    #[test]
+    fn an_interrupted_agent_message_roundtrips() {
+        let src = include_str!("../examples/wire/event.agent.message.interrupted.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.agent.message.json"))
+                .unwrap();
+        assert!(serde_json::to_value(&plain).unwrap()["payload"]
+            .get("interrupted")
+            .is_none());
+    }
+
+    /// SPEC 0.161: a delta that drops the text so far carries `reset: true`; any other leaves it
+    /// out.
+    #[test]
+    fn a_reset_agent_delta_roundtrips() {
+        let src = include_str!("../examples/wire/event.agent.delta.reset.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.agent.delta.json")).unwrap();
+        assert!(serde_json::to_value(&plain).unwrap()["payload"]
+            .get("reset")
             .is_none());
     }
 

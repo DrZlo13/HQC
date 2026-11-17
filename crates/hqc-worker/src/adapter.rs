@@ -189,6 +189,13 @@ pub trait Adapter: Send {
         let _ = call_id;
         anyhow::bail!("this runtime cannot move a call to the background")
     }
+    /// Stop task `task_id` alone, a `stoppable` one of [`AdapterEvent::LiveSubagents`]; the
+    /// turn and the other tasks go on. With no process, nothing to do. What the runtime answers
+    /// is only logged.
+    async fn stop_task(&mut self, task_id: &str) -> anyhow::Result<()> {
+        let _ = task_id;
+        anyhow::bail!("this runtime cannot stop a task alone")
+    }
     /// `message`: the user's text with a deny option (T26), the reason the runtime sees.
     async fn answer_approval(
         &mut self,

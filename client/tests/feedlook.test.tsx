@@ -313,12 +313,12 @@ describe('the one-column gutter', () => {
       const m = [...b.children].find((c) => c.classList.contains('feed-mark'));
       return [b.classList.contains('feed-full'), m ? m.className.replace('feed-mark feed-mark-', '') : null];
     });
+    // The question, pending while the turn runs, waits for a turn of its own at the bottom.
     expect(blocks).toEqual([
       [true, null],
       [false, 'fold'],
       [false, 'dot'],
       [false, 'ok'],
-      [false, 'relay'],
       [false, 'file'],
       [false, 'ask'],
       [true, null],
@@ -330,6 +330,7 @@ describe('the one-column gutter', () => {
       [false, 'error'],
       [false, 'dot'],
       [false, 'running'],
+      [false, 'relay'],
     ]);
     // A mark is decoration: the block says what it is in words.
     expect(root.querySelector('.feed-mark:not([aria-hidden=true])')).toBeNull();

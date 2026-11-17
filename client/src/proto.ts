@@ -125,10 +125,13 @@ export interface UserMessage {
 }
 export interface AgentDelta {
   text: string;
+  /** Since 0.161: the runtime abandoned the attempt that wrote the text so far, which the client
+   *  drops; `text` is empty. Absent = false. */
+  reset?: boolean;
 }
 /** One subagent the agent runs now (SPEC §4, since 0.101), or (since 0.127) one background
- *  shell command of the agent, with only `task_id`, `description`, `duration_ms`, `call_id` and
- *  `kind`. */
+ *  shell command of the agent, with only `task_id`, `description`, `duration_ms`, `call_id`,
+ *  `kind` and `stoppable`. */
 export interface LiveSubagent {
   task_id: string;
   /** Its task. */
@@ -144,6 +147,9 @@ export interface LiveSubagent {
   call_id?: string;
   /** A subagent or a background command (since 0.141); absent from an older worker. */
   kind?: LiveKind;
+  /** Since 0.161: it can be stopped alone (`POST .../tasks/{task_id}/stop`), a subagent's row
+   *  and a command's; absent from an older worker. */
+  stoppable?: boolean;
 }
 export const LIVE_KINDS = ['agent', 'command'] as const;
 export type LiveKind = (typeof LIVE_KINDS)[number];
@@ -165,6 +171,9 @@ export interface AgentMessage {
    *  too low"; since SPEC 0.67): a service line of the feed, not the agent's text. Absent =
    *  false. */
   runtime?: boolean;
+  /** An interrupt cut the reply off before the runtime finished it (Stop, "No" to a permission
+   *  request; since SPEC 0.161): shown muted and marked. Absent = false. */
+  interrupted?: boolean;
 }
 export interface AgentThinking {
   text: string;
@@ -272,6 +281,8 @@ export interface Usage {
 export interface Status {
   state: SessionState;
   detail?: string;
+  /** On the `idle` that ends a turn: the turn's input, as on `agent.message` (SPEC §4). */
+  in_reply_to?: Uuid;
 }
 export interface SystemNote {
   text: string;
@@ -415,7 +426,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     during_text: optBool(p, 'during_text'),
     joined: optBool(p, 'joined'),
   }),
-  'agent.delta': (p) => ({ text: str(p, 'text') }),
+  'agent.delta': (p) => ({ text: str(p, 'text'), reset: optBool(p, 'reset') }),
   'subagents.live': (p) => ({
     agents: arr(p, 'agents').map((v, i) => {
       const a = obj(v, `agents[${i}]`);
@@ -428,6 +439,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
         duration_ms: num(a, 'duration_ms'),
         call_id: optStr(a, 'call_id'),
         kind: oneOf(a, 'kind', LIVE_KINDS),
+        stoppable: optBool(a, 'stoppable'),
       };
     }),
   }),
@@ -437,6 +449,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     final: bool(p, 'final'),
     in_reply_to: optStr(p, 'in_reply_to'),
     runtime: optBool(p, 'runtime'),
+    interrupted: optBool(p, 'interrupted'),
   }),
   'agent.thinking': (p) => ({ text: str(p, 'text') }),
   'tool.call': (p) => ({
@@ -519,7 +532,11 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     session_cost_usd: optNum(p, 'session_cost_usd'),
     model: optStr(p, 'model'),
   }),
-  status: (p) => ({ state: tolerantEnum(p, 'state', SESSION_STATES), detail: optStr(p, 'detail') }),
+  status: (p) => ({
+    state: tolerantEnum(p, 'state', SESSION_STATES),
+    detail: optStr(p, 'detail'),
+    in_reply_to: optStr(p, 'in_reply_to'),
+  }),
   system: (p) => ({
     text: str(p, 'text'),
     code: str(p, 'code'),
@@ -819,6 +836,10 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
   'session.background': (p) => {
     str(p, 'session_id');
     str(p, 'call_id');
+  },
+  'session.stop_task': (p) => {
+    str(p, 'session_id');
+    str(p, 'task_id');
   },
   'session.kill': (p) => void str(p, 'session_id'),
   'session.permission_mode': (p) => {

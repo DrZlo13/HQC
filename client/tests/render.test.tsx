@@ -15,7 +15,7 @@ import {
   onlyRequests,
   type ChatActions,
 } from "../src/ui/cards";
-import { CANONICAL_LABELS } from "../src/ui/labels";
+import { CANONICAL_LABELS, formatTime } from "../src/ui/labels";
 import { argsText, buildFeed, cutJson, relativePaths, subagentState } from "../src/ui/feed";
 
 const WIRE = join(import.meta.dirname, "../../crates/hqc-proto/examples/wire");
@@ -116,6 +116,7 @@ describe("every example event renders", () => {
       (f) =>
         f.startsWith("event.") &&
         f !== "event.agent.delta.json" &&
+        f !== "event.agent.delta.reset.json" &&
         f !== "event.subagents.live.json" &&
         f !== "event.tokens.rate.json",
     )
@@ -138,6 +139,15 @@ describe("every example event renders", () => {
     expect(t.items()).toEqual([]);
     t.apply(ev("event.agent.message"));
     expect(t.streaming).toBe("");
+  });
+
+  it("agent.delta with reset drops the text of an abandoned attempt (SPEC 0.161)", () => {
+    const t = new Timeline();
+    t.apply(ev("event.agent.delta"));
+    t.apply(ev("event.agent.delta.reset"));
+    expect(t.streaming).toBe("");
+    t.apply(ev("event.agent.delta", (e) => (e.payload.text = "Retried")));
+    expect(t.streaming).toBe("Retried");
   });
 
   it("an older page loaded behind the live tail ends no stream", () => {
@@ -247,6 +257,325 @@ describe("an input that came while the agent's text was being written (SPEC §6)
     expect(blocks.map((b) => b.kind)).toEqual(["agent", "item"]);
     const [first] = blocks;
     expect(first.kind === "agent" ? first.usage?.seq : undefined).toBe(3);
+  });
+
+  it("a final answer takes the line that says how its turn ended along", () => {
+    const t = new Timeline();
+    const end = (code: string, seq = 4) =>
+      ev("event.system", (e) => {
+        e.seq = seq;
+        e.payload = { code, text: code === "turn_interrupted" ? "Interrupted" : "Turn ended early: max_turns" };
+      });
+    for (const code of ["turn_interrupted", "turn_ended_early"]) {
+      const t = new Timeline();
+      t.applyAll([input(1, true), answer(2), ev("event.usage", withSeq(3)), end(code)]);
+      expect(order(t)).toEqual(["e2", "e3", "e4", "e1"]);
+      // A turn that ends on an API error or an interrupt mid-reply has no `usage` line.
+      const bare = new Timeline();
+      bare.applyAll([input(1, true), answer(2), end(code, 3)]);
+      expect(order(bare)).toEqual(["e2", "e3", "e1"]);
+    }
+    t.applyAll([input(1, true), answer(2), ev("event.usage", withSeq(3)), end("worker_log")]);
+    expect(order(t)).toEqual(["e2", "e3", "e1", "e4"]);
+  });
+});
+
+describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
+  const at = (seq: number) =>
+    new Date(Date.parse("2026-10-22T10:00:00Z") + seq * 1000).toISOString();
+  const id = (seq: number) =>
+    `0199f3a2-7c10-7000-8000-${String(seq).padStart(12, "0")}`;
+  /** The user's message stored at `seq`: delivered at `seq` `delivered` (the worker's ack),
+   *  else pending. */
+  const input = (seq: number, delivered?: number, patch: (e: any) => void = () => {}) =>
+    ev("event.user.message", (e) => {
+      e.seq = seq;
+      e.event_id = id(seq);
+      e.ts = at(seq);
+      e.payload = { text: `input ${seq}`, artifact_ids: [] };
+      if (delivered === undefined) {
+        e.delivery = "pending";
+        delete e.delivered_at;
+      } else e.delivered_at = at(delivered);
+      patch(e);
+    });
+  const final = (seq: number, inReplyTo: number) =>
+    ev("event.agent.message", (e) => {
+      e.seq = seq;
+      e.ts = at(seq);
+      e.payload = { text: `answer to ${inReplyTo}`, final: true, in_reply_to: id(inReplyTo) };
+    });
+  const idle = (seq: number, inReplyTo: number) =>
+    ev("event.status", (e) => {
+      e.seq = seq;
+      e.ts = at(seq);
+      e.payload = { state: "idle", in_reply_to: id(inReplyTo) };
+    });
+  const order = (t: Timeline) => t.items().map((i) => i.key);
+  const time = (seq: number) =>
+    [...root.querySelectorAll(".msg-user")]
+      .find((m) => m.textContent?.includes(`input ${seq}`))!
+      .querySelector(".msg-time")!.textContent;
+
+  it("stands at the bottom while the turn runs, queued", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3),
+      result(4, "a"),
+      call(5, "b", "Bash", { command: "make test" }),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e3"]);
+    show(t);
+    expect(time(3)).toBe(`${formatTime(at(3))} · queued`);
+  });
+
+  it("delivered, stands after the turn it waited through and before the work of its own", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3),
+      result(4, "a"),
+      final(5, 1),
+      ev("event.usage", withSeq(6)),
+      idle(7, 1),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e7", "e3"]);
+    t.applyDelivery({
+      session_id: "s",
+      event_id: id(3),
+      seq: 3,
+      delivery: "delivered",
+      delivered_at: at(7.1),
+    });
+    t.applyAll([call(8, "b", "Read", { file_path: "a.rs" }), result(9, "b"), final(10, 3)]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e7", "e3", "e8", "e9", "e10"]);
+    show(t);
+    expect(time(3)).toBe(formatTime(at(3)));
+    // The answer it waited through keeps its usage line.
+    expect(root.querySelectorAll(".msg-final > .meta .usage")).toHaveLength(1);
+  });
+
+  it("one whose turn has no work (a slash command) stands before the end of its own turn", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 6.1, (e) => (e.payload.text = "/cost")),
+      result(4, "a"),
+      final(5, 1),
+      idle(6, 1),
+      idle(7, 3),
+      input(8, 8.1),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e3", "e7", "e8"]);
+  });
+
+  it("inputs waiting one behind another take the turns in order", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 6.1),
+      input(4),
+      result(5, "a"),
+      final(6, 1),
+      call(7, "b", "Bash", { command: "ls" }),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e3", "e7", "e4"]);
+    const queued = t.items().filter((i) => i.kind === "event" && i.queued);
+    expect(queued.map((i) => i.key)).toEqual(["e3", "e4"]);
+  });
+
+  it("a joined input behind a waiting one stays behind it: two inputs carried past a final answer", () => {
+    // Both written during the thinking of a turn with no calls (DrZlo13/hqc#42): the CLI runs
+    // the first as the next turn, the second joins that turn.
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      ev("event.agent.thinking", (e) => ((e.seq = 2), (e.ts = at(2)))),
+      input(3, 6.1),
+      input(4, 7.1, (e) => (e.payload.joined = true)),
+      final(5, 1),
+      idle(6, 1),
+      ev("event.agent.thinking", (e) => ((e.seq = 7), (e.ts = at(7)))),
+      final(8, 4),
+      idle(9, 4),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e3", "e4", "e7", "e8", "e9"]);
+  });
+
+  it("a joined input behind a waiting one stays behind it: inputs during a turn another session's question started", () => {
+    const t = new Timeline();
+    t.applyAll([
+      ev("event.peer.message", (e) => {
+        e.seq = 1;
+        e.event_id = id(1);
+        e.ts = at(1);
+        e.delivery = "delivered";
+        e.delivered_at = at(1.2);
+      }),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 8.1),
+      input(4, 10.1, (e) => (e.payload.joined = true)),
+      result(5, "a"),
+      final(6, 1),
+      ev("event.usage", withSeq(7)),
+      idle(8, 1),
+      call(9, "b", "Bash", { command: "ls" }),
+      result(10, "b"),
+      final(11, 3),
+      idle(12, 3),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e7", "e8", "e3", "e4", "e9", "e10", "e11", "e12"]);
+  });
+
+  it("a /compact typed during a turn stands above the compaction it started", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 7.1, (e) => (e.payload.text = "/compact")),
+      result(4, "a"),
+      final(5, 1),
+      ev("event.usage", withSeq(6)),
+      idle(7, 1),
+      ev("event.system", (e) => {
+        e.seq = 8;
+        e.payload = { code: "context_compacted", text: "Summary of the conversation" };
+      }),
+      ev("event.usage", (e) => ((e.seq = 9), (e.payload = { input_tokens: 0, output_tokens: 0, cost_usd: 0.0014 }))),
+      idle(10, 3),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e7", "e3", "e8", "e9", "e10"]);
+  });
+
+  it("a turn lost right after it was taken ends the waiting input's own turn", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 6.1),
+      result(4, "a"),
+      final(5, 1),
+      idle(6, 1),
+      ev("event.system", (e) => {
+        e.seq = 7;
+        e.payload = { code: "turn_lost", text: "The agent process stopped during a turn; the turn was lost" };
+      }),
+      input(8, 8.1),
+      call(9, "b", "Bash", { command: "ls" }),
+      final(10, 8),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e3", "e7", "e8", "e9", "e10"]);
+  });
+
+  it("one written during the text waits behind the one queued before it, live and once the text is stored", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3),
+      result(4, "a"),
+      input(5, undefined, (e) => (e.payload.during_text = true)),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e3", "e5"]);
+    t.applyAll([final(6, 1), ev("event.usage", withSeq(7))]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e6", "e7", "e3", "e5"]);
+  });
+
+  it("one written during the agent's thinking or text and taken after that turn stands after it", () => {
+    // A real session's events: 180 came while the thinking of 179's turn streamed, the agent
+    // took it five seconds after that turn ended and answered it in a turn of its own.
+    const thinking = (seq: number) => ev("event.agent.thinking", (e) => ((e.seq = seq), (e.ts = at(seq))));
+    const t = new Timeline();
+    t.applyAll([
+      input(179, 179.5),
+      input(180, undefined, (e) => (e.payload.during_text = true)),
+      thinking(181),
+      final(182, 179),
+      ev("event.usage", withSeq(183)),
+      idle(184, 179),
+    ]);
+    expect(order(t)).toEqual(["e179", "e181", "e182", "e183", "e184", "e180"]);
+    show(t);
+    expect(time(180)).toBe(`${formatTime(at(180))} · queued`);
+    t.applyDelivery({
+      session_id: "s",
+      event_id: id(180),
+      seq: 180,
+      delivery: "delivered",
+      delivered_at: at(184.5),
+    });
+    t.applyAll([thinking(185), final(186, 180), ev("event.usage", withSeq(187)), idle(188, 180)]);
+    expect(order(t)).toEqual(["e179", "e181", "e182", "e183", "e184", "e180", "e185", "e186", "e187", "e188"]);
+  });
+
+  it("the text that starts the own turn of one written during the text stays under it", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      result(3, "a"),
+      input(4, 6.1, (e) => (e.payload.during_text = true)),
+      final(5, 1),
+      idle(6, 1),
+      ev("event.agent.message", (e) => {
+        e.seq = 7;
+        e.ts = at(7);
+        e.payload = { text: "Let me look.", final: false };
+      }),
+      call(8, "b", "Read", { file_path: "a.rs" }),
+      result(9, "b"),
+      final(10, 4),
+      idle(11, 4),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e3", "e5", "e6", "e4", "e7", "e8", "e9", "e10", "e11"]);
+  });
+
+  it("a question from another session waits too, and says so", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      ev("event.peer.message", withSeq(3)),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e3"]);
+    t.apply(result(4, "a"));
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e3"]);
+    show(t);
+    expect(root.querySelector(".relay-when")!.textContent).toBe(
+      `${formatTime("2026-10-22T10:00:00Z")} · queued`,
+    );
+  });
+
+  it("keeps its place: sent while no turn ran, joined to the turn, or mirrored", () => {
+    const t = new Timeline();
+    t.applyAll([input(1, 1.2), final(2, 1), input(3)]);
+    expect(order(t)).toEqual(["e1", "e2", "e3"]);
+    show(t);
+    expect(time(3)).toBe(`${formatTime(at(3))} · awaiting delivery`);
+    const joined = new Timeline();
+    joined.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 4.1, (e) => (e.payload.joined = true)),
+      result(4, "a"),
+      final(5, 1),
+    ]);
+    expect(order(joined)).toEqual(["e1", "e2", "e3", "e4", "e5"]);
+    // A message typed in VS Code during a turn, mirrored where the CLI took it (SPEC §9.1).
+    const mirrored = new Timeline();
+    mirrored.applyAll([
+      input(1, 1),
+      call(2, "a", "Bash", { command: "make" }),
+      result(3, "a"),
+      input(4, 4),
+      final(5, 1),
+    ]);
+    expect(order(mirrored)).toEqual(["e1", "e2", "e3", "e4", "e5"]);
   });
 });
 
@@ -617,6 +946,137 @@ describe("clarify.request", () => {
       root.querySelector<HTMLInputElement>('input[value="Hub"]')!.checked,
     ).toBe(true);
   });
+
+  // SPEC 0.161: the CLI no longer waits for the answer, so it goes as the user's message, in the
+  // words of the VS Code tab for an earlier question (web:162062–162070).
+  const cancelled = (reason: string, only?: number) => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.clarify.request", (e) => {
+        e.seq = 1;
+        if (only !== undefined) e.payload.questions = [e.payload.questions[only]];
+      }),
+    );
+    t.apply(
+      ev("event.clarify.cancel", (e) => {
+        e.seq = 2;
+        e.payload.reason = reason;
+      }),
+    );
+    return t;
+  };
+  const submit = () =>
+    act(async () =>
+      root
+        .querySelector<HTMLButtonElement>(".card-clarify button[type=submit]")!
+        .click(),
+    );
+  const SEVERAL =
+    'Answering your earlier questions:\n- "Which area should I focus on first?": Worker\n- "Which checks should run?": clippy, test\n- "Anything else?": no';
+  const submitButton = () => root.querySelector<HTMLButtonElement>(".card-clarify button[type=submit]");
+  const typeOther = (q: number, value: string) =>
+    act(() => {
+      const text = root.querySelectorAll(".card-clarify fieldset")[q].querySelector<HTMLInputElement>("input[type=text]")!;
+      text.value = value;
+      text.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  const answerAll = async () => {
+    await act(() => root.querySelector<HTMLInputElement>('input[value="Worker"]')!.click());
+    await act(() => root.querySelector<HTMLInputElement>('input[value="clippy"]')!.click());
+    await act(() => root.querySelector<HTMLInputElement>('input[value="test"]')!.click());
+    await typeOther(2, "no");
+  };
+  const outcomes = () => [...root.querySelectorAll(".card-clarify .outcome")].map((o) => o.textContent);
+  const checked = (value: string) => root.querySelector<HTMLInputElement>(`input[value="${value}"]`)!.checked;
+  // The chat's `send`: the message stands in the feed at once, not stored yet.
+  const sending = (t: Timeline) => vi.fn((text: string) => t.addPending("op-1", text));
+  const userMessage = (seq: number, text: string) =>
+    ev("event.user.message", (e) => {
+      e.seq = seq;
+      e.payload = { text, artifact_ids: [] };
+      delete e.client_op_id;
+    });
+  for (const reason of ["worker_restart", "stopped"]) {
+    it(`a question cancelled with ${reason} is answered by a message`, async () => {
+      const t = cancelled(reason);
+      const send = sending(t);
+      const { actions, draw } = show(t, { send });
+      expect(root.querySelector(".card-clarify")!.classList.contains("is-open")).toBe(true);
+      // Nothing chosen, nothing to send; as on an open card, Answer waits for every question.
+      expect(submitButton()!.disabled).toBe(true);
+      await act(() => root.querySelector<HTMLInputElement>('input[value="Worker"]')!.click());
+      await act(() => root.querySelector<HTMLInputElement>('input[value="clippy"]')!.click());
+      await act(() => root.querySelector<HTMLInputElement>('input[value="test"]')!.click());
+      expect(submitButton()!.disabled).toBe(true);
+      await act(async () => {
+        root.querySelector("form.card-clarify")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      });
+      expect(send).not.toHaveBeenCalled();
+      await typeOther(2, "no");
+      expect(submitButton()!.disabled).toBe(false);
+      await submit();
+      expect(send).toHaveBeenCalledWith(SEVERAL);
+      expect(actions.answer).not.toHaveBeenCalled();
+      draw();
+      expect(submitButton()).toBeNull();
+      expect(outcomes()).toEqual(["Answers sent"]);
+      expect([checked("Worker"), checked("clippy"), checked("test"), checked("Hub")]).toEqual([true, true, true, false]);
+    });
+  }
+
+  it("a later message of the user closes it", () => {
+    const t = cancelled("worker_restart");
+    t.apply(userMessage(3, "Never mind, look at the hub."));
+    show(t, { send: vi.fn() });
+    expect(submitButton()).toBeNull();
+    expect(root.querySelector(".card-clarify fieldset")!.hasAttribute("disabled")).toBe(true);
+    expect(outcomes()).toEqual(["Cancelled: worker restarted"]);
+  });
+
+  it("another session's message after it closes it too", () => {
+    const t = cancelled("stopped");
+    t.apply(ev("event.peer.message", withSeq(3)));
+    show(t, { send: vi.fn() });
+    expect(submitButton()).toBeNull();
+    expect(outcomes()).toEqual(["Cancelled: turn stopped"]);
+  });
+
+  it("opened again after the answer, it shows what was answered", () => {
+    const t = cancelled("stopped");
+    t.apply(userMessage(3, SEVERAL));
+    show(t, { send: vi.fn() });
+    expect(submitButton()).toBeNull();
+    expect(outcomes()).toEqual(["Answers sent"]);
+    expect([checked("Worker"), checked("clippy"), checked("test"), checked("Hub")]).toEqual([true, true, true, false]);
+  });
+
+  it("a send that failed and was discarded leaves it to be answered", async () => {
+    const t = cancelled("worker_restart");
+    const { draw } = show(t, { send: sending(t) });
+    await answerAll();
+    await submit();
+    t.failPending("op-1", "offline");
+    draw();
+    expect(submitButton()).toBeNull();
+    expect(outcomes()).toEqual(["Cancelled: worker restarted"]);
+    t.dropPending("op-1");
+    draw();
+    expect(submitButton()).not.toBeNull();
+  });
+
+  it("the answer to one question goes in the tab's words for one", async () => {
+    const send = vi.fn();
+    show(cancelled("worker_restart", 2), { send });
+    await typeOther(0, "no");
+    await submit();
+    expect(send).toHaveBeenCalledWith('Answering your earlier question "Anything else?": no');
+  });
+
+  it("a question that timed out stays closed", () => {
+    show(cancelled("timeout"), { send: vi.fn() });
+    expect(root.querySelector(".card-clarify button")).toBeNull();
+    expect(root.querySelector(".card-clarify fieldset")!.hasAttribute("disabled")).toBe(true);
+  });
 });
 
 describe("tool groups (T26)", () => {
@@ -858,6 +1318,32 @@ describe("tool groups (T26)", () => {
     expect(groups).toHaveLength(2);
     expect(root.querySelector(".msg-agent")!.textContent).toContain("Looking further.");
     expect(groups[1].classList.contains("tool-running")).toBe(true);
+  });
+
+  it("a call its turn left without a result is not finished; a call of the turn going on runs", async () => {
+    const t = new Timeline();
+    t.applyAll([
+      call(1, "a", "Bash", { command: "sleep 600" }),
+      ev("event.system", (e) => {
+        e.seq = 2;
+        e.payload = { code: "turn_lost", text: "The agent process stopped during a turn; the turn was lost" };
+      }),
+      ev("event.user.message", withSeq(3)),
+      call(4, "b", "Bash", { command: "make" }),
+    ]);
+    show(t);
+    const [lost, now] = [...root.querySelectorAll(".tool-group")];
+    expect(lost.classList.contains("tool-unfinished")).toBe(true);
+    expect(lost.querySelector(".pulse-dot")).toBeNull();
+    expect(lost.querySelector(".tool-group-head .mark-error")!.getAttribute("aria-label")).toBe("not finished");
+    // The one-column gutter marks it as a failed call.
+    expect(lost.parentElement!.querySelector(".feed-mark-error")).not.toBeNull();
+    await act(async () => lost.querySelector<HTMLButtonElement>(".tool-group-head")!.click());
+    const row = lost.querySelector(".tool-row")!;
+    expect(row.classList.contains("tool-unfinished")).toBe(true);
+    expect(row.querySelector(".mark-error")!.getAttribute("aria-label")).toBe("not finished");
+    expect(now.classList.contains("tool-running")).toBe(true);
+    expect(now.querySelector(".tool-group-head .pulse-dot")).not.toBeNull();
   });
 });
 
@@ -1604,6 +2090,19 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
     }
   });
 
+  it("a call before the last end of a turn is not the running one", () => {
+    const t = new Timeline();
+    t.applyAll([
+      call(1, "a", "Bash", { command: "sleep 600" }),
+      agentText(2, "Stopped.", true),
+      ev("event.user.message", withSeq(3)),
+    ]);
+    expect(draw("running", t)!.textContent).toBe("Agent is working");
+    render(null, root);
+    t.apply(call(4, "b", "Bash", { command: "make" }));
+    expect(draw("running", t)!.querySelector(".activity-what")!.textContent).toBe("make");
+  });
+
   it('a waiting hqc_ask (T32): "Waiting for a reply from <session> <time>"', () => {
     const t = new Timeline();
     t.apply(
@@ -1953,6 +2452,18 @@ describe("the feed like the Claude Code tab", () => {
     const line = root.querySelector(".line.line-system.line-runtime")!;
     expect(line.textContent).toBe("Credit balance is too low");
     expect(root.querySelector(".msg-agent")).toBeNull();
+  });
+
+  it("shows an answer an interrupt cut off muted, marked interrupted after its time", () => {
+    const t = new Timeline();
+    t.apply(ev("event.agent.message.interrupted"));
+    t.apply(agentText(44, "All done.", true));
+    show(t);
+    const [cut, whole] = [...root.querySelectorAll(".msg-agent")];
+    expect(cut.classList.contains("msg-interrupted")).toBe(true);
+    expect(cut.querySelector(".msg-time .interrupted")!.textContent).toBe(" · interrupted");
+    expect(whole.classList.contains("msg-interrupted")).toBe(false);
+    expect(whole.querySelector(".interrupted")).toBeNull();
   });
 
   const clarify = () =>

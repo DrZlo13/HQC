@@ -128,15 +128,16 @@ function Separator() {
 const kindOf = (k: string | undefined): ArtifactKind | undefined =>
   (ARTIFACT_KINDS as readonly string[]).includes(k ?? '') ? (k as ArtifactKind) : undefined;
 
-/** "↙ Question from X" / "↙ Message from X": a `peer.message` that came into this session. */
-export function PeerMessageBlock({ event, actions }: { event: EventOf<'peer.message'>; actions: ChatActions }) {
+/** "↙ Question from X" / "↙ Message from X": a `peer.message` that came into this session;
+ *  `queued`: it waits for a turn of its own (`Item.queued`), said while it is `pending`. */
+export function PeerMessageBlock({ event, actions, queued }: { event: EventOf<'peer.message'>; actions: ChatActions; queued?: boolean }) {
   const p = event.payload;
   return (
     <Relay
       dir="in"
       label={p.mode === 'ask' ? 'Question from' : 'Message from'}
       peer={<PeerLink target={p.from_session_id} label={p.from ?? `session ${p.from_session_id.slice(-8)}`} actions={actions} />}
-      when={formatTime(event.ts)}
+      when={queued && event.delivery === 'pending' ? `${formatTime(event.ts)} · queued` : formatTime(event.ts)}
       copy={p.text}
     >
       <Markdown class="text" text={p.text} />

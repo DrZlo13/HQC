@@ -203,6 +203,10 @@ export class ChatSession {
     return this.api.background(this.id, callId);
   }
 
+  stopTask(taskId: string): Promise<void> {
+    return this.api.stopTask(this.id, taskId);
+  }
+
   retry(): Promise<void> {
     return this.api.retry(this.id);
   }

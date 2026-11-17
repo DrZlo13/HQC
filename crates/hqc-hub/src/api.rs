@@ -1659,7 +1659,10 @@ pub async fn input(
     Ok(reply(StatusCode::CREATED, &row))
 }
 
-/// Abort the current turn; open requests are cancelled with `stopped`.
+/// Abort the current turn. The hub's own open requests (a move, a secret) are cancelled with
+/// `stopped`. The runtime's (approvals, questions) are the worker's to close: it cancels those
+/// of the interrupted turn when the turn ends, and a background subagent's stay open, since the
+/// subagent goes on (SPEC §8.1, since 0.161). With no worker connected the hub cancels them too.
 pub async fn stop(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -1667,8 +1670,17 @@ pub async fn stop(
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Write).await?;
     not_system(&s)?;
-    requests::cancel_open_of_session(&app, id, CancelReason::Stopped).await?;
+    let open = db::open_requests_of_session(&app.db, id).await?;
+    let runtimes = |kind: &str| matches!(kind, "approval" | "clarify");
+    for p in open.iter().filter(|p| !runtimes(&p.kind)) {
+        requests::cancel(&app, p, CancelReason::Stopped).await?;
+    }
     let sent = send_to_worker(&app, &s, HubFrame::SessionStop { session_id: id });
+    if !sent {
+        for p in open.iter().filter(|p| runtimes(&p.kind)) {
+            requests::cancel(&app, p, CancelReason::Stopped).await?;
+        }
+    }
     Ok(Json(json!({ "sent": sent })))
 }
 
@@ -1742,6 +1754,35 @@ pub(crate) async fn restart_agent(app: &AppState, s: &SessionRow) -> bool {
     }
     delivery::kick(app, s.id, true).await;
     true
+}
+
+/// Longest `task_id` of `POST .../tasks/{task_id}/stop`, in bytes.
+const MAX_TASK_ID: usize = 128;
+
+/// Stop the agent's task `task_id` alone (the client sends a `stoppable` row of the session's
+/// `subagents.live`; the id is not checked against it, the session is the user's own):
+/// `session.stop_task` to the worker, whose runtime's answer is only logged.
+pub async fn stop_task(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path((id, task_id)): Path<(Uuid, String)>,
+) -> ApiResult<Json<Value>> {
+    let s = session_for(&app, &user, id, Action::Write).await?;
+    not_system(&s)?;
+    if task_id.is_empty() || task_id.len() > MAX_TASK_ID || task_id.contains('\0') {
+        return Err(ApiError::BadRequest(format!(
+            "task_id must be 1 to {MAX_TASK_ID} bytes without NUL"
+        )));
+    }
+    let sent = send_to_worker(
+        &app,
+        &s,
+        HubFrame::SessionStopTask {
+            session_id: id,
+            task_id,
+        },
+    );
+    Ok(Json(json!({ "sent": sent })))
 }
 
 pub async fn retry(

@@ -125,6 +125,10 @@ pub fn router(app: AppState) -> Router {
             "/api/providers/{id}",
             axum::routing::patch(providers::update).delete(providers::delete),
         )
+        .route(
+            "/api/sessions/{id}/tasks/{task_id}/stop",
+            post(api::stop_task),
+        )
         .route("/api/sessions/{id}/retry", post(api::retry))
         .route("/api/sessions/{id}/archive", post(api::archive))
         .route("/api/sessions/{id}/unarchive", post(api::unarchive))

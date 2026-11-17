@@ -646,9 +646,10 @@ async fn approval_answer_and_expiry() {
     hub.finish().await;
 }
 
-/// Clarify: answer by id; stop cancels an open one with `clarify.response {answers: {}}`.
+/// Clarify: answer by id; after Stop an open one is the worker's to close, no empty answer goes
+/// to it, and the worker's `clarify.cancel` closes it.
 #[tokio::test]
-async fn clarify_answer_and_cancel_on_stop() {
+async fn clarify_answer_and_cancel_after_stop() {
     let hub = TestHub::start().await;
     let (_, token) = hub.enroll("home-mac").await;
     let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
@@ -684,15 +685,17 @@ async fn clarify_answer_and_cancel_on_stop() {
         .post(&format!("/api/sessions/{sid}/stop"), json!({}))
         .await;
     assert_eq!((s, r["sent"].as_bool()), (200, Some(true)));
-    let f = w.expect("clarify.response").await;
-    assert_eq!(
-        f["payload"],
-        json!({"session_id": sid, "request_id": "c-2", "answers": {}})
-    );
     w.expect("session.stop").await;
+    w.event(agent_event(
+        &sid,
+        "clarify.cancel",
+        json!({"request_id": "c-2", "reason": "stopped"}),
+    ))
+    .await;
     let events = hub.events(&sid).await;
     let cancel = events.last().unwrap();
     assert_eq!(cancel["type"], "clarify.cancel");
+    assert_eq!(cancel["author"]["kind"], "agent");
     assert_eq!(
         cancel["payload"],
         json!({"request_id": "c-2", "reason": "stopped"})
@@ -702,7 +705,7 @@ async fn clarify_answer_and_cancel_on_stop() {
 
 /// A worker's cancel (the Claude Code adapter's for a request still open when the turn ends)
 /// closes its request; sent again, it gets its `seq`. One for a request the hub closed already
-/// (stop cancels first) is not stored a second time.
+/// (a stopped process's, which the hub cancels) is not stored a second time.
 #[tokio::test]
 async fn a_workers_cancel_closes_its_request_once() {
     let hub = TestHub::start().await;
@@ -737,12 +740,13 @@ async fn a_workers_cancel_closes_its_request_once() {
         approval_payload("req-2", far),
     ))
     .await;
-    let (s, _) = hub
-        .post(&format!("/api/sessions/{sid}/stop"), json!({}))
-        .await;
-    assert_eq!(s, 200);
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "stopped", "locked_by": "none"}),
+    )
+    .await;
+    w.expect("ack").await;
     w.expect("approval.response").await;
-    w.expect("session.stop").await;
     let ack = w
         .event(agent_event(
             &sid,
@@ -769,6 +773,67 @@ async fn a_workers_cancel_closes_its_request_once() {
             (json!("req-1"), json!("agent")),
             (json!("req-2"), json!("system"))
         ]
+    );
+    hub.finish().await;
+}
+
+/// SPEC §8.1 (0.161): Stop spares background subagents, so it leaves the runtime's open
+/// requests to the worker, which cancels those of the interrupted turn and keeps a background
+/// subagent's: nothing answers this one, and the owner still can. With no worker connected the
+/// hub cancels them, as before.
+#[tokio::test]
+async fn stop_leaves_the_runtimes_requests_to_the_worker() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("stop").await;
+    ack_start(&mut w, &sid).await;
+    let far = "2099-01-01T00:00:00Z";
+    w.event(agent_event(
+        &sid,
+        "approval.request",
+        approval_payload("req-1", far),
+    ))
+    .await;
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/stop"), json!({}))
+        .await;
+    assert_eq!((s, r["sent"].as_bool()), (200, Some(true)));
+    let stop = w.expect("session.stop").await;
+    w.reply(&stop["id"], "ack", json!({})).await;
+    w.expect_silence(Duration::from_millis(300)).await;
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/req-1"),
+            json!({"option_id": "allow"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let f = w.expect("approval.response").await;
+    assert_eq!(f["payload"]["option_id"], "allow");
+    w.reply(&f["id"], "ack", json!({})).await;
+
+    w.event(agent_event(
+        &sid,
+        "approval.request",
+        approval_payload("req-2", far),
+    ))
+    .await;
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/stop"), json!({}))
+        .await;
+    assert_eq!((s, r["sent"].as_bool()), (200, Some(false)));
+    let events = hub.events(&sid).await;
+    let cancel = events.last().unwrap();
+    assert_eq!(
+        (cancel["type"].as_str(), &cancel["payload"]),
+        (
+            Some("approval.cancel"),
+            &json!({"request_id": "req-2", "reason": "stopped"})
+        )
     );
     hub.finish().await;
 }
@@ -1214,6 +1279,45 @@ async fn an_input_during_the_answer_text_is_marked() {
         "{}",
         stored(&after)
     );
+    hub.finish().await;
+}
+
+/// SPEC §4, §6 (0.161): an `agent.delta` with `reset: true` (the runtime abandoned the attempt
+/// that wrote the text) drops the text so far: the subscriber gets it, a client that subscribes
+/// after it gets no copy, and an input stored after it is not marked `during_text`.
+#[tokio::test]
+async fn a_reset_delta_drops_the_text_so_far() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("reset").await;
+    ack_start(&mut w, &sid).await;
+    let mut c = FakeClient::connect(&hub).await;
+    c.subscribe(&sid, 0).await;
+    w.event(agent_event(&sid, "agent.delta", json!({"text": "Let me"})))
+        .await;
+    assert_eq!(c.until("event").await["event"]["payload"]["text"], "Let me");
+    let reset = agent_event(&sid, "agent.delta", json!({"text": "", "reset": true}));
+    w.event(reset.clone()).await;
+    assert_eq!(c.until("event").await["event"], reset);
+
+    let mut late = FakeClient::connect(&hub).await;
+    let backlog = late.subscribe(&sid, 0).await;
+    assert!(
+        backlog.iter().all(|e| e["type"] != "agent.delta"),
+        "{backlog:?}"
+    );
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "meanwhile"}),
+        )
+        .await;
+    assert_eq!(s, 201);
+    let input = r["event"]["event_id"].clone();
+    let events = hub.events(&sid).await;
+    let stored = events.iter().find(|e| e["event_id"] == input).unwrap();
+    assert!(stored["payload"].get("during_text").is_none(), "{stored}");
     hub.finish().await;
 }
 
@@ -2582,6 +2686,70 @@ async fn a_foreground_call_goes_to_the_background() {
         v["agent"]["process_state"] == "stopped" && v.get("foreground_calls").is_none()
     })
     .await;
+    hub.finish().await;
+}
+
+/// SPEC §5.3, §6: `POST .../tasks/{task_id}/stop` reaches the worker as `session.stop_task`; a
+/// `task_id` that is too long or has a NUL is refused, another user's session is not found,
+/// the worker's service session takes none, and with the worker away nothing is sent.
+#[tokio::test]
+async fn a_task_is_stopped_alone() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, hello) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Stop a task").await;
+    ack_start(&mut w, &sid).await;
+
+    let task = "a52af2b436ded4cea";
+    let path = |sid: &str, task: &str| format!("/api/sessions/{sid}/tasks/{task}/stop");
+    let (s, r) = hub.post(&path(&sid, task), json!({})).await;
+    assert_eq!((s, r["sent"].as_bool()), (200, Some(true)), "{r}");
+    let f = w.expect("session.stop_task").await;
+    assert_eq!(f["payload"], json!({"session_id": sid, "task_id": task}));
+    let long = "x".repeat(129);
+    for bad in [long.as_str(), "a52af%00"] {
+        let (s, _) = hub.post(&path(&sid, bad), json!({})).await;
+        assert_eq!(s, 400, "{bad:?}");
+    }
+
+    let db = &hub.app.db;
+    let stranger = hqc_hub::db::ensure_user(db, "stranger-stop@example.com")
+        .await
+        .unwrap();
+    let project = hqc_hub::db::create_project(db, stranger.id, "Theirs", "")
+        .await
+        .unwrap();
+    let theirs = hqc_hub::db::create_session(
+        db,
+        hqc_hub::db::NewSession {
+            project_id: project.id,
+            owner_id: stranger.id,
+            workspace_id: None,
+            worker_id: None,
+            cwd: ".",
+            title: Some("Theirs"),
+            model: None,
+            auto_approve: false,
+            permission_mode: None,
+        },
+    )
+    .await
+    .unwrap();
+    let (s, _) = hub.post(&path(&theirs.to_string(), task), json!({})).await;
+    assert_eq!(s, 404);
+    let service = hello["payload"]["system_session_id"].as_str().unwrap();
+    let (s, v) = hub.post(&path(service, task), json!({})).await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (409, Some("system_session")),
+        "{v}"
+    );
+
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (s, r) = hub.post(&path(&sid, task), json!({})).await;
+    assert_eq!((s, r["sent"].as_bool()), (200, Some(false)), "{r}");
     hub.finish().await;
 }
 

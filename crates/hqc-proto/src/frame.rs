@@ -456,6 +456,11 @@ pub enum HubFrame {
     /// runtime answers is the worker's log.
     #[serde(rename = "session.background")]
     SessionBackground { session_id: Uuid, call_id: String },
+    /// Stop the agent's task `task_id` alone, one of `subagents.live` (the client sends a row
+    /// with `stoppable`); the turn and the other tasks go on (since SPEC 0.161). Answered with
+    /// `ack`, also when no agent runs; what the runtime answers is the worker's log.
+    #[serde(rename = "session.stop_task")]
+    SessionStopTask { session_id: Uuid, task_id: String },
     /// Terminate the agent process.
     #[serde(rename = "session.kill")]
     SessionKill { session_id: Uuid },
@@ -1454,6 +1459,7 @@ mod tests {
         "session.input",
         "session.stop",
         "session.background",
+        "session.stop_task",
         "session.kill",
         "session.permission_mode",
         "session.model",
@@ -1522,6 +1528,10 @@ mod tests {
         (
             "session.background",
             include_str!("../examples/wire/hub.session.background.json"),
+        ),
+        (
+            "session.stop_task",
+            include_str!("../examples/wire/hub.session.stop_task.json"),
         ),
         (
             "session.kill",
@@ -1766,6 +1776,7 @@ mod tests {
             HubFrame::SessionInput(_) => "session.input",
             HubFrame::SessionStop { .. } => "session.stop",
             HubFrame::SessionBackground { .. } => "session.background",
+            HubFrame::SessionStopTask { .. } => "session.stop_task",
             HubFrame::SessionKill { .. } => "session.kill",
             HubFrame::SessionPermissionMode { .. } => "session.permission_mode",
             HubFrame::SessionModel { .. } => "session.model",

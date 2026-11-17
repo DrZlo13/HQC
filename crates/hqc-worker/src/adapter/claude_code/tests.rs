@@ -318,7 +318,12 @@ fn check_ids(fx: &Fixture, evs: &[AdapterEvent], session_id: Uuid, input_id: Uui
     let mut from_records = HashSet::new();
     for e in events(evs) {
         assert_eq!(e.session_id, session_id);
-        assert_eq!(e.author, Author::Agent { id: session_id });
+        // A turn that ended early ends with the adapter's own `system` line.
+        let author = match e.kind {
+            EventKind::System { .. } => Author::System,
+            _ => Author::Agent { id: session_id },
+        };
+        assert_eq!(e.author, author);
         assert!(e.seq.is_none());
         match &e.kind {
             EventKind::ToolCall { .. }
@@ -595,15 +600,30 @@ async fn ask_user_question_becomes_clarify() {
     assert_eq!(without_uuids(h.claude.stdin()), lines(fx.stdin));
 }
 
+/// A turn that hit `--max-turns` (`error_max_turns`, `terminal_reason: max_turns`) ends with
+/// a line that says why, after its `usage`; its `status idle` carries no reason of its own.
 #[tokio::test]
-async fn mcp_timeout_turn_ends_with_detail() {
+async fn mcp_timeout_turn_says_it_ended_early() {
     let fx = fixture!("mcp-timeout");
     let (h, evs, _) = run(&fx, "once", BTreeMap::new()).await;
     assert_eq!(without_uuids(h.claude.stdin()), lines(fx.stdin));
+    assert_eq!(
+        shape(&evs[evs.len() - 4..]),
+        ["usage", "system", "status", "turn_ended"]
+    );
     let evs = events(&evs);
     assert!(evs.iter().any(|e| matches!(
         &e.kind,
-        EventKind::Status { state: SessionState::Idle, detail: Some(d), .. } if d == "error_max_turns"
+        EventKind::System { code, text, .. } if code == "turn_ended_early"
+            && text == "Turn ended early: max_turns · Reached maximum number of turns (2)"
+    )));
+    assert!(evs.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::Status {
+            state: SessionState::Idle,
+            detail: None,
+            ..
+        }
     )));
     assert!(evs.iter().any(|e| matches!(
         &e.kind,
@@ -1733,6 +1753,75 @@ async fn stop_escalates_to_sigterm_when_sigint_does_not_end_the_turn() {
     assert_eq!(h.claude.signals(), [Sig::Interrupt, Sig::Terminate]);
 }
 
+/// SPEC §8.1: every process, a new one and a resumed one, gets `initialize` with only
+/// `perTaskStopAffordance: true` as the first line of its stdin, before the prompt: the CLI
+/// takes it only before the first user message, and with it Stop spares the background
+/// subagents.
+#[tokio::test]
+async fn every_process_gets_initialize_first() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start(fx.stream, fx.claude_session()).await;
+    h.turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
+        .await;
+    h.adapter.kill().await.unwrap();
+    let (work, config) = &h._dirs;
+    let t = super::paths::transcript_path(
+        config.path(),
+        &work.path().canonicalize().unwrap(),
+        &fx.claude_session(),
+    );
+    std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+    std::fs::write(&t, fx.transcript).unwrap();
+    let s = spec(h.session_id, work.path(), fx.claude_session());
+    h.adapter.resume(&s).await.unwrap();
+    assert!(h.claude.commands()[1]
+        .args
+        .contains(&"--resume".to_string()));
+    let inits = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let i = h.claude.initialize();
+            if i.len() == 2 {
+                return i;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("no initialize on the stdin of both processes");
+    // Before the first process's prompt, and before anything else of the second.
+    assert_eq!(inits[0].0, 0);
+    assert_eq!(inits[1].0, h.claude.stdin().len());
+    for (_, v) in &inits {
+        assert_eq!(v["type"], "control_request");
+        assert_eq!(
+            v["request"],
+            json!({"subtype": "initialize", "perTaskStopAffordance": true})
+        );
+        assert!(v["request_id"].as_str().unwrap().starts_with("hqc-init-"));
+    }
+    assert_ne!(inits[0].1["request_id"], inits[1].1["request_id"]);
+    h.adapter.kill().await.unwrap();
+}
+
+/// The CLI's answer to `initialize`, a success (2.1.312: the commands, models and account) or
+/// an error, gives nothing.
+#[test]
+fn the_answer_to_initialize_is_skipped() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let init = writes(&[core.initialize()]);
+    let id = init[0]["request_id"].as_str().unwrap();
+    for answer in [
+        json!({"type": "control_response", "response": {"subtype": "success", "request_id": id,
+            "response": {"commands": [{"name": "compact", "description": "Clear conversation history but keep a summary in context", "argumentHint": ""}],
+                "agents": [], "output_style": "default", "models": [], "account": {}, "pid": 4242},
+            "pending_permission_requests": [], "pending_user_dialog_requests": []}}),
+        json!({"type": "control_response", "response": {"subtype": "error", "request_id": id,
+            "error": "initialize: skills must be an array of strings"}}),
+    ] {
+        assert!(core.on_line(&answer.to_string()).is_empty(), "{answer}");
+    }
+}
+
 #[tokio::test]
 async fn early_exit_fails_start() {
     let config = tempfile::tempdir().unwrap();
@@ -2238,14 +2327,20 @@ fn deny_is_the_tabs_no() {
             _ => None,
         })
         .collect();
+    // One "Interrupted" line for the turn; `[Request interrupted by user for tool use]` is none.
     assert_eq!(
         kinds,
         [
             "tool.result",
             "usage",
-            "status:Some(\"error_during_execution\")",
+            "system",
+            "status:None",
             "turn_ended"
         ]
+    );
+    assert_eq!(
+        system_events(&all),
+        [("turn_interrupted".into(), "Interrupted".into())]
     );
 }
 
@@ -2399,8 +2494,160 @@ fn end_of_turn_status_names_its_input() {
             .unwrap();
         assert_eq!(
             status["payload"],
-            json!({"state": "idle", "detail": "error_during_execution", "in_reply_to": input})
+            json!({"state": "idle", "in_reply_to": input})
         );
+    }
+}
+
+/// Stop during the answer (2.1.312: the text cut off comes as `assistant` with `aborted:
+/// true`, then `[Request interrupted by user]`, then `result` with `terminal_reason:
+/// aborted_streaming`): the text is the final `agent.message` with `interrupted: true`, and
+/// the turn ends with one "Interrupted" line after its `usage`.
+#[test]
+fn an_interrupted_answer_is_marked_and_the_turn_says_so() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let input = started(&mut core, sid);
+    let a = play(
+        &mut core,
+        &format!(
+            r#"{{"type":"assistant","message":{{"model":"claude-haiku-5-5","content":[{{"type":"text","text":"The tests in crates/hqc-hub"}}]}},"parent_tool_use_id":null,"uuid":"{}","aborted":true}}
+{{"type":"user","message":{{"role":"user","content":[{{"type":"text","text":"[Request interrupted by user]"}}]}},"parent_tool_use_id":null,"uuid":"{}"}}
+{{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"stop_reason":null,"terminal_reason":"aborted_streaming","errors":["[ede_diagnostic] result_type=user last_content_type=text stop_reason=null"],"total_cost_usd":0.002,"usage":{{"input_tokens":4,"output_tokens":7}}}}"#,
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        ),
+    );
+    let evs = emitted(a.clone());
+    assert_eq!(
+        shape(&evs),
+        [
+            "agent.message:true",
+            "usage",
+            "system",
+            "status",
+            "turn_ended"
+        ]
+    );
+    assert_eq!(
+        system_events(&a),
+        [("turn_interrupted".into(), "Interrupted".into())]
+    );
+    let wire: Vec<Value> = events(&evs)
+        .into_iter()
+        .map(|e| serde_json::to_value(&e.kind).unwrap())
+        .collect();
+    assert_eq!(
+        wire[0]["payload"],
+        json!({"text": "The tests in crates/hqc-hub", "final": true, "in_reply_to": input,
+            "interrupted": true})
+    );
+    assert_eq!(
+        wire[3]["payload"],
+        json!({"state": "idle", "in_reply_to": input})
+    );
+}
+
+/// A turn interrupted while its reply streamed can end with a `result` of no tokens though the
+/// total grew (seen on the stand, 2.1.312): no `0 → 0 tokens` line, only the session's total.
+#[test]
+fn an_interrupted_turn_without_tokens_gives_no_usage_line() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let a = play(
+        &mut core,
+        &format!(
+            r#"{{"type":"assistant","message":{{"model":"claude-haiku-5-5","content":[{{"type":"text","text":"Once upon"}}]}},"parent_tool_use_id":null,"uuid":"{}","aborted":true}}
+{{"type":"result","subtype":"success","is_error":false,"num_turns":1,"stop_reason":null,"terminal_reason":"aborted_streaming","result":"Once upon","total_cost_usd":0.00013,"usage":{{"input_tokens":0,"output_tokens":0}}}}"#,
+            Uuid::new_v4()
+        ),
+    );
+    let evs = emitted(a.clone());
+    assert_eq!(
+        shape(&evs),
+        [
+            "agent.message:true",
+            "usage",
+            "system",
+            "status",
+            "turn_ended"
+        ]
+    );
+    let wire: Vec<Value> = events(&evs)
+        .into_iter()
+        .map(|e| serde_json::to_value(&e.kind).unwrap())
+        .collect();
+    assert_eq!(wire[1]["payload"]["input_tokens"], 0);
+    assert!(wire[1]["payload"].get("cost_usd").is_none());
+    assert_eq!(wire[1]["payload"]["session_cost_usd"], 0.00013);
+}
+
+/// A turn the CLI ended early for any reason but an interrupt ends with one line that says
+/// why, after its `usage`: the `terminal_reason` (the subtype without one), the API's status
+/// and `errors`, cut to 300 bytes; not the `result` text of `is_error: true`, which the CLI's
+/// own reply brought. A turn that completed, and a local command (no `terminal_reason`), have
+/// none.
+#[test]
+fn a_turn_that_ended_early_says_why() {
+    let sid = Uuid::now_v7();
+    let end = |fields: Value| {
+        let mut core = Core::new(sid, false);
+        started(&mut core, sid);
+        let mut r = json!({"type": "result", "num_turns": 1, "total_cost_usd": 0.001,
+            "usage": {"input_tokens": 4, "output_tokens": 2}});
+        r.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        system_events(&core.on_line(&r.to_string()))
+    };
+    let early = |t: &str| vec![("turn_ended_early".to_string(), t.to_string())];
+    assert_eq!(
+        end(
+            json!({"subtype": "error_max_budget_usd", "is_error": true, "terminal_reason": "budget_exhausted",
+            "errors": ["Reached maximum budget ($0.01)"]})
+        ),
+        early("Turn ended early: budget_exhausted · Reached maximum budget ($0.01)")
+    );
+    assert_eq!(
+        end(
+            json!({"subtype": "success", "is_error": true, "result": "API Error: 529 Overloaded",
+            "terminal_reason": "api_error", "api_error_status": 529})
+        ),
+        early("Turn ended early: api_error · API status 529")
+    );
+    assert_eq!(
+        end(
+            json!({"subtype": "success", "is_error": false, "result": "", "terminal_reason": "hook_stopped"})
+        ),
+        early("Turn ended early: hook_stopped")
+    );
+    assert_eq!(
+        end(
+            json!({"subtype": "error_during_execution", "is_error": true, "errors": ["boom", " ", "again"]})
+        ),
+        early("Turn ended early: error_during_execution · boom; again")
+    );
+    let long = end(
+        json!({"subtype": "error_during_execution", "is_error": true, "terminal_reason": "model_error",
+        "errors": ["x".repeat(1000)]}),
+    );
+    assert_eq!(long[0].1.len(), 300);
+    assert!(long[0].1.starts_with("Turn ended early: model_error · xxx"));
+    assert!(end(
+        json!({"subtype": "success", "is_error": false, "result": "OK", "terminal_reason": "completed"})
+    )
+    .is_empty());
+    assert!(
+        end(json!({"subtype": "success", "is_error": false, "result": "", "num_turns": 0}))
+            .is_empty()
+    );
+    // The model moved its work to the background, or a tool call was deferred: on purpose.
+    for reason in ["background_requested", "tool_deferred"] {
+        assert!(end(
+            json!({"subtype": "success", "is_error": false, "result": "", "terminal_reason": reason})
+        )
+        .is_empty());
     }
 }
 
@@ -2537,6 +2784,218 @@ fn a_turn_the_cli_starts_by_itself_names_no_input() {
     );
 }
 
+/// An input written while the CLI runs a turn it started by itself, after that turn's last text
+/// and before its `result` (9–100 ms apart on the stand): the text stays held, as for an input
+/// written into a turn of hqc's, and that `result` ends it `final: true`; the input runs next.
+#[test]
+fn an_input_during_a_turn_the_cli_starts_by_itself_keeps_its_last_text() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(sid, "Run `sleep 5` in the background.");
+    let b = user_input(sid, "Reply with the single word PONG.");
+    let init = json!({"type": "system", "subtype": "init", "model": "claude-haiku-5-5",
+        "permissionMode": "default", "session_id": CLI_SESSION})
+    .to_string();
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, &a.text),
+            reply("LAUNCHED"),
+            result("success"),
+            lifecycle(&ua, "completed"),
+            r#"{"type":"system","subtype":"task_notification","task_id":"abd6ecd27912266e5","tool_use_id":"toolu_018foiN3RMuTb1fmFn53JffP","status":"completed","summary":"done","uuid":"614bde30-70d7-46cc-9ff9-9e22f9bdc118"}"#.into(),
+            init.clone(),
+            reply("The background command finished."),
+        ]),
+    );
+    let ub = line_uuid(&core.input(&b));
+    let out = play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "queued"),
+            result("success"),
+            init,
+            lifecycle(&ub, "started"),
+            echo(&ub, &b.text),
+            reply("PONG"),
+            result("success"),
+            lifecycle(&ub, "completed"),
+        ]),
+    );
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "message \"The background command finished.\" to A",
+            "status to A",
+            "turn_ended [B]",
+            "accepted B",
+            "message \"PONG\" to B",
+            "status to B",
+            "turn_ended []"
+        ]
+    );
+    let finals: Vec<bool> = events(&emitted(out))
+        .into_iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::AgentMessage { r#final, .. } => Some(*r#final),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finals, [true, true]);
+}
+
+/// A request whose stream broke after some text, then retried by the CLI: the main agent's
+/// next `message_start` drops the text written so far (`agent.delta` with `reset: true` and an
+/// empty `text`), as the VS Code tab drops the rows of an abandoned attempt. No reset before any
+/// text, after text an assistant text took up, or on a subagent's `message_start`.
+#[test]
+fn a_new_request_drops_the_text_of_an_abandoned_attempt() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let ev = |e: Value| {
+        json!({"type": "stream_event", "parent_tool_use_id": null, "event": e,
+            "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+    };
+    let start = ev(json!({"type": "message_start", "message": {"id": "msg_01"}})).to_string();
+    let delta = |t: &str| {
+        ev(json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": t}}))
+        .to_string()
+    };
+    let deltas = |a: Vec<Action>| -> Vec<(String, bool)> {
+        events(&emitted(a))
+            .into_iter()
+            .filter_map(|e| match &e.kind {
+                EventKind::AgentDelta { text, reset } => Some((text.clone(), *reset)),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(
+        deltas(play(&mut core, &start)).is_empty(),
+        "nothing written"
+    );
+    assert_eq!(
+        deltas(play(&mut core, &delta("Let me"))),
+        [("Let me".into(), false)]
+    );
+    assert_eq!(deltas(play(&mut core, &start)), [(String::new(), true)]);
+    assert!(deltas(play(&mut core, &start)).is_empty(), "dropped once");
+    play(
+        &mut core,
+        &lines_of(&[
+            delta("Let me look."),
+            reply("Let me look."),
+            bash("toolu_01", "ls"),
+            tool_result("toolu_01"),
+        ]),
+    );
+    assert!(
+        deltas(play(&mut core, &start)).is_empty(),
+        "an assistant text took it up"
+    );
+    play(&mut core, &delta("Now"));
+    let mut sub: Value = serde_json::from_str(&start).unwrap();
+    sub["parent_tool_use_id"] = json!("toolu_02");
+    assert!(
+        deltas(play(&mut core, &sub.to_string())).is_empty(),
+        "a subagent's"
+    );
+}
+
+/// A stream broken after some text that the CLI retried without one (2.1.312: "Error
+/// streaming, falling back to non-streaming mode"): no `message_start` comes, the response
+/// arrives as an `assistant` of another `message.id`, and the text written so far is dropped
+/// before it, as the VS Code tab drops it (`web:171092`). None for the response streamed, a
+/// `<synthetic>` one, one without an id, after text an assistant text took up, or a subagent's.
+#[test]
+fn a_reply_without_a_stream_drops_the_text_of_an_abandoned_attempt() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let ev = |e: Value| {
+        json!({"type": "stream_event", "parent_tool_use_id": null, "event": e,
+            "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+        .to_string()
+    };
+    let start = |id: &str| ev(json!({"type": "message_start", "message": {"id": id}}));
+    let delta = |t: &str| {
+        ev(json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": t}}))
+    };
+    let said = |id: &str, model: &str, t: &str| {
+        json!({"type": "assistant", "message": {"id": id, "model": model, "role": "assistant",
+            "content": [{"type": "text", "text": t}]},
+            "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+        .to_string()
+    };
+    let kinds = |a: Vec<Action>| -> Vec<String> {
+        events(&emitted(a))
+            .into_iter()
+            .map(|e| match &e.kind {
+                EventKind::AgentDelta { text, reset } => format!("delta {text:?} {reset}"),
+                EventKind::AgentMessage { text, .. } => format!("message {text:?}"),
+                _ => "other".into(),
+            })
+            .collect()
+    };
+    play(&mut core, &lines_of(&[start("msg_01"), delta("Let me")]));
+    let out = kinds(play(
+        &mut core,
+        &lines_of(&[
+            said("msg_02", "claude-haiku-5-5", "Here it is."),
+            result("success"),
+        ]),
+    ));
+    assert_eq!(
+        out[..2],
+        ["delta \"\" true", "message \"Here it is.\""],
+        "{out:?}"
+    );
+    started(&mut core, sid);
+    for (lines, why) in [
+        (
+            vec![
+                start("msg_03"),
+                delta("Sure"),
+                said("msg_03", "claude-haiku-5-5", "Sure."),
+            ],
+            "the response streamed",
+        ),
+        (
+            vec![said("msg_04", "claude-haiku-5-5", "More.")],
+            "an assistant text took it up",
+        ),
+        (
+            vec![
+                start("msg_05"),
+                delta("API"),
+                said("msg_06", "<synthetic>", "API Error"),
+            ],
+            "a synthetic one",
+        ),
+        (
+            vec![start("msg_07"), delta("No id"), reply("No id.")],
+            "one without an id",
+        ),
+    ] {
+        let out = kinds(play(&mut core, &lines_of(&lines)));
+        assert!(!out.iter().any(|k| k.ends_with("true")), "{why}: {out:?}");
+    }
+    play(&mut core, &lines_of(&[start("msg_08"), delta("Main")]));
+    let mut sub: Value = serde_json::from_str(&said("msg_09", "claude-haiku-5-5", "Sub.")).unwrap();
+    sub["parent_tool_use_id"] = json!("toolu_02");
+    assert!(
+        kinds(play(&mut core, &sub.to_string())).is_empty(),
+        "a subagent's"
+    );
+}
+
 #[test]
 fn control_response_echo_and_unknown_requests() {
     let mut core = Core::new(Uuid::now_v7(), false);
@@ -2653,6 +3112,7 @@ fn held_text_is_not_final_before_a_tool_call() {
                 r#final: false,
                 in_reply_to: Some(input),
                 runtime: false,
+                interrupted: false,
             }
         )
     );
@@ -2706,7 +3166,8 @@ fn nul_never_reaches_an_event() {
         }
     }
     assert!(kinds.contains(&EventKind::AgentDelta {
-        text: "d\u{FFFD}".into()
+        text: "d\u{FFFD}".into(),
+        reset: false,
     }));
     let mut seen = 0;
     for k in &kinds {
@@ -3744,6 +4205,91 @@ fn background_asks_the_cli_to_move_the_call() {
     }
 }
 
+/// The stop button of a row: `control_request {subtype: stop_task, task_id}`; the
+/// CLI's answer, `{}` or an error, gives no action.
+#[test]
+fn stop_task_asks_the_cli_to_stop_the_task() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let Action::Write(v) = core.stop_task("a52af2b436ded4cea") else {
+        panic!("not a write");
+    };
+    assert_eq!(v["type"], "control_request");
+    assert_eq!(
+        v["request"],
+        json!({"subtype": "stop_task", "task_id": "a52af2b436ded4cea"})
+    );
+    let id = v["request_id"].as_str().unwrap();
+    assert!(id.starts_with("hqc-stop-task-"), "{id}");
+    for answer in [
+        json!({"subtype": "success", "request_id": id, "response": {}}),
+        json!({"subtype": "error", "request_id": id, "error": "stop_task: task_id must be a string"}),
+    ] {
+        let line = json!({"type": "control_response", "response": answer});
+        assert!(core.on_line(&line.to_string()).is_empty());
+    }
+}
+
+/// A subagent's row and the agent's background command beside it are both `stoppable`; the
+/// subagent stopped alone ends as any end of it (the lines after the stop are made up after the
+/// CLI's code, 2.1.312: `task_updated` `killed`, the list without it, `task_notification`
+/// `stopped`): its row goes, the command's stays, and its "Background task" line comes.
+#[test]
+fn a_subagent_row_and_a_command_row_are_stoppable() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let lines = [
+        r#"{"type":"system","subtype":"task_started","task_id":"a52af2b436ded4cea","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","description":"Sleep and reply with number","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent"}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a52af2b436ded4cea","task_type":"local_agent","description":"Sleep and reply with number"},{"task_id":"b2st7oc3z","task_type":"local_bash","description":"Run the full pass over 1000 boards on cirunner"}]}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"b2st7oc3z","tool_use_id":"toolu_01Run","description":"Run the full pass over 1000 boards on cirunner","is_backgrounded":true,"task_type":"local_bash"}"#,
+    ];
+    let mut last = None;
+    for l in lines {
+        for a in core.on_line(l) {
+            if let Action::Emit(AdapterEvent::LiveSubagents(list)) = a {
+                last = Some(list);
+            }
+        }
+    }
+    let rows: Vec<(String, bool)> = last
+        .unwrap()
+        .into_iter()
+        .map(|s| (s.task_id, s.stoppable))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("a52af2b436ded4cea".to_string(), true),
+            ("b2st7oc3z".to_string(), true)
+        ]
+    );
+
+    let stopped = [
+        r#"{"type":"system","subtype":"task_updated","task_id":"a52af2b436ded4cea","patch":{"status":"killed","end_time":1793889489540}}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b2st7oc3z","task_type":"local_bash","description":"Run the full pass over 1000 boards on cirunner"}]}"#,
+        r#"{"type":"system","subtype":"task_notification","task_id":"a52af2b436ded4cea","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","status":"stopped","output_file":"","summary":"Sleep and reply with number","uuid":"0f6c1d2e-6666-4a55-9d0e-1a2b3c4d5e01"}"#,
+    ];
+    let mut out = Vec::new();
+    for l in stopped {
+        out.extend(core.on_line(l));
+    }
+    let lists: Vec<Vec<String>> = out
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::LiveSubagents(list)) => {
+                Some(list.iter().map(|s| s.task_id.clone()).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lists.last().unwrap(), &["b2st7oc3z".to_string()]);
+    assert_eq!(
+        system_events(&out),
+        [(
+            "task_notification".into(),
+            "Sleep and reply with number".into()
+        )]
+    );
+}
+
 /// `/compact` (lines of fixture `stream-resume-compact`, 2.1.308; the same `compact_boundary`
 /// came on 2.1.312): `system context_compacted` with the summary of the synthetic `user` line
 /// after it as its text, its id derived from the line's uuid, which is the transcript record's.
@@ -3864,17 +4410,25 @@ fn synthetic_reply_is_a_runtime_agent_message() {
     );
     let a = play(&mut core, &stream);
     let evs = emitted(a.clone());
+    // No tokens and no cost: no empty `0 → 0 tokens` line.
     assert_eq!(
         shape(&evs),
         [
             "agent.message:false",
             "agent.message:true",
-            "usage",
+            "system",
             "status",
             "turn_ended"
         ]
     );
-    assert!(system_events(&a).is_empty());
+    // The reason, not the reply's text again.
+    assert_eq!(
+        system_events(&a),
+        [(
+            "turn_ended_early".into(),
+            "Turn ended early: api_error".into()
+        )]
+    );
     let messages: Vec<(Uuid, &EventKind)> = events(&evs)
         .into_iter()
         .filter(|e| matches!(e.kind, EventKind::AgentMessage { .. }))
@@ -3893,6 +4447,7 @@ fn synthetic_reply_is_a_runtime_agent_message() {
                 r#final: true,
                 in_reply_to: Some(input),
                 runtime: true,
+                interrupted: false,
             }
         )
     );

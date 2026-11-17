@@ -81,6 +81,9 @@ export interface ChatActions {
   timeline: Timeline;
   approve(requestId: string, optionId: string, message?: string): Promise<void>;
   answer(requestId: string, answers: Record<string, ClarifyAnswer>): Promise<void>;
+  /** Sends `text` to the session as the user's message; absent where the card is shown away
+   *  from its session and where the session takes no input. */
+  send?(text: string): void;
   resend(clientOpId: string): void;
   discard(clientOpId: string): void;
   /** Opens the artifact in a new tab; `download`: as an attachment. */
@@ -168,7 +171,8 @@ function gutter(b: Block, timeline: Timeline): Gutter {
     case 'tools': {
       const state = groupState(b.rows);
       if (state === 'running') return { mark: mark('running', <span class="pulse-dot" />) };
-      return { mark: mark(state, state === 'ok' ? <IconCheck size={13} /> : <IconCross size={13} />) };
+      // A call its turn left without a result is marked as a failed one, as the VS Code tab does.
+      return { mark: state === 'ok' ? mark('ok', <IconCheck size={13} />) : mark('error', <IconCross size={13} />) };
     }
     case 'subagent': {
       const { state } = subagentState(b.call, b.result, timeline);
@@ -269,7 +273,7 @@ function BlockView({ block, actions }: { block: Block; actions: ChatActions }) {
       const it = block.item;
       switch (it.kind) {
         case 'event':
-          return <EventView event={it.event} actions={actions} />;
+          return <EventView event={it.event} actions={actions} queued={it.queued} />;
         case 'invalid':
           return <InvalidCard invalid={it.invalid} />;
         case 'pending':
@@ -352,10 +356,11 @@ export function ActivityLine({
   );
 }
 
-export function EventView({ event, actions }: { event: HqcEvent; actions: ChatActions }) {
+/** `queued`: an input waiting for a turn of its own (`Item.queued`). */
+export function EventView({ event, actions, queued }: { event: HqcEvent; actions: ChatActions; queued?: boolean }) {
   switch (event.type) {
     case 'user.message':
-      return <UserMessage event={event} actions={actions} />;
+      return <UserMessage event={event} actions={actions} queued={queued} />;
     case 'agent.delta':
       return <StreamingMessage text={event.payload.text} />;
     case 'subagents.live':
@@ -407,7 +412,7 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
         />
       );
     case 'peer.message':
-      return <PeerMessageBlock event={event} actions={actions} />;
+      return <PeerMessageBlock event={event} actions={actions} queued={queued} />;
     case 'usage':
       return (
         <div class="line line-usage">
@@ -575,7 +580,7 @@ function MessageActions({ children }: { children: ComponentChildren }) {
   return <div class="msg-actions">{children}</div>;
 }
 
-function UserMessage({ event, actions }: { event: EventOf<'user.message'>; actions: ChatActions }) {
+function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'>; actions: ChatActions; queued?: boolean }) {
   const d = event.delivery;
   const ids = event.payload.artifact_ids;
   const fork = actions.fork && event.author.kind === 'user' && d !== 'pending' && d !== 'failed';
@@ -606,7 +611,7 @@ function UserMessage({ event, actions }: { event: EventOf<'user.message'>; actio
         note={event.payload.joined ? 'joined the turn' : undefined}
         time={[
           event.payload.schedule_id && <span class="scheduled"> · scheduled</span>,
-          d === 'pending' && <span class="delivery"> · awaiting delivery</span>,
+          d === 'pending' && <span class="delivery"> · {queued ? 'queued' : 'awaiting delivery'}</span>,
           d === 'failed' && <span class="delivery delivery-failed"> · not delivered</span>,
           forking && (
             <span class="forking" role="status">
@@ -703,9 +708,11 @@ export function UsageParts({ usage }: { usage: EventOf<'usage'> }) {
 }
 
 function AgentMessage({ event, usage }: { event: EventOf<'agent.message'>; usage?: EventOf<'usage'> }) {
+  // An interrupt cut it off: muted, marked after its time.
+  const interrupted = event.payload.interrupted;
   return (
-    <article class={`msg-agent ${event.payload.final ? 'msg-final' : 'msg-interim'}`}>
-      <MessageTime ts={event.ts} />
+    <article class={`msg-agent ${event.payload.final ? 'msg-final' : 'msg-interim'}${interrupted ? ' msg-interrupted' : ''}`}>
+      <MessageTime ts={event.ts}>{interrupted && <span class="interrupted"> · interrupted</span>}</MessageTime>
       <Markdown class="text" text={event.payload.text} />
       {usage && (
         <div class="meta">
@@ -781,8 +788,14 @@ function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }
   );
 }
 
-function StateMark({ state }: { state: 'running' | 'error' | 'ok' }) {
+function StateMark({ state }: { state: 'running' | 'unfinished' | 'error' | 'ok' }) {
   if (state === 'running') return <span class="pulse-dot" role="img" aria-label="running" />;
+  if (state === 'unfinished')
+    return (
+      <span class="mark mark-error" role="img" aria-label="not finished">
+        <IconCross size={13} />
+      </span>
+    );
   return (
     <span class={`mark mark-${state}`} role="img" aria-label={state === 'ok' ? 'done' : 'error'}>
       {state === 'ok' ? <IconCheck size={13} /> : <IconCross size={13} />}
@@ -798,7 +811,7 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
   const { call } = row;
   const result = call ? actions.timeline.resultFor(call.payload.call_id) ?? row.result : row.result;
   const r = result?.payload;
-  const state = !r ? 'running' : r.error ? 'error' : 'ok';
+  const state = !r ? (row.unfinished ? 'unfinished' : 'running') : r.error ? 'error' : 'ok';
   const line = call ? callLine(call.payload.tool, call.payload.args_preview) : undefined;
   return (
     <details class={`tool-row tool-${state}`}>
@@ -1003,11 +1016,22 @@ interface OtherAnswer {
 export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.request'>; actions: ChatActions }) {
   const p = event.payload;
   const fate = actions.timeline.requestFate(p.request_id);
-  const open = !fate.response && !fate.cancel;
+  // Questions a worker restart or Stop cancelled are answered by a message, as the VS Code tab
+  // offers an earlier question again (`web:161989`), until a message of the user stands after
+  // the cancel: that message, when it is the answer (`web:162093`), says what was chosen; any
+  // other closes the card. Any other cancel closes it at once.
+  const earlier =
+    !fate.response && (fate.cancel?.reason === 'worker_restart' || fate.cancel?.reason === 'stopped');
+  const after = earlier ? actions.timeline.userMessageAfter(fate.cancelSeq!) : undefined;
+  const replayed = after && earlierAnswers(after.text.trim(), p.questions);
+  // An answer whose message failed to be sent is not given yet.
+  const answeredLater = !!replayed && !after!.failed;
+  const later = earlier && !after && !!actions.send;
+  const open = (!fate.response && !fate.cancel) || later;
   const [answers, setAnswers] = useState<Record<string, ClarifyAnswer>>({});
   const [others, setOthers] = useState<Record<string, OtherAnswer>>({});
   const { busy, error, run } = useAction();
-  const given = fate.response && 'answers' in fate.response ? fate.response.answers : undefined;
+  const given = fate.response && 'answers' in fate.response ? fate.response.answers : replayed;
 
   const set = (q: ClarifyQuestion, v: string, checked: boolean) => {
     setAnswers((a) => {
@@ -1067,7 +1091,10 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
       class={`card card-clarify ${open ? 'is-open' : 'is-closed'}`}
       onSubmit={(e) => {
         e.preventDefault();
-        if (open && complete) run(() => actions.answer(p.request_id, toSend));
+        if (later) {
+          const text = earlierAnswer(p.questions, collect());
+          if (complete && text !== undefined) actions.send!(text);
+        } else if (open && complete) run(() => actions.answer(p.request_id, toSend));
       }}
     >
       <div class="card-title">Agent asks</div>
@@ -1134,16 +1161,75 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
       })}
       {open && (
         <div class="actions">
-          <button type="submit" class="btn btn-primary" disabled={busy || !complete}>
+          <button
+            type="submit"
+            class="btn btn-primary"
+            disabled={busy || (later && earlierAnswer(p.questions, collect()) === undefined) || !complete}
+          >
             Answer
           </button>
         </div>
       )}
-      {fate.response && <div class="outcome">Answers sent</div>}
-      {fate.cancel && <div class="outcome">Cancelled: {CANCEL_LABELS[fate.cancel.reason]}</div>}
+      {(fate.response || answeredLater) && <div class="outcome">Answers sent</div>}
+      {fate.cancel && !answeredLater && <div class="outcome">Cancelled: {CANCEL_LABELS[fate.cancel.reason]}</div>}
       {error && <div class="error-text">{error}</div>}
     </form>
   );
+}
+
+/** The message the VS Code tab sends for an earlier question it shows again (`web:162062`):
+ *  the questions answered, in their order, the items of a multi answer joined by ", ";
+ *  undefined when none is, as the tab then sends nothing. */
+function earlierAnswer(questions: ClarifyQuestion[], answers: Record<string, ClarifyAnswer>): string | undefined {
+  const given = questions.flatMap((q) => {
+    const a = answers[q.id];
+    const text = Array.isArray(a) ? a.join(', ') : a;
+    return text ? [{ question: q.text, answer: text }] : [];
+  });
+  if (given.length === 0) return undefined;
+  if (given.length === 1) return `${EARLIER_ONE}${given[0].question}": ${given[0].answer}`;
+  return [EARLIER_SEVERAL, ...given.map((g) => `- "${g.question}": ${g.answer}`)].join('\n');
+}
+
+const EARLIER_ONE = 'Answering your earlier question "';
+const EARLIER_SEVERAL = 'Answering your earlier questions:';
+
+/** The answers a message in those words gives, read by the card's question texts as the tab
+ *  reads them (`web:162093`), the items of a `multi` answer split at ", "; undefined when the
+ *  message answers none of them. */
+function earlierAnswers(text: string, questions: ClarifyQuestion[]): Record<string, ClarifyAnswer> | undefined {
+  const texts = questions.map((q) => q.text);
+  const found = new Map<string, string>();
+  if (text.startsWith(EARLIER_ONE)) {
+    // The longest question that fits: one may begin with another.
+    let best: { question: string; marker: string } | undefined;
+    for (const q of texts) {
+      const marker = `${EARLIER_ONE}${q}": `;
+      if (text.startsWith(marker) && (!best || marker.length > best.marker.length)) best = { question: q, marker };
+    }
+    if (best) found.set(best.question, text.slice(best.marker.length));
+  } else if (text.startsWith(`${EARLIER_SEVERAL}\n`)) {
+    const lines = text.slice(EARLIER_SEVERAL.length + 1);
+    let at = 0;
+    for (let i = 0; i < texts.length; i++) {
+      const marker = `- "${texts[i]}": `;
+      if (!lines.startsWith(marker, at)) continue;
+      const from = at + marker.length;
+      let to = lines.length;
+      for (let j = i + 1; j < texts.length; j++) {
+        const next = lines.indexOf(`\n- "${texts[j]}": `, from);
+        if (next !== -1 && next < to) to = next;
+      }
+      found.set(texts[i], lines.slice(from, to));
+      at = to + 1;
+    }
+  }
+  const out: Record<string, ClarifyAnswer> = {};
+  for (const q of questions) {
+    const a = found.get(q.text);
+    if (a !== undefined) out[q.id] = q.multi ? a.split(', ') : a;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 function InvalidCard({ invalid }: { invalid: InvalidEvent }) {

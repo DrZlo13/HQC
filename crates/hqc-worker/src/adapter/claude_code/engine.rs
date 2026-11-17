@@ -6,12 +6,18 @@
 //! - `stream_event` `text_delta` → `agent.delta`; deltas (text, thinking, tool input at four
 //!   characters a token, redacted thinking at its `estimated_tokens`), then `message_delta`'s
 //!   `usage.output_tokens` for the token rate ([`Core::take_output_tokens`], [`super::rate`]);
+//!   after text deltas no assistant text took up, a `message_start` or an `assistant` of
+//!   another `message.id` than the one streamed → `agent.delta` with `reset: true`
+//!   ([`Core::live_text`]);
 //! - `assistant` text → `agent.message`, held until the next element: another assistant
-//!   block or a tool result makes it `final: false`, `result` makes it `final: true`;
+//!   block or a tool result makes it `final: false`, `result` makes it `final: true`; an
+//!   input written during a turn the CLI started by itself leaves it held;
 //! - `assistant` `tool_use` → `tool.call` ([`args_preview`]: an `Agent` call's `prompt`
 //!   last); non-empty `thinking` → `agent.thinking`;
 //! - `assistant` text with `model` `<synthetic>` (the CLI's own reply: an API error, "Credit
 //!   balance is too low") → `agent.message` with `runtime: true`, held and flushed as any;
+//! - `assistant` text with `aborted: true` (an interrupt cut it off) → `agent.message` with
+//!   `interrupted: true`, held and flushed as any;
 //! - `system` `task_notification` (a background task ended) → `system task_notification`
 //!   with its `status`, its `task_id` and the task's `tool_use_id` as `call_id`, except for a
 //!   task that a subagent started or whose `task_started` said it runs in the foreground,
@@ -35,11 +41,13 @@
 //! - the same subagents one by one → [`AdapterEvent::LiveSubagents`] when they or a title
 //!   change, and on every `system` `task_progress` of one of them: the title and the
 //!   `tool_use_id` (`call_id`) from its `task_started`, what it does now (`description`),
-//!   `total_tokens` and `tool_uses` from its latest `task_progress` (2.1.312); after them, in
-//!   the same list, the main agent's background shell commands of the latest
+//!   `total_tokens` and `tool_uses` from its latest `task_progress` (2.1.312), `stoppable`
+//!   ([`Core::stop_task`]); after them, in the same list, the main agent's background shell
+//!   commands of the latest
 //!   `background_tasks_changed` list (`task_type: local_bash`, not `ambient`, whose
 //!   `task_started` has come and was not a `Monitor` call's, of no subagent that counts), each
-//!   with its `description` and run time only, when they or a `description` change;
+//!   with its `description`, run time and `stoppable` only, when they or a `description`
+//!   change;
 //! - `system` `background_tasks_changed` (`tasks`: the CLI's list of the session's running
 //!   background tasks, subagents and commands, its subagents' too) →
 //!   [`AdapterEvent::BackgroundTasks`] with their number when it changes;
@@ -55,9 +63,12 @@
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
 //!   every user message written to stdin gets a fresh v4 `uuid`, which its echo and its
 //!   `command_lifecycle` lines name (2.1.312);
-//! - `result` → `usage` (one with `num_turns: 0`, no tokens and no `compact_boundary` in it
-//!   gives none, or, when the total grew, one with no tokens, no `cost_usd` and the total),
-//!   `status idle`, end of turn;
+//! - `result` → `usage` (one with no tokens and no `compact_boundary` in it gives none, or,
+//!   when the total grew, one with no tokens, no `cost_usd` and the total),
+//!   then `system turn_interrupted` for a `terminal_reason` `aborted_*`, or `system
+//!   turn_ended_early` for an error or a `terminal_reason` other than `completed`,
+//!   `background_requested` and `tool_deferred` ([`turn_end_line`]), then `status idle`, end
+//!   of turn;
 //!   `usage.cost_usd` is the growth of the CLI's cumulative `total_cost_usd` since the previous
 //!   `usage` with a `cost_usd` (or since the transcript's last `cost-state` after `--resume`),
 //!   `session_cost_usd` the total itself;
@@ -79,8 +90,9 @@
 //! - `permissionMode` of `system` `init` and `system` `status`, and the CLI's answer to our
 //!   `set_permission_mode` → [`AdapterEvent::PermissionMode`] when it changes (T38), and
 //!   on every success of our `set_permission_mode` (T39);
-//! - the CLI's answers to our `set_model` and `background_tasks` are only logged;
-//! - other `control_response` lines are the CLI's echo of ours and are skipped.
+//! - the CLI's answers to our `set_model`, `background_tasks` and `stop_task` are only logged;
+//! - the CLI's answer to our `initialize` ([`Core::initialize`]) and the other
+//!   `control_response` lines, the CLI's echo of ours, are skipped.
 //!
 //! U+0000 in any text taken from the CLI (binary tool output) becomes U+FFFD ([`text`],
 //! [`preview`]): the hub's Postgres refuses it (SPEC §5.2).
@@ -129,6 +141,14 @@ pub const TASK_NOTIFICATION: &str = "task_notification";
 /// `system.code` of stream-json `system` `compact_boundary` (SPEC §4, §8.1).
 pub const CONTEXT_COMPACTED: &str = "context_compacted";
 pub const CONTEXT_COMPACTED_TEXT: &str = "Context compacted";
+/// `system.code` of a turn an interrupt ended (Stop, "No" to a permission request):
+/// `result` with a `terminal_reason` `aborted_*` (SPEC §4, §8.1).
+pub const TURN_INTERRUPTED: &str = "turn_interrupted";
+pub const TURN_INTERRUPTED_TEXT: &str = "Interrupted";
+/// `system.code` of a turn the CLI ended early for another reason: an error `result`, or a
+/// `terminal_reason` other than `completed`, `background_requested` and `tool_deferred` (SPEC
+/// §4, §8.1).
+pub const TURN_ENDED_EARLY: &str = "turn_ended_early";
 /// `message.model` of a reply the CLI wrote itself instead of the model ("Credit balance is
 /// too low", API errors; 2.1.312, stream-json and transcript alike): `agent.message` with
 /// `runtime: true`.
@@ -139,6 +159,8 @@ const MODE_REQUEST: &str = "hqc-mode-";
 const MODEL_REQUEST: &str = "hqc-model-";
 /// `request_id` prefix of our `background_tasks` control requests.
 const BACKGROUND_REQUEST: &str = "hqc-background-";
+/// `request_id` prefix of our `stop_task` control requests.
+const STOP_TASK_REQUEST: &str = "hqc-stop-task-";
 /// `patch.status` of a `task_updated` that ends a foreground call ([`Core::foreground`]).
 const CALL_ENDED: [&str; 3] = ["completed", "failed", "killed"];
 
@@ -234,8 +256,9 @@ impl Pending {
 pub struct Core {
     session_id: Uuid,
     restricted: bool,
-    /// The last assistant text: event id, text, and whether the CLI wrote it itself.
-    held: Option<(Uuid, String, bool)>,
+    /// The last assistant text: event id, text, whether the CLI wrote it itself, and whether
+    /// an interrupt cut it off.
+    held: Option<(Uuid, String, bool, bool)>,
     /// Event id of the `context_compacted` of a `compact_boundary`, held for the summary that
     /// follows it ([`Core::release_compaction`]).
     compaction: Option<Uuid>,
@@ -328,6 +351,12 @@ pub struct Core {
     streamed_chars: u64,
     streamed_estimated: u64,
     streamed: u64,
+    /// The main agent's text deltas were sent since its last assistant text: the hub and
+    /// clients show text that no `agent.message` will cover if the CLI abandons the attempt
+    /// ([`Core::on_stream_event`], [`Core::on_assistant`]).
+    live_text: bool,
+    /// `message.id` of the main agent's latest `message_start`: the response being streamed.
+    streamed_id: Option<String>,
     /// `session_id` of the latest `system/init`: its subagents' transcripts are in its folder.
     cli_session: Option<String>,
     /// The Bash calls and subagents of the agent itself the CLI runs in the foreground, by
@@ -387,6 +416,8 @@ impl Core {
             streamed_chars: 0,
             streamed_estimated: 0,
             streamed: 0,
+            live_text: false,
+            streamed_id: None,
             cli_session: None,
             foreground: BTreeMap::new(),
             task_calls: HashMap::new(),
@@ -466,7 +497,13 @@ impl Core {
         }
         self.in_turn = true;
         self.turn += 1;
-        self.held = None;
+        // The last text of a turn the CLI started by itself stays held, as an input written
+        // into a turn of hqc's leaves it ([`Core::inject_with_images`]): that turn's next line,
+        // its `result`, ends it. Dropped here, it was lost when the input came between the
+        // text and the `result` (SPEC §8.1).
+        if !self.self_turn {
+            self.held = None;
+        }
         vec![self.write(input, images, false)]
     }
 
@@ -514,6 +551,19 @@ impl Core {
             "type": "user",
             "uuid": uuid,
             "message": {"role": "user", "content": content},
+        }))
+    }
+
+    /// `control_request` `initialize` with only `perTaskStopAffordance: true`, the first line
+    /// of every process's stdin (SPEC §8.1): with it an `interrupt` stops the turn and spares
+    /// the background subagents and workflows, which it kills otherwise (2.1.312). The CLI
+    /// applies it only before the first user message: one after it is taken as a second
+    /// client's and changes nothing. Its answer is skipped ([`Core::on_control_response`]).
+    pub fn initialize(&self) -> Action {
+        Action::Write(json!({
+            "type": "control_request",
+            "request_id": format!("hqc-init-{}", Uuid::now_v7()),
+            "request": {"subtype": "initialize", "perTaskStopAffordance": true},
         }))
     }
 
@@ -571,6 +621,20 @@ impl Core {
             "type": "control_request",
             "request_id": format!("{BACKGROUND_REQUEST}{}", Uuid::now_v7()),
             "request": {"subtype": "background_tasks", "tool_use_id": call_id},
+        }))
+    }
+
+    /// Stop task `task_id` alone, a `stoppable` row of [`AdapterEvent::LiveSubagents`], a
+    /// subagent or a command: `control_request {subtype: stop_task, task_id}`. The CLI answers
+    /// `success` with `{}`, also for a task it does not know or one that has ended, or an error
+    /// with the reason it did not stop it; a stopped subagent then ends with `task_updated` and
+    /// `task_notification` `stopped`, as any end of it (by the 2.1.312 code, not checked live); a
+    /// command ends so too (checked live on 2.1.312).
+    pub fn stop_task(&self, task_id: &str) -> Action {
+        Action::Write(json!({
+            "type": "control_request",
+            "request_id": format!("{STOP_TASK_REQUEST}{}", Uuid::now_v7()),
+            "request": {"subtype": "stop_task", "task_id": task_id},
         }))
     }
 
@@ -908,11 +972,21 @@ impl Core {
         vec![Action::Emit(AdapterEvent::PermissionMode(mode))]
     }
 
-    /// The CLI's answer to our `set_permission_mode`, `set_model` or `background_tasks` (the
-    /// latter two logged); every other `control_response` is the echo of one of ours.
+    /// The CLI's answer to our `set_permission_mode`, `set_model`, `background_tasks` or
+    /// `stop_task` (the latter three logged); the answer to our `initialize` (the CLI's
+    /// commands, models and account, or an error) and every other `control_response`, the echo
+    /// of one of ours, are skipped.
     fn on_control_response(&mut self, v: &Value) -> Vec<Action> {
         let r = &v["response"];
         let id = r["request_id"].as_str().unwrap_or("");
+        if id.starts_with(STOP_TASK_REQUEST) {
+            if r["subtype"] == "success" {
+                tracing::info!(session_id = %self.session_id, request_id = id, "task stopped");
+            } else {
+                tracing::warn!(session_id = %self.session_id, request_id = id, error = %r["error"], "claude did not stop the task");
+            }
+            return vec![];
+        }
         if id.starts_with(BACKGROUND_REQUEST) {
             if r["subtype"] == "success" && r["response"]["backgrounded"] != false {
                 tracing::info!(session_id = %self.session_id, request_id = id, "call moved to the background");
@@ -984,7 +1058,17 @@ impl Core {
         let ev = &v["event"];
         match ev["type"].as_str() {
             Some("message_start") => {
-                (self.streamed_chars, self.streamed_estimated, self.streamed) = (0, 0, 0)
+                (self.streamed_chars, self.streamed_estimated, self.streamed) = (0, 0, 0);
+                self.streamed_id = ev["message"]["id"].as_str().map(str::to_owned);
+                // A new request of the model after text no assistant text took up: the CLI
+                // abandoned the attempt that wrote it (a stream that broke, then a retry), as the
+                // VS Code tab takes it (`web:163707`); the hub and clients drop it.
+                if std::mem::take(&mut self.live_text) {
+                    return vec![self.emit_new(EventKind::AgentDelta {
+                        text: String::new(),
+                        reset: true,
+                    })];
+                }
             }
             // The exact count comes once per response, at its end: it adds what the estimate
             // of its deltas missed.
@@ -1018,7 +1102,11 @@ impl Core {
         self.streamed = estimate;
         if delta["type"] == "text_delta" {
             if let Some(t) = delta["text"].as_str().filter(|t| !t.is_empty()) {
-                return vec![self.emit_new(EventKind::AgentDelta { text: text(t) })];
+                self.live_text = true;
+                return vec![self.emit_new(EventKind::AgentDelta {
+                    text: text(t),
+                    reset: false,
+                })];
             }
         }
         vec![]
@@ -1032,7 +1120,21 @@ impl Core {
         // The CLI's own reply, not the model's: marked, but held and flushed like any text,
         // so it is the turn's final message when it ends the turn.
         let synthetic = v["message"]["model"] == SYNTHETIC_MODEL;
+        // Cut off by an interrupt before the stream completed (2.1.312).
+        let aborted = v["aborted"] == true;
         let mut out = Vec::new();
+        // A response other than the one streamed while that one's text stands: the CLI gave up
+        // the stream and asked again without one ("Error streaming, falling back to
+        // non-streaming mode", 2.1.312), which brings no `message_start`; as the VS Code tab
+        // takes it (`web:171092`), the text so far is dropped first.
+        let id = v["message"]["id"].as_str();
+        if self.live_text && !synthetic && id.is_some() && id != self.streamed_id.as_deref() {
+            self.live_text = false;
+            out.push(self.emit_new(EventKind::AgentDelta {
+                text: String::new(),
+                reset: true,
+            }));
+        }
         for (i, block) in blocks(v).iter().enumerate() {
             let id = record_event_id(&uuid, i);
             match block["type"].as_str() {
@@ -1045,7 +1147,8 @@ impl Core {
                     if synthetic {
                         tracing::info!(session_id = %self.session_id, "runtime message");
                     }
-                    self.held = Some((id, text(t), synthetic));
+                    self.held = Some((id, text(t), synthetic, aborted));
+                    self.live_text = false;
                 }
                 Some("tool_use") => {
                     out.extend(self.flush(false));
@@ -1427,7 +1530,8 @@ impl Core {
         vec![self.live_list()]
     }
 
-    /// [`Core::live`], then [`Core::live_commands`], as sent: the run time of each counted now.
+    /// [`Core::live`], then [`Core::live_commands`], as sent: the run time of each counted now;
+    /// a subagent and a command alike are `stoppable` ([`Core::stop_task`]).
     fn live_list(&self) -> Action {
         Action::Emit(AdapterEvent::LiveSubagents(
             self.live
@@ -1443,6 +1547,7 @@ impl Core {
                     duration_ms: u64::try_from(a.since.elapsed().as_millis()).unwrap_or(u64::MAX),
                     call_id: a.call_id.clone(),
                     kind: Some(kind),
+                    stoppable: true,
                 })
                 .collect(),
         ))
@@ -1520,15 +1625,12 @@ impl Core {
                 .as_object()
                 .and_then(|m| m.keys().next().cloned())
         });
-        // A result with no model turn and no tokens (a local slash command, the empty second
-        // `result` after a turn the CLI started by itself, one the CLI closes on a background
-        // subagent's notification) is not a turn's `usage`: the feed would show an empty `0 → 0
-        // tokens` line. `/compact` has `num_turns: 0` and no tokens but costs, so it keeps its
-        // `usage`.
-        if v["num_turns"].as_u64() != Some(0)
-            || input_tokens + output_tokens > 0
-            || (spent && compacted)
-        {
+        // A result with no tokens (a local slash command, the empty second `result` after a turn
+        // the CLI started by itself, one the CLI closes on a background subagent's
+        // notification, a turn interrupted while its reply streamed) is not a turn's `usage`:
+        // the feed would show an empty `0 → 0 tokens` line. `/compact` has no tokens but costs,
+        // so it keeps its `usage`.
+        if input_tokens + output_tokens > 0 || (spent && compacted) {
             let cost_usd = total.map(|t| self.turn_cost(t));
             out.push(self.emit_new(EventKind::Usage {
                 input_tokens,
@@ -1540,7 +1642,8 @@ impl Core {
                 model,
             }));
         } else if spent {
-            // The total grew by what background subagents spent meanwhile: a `usage` with the
+            // The total grew with no tokens in the result: what background subagents spent
+            // meanwhile, or a reply an interrupt cut off before its end. A `usage` with the
             // total only, which the client counts for the session and draws no line for. The
             // baseline stays, so the next turn's `cost_usd` carries it.
             out.push(self.emit_new(EventKind::Usage {
@@ -1554,10 +1657,14 @@ impl Core {
             }));
         }
         let subtype = v["subtype"].as_str().unwrap_or("");
+        // At the end of the turn, after its `usage`, which the feed draws under the answer.
+        if let Some((code, t)) = turn_end_line(v) {
+            out.push(self.emit_system(code, t));
+        }
         out.push(self.emit_new(EventKind::Status {
             state: SessionState::Idle,
-            // `error_max_turns`, `error_during_execution`, ...: why the turn ended early.
-            detail: (subtype != "success" || v["is_error"] == true).then(|| subtype.to_owned()),
+            // Why the turn ended early is the line above.
+            detail: None,
             // The turn's input: the hub fails an `hqc_ask` it carried that no final message
             // answered (SPEC §7.1).
             in_reply_to: self.reply_to(),
@@ -1864,7 +1971,7 @@ impl Core {
     // ---- helpers -----------------------------------------------------------------------
 
     fn flush(&mut self, r#final: bool) -> Option<Action> {
-        let (id, text, runtime) = self.held.take()?;
+        let (id, text, runtime, interrupted) = self.held.take()?;
         Some(self.emit(
             id,
             EventKind::AgentMessage {
@@ -1872,6 +1979,7 @@ impl Core {
                 r#final,
                 in_reply_to: self.reply_to(),
                 runtime,
+                interrupted,
             },
         ))
     }
@@ -1971,6 +2079,52 @@ fn limits(w: &Value) -> Option<hqc_proto::frame::Limits> {
         seven_day: window("seven_day"),
     };
     (l.five_hour.is_some() || l.seven_day.is_some()).then_some(l)
+}
+
+/// The `system` line a `result` ends its turn with (SPEC §8.1), by its `terminal_reason`
+/// (2.1.312: 19 values, of which `completed`, `background_requested` and `tool_deferred` end a
+/// turn on purpose; a local command has none): `aborted_streaming` or `aborted_tools` →
+/// [`TURN_INTERRUPTED`]; any other but those three, or an error result (`subtype` other than `success`, `is_error: true`) → [`TURN_ENDED_EARLY`]
+/// "Turn ended early: " with the reason (the subtype without one), `api_error_status` and
+/// `errors`. Not the `result` text: with `is_error: true` it is the CLI's own reply, which
+/// came as its `assistant` line already.
+fn turn_end_line(v: &Value) -> Option<(&'static str, String)> {
+    let reason = v["terminal_reason"].as_str();
+    if reason.is_some_and(|r| r.starts_with("aborted_")) {
+        return Some((TURN_INTERRUPTED, TURN_INTERRUPTED_TEXT.into()));
+    }
+    let subtype = v["subtype"].as_str().unwrap_or("");
+    let error = subtype != "success" || v["is_error"] == true;
+    // `background_requested` (the model moved its work to the background) and `tool_deferred`
+    // end a turn on purpose, not because something failed.
+    if !error
+        && reason
+            .is_none_or(|r| matches!(r, "completed" | "background_requested" | "tool_deferred"))
+    {
+        return None;
+    }
+    let mut parts = vec![reason.unwrap_or(subtype).to_owned()];
+    if let Some(status) = v["api_error_status"].as_u64() {
+        parts.push(format!("API status {status}"));
+    }
+    let errors: Vec<&str> = v["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .collect();
+    if !errors.is_empty() {
+        parts.push(errors.join("; "));
+    }
+    Some((
+        TURN_ENDED_EARLY,
+        preview(
+            &format!("Turn ended early: {}", parts.join(" · ")),
+            ERROR_TEXT_LIMIT,
+        ),
+    ))
 }
 
 pub fn record_event_id(uuid: &Uuid, index: usize) -> Uuid {

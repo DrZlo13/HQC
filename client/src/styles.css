@@ -2982,6 +2982,13 @@ select.input {
   color: var(--text);
 }
 
+/* A reply an interrupt cut off: muted; " · interrupted" after its time. */
+.msg-agent.msg-interrupted,
+.msg-agent.msg-interrupted strong,
+.msg-agent.msg-interrupted :is(h1, h2, h3, h4, h5, h6) {
+  color: var(--muted);
+}
+
 .msg-agent > .meta {
   margin-top: 8px;
 }
@@ -4557,6 +4564,14 @@ a.relay-peer {
   color: var(--muted);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+/* A subagent's stop, small at the end of its line. */
+.live-agents-stop {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  align-self: center;
 }
 
 /* The new screen: the subagents and the composer are one panel under the feed, each line led by

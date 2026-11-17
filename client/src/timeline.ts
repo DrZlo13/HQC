@@ -38,13 +38,17 @@ export interface InvalidEvent {
 }
 
 export type Item =
-  | { kind: "event"; key: string; event: HqcEvent }
+  /** `queued`: an input that came while a turn ran and waits for a turn of its own (SPEC §6),
+   *  out of its `seq` place. */
+  | { kind: "event"; key: string; event: HqcEvent; queued?: boolean }
   | { kind: "invalid"; key: string; invalid: InvalidEvent }
   | { kind: "pending"; key: string; pending: PendingMessage };
 
 export interface RequestFate {
   response?: ApprovalResponse | ClarifyResponse;
   cancel?: RequestCancel;
+  /** `seq` of the cancel. */
+  cancelSeq?: number;
 }
 
 export class Timeline {
@@ -68,7 +72,7 @@ export class Timeline {
   /** Events before this `seq` are not loaded yet (`ChatSession` loads the newest page first);
    *  0 once the history is in. */
   olderFrom = 0;
-  /** Text of `agent.delta` since the last `agent.message`. */
+  /** Text of `agent.delta` since the last `agent.message` or `reset`. */
   streaming = "";
   /** The subagents of the latest `subagents.live`. */
   liveAgents: LiveSubagent[] = [];
@@ -105,7 +109,8 @@ export class Timeline {
 
   private applyQuiet(ev: HqcEvent, advance = true): void {
     if (ev.type === "agent.delta") {
-      this.streaming += ev.payload.text;
+      // `reset`: the runtime abandoned the attempt that wrote the text so far (SPEC §4).
+      this.streaming = ev.payload.reset ? "" : this.streaming + ev.payload.text;
       return;
     }
     if (ev.type === "subagents.live") {
@@ -187,9 +192,12 @@ export class Timeline {
         this.fate(ev.payload.request_id).response = ev.payload;
         break;
       case "approval.cancel":
-      case "clarify.cancel":
-        this.fate(ev.payload.request_id).cancel = ev.payload;
+      case "clarify.cancel": {
+        const f = this.fate(ev.payload.request_id);
+        f.cancel = ev.payload;
+        f.cancelSeq = ev.seq;
         break;
+      }
     }
   }
 
@@ -268,6 +276,19 @@ export class Timeline {
     return this.fates.get(requestId) ?? {};
   }
 
+  /** The first user's message after `seq`: a stored one, else one not stored yet (`failed`
+   *  when its POST failed); undefined when none stands after it. Another session's message,
+   *  which the agent takes as input too, counts as one with no text: it answers nothing. */
+  userMessageAfter(seq: number): { text: string; failed: boolean } | undefined {
+    for (const e of this.events()) {
+      if (e.seq! <= seq) continue;
+      if (e.type === "user.message") return { text: e.payload.text, failed: false };
+      if (e.type === "peer.message") return { text: "", failed: false };
+    }
+    const [p] = this.pending.values();
+    return p && { text: p.text, failed: p.status === "failed" };
+  }
+
   request(
     requestId: string,
   ): EventOf<"approval.request" | "clarify.request"> | undefined {
@@ -285,11 +306,12 @@ export class Timeline {
     return this.endsByCall.get(callId) ?? (taskId === undefined ? undefined : this.endsByTask.get(taskId));
   }
 
-  /** The last `tool.call` while it has no `tool.result`. */
+  /** The last `tool.call` after the last end of a turn while it has no `tool.result`. */
   runningCall(): EventOf<"tool.call"> | undefined {
     const evs = this.events();
     for (let i = evs.length - 1; i >= 0; i--) {
       const e = evs[i];
+      if (endsTurn(e)) return undefined;
       if (e.type === "tool.call")
         return this.results.has(e.payload.call_id) ? undefined : e;
     }
@@ -308,6 +330,13 @@ export class Timeline {
         return Math.max(since, Date.parse(e.ts));
     }
     return since;
+  }
+
+  /** `seq` of the last event that ended a turn (`endsTurn`), 0 if none did. */
+  lastTurnEnd(): number {
+    const evs = this.events();
+    for (let i = evs.length - 1; i >= 0; i--) if (endsTurn(evs[i])) return evs[i].seq!;
+    return 0;
   }
 
   /** Requests with neither an answer nor a cancellation, oldest first. */
@@ -389,7 +418,7 @@ export class Timeline {
   }
 
   items(): Item[] {
-    const out: Item[] = this.events().map((e) => ({
+    const bySeq: Item[] = this.events().map((e) => ({
       kind: "event",
       key: `e${e.seq}`,
       event: e,
@@ -397,25 +426,34 @@ export class Timeline {
     for (const inv of this.invalid) {
       const item: Item = { kind: "invalid", key: inv.key, invalid: inv };
       const at =
-        inv.seq === undefined ? -1 : out.findIndex((i) => seqOf(i) > inv.seq!);
-      if (at < 0) out.push(item);
-      else out.splice(at, 0, item);
+        inv.seq === undefined ? -1 : bySeq.findIndex((i) => seqOf(i) > inv.seq!);
+      if (at < 0) bySeq.push(item);
+      else bySeq.splice(at, 0, item);
     }
+    const out = placeQueued(bySeq);
     // An input that came while the agent's text was being written stands under that text
     // (SPEC §6): the `agent.message` goes above the inputs with `during_text` right before it
     // in `seq` order, never above the input it answers. A final one takes the `usage` right
-    // after it along, which the feed draws in its block.
+    // after it along, which the feed draws in its block, and the line that says how the turn
+    // ended (`turn_interrupted`, `turn_ended_early`), which the worker sends after that `usage`.
+    // An input `placeQueued` moved after the turn it waited through is no longer there: its own
+    // turn's text stays under it.
     let floor = 0;
     for (let i = 0; i < out.length; i++) {
       const a = out[i];
       if (a.kind !== "event" || a.event.type !== "agent.message") continue;
-      const next = out[i + 1];
-      const n = a.event.payload.final && next?.kind === "event" && next.event.type === "usage" ? 2 : 1;
+      let n = 1;
+      if (a.event.payload.final) {
+        const u = out[i + n];
+        if (u?.kind === "event" && u.event.type === "usage") n++;
+        const end = out[i + n];
+        if (end?.kind === "event" && isTurnEndLine(end.event)) n++;
+      }
       const answers = a.event.payload.in_reply_to;
       let at = i;
       while (at > floor) {
         const prev = out[at - 1];
-        if (prev.kind !== "event" || !duringText(prev) || prev.event.event_id === answers) break;
+        if (prev.kind !== "event" || !duringText(prev) || prev.queued || prev.event.event_id === answers) break;
         at--;
       }
       if (at < i) out.splice(at, 0, ...out.splice(i, n));
@@ -443,6 +481,119 @@ export function duringText(it: Item): boolean {
     (it.event.type === "user.message" || it.event.type === "peer.message") &&
     it.event.payload.during_text === true
   );
+}
+
+/** The line the worker sends after a turn's `usage` when the turn did not complete (SPEC §4). */
+function isTurnEndLine(e: HqcEvent): boolean {
+  return e.type === "system" && (e.payload.code === "turn_interrupted" || e.payload.code === "turn_ended_early");
+}
+
+/** The event ends a turn (SPEC §17.1): the final `agent.message`, `status` `idle` or `error`,
+ *  `system turn_lost`. */
+export function endsTurn(e: HqcEvent): boolean {
+  switch (e.type) {
+    case "agent.message":
+      return e.payload.final;
+    case "status":
+      return e.payload.state === "idle" || e.payload.state === "error";
+    case "system":
+      return e.payload.code === "turn_lost";
+    default:
+      return false;
+  }
+}
+
+/** The input whose turn this event ends (`in_reply_to`). */
+function endOf(e: HqcEvent | undefined): string | undefined {
+  return e?.type === "agent.message" || e?.type === "status" ? e.payload.in_reply_to : undefined;
+}
+
+/** An input the hub queued for the agent (SPEC §5.2): it has a `delivery`. */
+function isInput(e: HqcEvent): e is EventOf<"user.message" | "peer.message"> {
+  return (e.type === "user.message" || e.type === "peer.message") && e.delivery !== undefined;
+}
+
+/** An input that, come while a turn runs, waits for a turn of its own: not `joined` to that
+ *  turn, not failed, and not taken when it was written (a mirrored one is delivered at its own
+ *  `ts`, SPEC §9.2). One with `during_text` too: taken only after that turn, it stands after it. */
+function mayWait(e: EventOf<"user.message" | "peer.message">): boolean {
+  return (
+    !joined(e) &&
+    e.delivery !== "failed" &&
+    !(e.delivered_at && Date.parse(e.delivered_at) <= Date.parse(e.ts))
+  );
+}
+
+/** An event of the agent's work in a turn: `status running`, `system context_compacted` (a
+ *  `/compact` starts its turn with it), or what its runtime wrote but an input and the turn's
+ *  `usage`. */
+function agentWork(e: HqcEvent): boolean {
+  if (e.type === "status") return e.payload.state === "running";
+  if (e.type === "system" && e.payload.code === "context_compacted") return true;
+  return e.author.kind === "agent" && e.type !== "peer.message" && e.type !== "usage";
+}
+
+/** The inputs that came while a turn ran and wait for a turn of their own (SPEC §6), out of
+ *  their `seq` place: each stands where its turn starts, after the turns it waited through,
+ *  before the agent's first event of work, or before the end of its own turn: one that names it
+ *  (`in_reply_to`), or one with no turn opened since the end before that names no input and is
+ *  no `status` closing that same turn; one whose turn has not started stands at the bottom. In
+ *  `seq` order a turn runs from an input that does not wait, or from the agent's work, to an
+ *  event that `endsTurn`. A delivered input waited only if the first end of a turn after it is
+ *  not its own. A `joined` input behind a waiting one went into one of the later turns: it
+ *  stays right behind it. */
+function placeQueued(items: Item[]): Item[] {
+  const nextEnd: (HqcEvent | undefined)[] = [];
+  let end: HqcEvent | undefined;
+  for (let i = items.length - 1; i >= 0; i--) {
+    nextEnd[i] = end;
+    const it = items[i];
+    if (it.kind === "event" && endsTurn(it.event)) end = it.event;
+  }
+  const out: Item[] = [];
+  const waiting: Extract<Item, { kind: "event" }>[] = [];
+  // The first `n` waiting inputs, with the joined ones right behind them.
+  const take = (n: number) => {
+    while (n > 0 && n < waiting.length && joined(waiting[n].event)) n++;
+    for (const w of waiting.splice(0, n)) out.push({ ...w, queued: true });
+  };
+  const headDelivered = () => waiting[0]?.event.delivery === "delivered";
+  let open = false;
+  items.forEach((it, i) => {
+    if (it.kind !== "event") return void out.push(it);
+    const e = it.event;
+    if (isInput(e)) {
+      if (joined(e) && waiting.length > 0) {
+        waiting.push(it);
+        return;
+      }
+      const waited =
+        e.delivery === "pending" || (nextEnd[i] !== undefined && endOf(nextEnd[i]) !== e.event_id);
+      if ((open || waiting.length > 0) && mayWait(e) && waited) {
+        waiting.push(it);
+        return;
+      }
+      out.push(it);
+      if (e.delivery !== "failed" && !joined(e)) open = true;
+      return;
+    }
+    if (endsTurn(e)) {
+      // The end of a waiting input's own turn: it started without work of the agent before.
+      const own = waiting.findIndex((w) => w.event.event_id === endOf(e));
+      if (own >= 0) take(own + 1);
+      else if (!open && e.type !== "status" && endOf(e) === undefined && headDelivered()) take(1);
+      out.push(it);
+      open = false;
+      return;
+    }
+    if (!open && agentWork(e)) {
+      if (headDelivered()) take(1);
+      open = true;
+    }
+    out.push(it);
+  });
+  take(waiting.length);
+  return out;
 }
 
 function seqOf(i: Item): number {

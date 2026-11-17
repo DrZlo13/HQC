@@ -562,6 +562,11 @@ export class Api {
     await this.req('POST', `/api/sessions/${enc(id)}/resume`);
   }
 
+  /** Stops the agent's task `taskId` alone, a `stoppable` row of its `subagents.live`. */
+  async stopTask(id: string, taskId: string): Promise<void> {
+    await this.req('POST', `/api/sessions/${enc(id)}/tasks/${enc(taskId)}/stop`);
+  }
+
   async retry(id: string): Promise<void> {
     await this.req('POST', `/api/sessions/${enc(id)}/retry`);
   }

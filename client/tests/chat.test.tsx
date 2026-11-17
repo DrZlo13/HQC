@@ -8,7 +8,7 @@ import { render } from 'preact';
 import { act } from 'preact/test-utils';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Api, SessionPatch } from '../src/api';
+import { Api, type SessionPatch } from '../src/api';
 import { AppState } from '../src/app';
 import {
   parseEvent,
@@ -114,6 +114,8 @@ function setup(
     forkSession: vi.fn(async () => ({ ...info, id: 's2', title: 'test 12 (fork)', last_seq: 4, last_read_seq: 4 })),
     // POST /api/sessions/{id}/background.
     background: vi.fn(async () => {}),
+    // POST /api/sessions/{id}/tasks/{task_id}/stop.
+    stopTask: vi.fn(async () => {}),
     sessions: vi.fn(async () => []),
     projects: vi.fn(async () => []),
     workspaces: vi.fn(async () => [
@@ -792,6 +794,46 @@ describe('live subagents', () => {
     );
     expect(rows()).toEqual([['A command of an older worker', '1s']]);
   });
+
+  it("stops a subagent or a command from its row, the button off until the hub answers; a row without stoppable has none", async () => {
+    // SPEC 0.161: the worker marks a subagent's row and a command's `stoppable`; an older
+    // worker marks none.
+    const { api, app } = setup('idle', { subagents: 1, background_tasks: 3 });
+    await mount(app);
+    await act(async () =>
+      subscriber!.onEvent(
+        live(
+          (e) =>
+            (e.payload.agents = [
+              { task_id: 'a52af2b436ded4cea', description: 'Sleep and reply with number', duration_ms: 3000, stoppable: true },
+              { task_id: 'b2st7oc3z', description: 'Full run over 1000 boards on cirunner', duration_ms: 65_000, stoppable: true },
+              { task_id: 'bold', description: 'A command of an older worker', duration_ms: 1000 },
+            ]),
+        ),
+      ),
+    );
+    const stops = () => [...root.querySelectorAll<HTMLElement>('.live-agents-row')].map((r) => r.querySelector<HTMLButtonElement>('.live-agents-stop'));
+    expect(stops().map((b) => b !== null)).toEqual([true, true, false]);
+    let answer = () => {};
+    api.stopTask.mockImplementationOnce(() => new Promise<void>((r) => (answer = () => r())));
+    await act(async () => stops()[0]!.click());
+    expect(api.stopTask).toHaveBeenCalledWith('s1', 'a52af2b436ded4cea');
+    expect(stops()[0]!.disabled).toBe(true);
+    // The answer settles through the chat's notice handler first.
+    await act(async () => {
+      answer();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(stops()[0]!.disabled).toBe(false);
+    await act(async () => stops()[1]!.click());
+    expect(api.stopTask).toHaveBeenLastCalledWith('s1', 'b2st7oc3z');
+  });
+
+  it('sends the stop as POST /api/sessions/{id}/tasks/{task_id}/stop', async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ sent: true })));
+    await new Api('', fetchImpl as never).stopTask('s1', 'a52af2b436ded4cea');
+    expect(fetchImpl).toHaveBeenCalledWith('/api/sessions/s1/tasks/a52af2b436ded4cea/stop', expect.objectContaining({ method: 'POST' }));
+  });
 });
 
 describe('the request card through the chat', () => {
@@ -879,6 +921,40 @@ describe('the VS Code strip instead of the composer (SPEC §9.3)', () => {
     expect($('.lockbar')).toBeNull();
     expect($('.composer textarea')).not.toBeNull();
     expect($('.chat-meta')!.textContent).toContain('drzlo-mac');
+  });
+});
+
+// SPEC 0.161: a question a worker restart cancelled is answered by a message, so only where the
+// session takes one (§10.1).
+describe('an earlier question of the agent', () => {
+  const history = [
+    ev('event.clarify.request', 1),
+    ev('event.clarify.cancel', 2, (e) => (e.payload.reason = 'worker_restart')),
+  ];
+  const answer = () => $('.card-clarify button[type=submit]');
+  // The first chat of a run may take longer than `mount` waits to show its feed.
+  const card = () => vi.waitFor(() => expect($('.card-clarify')).not.toBeNull());
+
+  it('is answered where the composer is', async () => {
+    const { app } = setup('idle', { history });
+    await mount(app);
+    await card();
+    expect(answer()).not.toBeNull();
+  });
+
+  it('is not in a session VS Code holds', async () => {
+    const { app } = setup('locked_vscode', { history });
+    await mount(app);
+    await card();
+    expect(answer()).toBeNull();
+  });
+
+  it('is not in an archived session', async () => {
+    const { app } = setup('idle', { history });
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true, state: 'archived' });
+    await mount(app);
+    await card();
+    expect(answer()).toBeNull();
   });
 });
 
@@ -1503,6 +1579,21 @@ describe('an input that came while the agent writes (SPEC §6)', () => {
     });
     await act(async () => $('.composer button[type=submit]')!.click());
     expect(under($('.msg-pending')!)).toBe(true);
+  });
+
+  it('one queued while the turn runs stands under the text and under the inputs written during it', async () => {
+    const { push } = await writing([first]);
+    const queued = ev('event.user.message', 2, (e) => {
+      e.event_id = '0199f3a2-7c10-7000-8000-000000000320';
+      e.payload = { text: 'queued meanwhile', artifact_ids: [] };
+      e.delivery = 'pending';
+      delete e.delivered_at;
+    });
+    await act(async () => push(queued));
+    await act(async () => push(meanwhile(3)));
+    expect(under(block('queued meanwhile'))).toBe(true);
+    expect(block('written meanwhile').compareDocumentPosition(block('queued meanwhile')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(block('queued meanwhile').querySelector('.msg-time')!.textContent).toMatch(/ · queued$/);
   });
 
   it('one that came during an earlier text stays above it', async () => {

@@ -365,6 +365,7 @@ fn assistant(m: &Message, in_reply_to: Option<Uuid>) -> Vec<Event> {
                     r#final: end_turn,
                     in_reply_to,
                     runtime: synthetic,
+                    interrupted: false,
                 }
             }
             Some("tool_use") => EventKind::ToolCall {
@@ -573,6 +574,7 @@ mod tests {
                 r#final: false,
                 in_reply_to: Some(prompt),
                 runtime: true,
+                interrupted: false,
             }]
         );
         assert_eq!(evs[0].author, agent());

@@ -5,6 +5,11 @@
 //!   the room gets it in its input queue as a `peer.message` from the room carrying `room
 //!   {session_id, seq}`, the room and the message's `seq` there ([`owner_message`]): in a
 //!   `council` every agent, in a `conversation` the speaker ([`speaker`]), else the first agent.
+//! - A message from a session that is none of the room's agents, a `peer.message` from it, is the
+//!   room's first message from the session that made it with `hqc_room`, or any other session's
+//!   `hqc_send` to the room ([`peers::into_room`]); it goes to the agents as the owner's does
+//!   ([`owner_message`]). It counts as the owner's, not as a post: it ends the count of the
+//!   members' posts, and the hub's line in front of it in an agent's input names its sender.
 //! - Such an input goes to the agent without a peer header: the hub puts its own lines, which
 //!   name an agent by its address, in front of its text, `[hqc room` in the texts it puts there
 //!   escaped ([`input_text`]); the feed keeps the text as sent. In front go the other agents'
@@ -23,11 +28,12 @@
 //!   speaker's turn, with none of its inputs from the room still waiting for its worker, moves
 //!   the circle on ([`decide`]): its latest post since it became the speaker wakes the next agent
 //!   after it, with its files and capped to the posting agent's mode where that is below its own,
-//!   until [`MAX_HOPS`] posts follow the owner's last message (then one `system room_stopped`);
-//!   else its pass hands the last post or owner's message on to the next agent, until every agent
-//!   but its author passed; else the room stops (`room_stopped`). Its runtime's own reply, an
-//!   input from the room that fails delivery and `POST /stop` of the room write `room_stopped`
-//!   too. In `council`, and while the room is archived, nobody is woken but by the owner.
+//!   until [`MAX_HOPS`] posts follow the owner's or a non-member's last message (then one `system
+//!   room_stopped`); else its pass hands the last post, the owner's message or a non-member's on
+//!   to the next agent, until every agent but its author passed; else the room stops
+//!   (`room_stopped`). Its runtime's own reply, an input from the room that fails delivery and
+//!   `POST /stop` of the room write `room_stopped` too. In `council` nobody is woken but by the
+//!   owner's or a non-member's message, and while the room is archived by none but the owner's.
 //! - All of it is decided and stored under the room's [`lock`].
 
 use hqc_proto::{api::RoomMode, event::Chain, frame::PermissionMode};
@@ -77,9 +83,9 @@ pub async fn lock(app: &AppState, room: Uuid) -> tokio::sync::OwnedMutexGuard<()
     app.owner_lock("room", room).await
 }
 
-/// The owner's message `msg`, stored in room `room` under its [`lock`], to the room's agents: in a
-/// council to each of them; in a conversation to the speaker as of the message, so that a repeat
-/// of it goes to the same agent, else to the first agent.
+/// The owner's message `msg`, or a non-member's, stored in room `room` under its [`lock`], to the
+/// room's agents: in a council to each of them; in a conversation to the speaker as of the
+/// message, so that a repeat of it goes to the same agent, else to the first agent.
 pub async fn owner_message(
     app: &AppState,
     room: &SessionRow,
@@ -97,6 +103,16 @@ pub async fn owner_message(
     wake(app, room, &members, msg).await
 }
 
+/// The chain of a message of a session that goes on in the inputs made from it: a non-member's
+/// message and an agent's post carry one; the owner's message has none, and each input made from
+/// it starts its own.
+fn chain_of(source: &EventRow) -> Option<Chain> {
+    (source.kind == "peer.message")
+        .then(|| source.chain.clone())
+        .flatten()
+        .and_then(|c| serde_json::from_value(c).ok())
+}
+
 /// The files of a room's event, its `artifact_ids`.
 fn files_of(payload: Option<&Value>) -> Vec<Uuid> {
     payload
@@ -104,13 +120,14 @@ fn files_of(payload: Option<&Value>) -> Vec<Uuid> {
         .unwrap_or_default()
 }
 
-/// Event `source` of room `room`, the owner's message or an agent's post, into the input queue
-/// of each of `targets` but its author: a `peer.message` from its author (the room for the
-/// owner's message) with the event's text, `room {session_id, seq}` and as files the event's,
-/// then those of the messages that go in front of it ([`room_block`]), each once, capped by the
-/// cap kept with a post for an agent whose own mode is above it, and by the posts that go in
-/// front of it ([`posts_cap`]). Its id is derived from the agent and the event, so a repeat
-/// stores nothing twice.
+/// Event `source` of room `room`, the owner's message, a non-member's or an agent's post, into the
+/// input queue of each of `targets` but its author: a `peer.message` from its author (the room
+/// for the owner's message) with the event's text, `room {session_id, seq}` and as files the
+/// event's, then those of the messages that go in front of it ([`room_block`]), each once. The
+/// input is capped by the cap kept with a post for an agent whose own mode is above it, and by
+/// the posts that go in front of it ([`posts_cap`]); it carries the chain of a non-member's message
+/// or a post on ([`chain_of`]), the owner's message starts one. Its id is derived from the agent
+/// and the event, so a repeat stores nothing twice.
 async fn wake(
     app: &AppState,
     room: &SessionRow,
@@ -181,7 +198,10 @@ async fn wake(
         if !files.is_empty() {
             payload["artifact_ids"] = json!(files);
         }
-        store(app, m, id, from_id, payload, Some("pending"), cap).await?;
+        // An input from a message that came from a session carries its chain on, hops and all: a
+        // loop through the room runs into the chain limit. The owner's message starts one.
+        let chain = made_chain(m, id, chain_of(source), cap);
+        store(app, m, id, from_id, payload, Some("pending"), chain).await?;
         delivery::kick(app, m.id, false).await;
     }
     Ok(())
@@ -223,8 +243,9 @@ async fn speaker(app: &AppState, room: Uuid, before: i64) -> anyhow::Result<Opti
     Ok(Some(w))
 }
 
-/// A room's last message: a post or the owner's message, its author (`None` for the owner's) and
-/// the agents that passed after it ([`last_message`]).
+/// A room's last message: a post, the owner's message or a non-member's, its author (`None` for
+/// the owner's, else the posting agent or the sender) and the agents that passed after it
+/// ([`last_message`]).
 struct LastMessage {
     event: EventRow,
     author: Option<Uuid>,
@@ -333,9 +354,27 @@ fn own_mode(s: &SessionRow) -> PermissionMode {
         .unwrap_or(PermissionMode::AllowAll)
 }
 
+/// The chain of message `id` of room session `s`: `chain` gone on, or a person's, as an input of
+/// a person has (SPEC §7.1), capped by `cap` when given (T39). Only `cap` lowers it: what the
+/// chain capped is in `cap` already.
+fn made_chain(
+    s: &SessionRow,
+    id: Uuid,
+    chain: Option<Chain>,
+    cap: Option<(PermissionMode, String)>,
+) -> Chain {
+    let chain = chain.map(|c| {
+        json!(Chain {
+            permission_cap: None,
+            capped_by: None,
+            ..c
+        })
+    });
+    peers::input_chain(s.id, id, chain, cap)
+}
+
 /// A `peer.message` of a room in session `s` (an agent's input, or a post in the room), authored
-/// by session `from_id`, with a chain of its own, as a person's input has (SPEC §7.1), capped by
-/// `cap` when given (T39).
+/// by session `from_id`, with `chain` ([`made_chain`]).
 async fn store(
     app: &AppState,
     s: &SessionRow,
@@ -343,9 +382,8 @@ async fn store(
     from_id: Uuid,
     payload: Value,
     delivery: Option<&str>,
-    cap: Option<(PermissionMode, String)>,
+    chain: Chain,
 ) -> anyhow::Result<EventRow> {
-    let chain = peers::input_chain(s.id, id, None, cap);
     events::store_peer_message(
         app,
         s,
@@ -392,6 +430,8 @@ pub async fn input_text(
         for e in block {
             let from = if e.owner {
                 "message from your owner".to_string()
+            } else if e.outsider {
+                format!("message from {}", escape(&e.address))
             } else {
                 format!("post from {}", e.address)
             };
@@ -444,11 +484,19 @@ fn escape(text: &str) -> String {
     out
 }
 
-/// A post, or the owner's message, that goes to an agent in front of its input from the room.
+/// A `peer.message` of a room (`e.session_id = $1`) from a session that is not one of its
+/// members: a non-member's message, which counts as the owner's.
+const NON_MEMBER: &str = "e.type = 'peer.message' AND e.payload ->> 'from_session_id' NOT IN
+    (SELECT id::text FROM sessions WHERE room_id = $1)";
+
+/// A post, or the owner's or a non-member's message, that goes to an agent in front of its input
+/// from the room.
 #[derive(sqlx::FromRow)]
 struct BlockEntry {
     /// The owner's message, not a post.
     owner: bool,
+    /// A non-member's message, not a post either ([`NON_MEMBER`]).
+    outsider: bool,
     text: String,
     /// A post's author's address, as the hub stored it with the post: its name in the hub's
     /// lines.
@@ -459,9 +507,9 @@ struct BlockEntry {
 }
 
 /// The posts in room `room` of agents other than `agent`, and with `owner_messages` the owner's
-/// messages, after the agent's last input from the room before its own `seq` `before` and before
-/// the room's `seq` `seq`, oldest first: what goes in front of its input from the room at `seq`
-/// (SPEC §7.1.1). Only stored `seq`s pick them.
+/// messages and the non-members', after the agent's last input from the room before its own
+/// `seq` `before` and before the room's `seq` `seq`, oldest first: what goes in front of its
+/// input from the room at `seq` (SPEC §7.1.1). Only stored `seq`s pick them.
 async fn room_block(
     app: &AppState,
     room: Uuid,
@@ -470,21 +518,23 @@ async fn room_block(
     before: i64,
     owner_messages: bool,
 ) -> anyhow::Result<Vec<BlockEntry>> {
-    Ok(sqlx::query_as(
-        "SELECT e.type = 'user.message' AS owner, COALESCE(e.payload ->> 'text', '') AS text,
+    Ok(sqlx::query_as(&format!(
+        "SELECT e.type = 'user.message' AS owner, ({NON_MEMBER}) AS outsider,
+                COALESCE(e.payload ->> 'text', '') AS text,
                 COALESCE(e.payload ->> 'from', '?') AS address, e.chain,
                 e.payload -> 'artifact_ids' AS files
          FROM events e
          WHERE e.session_id = $1 AND e.seq < $3
-           AND ((e.type = 'peer.message' AND e.payload ->> 'from_session_id' <> $2::text)
+           AND ((e.type = 'peer.message' AND e.payload ->> 'from_session_id' <> $2::text
+                 AND ($5 OR NOT ({NON_MEMBER})))
                 OR ($5 AND e.type = 'user.message'))
            AND e.seq > COALESCE((SELECT (i.payload -> 'room' ->> 'seq')::bigint FROM events i
                                  WHERE i.session_id = $2 AND i.type = 'peer.message'
                                    AND i.payload -> 'room' ->> 'session_id' = $1::text
                                    AND i.seq < $4
                                  ORDER BY i.seq DESC LIMIT 1), 0)
-         ORDER BY e.seq",
-    )
+         ORDER BY e.seq"
+    ))
     .bind(room)
     .bind(agent)
     .bind(seq)
@@ -663,7 +713,45 @@ async fn post(
         payload["aside"] = json!(true);
     }
     let id = once_id("room.post", room.id, &row.event_id.to_string());
-    store(app, room, id, s.id, payload, None, cap).await
+    // The chain the agent's own `hqc_send` from this turn would carry (the limits aside: a post
+    // is stored whatever it counts), so what the post wakes goes on in the turn's chain.
+    // The owner's message that joined the turn is a person writing: the post goes on from the chain
+    // of the input made from it, which that message started, not from the turn's older one.
+    let turn = match owner_joined(app, s, room, opening, row).await? {
+        Some(joined) => turn_chain(app, s.id, &joined).await?,
+        None => turn,
+    };
+    let chain = peers::moved_on(Some(turn), false, peers::sender_mode(s), &from);
+    let chain = made_chain(room, id, Some(chain), cap);
+    store(app, room, id, s.id, payload, None, chain).await
+}
+
+/// The last input of agent `s` made from the owner's message in room `room` that joined the turn
+/// `opening` opened, before its final message `row`.
+async fn owner_joined(
+    app: &AppState,
+    s: &SessionRow,
+    room: &SessionRow,
+    opening: &EventRow,
+    row: &EventRow,
+) -> anyhow::Result<Option<EventRow>> {
+    let id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT event_id FROM events
+         WHERE session_id = $1 AND type = 'peer.message' AND payload ->> 'joined' = 'true'
+           AND payload -> 'room' ->> 'session_id' = $2::text
+           AND payload ->> 'from_session_id' = $2::text AND seq > $3 AND seq < $4
+         ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(s.id)
+    .bind(room.id)
+    .bind(opening.seq)
+    .bind(row.seq)
+    .fetch_optional(&app.db)
+    .await?;
+    match id {
+        Some(id) => Ok(db::event_by_id(&app.db, id).await?),
+        None => Ok(None),
+    }
 }
 
 /// `system room_passed` of agent `s` in room `room`.
@@ -694,32 +782,48 @@ async fn runtime_line(
 
 /// The speaker `s`'s post `post` in conversation `room`, at the end of its turn ([`decide`]): it
 /// wakes the next agent after `s`, with its files and cap, while at most [`MAX_HOPS`] posts follow
-/// the owner's last message before it; past them the room gets `system room_stopped` instead.
+/// the owner's or a non-member's last message before it; past them the room gets `system
+/// room_stopped` instead.
 async fn after_post(
     app: &AppState,
     room: &SessionRow,
     s: &SessionRow,
     post: &EventRow,
 ) -> anyhow::Result<()> {
-    // The posts after the owner's last message before this one, this one included.
+    // The owner's or a non-member's last message before this one, and the members' posts after it,
+    // this one included.
+    let (since, sender): (i64, Option<String>) = sqlx::query_as(&format!(
+        "SELECT e.seq, e.payload ->> 'from' FROM events e
+         WHERE e.session_id = $1 AND e.seq < $2 AND (e.type = 'user.message' OR ({NON_MEMBER}))
+         ORDER BY e.seq DESC LIMIT 1"
+    ))
+    .bind(room.id)
+    .bind(post.seq)
+    .fetch_optional(&app.db)
+    .await?
+    .unwrap_or((0, None));
     let n: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM events
-         WHERE session_id = $1 AND type = 'peer.message' AND seq <= $2
-           AND seq > COALESCE((SELECT max(seq) FROM events
-                               WHERE session_id = $1 AND type = 'user.message' AND seq < $2), 0)",
+         WHERE session_id = $1 AND type = 'peer.message' AND seq <= $2 AND seq > $3
+           AND payload ->> 'from_session_id' IN (SELECT id::text FROM sessions WHERE room_id = $1)",
     )
     .bind(room.id)
     .bind(post.seq)
+    .bind(since)
     .fetch_one(&app.db)
     .await?;
     let max = i64::from(MAX_HOPS);
     if n > max {
+        let whose = match sender {
+            Some(from) => format!("{from}'s"),
+            None => "your last".to_string(),
+        };
         events::system(
             app,
             room,
             ROOM_STOPPED,
             &format!(
-                "The agents posted {max} times since your last message and stopped waking each \
+                "The agents posted {max} times since {whose} message and stopped waking each \
                  other; they go on when you write"
             ),
         )
@@ -734,9 +838,10 @@ async fn after_post(
 }
 
 /// After the speaker `passer` of conversation `room` passed, at the end of its turn
-/// ([`decide`]): the last post or owner's message of the room goes to the next agent after the
-/// passer that is not its author. The speaker is gone once every agent but that author passed
-/// ([`all_passed`]), so somebody is left.
+/// ([`decide`]): the last post, owner's message or non-member's of the room goes to the next agent
+/// after the passer that is not its author (a non-member's has its sender for one, who is no
+/// agent). The speaker is gone once every agent but that author passed ([`all_passed`]), so
+/// somebody is left.
 async fn pass_on(app: &AppState, room: &SessionRow, passer: Uuid) -> anyhow::Result<()> {
     let Some(last) = last_message(app, room.id, i64::MAX).await? else {
         return Ok(());
@@ -792,7 +897,11 @@ async fn decide(
                   AND o.payload -> 'room' ->> 'session_id' = $1::text),
                (SELECT COALESCE(max(seq), 0) FROM events
                 WHERE session_id = $1
-                  AND (type = 'user.message' OR (type = 'system' AND payload ->> 'code' = $3))))",
+                  AND (type = 'user.message'
+                       OR (type = 'peer.message'
+                           AND payload ->> 'from_session_id' NOT IN
+                               (SELECT id::text FROM sessions WHERE room_id = $1))
+                       OR (type = 'system' AND payload ->> 'code' = $3))))",
     )
     .bind(room.id)
     .bind(s.id)

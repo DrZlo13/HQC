@@ -176,6 +176,7 @@ async fn a_call_goes_to_the_hub_and_back() {
             "hqc_ask",
             "hqc_search_history",
             "hqc_spawn",
+            "hqc_room",
             "hqc_schedule",
             "hqc_move",
             "hqc_rename"

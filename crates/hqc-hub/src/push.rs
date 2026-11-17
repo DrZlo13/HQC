@@ -162,7 +162,7 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
         | EventKind::ClarifyRequest { request_id, .. } => Some(request_id),
         _ => None,
     };
-    // A post in a room is named by its agent (SPEC §16).
+    // A message in a room is named by its agent or its sender (SPEC §16).
     let post_author = match kind {
         EventKind::PeerMessage {
             from_session_id, ..

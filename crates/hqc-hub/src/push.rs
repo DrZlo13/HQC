@@ -119,7 +119,8 @@ impl PushSender for WebPush {
     }
 }
 
-fn clip(s: &str, n: usize) -> String {
+/// `s` cut to `n` characters, with `…` after a cut.
+pub(crate) fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
     } else {
@@ -161,6 +162,13 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
         | EventKind::ClarifyRequest { request_id, .. } => Some(request_id),
         _ => None,
     };
+    // A post in a room is named by its agent (SPEC §16).
+    let post_author = match kind {
+        EventKind::PeerMessage {
+            from_session_id, ..
+        } if s.room_mode.is_some() => Some(*from_session_id),
+        _ => None,
+    };
     let approval_like = request_id.is_some();
     if s.system && approval_like && s.worker_id.is_some_and(|w| !worker_push_due(app, w)) {
         tracing::debug!(session_id = %s.id, "worker request: push skipped, one was sent less than 10 s ago");
@@ -185,6 +193,17 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
                 })
         } else {
             Vec::new()
+        };
+        let body = match post_author {
+            Some(a) => match db::session(&app.db, a).await {
+                Ok(Some(a)) => format!("{}: {body}", a.title),
+                Ok(None) => body,
+                Err(e) => {
+                    tracing::error!(%session_id, error = %e, "push: the post's agent");
+                    body
+                }
+            },
+            None => body,
         };
         let payload = message(&s, &row, request_id.as_deref(), body);
         let mut users = vec![session_owner];

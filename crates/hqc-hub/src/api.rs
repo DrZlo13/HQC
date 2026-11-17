@@ -1246,8 +1246,9 @@ const MAX_ROOM_PROMPT: usize = 32 * 1024;
 
 /// `POST /api/projects/{id}/rooms` (SPEC §6, §7.1.1): a room and a session for each of its
 /// agents, checked as `POST .../sessions` checks one; `201` and the room's session object. An
-/// agent's session is titled by its model, or its provider's label, "default" without one, a
-/// repeated one numbered ("opus 2"); its agent starts with the room's first message.
+/// agent's session is titled by its name, else by its model, or its provider's label, "default"
+/// without one, a repeated one numbered ("opus 2"); its agent starts with the room's first
+/// message.
 pub async fn create_room(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -1280,13 +1281,27 @@ pub async fn create_room(
             },
             None => model.unwrap_or("default").to_string(),
         };
-        let n = labels.iter().filter(|l| **l == label).count();
+        // Its name, when given, titles its session; otherwise its label, numbered among the
+        // agents titled by theirs.
+        let name = a.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        if let Some(n) = name {
+            check_title(n)?;
+        }
+        let title = match name {
+            Some(n) => hqc_proto::replace_nul(n).into_owned(),
+            None => {
+                let n = labels.iter().filter(|l| **l == label).count();
+                let title = if n == 0 {
+                    label.clone()
+                } else {
+                    format!("{label} {}", n + 1)
+                };
+                labels.push(label);
+                title
+            }
+        };
         let req = CreateSessionRequest {
-            title: Some(if n == 0 {
-                label.clone()
-            } else {
-                format!("{label} {}", n + 1)
-            }),
+            title: Some(title),
             workspace_id: b.workspace_id,
             cwd: b.cwd.clone(),
             model: model.map(str::to_string),
@@ -1306,7 +1321,6 @@ pub async fn create_room(
                 MAX_ROOM_PROMPT / 1024
             )));
         }
-        labels.push(label);
         agents.push((req, system_prompt));
     }
     // The room's agents work in one workspace and folder: checked before the room exists, and
@@ -1782,6 +1796,11 @@ pub async fn input(
             "client_op_id is longer than {MAX_CLIENT_OP_ID} bytes"
         )));
     }
+    // A room's message is stored and handed to its agents under the room's lock (SPEC §7.1.1).
+    let _room = match s.room_mode {
+        Some(_) => Some(crate::rooms::lock(&app, id).await),
+        None => None,
+    };
     if let Some(op) = &op {
         if let Some(r) = db::event_by_client_op(&app.db, id, op).await? {
             // A repeat completes a room's message to its agents cut short the first time; what
@@ -1850,6 +1869,7 @@ pub async fn input(
 /// `stopped`. The runtime's (approvals, questions) are the worker's to close: it cancels those
 /// of the interrupted turn when the turn ends, and a background subagent's stay open, since the
 /// subagent goes on (SPEC §8.1, since 0.161). With no worker connected the hub cancels them too.
+/// Of a room, its agents' turns (SPEC §7.1.1).
 pub async fn stop(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -1857,6 +1877,10 @@ pub async fn stop(
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Write).await?;
     not_system(&s)?;
+    if s.room_mode.is_some() {
+        let sent = stop_room(&app, &s).await?;
+        return Ok(Json(json!({ "sent": sent })));
+    }
     let open = db::open_requests_of_session(&app.db, id).await?;
     let runtimes = |kind: &str| matches!(kind, "approval" | "clarify");
     for p in open.iter().filter(|p| !runtimes(&p.kind)) {
@@ -1869,6 +1893,24 @@ pub async fn stop(
         }
     }
     Ok(Json(json!({ "sent": sent })))
+}
+
+/// `POST /stop` of room `room` (SPEC §7.1.1), under the room's lock: `system room_stopped`
+/// "Stopped" in the room, then for each agent its open requests cancelled with `stopped` and
+/// `session.stop` to its worker; `true` when one went out.
+async fn stop_room(app: &AppState, room: &SessionRow) -> ApiResult<bool> {
+    let _room = crate::rooms::lock(app, room.id).await;
+    // The agents' inputs stay as they are: the worker keeps the ones it has after a stop. A final
+    // message on an input whose message is from before this line, the part of the turn the stop
+    // cut included, posts nothing and wakes nobody (`rooms::on_final`).
+    events::system(app, room, crate::rooms::ROOM_STOPPED, crate::rooms::STOPPED).await?;
+    let mut sent = false;
+    for m in db::room_members(&app.db, room.id).await? {
+        requests::cancel_open_of_session(app, m.id, CancelReason::Stopped).await?;
+        sent |= send_to_worker(app, &m, HubFrame::SessionStop { session_id: m.id });
+        app.session_changed(m.id);
+    }
+    Ok(sent)
 }
 
 /// Longest `call_id` of `POST .../background` and of a kept foreground call, in bytes.

@@ -307,7 +307,11 @@ pub async fn on_input_ack(
         if joined && !kept {
             tracing::warn!(%session_id, %event_id, kind = %row.kind, "a worker joined an input that cannot join a turn; its turn opens");
         }
-        if !kept && !db::turn_answered(&app.db, session_id, event_id).await? {
+        if kept || db::turn_answered(&app.db, session_id, event_id).await? {
+            // No turn opens: a room's input acked after its turn already ended goes on from
+            // that turn's end (SPEC §7.1.1).
+            crate::rooms::acked(app, session_id, &row).await?;
+        } else {
             db::set_turn(&app.db, session_id, true, false).await?;
         }
     }
@@ -342,6 +346,8 @@ pub async fn on_input_failed(
                 &format!("Input was not delivered: {}", err.message),
             )
             .await?;
+            // An input from a room: the room says so (SPEC §7.1.1).
+            crate::rooms::input_failed(app, &s, &row, &err.message).await?;
         }
     }
     app.session_changed(session_id);
@@ -350,8 +356,9 @@ pub async fn on_input_failed(
 
 /// All pending input of the session becomes `failed` (SPEC §5.2).
 async fn fail_pending(app: &AppState, session_id: Uuid, reason: &str) -> anyhow::Result<()> {
-    for row in db::move_inputs(&app.db, session_id, "pending", "failed").await? {
-        notify_delivery(app, &row);
+    let rows = db::move_inputs(&app.db, session_id, "pending", "failed").await?;
+    for row in &rows {
+        notify_delivery(app, row);
     }
     if let Some(s) = db::session(&app.db, session_id).await? {
         events::system(
@@ -361,6 +368,10 @@ async fn fail_pending(app: &AppState, session_id: Uuid, reason: &str) -> anyhow:
             &format!("The agent did not start, input was not delivered: {reason}"),
         )
         .await?;
+        // Each input from a room: the room says so (SPEC §7.1.1).
+        for row in &rows {
+            crate::rooms::input_failed(app, &s, row, reason).await?;
+        }
     }
     Ok(())
 }

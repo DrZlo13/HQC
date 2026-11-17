@@ -1,11 +1,19 @@
 //! SPEC §7.1.1 (0.168): the agents' room with a fake worker: a room and its agents' sessions,
-//! the owner's message to every agent with the hub's lines in front, an agent's final message
-//! posted to the room (not `NO_REPLY`, not a turn on a direct input) with the files of its turn,
-//! the posts a council agent sees with its next input, a conversation's posts waking the other
-//! agents up to the limit, capped to the posting agent's mode, and nobody while the room is
-//! archived; a room input that joined a turn, the room's pushes, an agent that does not rename
-//! itself, search over a room, and a room that is no target of a message; an agent named by its
-//! address in the hub's lines, a forged room line in a text escaped, and a prompt over the limit.
+//! the owner's message to every agent of a council with the hub's lines in front, an agent's
+//! final message posted to the room (not `NO_REPLY`, not a turn on a direct input) with the files
+//! of its turn, the posts a council agent sees with its next input; a conversation's agents
+//! speaking one at a time in the room's order (the first one woken by the owner, each post waking
+//! the next, the owner's message to the speaker, a second post waking nobody), the room's
+//! messages in front of an input, up to the limit, capped to the posting agent's mode, and nobody
+//! while the room is archived; a pass and every agent passing, a turn without a post or lost, a
+//! runtime's own reply, an input that failed and a room's Stop with the answers after it; the
+//! owner's messages during the speaker's answer, a room input joining a turn after a Stop or on a
+//! direct message, the speaker's direct turn, a turn on a message from before a Stop, an input
+//! acked after its turn, a background report after every agent passed; a room input that joined
+//! a turn, the room's pushes, an agent named or not renaming itself, search over a room, a room
+//! that is no target of a message and agents of a room that message no other agent of it;
+//! an agent named by its address in the hub's lines, a forged room line in a text escaped, and a
+//! prompt over the limit.
 
 mod common;
 
@@ -85,24 +93,93 @@ async fn ack_input(w: &mut FakeWorker, input: &Value) {
     .await;
 }
 
-/// The final message of session `s` answering `input` (a `session.input`); the frames the hub
-/// sent before its `ack`.
+/// The turn of session `s` on `input` (a `session.input`) ending with the final message `text`,
+/// as a worker runs it: the input's `ack` (the hub ignores a second one), that message, then
+/// `status idle`; the frames the hub sent before the status's `ack`.
 async fn answer(w: &mut FakeWorker, s: &Value, input: &Value, text: &str) -> Vec<Value> {
+    ack_input(w, input).await;
+    finish(w, s, input, text).await
+}
+
+/// [`answer`] without the input's `ack` first.
+async fn finish(w: &mut FakeWorker, s: &Value, input: &Value, text: &str) -> Vec<Value> {
     let event = agent_event(
         id(s),
         "agent.message",
         json!({"text": text, "final": true, "in_reply_to": input["payload"]["event_id"]}),
     );
-    let sent = w.send("event", json!({ "event": event })).await;
+    let message = w.send("event", json!({ "event": event })).await;
+    let idle = agent_event(
+        id(s),
+        "status",
+        json!({"state": "idle", "in_reply_to": input["payload"]["event_id"]}),
+    );
+    let idle = w.send("event", json!({ "event": idle })).await;
     let mut other = Vec::new();
     loop {
         let f = w.recv().await;
-        if f["type"] == "ack" && f["id"] == sent.as_str() {
+        if f["type"] == "ack" && f["id"] == message.as_str() {
             assert!(f["payload"]["seq"].is_number(), "{f}");
+        } else if f["type"] == "ack" && f["id"] == idle.as_str() {
             return other;
+        } else {
+            other.push(f);
         }
-        other.push(f);
     }
+}
+
+/// [`answer`], then the `n` inputs the hub sends, the starts among its frames acked.
+async fn answer_inputs(
+    w: &mut FakeWorker,
+    s: &Value,
+    input: &Value,
+    text: &str,
+    n: usize,
+) -> Vec<Value> {
+    let mut inputs = Vec::new();
+    for f in answer(w, s, input, text).await {
+        match f["type"].as_str() {
+            Some("session.start") => w.reply(&f["id"], "ack", json!({})).await,
+            Some("session.input") => inputs.push(f),
+            _ => panic!("unexpected frame {f}"),
+        }
+    }
+    let (_, more) = starts_and_inputs(w, n.saturating_sub(inputs.len())).await;
+    inputs.extend(more);
+    assert_eq!(inputs.len(), n, "{inputs:?}");
+    inputs
+}
+
+/// The block of the room's messages in front of an input from room `room`: `entries` of `(the
+/// sender's address or None for the owner, text)`.
+fn block(room: &str, entries: &[(Option<&str>, &str)]) -> String {
+    let mut out = format!("[hqc room {room} | since your last turn]\n");
+    for (from, text) in entries {
+        let from = match from {
+            Some(a) => format!("post from {a}"),
+            None => "message from your owner".into(),
+        };
+        out.push_str(&format!("[hqc room {room} | {from}]\n{text}\n\n"));
+    }
+    out + "---\n"
+}
+
+/// The room's `system` events with `code`.
+fn lines<'a>(events: &'a [Value], code: &str) -> Vec<&'a Value> {
+    events
+        .iter()
+        .filter(|e| e["type"] == "system" && e["payload"]["code"] == code)
+        .collect()
+}
+
+/// `status` of session `s` with `state`, ending its turn on `input` (a `session.input`).
+async fn status(w: &mut FakeWorker, s: &Value, input: &Value, state: &str) {
+    w.event(agent_event(
+        id(s),
+        "status",
+        json!({"state": state, "in_reply_to": input["payload"]["event_id"]}),
+    ))
+    .await;
 }
 
 async fn say(hub: &TestHub, session: &Value, text: &str) -> Value {
@@ -125,9 +202,9 @@ fn posts(events: &[Value]) -> Vec<&Value> {
 
 fn room_line(room: &str, from: &str) -> String {
     format!(
-        "[hqc room {room} | from {from} | your final message is posted to the room; reply \
-         exactly NO_REPLY to post nothing | your session's title is your name in the room: do \
-         not rename it]"
+        "[hqc room {room} | from {from} | your final message is posted to the room, where the \
+         other agents read it: do not message them | reply exactly NO_REPLY to post nothing | \
+         your session's title is your name in the room: do not rename it]"
     )
 }
 
@@ -287,7 +364,7 @@ async fn a_council_posts_its_agents_answers_and_shows_each_the_others_posts() {
     assert!(starts.is_empty());
     let history = |posts: &str| {
         format!(
-            "[hqc room personal/room-1 | posts since your last turn]\n{posts}---\n{line}\n\nAnd \
+            "[hqc room personal/room-1 | since your last turn]\n{posts}---\n{line}\n\nAnd \
              for the tests?"
         )
     };
@@ -327,7 +404,7 @@ async fn a_council_posts_its_agents_answers_and_shows_each_the_others_posts() {
 }
 
 #[tokio::test]
-async fn in_a_conversation_a_post_wakes_the_other_agents_until_twenty_follow_the_owner() {
+async fn in_a_conversation_a_post_wakes_the_next_agent_until_twenty_follow_the_owner() {
     let hub = TestHub::start().await;
     let (_, t) = hub.enroll("one").await;
     let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
@@ -344,23 +421,21 @@ async fn in_a_conversation_a_post_wakes_the_other_agents_until_twenty_follow_the
     let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
 
     say(&hub, &room, "Tabs or spaces?").await;
-    let (_, inputs) = starts_and_inputs(&mut w, 2).await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
     let ia = of(&inputs, a).clone();
-    for i in &inputs {
-        ack_input(&mut w, i).await;
-    }
+    ack_input(&mut w, &ia).await;
 
-    // A's post wakes B, from A.
-    let woken = answer(&mut w, a, &ia, "Tabs.").await;
-    assert_eq!(woken.len(), 1, "{woken:?}");
+    // A's post wakes B, from A, the owner's message in front.
+    let woken = answer_inputs(&mut w, a, &ia, "Tabs.", 1).await;
     let ib = &woken[0];
-    assert_eq!(
-        (&ib["type"], &ib["payload"]["session_id"]),
-        (&json!("session.input"), &b["id"])
-    );
+    assert_eq!(ib["payload"]["session_id"], b["id"]);
     assert_eq!(
         ib["payload"]["text"],
-        format!("{}\n\nTabs.", room_line("personal/debate", "personal/opus"))
+        format!(
+            "{}{}\n\nTabs.",
+            block("personal/debate", &[(None, "Tabs or spaces?")]),
+            room_line("personal/debate", "personal/opus")
+        )
     );
     assert!(ib["payload"].get("peer").is_none(), "{ib}");
     let post = posts(&hub.events(id(&room)).await)[0].clone();
@@ -380,25 +455,24 @@ async fn in_a_conversation_a_post_wakes_the_other_agents_until_twenty_follow_the
         json!({"session_id": room["id"], "seq": post["seq"]})
     );
 
-    // Up to twenty posts after the owner's message wake the others; the 21st wakes nobody and
-    // the room says once that the agents stopped.
+    // Up to twenty posts after the owner's message wake the next agent in turn; the 21st wakes
+    // nobody and the room says once that the agents stopped.
+    let (mut speaker, mut next, mut input) = (b, a, ib.clone());
     for n in 2..=20 {
-        let woken = answer(&mut w, a, &ia, &format!("Tabs, {n}.")).await;
-        assert_eq!(woken.len(), 1, "post {n}: {woken:?}");
-        assert_eq!(woken[0]["payload"]["session_id"], b["id"]);
+        let woken = answer_inputs(&mut w, speaker, &input, &format!("Tabs, {n}."), 1).await;
+        assert_eq!(woken[0]["payload"]["session_id"], next["id"], "post {n}");
+        (speaker, next, input) = (next, speaker, woken[0].clone());
     }
+    assert_eq!(speaker["id"], a["id"]);
     for n in 21..=22 {
-        assert!(answer(&mut w, a, &ia, &format!("Tabs, {n}."))
+        assert!(answer(&mut w, a, &input, &format!("Tabs, {n}."))
             .await
             .is_empty());
     }
     w.expect_silence(Duration::from_millis(200)).await;
     let events = hub.events(id(&room)).await;
     assert_eq!(posts(&events).len(), 22);
-    let stopped: Vec<&Value> = events
-        .iter()
-        .filter(|e| e["type"] == "system" && e["payload"]["code"] == "room_stopped")
-        .collect();
+    let stopped = lines(&events, "room_stopped");
     assert_eq!(stopped.len(), 1, "{events:?}");
     assert_eq!(
         stopped[0]["seq"].as_i64(),
@@ -406,13 +480,1361 @@ async fn in_a_conversation_a_post_wakes_the_other_agents_until_twenty_follow_the
         "right after the 21st post"
     );
 
-    // The owner's next message wakes them again.
+    // The owner's next message wakes the first agent again, and its post the next one.
     say(&hub, &room, "Decide.").await;
-    let (_, inputs) = starts_and_inputs(&mut w, 2).await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
     let ia = of(&inputs, a).clone();
-    let woken = answer(&mut w, a, &ia, "Tabs, finally.").await;
-    assert_eq!(woken.len(), 1, "{woken:?}");
+    let woken = answer_inputs(&mut w, a, &ia, "Tabs, finally.", 1).await;
     assert_eq!(woken[0]["payload"]["session_id"], b["id"]);
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: in a conversation the owner's first message wakes the first agent only; each
+/// post wakes only the next agent after its author, the last one waking the first; each input
+/// carries the owner's messages and the other agents' posts since the agent's previous input.
+#[tokio::test]
+async fn a_conversation_wakes_its_agents_one_at_a_time_in_order() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"title": "Debate", "mode": "conversation",
+               "agents": [{"model": "opus"}, {"model": "sonnet"}, {"model": "haiku"}]}),
+    )
+    .await;
+    let (a, b, c) = (
+        titled(&members, "opus"),
+        titled(&members, "sonnet"),
+        titled(&members, "haiku"),
+    );
+    let r = "personal/debate";
+    let msg = say(&hub, &room, "Which store?").await;
+    let (starts, inputs) = starts_and_inputs(&mut w, 1).await;
+    assert_eq!(starts.len(), 1);
+    let ia = of(&inputs, a).clone();
+    assert_eq!(
+        ia["payload"]["text"],
+        format!("{}\n\nWhich store?", room_line(r, "your owner"))
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+    let ev = hub
+        .events(id(a))
+        .await
+        .into_iter()
+        .find(|e| e["event_id"] == ia["payload"]["event_id"])
+        .unwrap();
+    assert_eq!(
+        ev["payload"]["room"],
+        json!({"session_id": room["id"], "seq": msg["seq"]})
+    );
+    for m in [b, c] {
+        assert!(posts(&hub.events(id(m)).await).is_empty(), "{}", m["title"]);
+    }
+    ack_input(&mut w, &ia).await;
+
+    let ib = answer_inputs(&mut w, a, &ia, "Postgres.", 1).await[0].clone();
+    assert_eq!(ib["payload"]["session_id"], b["id"]);
+    assert_eq!(
+        ib["payload"]["text"],
+        format!(
+            "{}{}\n\nPostgres.",
+            block(r, &[(None, "Which store?")]),
+            room_line(r, &addr(a))
+        )
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+    ack_input(&mut w, &ib).await;
+
+    let ic = answer_inputs(&mut w, b, &ib, "SQLite.", 1).await[0].clone();
+    assert_eq!(ic["payload"]["session_id"], c["id"]);
+    assert_eq!(
+        ic["payload"]["text"],
+        format!(
+            "{}{}\n\nSQLite.",
+            block(
+                r,
+                &[
+                    (None, "Which store?"),
+                    (Some(addr(a).as_str()), "Postgres.")
+                ]
+            ),
+            room_line(r, &addr(b))
+        )
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+    ack_input(&mut w, &ic).await;
+
+    // The last agent's post wakes the first, which sees what it has not seen.
+    let ia = answer_inputs(&mut w, c, &ic, "Both.", 1).await[0].clone();
+    assert_eq!(ia["payload"]["session_id"], a["id"]);
+    assert_eq!(
+        ia["payload"]["text"],
+        format!(
+            "{}{}\n\nBoth.",
+            block(r, &[(Some(addr(b).as_str()), "SQLite.")]),
+            room_line(r, &addr(c))
+        )
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1, §17.2: the owner's message in a conversation goes to the speaker alone, and joins
+/// its running turn; the circle goes on from the speaker's post, the next agent seeing both of
+/// the owner's messages and the post it has not seen.
+#[tokio::test]
+async fn the_owners_message_goes_to_the_speaker_and_the_circle_goes_on_from_it() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"title": "Debate", "mode": "conversation",
+               "agents": [{"model": "opus"}, {"model": "sonnet"}, {"model": "haiku"}]}),
+    )
+    .await;
+    let (a, b, c) = (
+        titled(&members, "opus"),
+        titled(&members, "sonnet"),
+        titled(&members, "haiku"),
+    );
+    let r = "personal/debate";
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    ack_input(&mut w, &inputs[0]).await;
+    let ib = answer_inputs(&mut w, a, &inputs[0], "Postgres.", 1).await[0].clone();
+    ack_input(&mut w, &ib).await;
+
+    // B is the speaker: the owner's message goes to B alone and joins its turn.
+    say(&hub, &room, "Shorter, please.").await;
+    let joined = w.expect("session.input").await;
+    assert_eq!(joined["payload"]["session_id"], b["id"]);
+    assert_eq!(
+        joined["payload"]["text"],
+        format!("{}\n\nShorter, please.", room_line(r, "your owner"))
+    );
+    w.reply(
+        &joined["id"],
+        "ack",
+        json!({"event_id": joined["payload"]["event_id"], "joined": true}),
+    )
+    .await;
+    w.expect_silence(Duration::from_millis(200)).await;
+
+    // B's post wakes C.
+    let ic = answer_inputs(&mut w, b, &ib, "SQLite.", 1).await[0].clone();
+    assert_eq!(ic["payload"]["session_id"], c["id"]);
+    assert_eq!(
+        ic["payload"]["text"],
+        format!(
+            "{}{}\n\nSQLite.",
+            block(
+                r,
+                &[
+                    (None, "Which store?"),
+                    (Some(addr(a).as_str()), "Postgres."),
+                    (None, "Shorter, please.")
+                ]
+            ),
+            room_line(r, &addr(b))
+        )
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: a second post of the agent on one input (a turn the CLI starts by itself) is
+/// posted and wakes nobody: the agent it woke first is the speaker.
+#[tokio::test]
+async fn a_second_post_of_an_agent_wakes_nobody() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    ack_input(&mut w, &inputs[0]).await;
+    let woken = answer_inputs(&mut w, a, &inputs[0], "Postgres.", 1).await;
+    assert_eq!(woken[0]["payload"]["session_id"], b["id"]);
+    assert!(
+        answer(&mut w, a, &inputs[0], "The background run finished.")
+            .await
+            .is_empty()
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+    assert_eq!(posts(&hub.events(id(&room)).await).len(), 2);
+    hub.finish().await;
+}
+
+/// SPEC §4, §7.1.1: `NO_REPLY` writes `system room_passed` in the room, in both modes; in a
+/// conversation the speaker's pass hands the last message on to the next agent.
+#[tokio::test]
+async fn a_pass_is_a_line_and_hands_the_last_message_on() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (talk, members) = room(
+        &hub,
+        json!({"title": "Debate", "mode": "conversation",
+               "agents": [{"model": "opus"}, {"model": "sonnet"}, {"model": "haiku"}]}),
+    )
+    .await;
+    let (a, b, c) = (
+        titled(&members, "opus"),
+        titled(&members, "sonnet"),
+        titled(&members, "haiku"),
+    );
+    let r = "personal/debate";
+    let msg = say(&hub, &talk, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    ack_input(&mut w, &inputs[0]).await;
+
+    // A passes: a line in the room, and B gets the owner's message.
+    let ib = answer_inputs(&mut w, a, &inputs[0], "NO_REPLY", 1).await[0].clone();
+    assert_eq!(ib["payload"]["session_id"], b["id"]);
+    assert_eq!(
+        ib["payload"]["text"],
+        format!("{}\n\nWhich store?", room_line(r, "your owner"))
+    );
+    let ev = hub
+        .events(id(b))
+        .await
+        .into_iter()
+        .find(|e| e["event_id"] == ib["payload"]["event_id"])
+        .unwrap();
+    assert_eq!(
+        (&ev["payload"]["from_session_id"], &ev["payload"]["room"]),
+        (
+            &talk["id"],
+            &json!({"session_id": talk["id"], "seq": msg["seq"]})
+        )
+    );
+    let events = hub.events(id(&talk)).await;
+    assert!(posts(&events).is_empty(), "{events:?}");
+    let passed = lines(&events, "room_passed");
+    assert_eq!(passed.len(), 1, "{events:?}");
+    assert_eq!(
+        (
+            &passed[0]["payload"]["text"],
+            &passed[0]["payload"]["from_session_id"]
+        ),
+        (&json!("opus passed"), &a["id"])
+    );
+    assert_eq!(passed[0]["author"], json!({"kind": "system"}));
+    ack_input(&mut w, &ib).await;
+
+    // B, now the speaker, posts: C is next.
+    let ic = answer_inputs(&mut w, b, &ib, "Postgres.", 1).await[0].clone();
+    assert_eq!(ic["payload"]["session_id"], c["id"]);
+    w.expect_silence(Duration::from_millis(200)).await;
+
+    // In a council a pass is a line as well.
+    let (council, members) = room(
+        &hub,
+        json!({"mode": "council", "agents": [{"model": "fable"}]}),
+    )
+    .await;
+    say(&hub, &council, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    ack_input(&mut w, &inputs[0]).await;
+    assert!(answer(&mut w, &members[0], &inputs[0], "NO_REPLY")
+        .await
+        .is_empty());
+    let events = hub.events(id(&council)).await;
+    let passed = lines(&events, "room_passed");
+    assert_eq!(passed.len(), 1, "{events:?}");
+    assert_eq!(passed[0]["payload"]["text"], "fable passed");
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: once every agent but the author of the last post passed since it, nobody is
+/// woken and no other line is written; after the owner's message, every agent.
+#[tokio::test]
+async fn when_every_agent_passed_nobody_is_woken() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation",
+               "agents": [{"model": "opus"}, {"model": "sonnet"}, {"model": "haiku"}]}),
+    )
+    .await;
+    let (a, b, c) = (
+        titled(&members, "opus"),
+        titled(&members, "sonnet"),
+        titled(&members, "haiku"),
+    );
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ib = answer_inputs(&mut w, a, &inputs[0], "Postgres.", 1).await[0].clone();
+    assert_eq!(ib["payload"]["session_id"], b["id"]);
+    // B passes: C gets A's post, from A.
+    let ic = answer_inputs(&mut w, b, &ib, "NO_REPLY", 1).await[0].clone();
+    assert_eq!(ic["payload"]["session_id"], c["id"]);
+    let ev = hub
+        .events(id(c))
+        .await
+        .into_iter()
+        .find(|e| e["event_id"] == ic["payload"]["event_id"])
+        .unwrap();
+    assert_eq!(ev["payload"]["from_session_id"], a["id"]);
+    assert_eq!(ev["payload"]["text"], "Postgres.");
+    // C passes: all but A passed since A's post.
+    assert!(answer(&mut w, c, &ic, "NO_REPLY").await.is_empty());
+    w.expect_silence(Duration::from_millis(200)).await;
+
+    // The owner's message: the first agent, then each in turn, until all three passed.
+    say(&hub, &room, "Anyone?").await;
+    let ia = w.expect("session.input").await;
+    assert_eq!(ia["payload"]["session_id"], a["id"]);
+    let ib = answer_inputs(&mut w, a, &ia, "NO_REPLY", 1).await[0].clone();
+    assert_eq!(ib["payload"]["session_id"], b["id"]);
+    let ic = answer_inputs(&mut w, b, &ib, "NO_REPLY", 1).await[0].clone();
+    assert_eq!(ic["payload"]["session_id"], c["id"]);
+    assert!(answer(&mut w, c, &ic, "NO_REPLY").await.is_empty());
+    w.expect_silence(Duration::from_millis(200)).await;
+    let events = hub.events(id(&room)).await;
+    assert_eq!(lines(&events, "room_passed").len(), 5, "{events:?}");
+    assert!(lines(&events, "room_stopped").is_empty(), "{events:?}");
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: the speaker's turn on its input from the room that ends without a final message
+/// stops the room; a turn that posted, or an agent that is not the speaker, writes nothing.
+#[tokio::test]
+async fn the_speakers_turn_without_a_post_stops_the_room() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    ack_input(&mut w, &inputs[0]).await;
+    status(&mut w, a, &inputs[0], "idle").await;
+    let events = hub.events(id(&room)).await;
+    let stopped = lines(&events, "room_stopped");
+    assert_eq!(stopped.len(), 1, "{events:?}");
+    assert_eq!(
+        stopped[0]["payload"]["text"],
+        "opus's turn ended without a post; the agents go on when you write"
+    );
+
+    // The next message goes to the first agent again; a turn that posted ends without a line,
+    // and so does the turn of an agent that is no longer the speaker. The speaker's `error`
+    // without a post stops the room as `idle` does.
+    say(&hub, &room, "Which store, then?").await;
+    let ia = w.expect("session.input").await;
+    assert_eq!(ia["payload"]["session_id"], a["id"]);
+    ack_input(&mut w, &ia).await;
+    let ib = answer_inputs(&mut w, a, &ia, "Postgres.", 1).await[0].clone();
+    status(&mut w, a, &ia, "idle").await;
+    status(&mut w, a, &inputs[0], "idle").await;
+    assert_eq!(lines(&hub.events(id(&room)).await, "room_stopped").len(), 1);
+    ack_input(&mut w, &ib).await;
+    status(&mut w, b, &ib, "error").await;
+    let events = hub.events(id(&room)).await;
+    let stopped = lines(&events, "room_stopped");
+    assert_eq!(stopped.len(), 2, "{events:?}");
+    assert_eq!(
+        stopped[1]["payload"]["text"],
+        "sonnet's turn ended without a post; the agents go on when you write"
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §5.2, §7.1.1: an input from the room that the worker rejects, or that fails with the
+/// agent's start, is a line in the room, in both modes.
+#[tokio::test]
+async fn a_room_input_that_fails_is_a_line_in_the_room() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (council, members) = room(
+        &hub,
+        json!({"mode": "council", "agents": [{"model": "opus"}]}),
+    )
+    .await;
+    say(&hub, &council, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    w.reply(
+        &inputs[0]["id"],
+        "error",
+        json!({"code": "internal", "message": "the inbox is gone", "retryable": false}),
+    )
+    .await;
+    let events = hub
+        .wait_events(id(&council), "room_stopped", |e| {
+            !lines(e, "room_stopped").is_empty()
+        })
+        .await;
+    assert_eq!(
+        lines(&events, "room_stopped")[0]["payload"]["text"],
+        "opus did not get the message: the inbox is gone"
+    );
+    let ev = hub
+        .events(id(&members[0]))
+        .await
+        .into_iter()
+        .find(|e| e["event_id"] == inputs[0]["payload"]["event_id"])
+        .unwrap();
+    assert_eq!(ev["delivery"], "failed");
+
+    let (talk, _) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "haiku"}]}),
+    )
+    .await;
+    say(&hub, &talk, "Which store?").await;
+    for _ in 0..3 {
+        let f = w.expect("session.start").await;
+        w.reply(
+            &f["id"],
+            "error",
+            json!({"code": "agent_start_failed", "message": "claude: command not found",
+                   "retryable": true}),
+        )
+        .await;
+    }
+    let events = hub
+        .wait_events(id(&talk), "room_stopped", |e| {
+            !lines(e, "room_stopped").is_empty()
+        })
+        .await;
+    let stopped = lines(&events, "room_stopped");
+    assert_eq!(stopped.len(), 1, "{events:?}");
+    assert_eq!(
+        stopped[0]["payload"]["text"],
+        "haiku did not get the message: claude: command not found"
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §6, §7.1.1: `POST /stop` of a room stops each of its agents: its open requests
+/// cancelled, `session.stop`, its inputs left as they are; the room says "Stopped". A final
+/// message on an input whose message is from before it posts nothing and wakes nobody, whether it
+/// is the stopped turn's, a turn on an input the worker had, or the turn of an agent a post woke
+/// just before the stop; the owner's next message starts the room again from the first agent.
+#[tokio::test]
+async fn stopping_a_room_stops_its_agents() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ia = inputs[0].clone();
+    ack_input(&mut w, &ia).await;
+    let q = json!({"request_id": "c-1", "questions": [{"id": "q1", "text": "Sure?"}]});
+    w.event(agent_event(id(a), "clarify.request", q)).await;
+    // Pending: A's worker does not ack it.
+    say(&hub, &room, "Shorter, please.").await;
+    let pending = w.expect("session.input").await;
+    assert_eq!(pending["payload"]["session_id"], a["id"]);
+
+    async fn stop(hub: &TestHub, room: &Value) {
+        let (s, r) = hub
+            .post(&format!("/api/sessions/{}/stop", id(room)), json!({}))
+            .await;
+        assert_eq!((s, r["sent"].as_bool()), (200, Some(true)), "{r}");
+    }
+    stop(&hub, &room).await;
+    let f = w.expect("clarify.response").await;
+    assert_eq!(
+        f["payload"],
+        json!({"session_id": id(a), "request_id": "c-1", "answers": {}})
+    );
+    let mut stopped = Vec::new();
+    for _ in 0..2 {
+        stopped.push(w.expect("session.stop").await["payload"]["session_id"].clone());
+    }
+    assert_eq!(stopped, vec![a["id"].clone(), b["id"].clone()]);
+    let events = hub.events(id(a)).await;
+    let cancel = events
+        .iter()
+        .find(|e| e["type"] == "clarify.cancel")
+        .unwrap();
+    assert_eq!(cancel["payload"]["reason"], "stopped");
+    let delivery = |e: &Value| {
+        events
+            .iter()
+            .find(|x| x["event_id"] == e["payload"]["event_id"])
+            .unwrap()["delivery"]
+            .clone()
+    };
+    assert_eq!(
+        (delivery(&ia), delivery(&pending)),
+        (json!("delivered"), json!("pending"))
+    );
+    let events = hub.events(id(&room)).await;
+    let stopped = lines(&events, "room_stopped");
+    assert_eq!(stopped.len(), 1, "{events:?}");
+    assert_eq!(stopped[0]["payload"]["text"], "Stopped");
+
+    // The stopped turn's final message, then the turn on the input the worker had: they stay in
+    // A's session, post nothing and wake nobody; the turn's end writes no line.
+    assert!(answer(&mut w, a, &ia, "Postgres.").await.is_empty());
+    ack_input(&mut w, &pending).await;
+    assert!(answer(&mut w, a, &pending, "Postgres, shorter.")
+        .await
+        .is_empty());
+    status(&mut w, a, &pending, "idle").await;
+    w.expect_silence(Duration::from_millis(200)).await;
+    let events = hub.events(id(&room)).await;
+    assert!(posts(&events).is_empty(), "{events:?}");
+    assert_eq!(lines(&events, "room_stopped").len(), 1, "{events:?}");
+    let finals = hub
+        .events(id(a))
+        .await
+        .into_iter()
+        .filter(|e| e["type"] == "agent.message" && e["payload"]["final"] == true)
+        .count();
+    assert_eq!(finals, 2);
+
+    // The owner's next message wakes the first agent, whose post wakes B; a stop then: B's answer
+    // after it posts nothing.
+    say(&hub, &room, "Go on.").await;
+    let ia = w.expect("session.input").await;
+    assert_eq!(ia["payload"]["session_id"], a["id"]);
+    ack_input(&mut w, &ia).await;
+    let ib = answer_inputs(&mut w, a, &ia, "Postgres.", 1).await[0].clone();
+    assert_eq!(ib["payload"]["session_id"], b["id"]);
+    stop(&hub, &room).await;
+    for _ in 0..2 {
+        w.expect("session.stop").await;
+    }
+    ack_input(&mut w, &ib).await;
+    assert!(answer(&mut w, b, &ib, "SQLite.").await.is_empty());
+    w.expect_silence(Duration::from_millis(200)).await;
+    let events = hub.events(id(&room)).await;
+    let texts: Vec<&Value> = posts(&events)
+        .into_iter()
+        .map(|p| &p["payload"]["text"])
+        .collect();
+    assert_eq!(texts, vec!["Postgres."], "{events:?}");
+    assert_eq!(lines(&events, "room_stopped").len(), 2, "{events:?}");
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1, §17.2: the owner's message that comes while the speaker's answer is written
+/// starts no second agent. When the CLI runs it as the speaker's next turn, the answer is posted,
+/// the turn's end with the message still waiting wakes nobody, and the end of that next turn wakes
+/// the next agent once, with the speaker's last post; when it joined the turn with its ack after
+/// the turn's end, the ack wakes the next agent, and after a turn that ended without an answer the
+/// ack stops the room.
+#[tokio::test]
+async fn the_owners_message_during_the_speakers_answer_starts_no_second_agent() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"title": "Debate", "mode": "conversation",
+               "agents": [{"model": "opus"}, {"model": "sonnet"}, {"model": "haiku"}]}),
+    )
+    .await;
+    let (a, b, c) = (
+        titled(&members, "opus"),
+        titled(&members, "sonnet"),
+        titled(&members, "haiku"),
+    );
+    let r = "personal/debate";
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ia = inputs[0].clone();
+    ack_input(&mut w, &ia).await;
+
+    // A turn of its own: A's turn end wakes nobody, its next turn's end wakes B.
+    say(&hub, &room, "Shorter, please.").await;
+    let im = w.expect("session.input").await;
+    assert_eq!(im["payload"]["session_id"], a["id"]);
+    assert!(answer(&mut w, a, &ia, "Postgres, because it scales.")
+        .await
+        .is_empty());
+    w.expect_silence(Duration::from_millis(200)).await;
+    ack_input(&mut w, &im).await;
+    let ib = answer_inputs(&mut w, a, &im, "Postgres.", 1).await[0].clone();
+    assert_eq!(ib["payload"]["session_id"], b["id"]);
+    assert_eq!(
+        ib["payload"]["text"],
+        format!(
+            "{}{}\n\nPostgres.",
+            block(
+                r,
+                &[
+                    (None, "Which store?"),
+                    (None, "Shorter, please."),
+                    (Some(addr(a).as_str()), "Postgres, because it scales.")
+                ]
+            ),
+            room_line(r, &addr(a))
+        )
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+    ack_input(&mut w, &ib).await;
+
+    // Joined, acked after B's turn ended: the ack wakes C with B's post.
+    say(&hub, &room, "And why?").await;
+    let ij = w.expect("session.input").await;
+    assert_eq!(ij["payload"]["session_id"], b["id"]);
+    assert!(answer(&mut w, b, &ib, "SQLite.").await.is_empty());
+    w.expect_silence(Duration::from_millis(200)).await;
+    w.reply(
+        &ij["id"],
+        "ack",
+        json!({"event_id": ij["payload"]["event_id"], "joined": true}),
+    )
+    .await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    assert_eq!(inputs[0]["payload"]["session_id"], c["id"]);
+    assert_eq!(
+        inputs[0]["payload"]["text"],
+        format!(
+            "{}{}\n\nSQLite.",
+            block(
+                r,
+                &[
+                    (None, "Which store?"),
+                    (None, "Shorter, please."),
+                    (Some(addr(a).as_str()), "Postgres, because it scales."),
+                    (Some(addr(a).as_str()), "Postgres."),
+                    (None, "And why?")
+                ]
+            ),
+            room_line(r, &addr(b))
+        )
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+
+    // Joined, acked after C's turn ended without an answer: the ack stops the room.
+    let ic = inputs[0].clone();
+    ack_input(&mut w, &ic).await;
+    say(&hub, &room, "Well?").await;
+    let ik = w.expect("session.input").await;
+    assert_eq!(ik["payload"]["session_id"], c["id"]);
+    status(&mut w, c, &ic, "idle").await;
+    assert!(lines(&hub.events(id(&room)).await, "room_stopped").is_empty());
+    w.reply(
+        &ik["id"],
+        "ack",
+        json!({"event_id": ik["payload"]["event_id"], "joined": true}),
+    )
+    .await;
+    let events = hub
+        .wait_events(id(&room), "room_stopped", |e| {
+            !lines(e, "room_stopped").is_empty()
+        })
+        .await;
+    assert_eq!(
+        lines(&events, "room_stopped")[0]["payload"]["text"],
+        "haiku's turn ended without a post; the agents go on when you write"
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1, §17.2: two owner's messages while the speaker writes, which the CLI carries into
+/// its next turn: the first opens it, the second joins it. The first turn's end and the joined ack
+/// wake nobody while that turn runs; its end wakes the next agent once, with the last post.
+#[tokio::test]
+async fn two_messages_carried_into_the_next_turn_start_no_second_agent() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"title": "Debate", "mode": "conversation",
+               "agents": [{"model": "opus"}, {"model": "sonnet"}, {"model": "haiku"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ia = inputs[0].clone();
+    ack_input(&mut w, &ia).await;
+    say(&hub, &room, "Shorter, please.").await;
+    let i2 = w.expect("session.input").await;
+    say(&hub, &room, "And why?").await;
+    let i3 = w.expect("session.input").await;
+    assert_eq!(i2["payload"]["session_id"], a["id"]);
+    assert_eq!(i3["payload"]["session_id"], a["id"]);
+    assert!(answer(&mut w, a, &ia, "Postgres, because it scales.")
+        .await
+        .is_empty());
+    w.expect_silence(Duration::from_millis(200)).await;
+    // The next turn: i2 opens it, i3 joins it; A is still writing.
+    ack_input(&mut w, &i2).await;
+    w.reply(
+        &i3["id"],
+        "ack",
+        json!({"event_id": i3["payload"]["event_id"], "joined": true}),
+    )
+    .await;
+    w.expect_silence(Duration::from_millis(700)).await;
+    let woken = answer_inputs(&mut w, a, &i2, "Postgres: it scales.", 1).await;
+    assert_eq!(woken[0]["payload"]["session_id"], b["id"]);
+    let ev = hub
+        .events(id(b))
+        .await
+        .into_iter()
+        .find(|e| e["event_id"] == woken[0]["payload"]["event_id"])
+        .unwrap();
+    assert_eq!(ev["payload"]["text"], "Postgres: it scales.");
+    w.expect_silence(Duration::from_millis(200)).await;
+    assert_eq!(posts(&hub.events(id(&room)).await).len(), 2);
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: after the room's Stop the worker runs the input it had, from before the Stop, as
+/// the agent's next turn, and the owner's new message joins that turn: the turn's answer is a post
+/// and its end wakes the next agent.
+#[tokio::test]
+async fn a_message_after_stop_joining_an_older_turn_is_posted() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ia = inputs[0].clone();
+    ack_input(&mut w, &ia).await;
+    say(&hub, &room, "Shorter, please.").await;
+    let pending = w.expect("session.input").await;
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{}/stop", id(&room)), json!({}))
+        .await;
+    assert_eq!(s, 200, "{r}");
+    for _ in 0..2 {
+        w.expect("session.stop").await;
+    }
+    status(&mut w, a, &ia, "idle").await;
+    ack_input(&mut w, &pending).await;
+    say(&hub, &room, "New topic: which queue?").await;
+    let im = w.expect("session.input").await;
+    assert_eq!(im["payload"]["session_id"], a["id"]);
+    w.reply(
+        &im["id"],
+        "ack",
+        json!({"event_id": im["payload"]["event_id"], "joined": true}),
+    )
+    .await;
+    let woken = answer_inputs(&mut w, a, &pending, "Kafka.", 1).await;
+    assert_eq!(woken[0]["payload"]["session_id"], b["id"]);
+    let events = hub.events(id(&room)).await;
+    let texts: Vec<&Value> = posts(&events)
+        .into_iter()
+        .map(|p| &p["payload"]["text"])
+        .collect();
+    assert_eq!(texts, vec!["Kafka."], "{events:?}");
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1, §17.2: the speaker's input from the room joins a turn on the owner's message in
+/// the agent's own session: the turn's answer is a post and its end wakes the next agent.
+#[tokio::test]
+async fn a_room_input_joining_a_direct_turn_is_posted() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ia = inputs[0].clone();
+    ack_input(&mut w, &ia).await;
+    let ib = answer_inputs(&mut w, a, &ia, "Postgres.", 1).await[0].clone();
+    assert_eq!(ib["payload"]["session_id"], b["id"]);
+    ack_input(&mut w, &ib).await;
+    // The owner types into A's own session: a turn of its own.
+    let u = say(&hub, a, "Unrelated: what time is it?").await;
+    let iu = w.expect("session.input").await;
+    assert_eq!(iu["payload"]["event_id"], u["event_id"]);
+    ack_input(&mut w, &iu).await;
+    // B's turn end wakes A, whose input joins the running direct turn.
+    let ia2 = answer_inputs(&mut w, b, &ib, "SQLite.", 1).await[0].clone();
+    assert_eq!(ia2["payload"]["session_id"], a["id"]);
+    w.reply(
+        &ia2["id"],
+        "ack",
+        json!({"event_id": ia2["payload"]["event_id"], "joined": true}),
+    )
+    .await;
+    let woken = answer_inputs(&mut w, a, &iu, "Noon. And SQLite is fine.", 1).await;
+    assert_eq!(woken[0]["payload"]["session_id"], b["id"]);
+    let events = hub.events(id(&room)).await;
+    let texts: Vec<&Value> = posts(&events)
+        .into_iter()
+        .map(|p| &p["payload"]["text"])
+        .collect();
+    assert_eq!(
+        texts,
+        vec!["Postgres.", "SQLite.", "Noon. And SQLite is fine."],
+        "{events:?}"
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: the speaker's turn on the owner's message in its own session, while its input
+/// from the room waits behind it, posts nothing and wakes nobody; the turn on the room's input
+/// then posts and wakes the next agent, once.
+#[tokio::test]
+async fn a_direct_turn_of_the_speaker_neither_posts_nor_moves_the_circle() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ia = inputs[0].clone();
+    ack_input(&mut w, &ia).await;
+    let ib = answer_inputs(&mut w, a, &ia, "Postgres.", 1).await[0].clone();
+    ack_input(&mut w, &ib).await;
+    let u = say(&hub, a, "Unrelated: what time is it?").await;
+    let iu = w.expect("session.input").await;
+    assert_eq!(iu["payload"]["event_id"], u["event_id"]);
+    ack_input(&mut w, &iu).await;
+    // B's turn end makes A the speaker; its input waits behind the direct turn.
+    let ia2 = answer_inputs(&mut w, b, &ib, "SQLite.", 1).await[0].clone();
+    assert_eq!(ia2["payload"]["session_id"], a["id"]);
+    assert!(answer(&mut w, a, &iu, "Noon.").await.is_empty());
+    w.expect_silence(Duration::from_millis(200)).await;
+    let events = hub.events(id(&room)).await;
+    assert_eq!(posts(&events).len(), 2, "{events:?}");
+    assert!(lines(&events, "room_stopped").is_empty(), "{events:?}");
+
+    ack_input(&mut w, &ia2).await;
+    let woken = answer_inputs(&mut w, a, &ia2, "SQLite is fine.", 1).await;
+    assert_eq!(woken[0]["payload"]["session_id"], b["id"]);
+    w.expect_silence(Duration::from_millis(200)).await;
+    let events = hub.events(id(&room)).await;
+    let texts: Vec<&Value> = posts(&events)
+        .into_iter()
+        .map(|p| &p["payload"]["text"])
+        .collect();
+    assert_eq!(
+        texts,
+        vec!["Postgres.", "SQLite.", "SQLite is fine."],
+        "{events:?}"
+    );
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: after the room's Stop the worker runs the input it had, from before the Stop,
+/// while the owner's new message waits behind it: that turn posts nothing and wakes nobody; the
+/// turn on the new message posts and wakes the next agent.
+#[tokio::test]
+async fn a_turn_on_a_message_from_before_stop_posts_nothing() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ia = inputs[0].clone();
+    ack_input(&mut w, &ia).await;
+    say(&hub, &room, "Shorter, please.").await;
+    let pending = w.expect("session.input").await;
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{}/stop", id(&room)), json!({}))
+        .await;
+    assert_eq!(s, 200, "{r}");
+    for _ in 0..2 {
+        w.expect("session.stop").await;
+    }
+    status(&mut w, a, &ia, "idle").await;
+    ack_input(&mut w, &pending).await;
+    say(&hub, &room, "New topic: which queue?").await;
+    let im = w.expect("session.input").await;
+    assert_eq!(im["payload"]["session_id"], a["id"]);
+    assert!(answer(&mut w, a, &pending, "Postgres, shorter.")
+        .await
+        .is_empty());
+    w.expect_silence(Duration::from_millis(200)).await;
+    assert!(posts(&hub.events(id(&room)).await).is_empty());
+
+    ack_input(&mut w, &im).await;
+    let woken = answer_inputs(&mut w, a, &im, "Kafka.", 1).await;
+    assert_eq!(woken[0]["payload"]["session_id"], b["id"]);
+    let events = hub.events(id(&room)).await;
+    let texts: Vec<&Value> = posts(&events)
+        .into_iter()
+        .map(|p| &p["payload"]["text"])
+        .collect();
+    assert_eq!(texts, vec!["Kafka."], "{events:?}");
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §5.2, §7.1.1: the speaker's input acked plainly after the turn that answers it ended (the
+/// ack lost with the link, sent again after the worker's outbox): that turn's end decided nothing
+/// while the input waited, the ack decides, and the next agent is woken with the post.
+#[tokio::test]
+async fn a_plain_ack_after_its_turn_ended_wakes_the_next_agent() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ia = inputs[0].clone();
+    assert!(finish(&mut w, a, &ia, "Postgres.").await.is_empty());
+    w.expect_silence(Duration::from_millis(200)).await;
+    ack_input(&mut w, &ia).await;
+    let (_, woken) = starts_and_inputs(&mut w, 1).await;
+    assert_eq!(woken[0]["payload"]["session_id"], b["id"]);
+    let ev = hub
+        .events(id(b))
+        .await
+        .into_iter()
+        .find(|e| e["event_id"] == woken[0]["payload"]["event_id"])
+        .unwrap();
+    assert_eq!(ev["payload"]["text"], "Postgres.");
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: every agent but the author of the last post passed, then the last of them reports
+/// on a background task in a turn the CLI started itself: the report is posted as an aside and
+/// wakes nobody, the round stays closed.
+#[tokio::test]
+async fn a_background_report_after_every_agent_passed_wakes_nobody() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ib = answer_inputs(&mut w, a, &inputs[0], "Postgres.", 1).await[0].clone();
+    assert_eq!(ib["payload"]["session_id"], b["id"]);
+    assert!(answer(&mut w, b, &ib, "NO_REPLY").await.is_empty());
+    w.expect_silence(Duration::from_millis(200)).await;
+    // The CLI's own turn after B's background task: its final message carries the `in_reply_to`
+    // of the turn before it.
+    w.event(agent_event(id(b), "status", json!({"state": "running"})))
+        .await;
+    assert!(
+        finish(&mut w, b, &ib, "The benchmark finished: Postgres wins.")
+            .await
+            .is_empty()
+    );
+    w.expect_silence(Duration::from_millis(300)).await;
+    let events = hub.events(id(&room)).await;
+    let posts = posts(&events);
+    assert_eq!(posts.len(), 2, "{events:?}");
+    assert_eq!(posts[1]["payload"]["from_session_id"], b["id"]);
+    assert_eq!(posts[1]["payload"]["aside"], true, "{events:?}");
+    assert!(posts[0]["payload"].get("aside").is_none(), "{events:?}");
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: the speaker's background report in a turn the CLI started itself while the
+/// owner's next message waited for it, which it then passed on: the next agent gets the speaker's
+/// post, not the report.
+#[tokio::test]
+async fn the_next_agent_gets_the_speakers_post_not_its_background_report() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ia = inputs[0].clone();
+    ack_input(&mut w, &ia).await;
+    say(&hub, &room, "And why?").await;
+    let i2 = w.expect("session.input").await;
+    assert_eq!(i2["payload"]["session_id"], a["id"]);
+    assert!(finish(&mut w, a, &ia, "Postgres.").await.is_empty());
+    w.event(agent_event(id(a), "status", json!({"state": "running"})))
+        .await;
+    assert!(finish(&mut w, a, &ia, "The benchmark finished.")
+        .await
+        .is_empty());
+    let woken = answer_inputs(&mut w, a, &i2, "NO_REPLY", 1).await;
+    assert_eq!(woken[0]["payload"]["session_id"], b["id"]);
+    let ev = hub
+        .events(id(b))
+        .await
+        .into_iter()
+        .find(|e| e["event_id"] == woken[0]["payload"]["event_id"])
+        .unwrap();
+    assert_eq!(ev["payload"]["text"], "Postgres.", "{ev}");
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: a background report that says `NO_REPLY`, in a turn the CLI started itself,
+/// writes nothing and counts as no pass: when the speaker passes after it, the agent that never
+/// spoke on the room's last post is woken with it.
+#[tokio::test]
+async fn a_background_turns_pass_counts_for_nothing() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation",
+               "agents": [{"model": "opus"}, {"model": "sonnet"}, {"model": "haiku"}]}),
+    )
+    .await;
+    let (a, b, c) = (
+        titled(&members, "opus"),
+        titled(&members, "sonnet"),
+        titled(&members, "haiku"),
+    );
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ia = inputs[0].clone();
+    let ib = answer_inputs(&mut w, a, &ia, "Postgres.", 1).await[0].clone();
+    assert_eq!(ib["payload"]["session_id"], b["id"]);
+    let ic = answer_inputs(&mut w, b, &ib, "SQLite is enough.", 1).await[0].clone();
+    assert_eq!(ic["payload"]["session_id"], c["id"]);
+    // A's background task ends while C speaks: the CLI's own turn, on A's input.
+    w.event(agent_event(id(a), "status", json!({"state": "running"})))
+        .await;
+    assert!(finish(&mut w, a, &ia, "NO_REPLY").await.is_empty());
+    let woken = answer_inputs(&mut w, c, &ic, "NO_REPLY", 1).await;
+    assert_eq!(woken[0]["payload"]["session_id"], a["id"]);
+    let ev = hub
+        .events(id(a))
+        .await
+        .into_iter()
+        .find(|e| e["event_id"] == woken[0]["payload"]["event_id"])
+        .unwrap();
+    assert_eq!(ev["payload"]["text"], "SQLite is enough.", "{ev}");
+    let events = hub.events(id(&room)).await;
+    let passed = lines(&events, "room_passed");
+    assert_eq!(passed.len(), 1, "{events:?}");
+    assert_eq!(passed[0]["payload"]["text"], "haiku passed");
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: a reply the runtime wrote itself in a turn the CLI started itself, while the
+/// owner's next message waits for the speaker, writes nothing and does not stop the room: the
+/// speaker's answer to that message wakes the next agent.
+#[tokio::test]
+async fn a_runtime_reply_of_a_background_turn_stops_nothing() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ia = inputs[0].clone();
+    ack_input(&mut w, &ia).await;
+    say(&hub, &room, "And why?").await;
+    let i2 = w.expect("session.input").await;
+    assert_eq!(i2["payload"]["session_id"], a["id"]);
+    assert!(finish(&mut w, a, &ia, "Postgres.").await.is_empty());
+    w.event(agent_event(id(a), "status", json!({"state": "running"})))
+        .await;
+    w.event(agent_event(
+        id(a),
+        "agent.message",
+        json!({"text": "API Error: overloaded", "final": true,
+               "in_reply_to": ia["payload"]["event_id"], "runtime": true}),
+    ))
+    .await;
+    status(&mut w, a, &ia, "idle").await;
+    let woken = answer_inputs(&mut w, a, &i2, "It scales.", 1).await;
+    assert_eq!(woken[0]["payload"]["session_id"], b["id"]);
+    let events = hub.events(id(&room)).await;
+    assert!(lines(&events, "room_stopped").is_empty(), "{events:?}");
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1, §17.3: the speaker's turn lost on its input from the room stops the room, naming
+/// why: its agent's process stopped, or the watchdog; the next message goes to the first agent.
+#[tokio::test]
+async fn the_speakers_lost_turn_stops_the_room() {
+    let hub = TestHub::start_timing(hqc_hub::config::Timing {
+        expiry_interval: Duration::from_millis(50),
+        turn_watchdog: Some(Duration::from_millis(2500)),
+        ..test_timing()
+    })
+    .await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let a = titled(&members, "opus");
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    ack_input(&mut w, &inputs[0]).await;
+    hub.wait_session(id(a), "running", |v| v["state"] == "running")
+        .await;
+    w.send(
+        "session.state",
+        json!({"session_id": id(a), "process_state": "stopped", "locked_by": "hqc"}),
+    )
+    .await;
+    w.expect("ack").await;
+    let events = hub
+        .wait_events(id(&room), "room_stopped", |e| {
+            !lines(e, "room_stopped").is_empty()
+        })
+        .await;
+    assert_eq!(
+        lines(&events, "room_stopped")[0]["payload"]["text"],
+        "opus's turn was lost (its agent process stopped); the agents go on when you write"
+    );
+
+    say(&hub, &room, "Again?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    assert_eq!(inputs[0]["payload"]["session_id"], a["id"]);
+    ack_input(&mut w, &inputs[0]).await;
+    let events = hub
+        .wait_events(id(&room), "the second room_stopped", |e| {
+            lines(e, "room_stopped").len() == 2
+        })
+        .await;
+    let text = lines(&events, "room_stopped")[1]["payload"]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        text.starts_with("opus's turn was lost (no events for ")
+            && text.ends_with(" s); the agents go on when you write"),
+        "{text}"
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §4, §7.1.1: a final message the runtime wrote itself (`runtime: true`) is no post and
+/// wakes nobody: from the speaker of a conversation, and in a council, it is a `room_stopped` line
+/// "<agent>: <its text>", cut to 200 characters; the turn's end writes no other line.
+#[tokio::test]
+async fn a_reply_the_runtime_wrote_is_a_line_and_no_post() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let runtime = |s: &Value, input: &Value, text: &str| {
+        agent_event(
+            id(s),
+            "agent.message",
+            json!({"text": text, "final": true, "in_reply_to": input["payload"]["event_id"],
+                   "runtime": true}),
+        )
+    };
+    let (talk, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let a = titled(&members, "opus");
+    say(&hub, &talk, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    ack_input(&mut w, &inputs[0]).await;
+    // The hub acks the event without a frame before it: nobody is woken.
+    w.event(runtime(a, &inputs[0], "Credit balance is too low"))
+        .await;
+    status(&mut w, a, &inputs[0], "idle").await;
+    w.expect_silence(Duration::from_millis(200)).await;
+    let events = hub.events(id(&talk)).await;
+    assert!(posts(&events).is_empty(), "{events:?}");
+    let stopped = lines(&events, "room_stopped");
+    assert_eq!(stopped.len(), 1, "{events:?}");
+    assert_eq!(
+        stopped[0]["payload"]["text"],
+        "opus: Credit balance is too low"
+    );
+
+    let (council, members) = room(
+        &hub,
+        json!({"mode": "council", "agents": [{"model": "fable"}]}),
+    )
+    .await;
+    say(&hub, &council, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    ack_input(&mut w, &inputs[0]).await;
+    let long = "x".repeat(250);
+    w.event(runtime(&members[0], &inputs[0], &long)).await;
+    let events = hub.events(id(&council)).await;
+    assert!(posts(&events).is_empty(), "{events:?}");
+    let stopped = lines(&events, "room_stopped");
+    assert_eq!(stopped.len(), 1, "{events:?}");
+    assert_eq!(
+        stopped[0]["payload"]["text"],
+        format!("fable: {}…", "x".repeat(200))
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §6, §7.1.1: an agent's `name` titles its session, trimmed, a NUL replaced; an empty one
+/// is none, and the agents without one are titled by their model, numbered among themselves. A
+/// name over the title's limit stores nothing.
+#[tokio::test]
+async fn a_room_agent_is_named() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (_w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let pid = hub.personal_project().await;
+    let (s, v) = hub
+        .post(
+            &format!("/api/projects/{pid}/rooms"),
+            json!({"mode": "council", "agents": [
+                {"model": "opus"}, {"name": "x".repeat(201), "model": "sonnet"}
+            ]}),
+        )
+        .await;
+    assert_eq!(s, 400, "{v}");
+    let (_, list) = hub.get(&format!("/api/projects/{pid}/sessions")).await;
+    assert!(
+        !list["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x.get("room_mode").is_some() || x.get("room_id").is_some()),
+        "{list}"
+    );
+
+    let (_, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [
+            {"name": "  Skeptic  ", "model": "opus"},
+            {"model": "opus"},
+            {"name": " ", "model": "opus"},
+            {"name": "a\u{0}b"}
+        ]}),
+    )
+    .await;
+    let mut titles: Vec<&str> = members
+        .iter()
+        .map(|m| m["title"].as_str().unwrap())
+        .collect();
+    titles.sort();
+    assert_eq!(titles, vec!["Skeptic", "a\u{FFFD}b", "opus", "opus 2"]);
+    let skeptic = titled(&members, "Skeptic");
+    assert_eq!(addr(skeptic), "personal/skeptic");
+    assert_eq!(skeptic["agent"]["model"], "opus");
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1, T40: in a conversation too the posts in front of an agent's input cap it: B, in
+/// `ask`, posts a second time after it woke C; the owner's next message, which carries no cap,
+/// goes to C, in `allow_all`, with B's second post in front and capped to `ask` by B.
+#[tokio::test]
+async fn a_conversation_input_takes_the_cap_of_the_posts_in_front_of_it() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation", "permission_mode": "ask",
+               "agents": [{"model": "opus"}, {"model": "sonnet"}, {"model": "haiku"}]}),
+    )
+    .await;
+    let (a, b, c) = (
+        titled(&members, "opus"),
+        titled(&members, "sonnet"),
+        titled(&members, "haiku"),
+    );
+    let (s, v) = hub
+        .patch(
+            &format!("/api/sessions/{}", id(c)),
+            json!({"permission_mode": "allow_all"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let f = w.expect("session.permission_mode").await;
+    w.reply(&f["id"], "ack", json!({})).await;
+
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ib = answer_inputs(&mut w, a, &inputs[0], "Postgres.", 1).await[0].clone();
+    let ic = answer_inputs(&mut w, b, &ib, "SQLite.", 1).await[0].clone();
+    assert_eq!(ic["payload"]["session_id"], c["id"]);
+    assert!(answer(&mut w, b, &ib, "SQLite, surely.").await.is_empty());
+
+    say(&hub, &room, "Decide.").await;
+    let to_c = w.expect("session.input").await;
+    assert_eq!(to_c["payload"]["session_id"], c["id"]);
+    assert!(
+        to_c["payload"]["text"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("| post from {}]\nSQLite, surely.\n\n", addr(b))),
+        "{to_c}"
+    );
+    assert_eq!(to_c["payload"]["permission_cap"], "ask", "{to_c}");
+    let ev = hub
+        .events(id(c))
+        .await
+        .into_iter()
+        .find(|e| e["event_id"] == to_c["payload"]["event_id"])
+        .unwrap();
+    assert_eq!(
+        (&ev["chain"]["permission_cap"], &ev["chain"]["capped_by"]),
+        (&json!("ask"), &json!(addr(b))),
+        "{ev}"
+    );
     hub.finish().await;
 }
 
@@ -448,6 +1870,50 @@ async fn a_room_is_no_target_of_a_message() {
         assert_eq!(r["payload"]["error"]["code"], "not_found", "{r}");
     }
     assert!(posts(&hub.events(id(&room)).await).is_empty());
+    w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §7.1, §7.1.1: an agent of a room sends nothing to another agent of the same room with
+/// `hqc_send` or `hqc_ask`: the error says its final message is posted to the room, where the
+/// other agents read it.
+#[tokio::test]
+async fn an_agent_of_a_room_messages_no_other_agent_of_it() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "council", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Discuss with each other briefly.").await;
+    let (starts, _) = starts_and_inputs(&mut w, 2).await;
+    let token = of(&starts, a)["payload"]["session_token"].as_str().unwrap();
+    for (tool, target) in [("hqc_send", addr(b)), ("hqc_ask", id(b).to_string())] {
+        let rid = Uuid::now_v7().to_string();
+        w.send(
+            "mcp.call",
+            json!({"request_id": rid, "session_token": token, "tool": tool,
+                   "args": {"text": "What do you think?", "session": target}}),
+        )
+        .await;
+        let r = w.expect("mcp.result").await;
+        assert_eq!(r["payload"]["error"]["code"], "invalid_args", "{r}");
+        let message = r["payload"]["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("your final message is posted to the room"),
+            "{r}"
+        );
+    }
+    let to_b: Vec<Value> = hub
+        .events(id(b))
+        .await
+        .into_iter()
+        .filter(|e| e["type"] == "peer.message" && e["payload"]["from_session_id"] == a["id"])
+        .collect();
+    assert!(to_b.is_empty(), "{to_b:?}");
     w.expect_silence(Duration::from_millis(200)).await;
     hub.finish().await;
 }
@@ -578,7 +2044,8 @@ async fn a_room_input_that_joined_the_turn_opens_none() {
     hub.finish().await;
 }
 
-/// SPEC §16: an agent's final message pushes nothing; its post in the room does.
+/// SPEC §16: an agent's final message pushes nothing; its post in the room does, under the
+/// room's title, the body named by the agent.
 #[tokio::test]
 async fn the_post_pushes_and_the_agents_answer_does_not() {
     let hub = TestHub::start().await;
@@ -614,14 +2081,19 @@ async fn the_post_pushes_and_the_agents_answer_does_not() {
         let m: hqc_proto::api::PushMessage = serde_json::from_value(sent[0].1.clone()).unwrap();
         assert_eq!(
             (m.kind.as_str(), m.session_id.to_string(), m.body.as_deref()),
-            ("peer.message", id(&room).to_string(), Some("Postgres."))
+            (
+                "peer.message",
+                id(&room).to_string(),
+                Some("opus: Postgres.")
+            )
         );
+        assert_eq!(m.title.as_deref(), room["title"].as_str());
     }
     hub.finish().await;
 }
 
 /// SPEC §7.1.1: an archived conversation keeps its agents' posts and wakes nobody with them;
-/// unarchived, a post wakes the other agents again.
+/// unarchived, the owner's message wakes the first agent and its post the next one again.
 #[tokio::test]
 async fn an_archived_room_wakes_nobody_and_is_unarchived() {
     let hub = TestHub::start().await;
@@ -634,11 +2106,9 @@ async fn an_archived_room_wakes_nobody_and_is_unarchived() {
     .await;
     let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
     say(&hub, &room, "Tabs or spaces?").await;
-    let (_, inputs) = starts_and_inputs(&mut w, 2).await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
     let ia = of(&inputs, a).clone();
-    for i in &inputs {
-        ack_input(&mut w, i).await;
-    }
+    ack_input(&mut w, &ia).await;
 
     let (s, v) = hub
         .post(&format!("/api/sessions/{}/archive", id(&room)), json!({}))
@@ -653,8 +2123,10 @@ async fn an_archived_room_wakes_nobody_and_is_unarchived() {
         .await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["archived"], false, "{v}");
-    let woken = answer(&mut w, a, &ia, "Tabs, again.").await;
-    assert_eq!(woken.len(), 1, "{woken:?}");
+    say(&hub, &room, "Again?").await;
+    let ia = w.expect("session.input").await;
+    assert_eq!(ia["payload"]["session_id"], a["id"]);
+    let woken = answer_inputs(&mut w, a, &ia, "Tabs, again.", 1).await;
     assert_eq!(woken[0]["payload"]["session_id"], b["id"]);
     hub.finish().await;
 }
@@ -701,11 +2173,9 @@ async fn a_post_carries_the_files_of_its_turn() {
     .await;
     let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
     say(&hub, &room, "Draw it.").await;
-    let (_, inputs) = starts_and_inputs(&mut w, 2).await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
     let ia = of(&inputs, a).clone();
-    for i in &inputs {
-        ack_input(&mut w, i).await;
-    }
+    ack_input(&mut w, &ia).await;
     let chart = upload(&hub, &t, id(a), "chart.png", b"\x89PNG chart").await;
     w.event(agent_event(
         id(a),
@@ -713,8 +2183,7 @@ async fn a_post_carries_the_files_of_its_turn() {
         json!({"artifact_id": chart, "kind": "image", "name": "chart.png"}),
     ))
     .await;
-    let woken = answer(&mut w, a, &ia, "Here it is.").await;
-    assert_eq!(woken.len(), 1, "{woken:?}");
+    let woken = answer_inputs(&mut w, a, &ia, "Here it is.", 1).await;
     assert_eq!(woken[0]["payload"]["session_id"], b["id"]);
     assert_eq!(woken[0]["payload"]["artifact_ids"], json!([chart]));
     let post = posts(&hub.events(id(&room)).await)[0].clone();
@@ -726,6 +2195,80 @@ async fn a_post_carries_the_files_of_its_turn() {
             .unwrap();
         assert!(linked, "not linked to {}", s["title"]);
     }
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: an input from a room carries the files of the event it carries, then those of the
+/// messages in front of it, each once, linked to the agent: in a conversation the owner's file
+/// reaches the second agent with the first agent's post, and the third agent after the file of
+/// the post that wakes it, once although the owner gave it twice.
+#[tokio::test]
+async fn an_input_from_a_room_carries_the_files_in_front_of_it() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation",
+               "agents": [{"model": "opus"}, {"model": "sonnet"}, {"model": "haiku"}]}),
+    )
+    .await;
+    let (a, b, c) = (
+        titled(&members, "opus"),
+        titled(&members, "sonnet"),
+        titled(&members, "haiku"),
+    );
+    let (s, plan) = hub
+        .upload("plan.md", "text/markdown", b"# Plan\n".to_vec(), None)
+        .await;
+    assert_eq!(s, 201, "{plan}");
+    let plan = plan["id"].as_str().unwrap().to_string();
+    let path = format!("/api/sessions/{}/input", id(&room));
+    let (s, v) = hub
+        .post(
+            &path,
+            json!({"text": "Read the plan.", "artifact_ids": [plan]}),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    assert_eq!(inputs[0]["payload"]["artifact_ids"], json!([plan]));
+
+    // A's post has no file: B gets the owner's.
+    let ib = answer_inputs(&mut w, a, &inputs[0], "Read it.", 1).await[0].clone();
+    assert_eq!(ib["payload"]["session_id"], b["id"]);
+    assert_eq!(ib["payload"]["artifact_ids"], json!([plan]), "{ib}");
+    let linked =
+        hqc_hub::artifacts::of_session(&hub.app.db, id(b).parse().unwrap(), plan.parse().unwrap())
+            .await
+            .unwrap();
+    assert!(linked, "not linked to B");
+    ack_input(&mut w, &ib).await;
+
+    // The owner gives the file again, to B, whose turn takes it in; B's post with a chart wakes
+    // C: the chart, then the plan once.
+    let (s, v) = hub
+        .post(&path, json!({"text": "Again.", "artifact_ids": [plan]}))
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let again = w.expect("session.input").await;
+    assert_eq!(again["payload"]["session_id"], b["id"]);
+    w.reply(
+        &again["id"],
+        "ack",
+        json!({"event_id": again["payload"]["event_id"], "joined": true}),
+    )
+    .await;
+    let chart = upload(&hub, &t, id(b), "chart.png", b"\x89PNG chart").await;
+    w.event(agent_event(
+        id(b),
+        "attachment",
+        json!({"artifact_id": chart, "kind": "image", "name": "chart.png"}),
+    ))
+    .await;
+    let ic = answer_inputs(&mut w, b, &ib, "Here it is.", 1).await[0].clone();
+    assert_eq!(ic["payload"]["session_id"], c["id"]);
+    assert_eq!(ic["payload"]["artifact_ids"], json!([chart, plan]), "{ic}");
     hub.finish().await;
 }
 
@@ -762,9 +2305,9 @@ async fn a_second_post_on_one_input_repeats_no_file() {
     hub.finish().await;
 }
 
-/// T39, SPEC §7.1.1: a post of an agent in `ask` wakes one in `allow_all` capped to `ask`, and
-/// one in `ask` without a cap, so that its input may still join a running turn; the owner's
-/// message carries none.
+/// T39, SPEC §7.1.1: a post of an agent in `ask` wakes the next one, in `allow_all`, capped to
+/// `ask`; its post, which keeps that cap, wakes the next one, in `ask`, without a cap, so that
+/// its input may still join a running turn; the owner's message carries none.
 #[tokio::test]
 async fn a_post_wakes_an_agent_in_a_higher_mode_capped() {
     let hub = TestHub::start().await;
@@ -773,7 +2316,7 @@ async fn a_post_wakes_an_agent_in_a_higher_mode_capped() {
     let (room, members) = room(
         &hub,
         json!({"mode": "conversation", "permission_mode": "ask",
-               "agents": [{"model": "opus"}, {"model": "sonnet"}, {"model": "haiku"}]}),
+               "agents": [{"model": "opus"}, {"model": "haiku"}, {"model": "sonnet"}]}),
     )
     .await;
     let (a, b, c) = (
@@ -792,18 +2335,17 @@ async fn a_post_wakes_an_agent_in_a_higher_mode_capped() {
     w.reply(&f["id"], "ack", json!({})).await;
 
     say(&hub, &room, "Run the tests.").await;
-    let (_, inputs) = starts_and_inputs(&mut w, 3).await;
-    for i in &inputs {
-        assert!(i["payload"].get("permission_cap").is_none(), "{i}");
-        ack_input(&mut w, i).await;
-    }
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
     let ia = of(&inputs, a).clone();
-    let woken = answer(&mut w, a, &ia, "Run them with --release.").await;
-    assert_eq!(woken.len(), 2, "{woken:?}");
+    assert!(ia["payload"].get("permission_cap").is_none(), "{ia}");
+    ack_input(&mut w, &ia).await;
+    let woken = answer_inputs(&mut w, a, &ia, "Run them with --release.", 1).await;
+    let to_c = of(&woken, c).clone();
+    assert_eq!(to_c["payload"]["permission_cap"], "ask", "{to_c}");
+    ack_input(&mut w, &to_c).await;
+    let woken = answer_inputs(&mut w, c, &to_c, "Running them.", 1).await;
     let to_b = of(&woken, b);
     assert!(to_b["payload"].get("permission_cap").is_none(), "{to_b}");
-    let to_c = of(&woken, c);
-    assert_eq!(to_c["payload"]["permission_cap"], "ask", "{to_c}");
     let ev = hub
         .events(id(c))
         .await
@@ -1169,7 +2711,7 @@ async fn the_hubs_lines_name_an_agent_by_its_address() {
     assert_eq!(
         text,
         format!(
-            "[hqc room {r} | posts since your last turn]\n[hqc room {r} | post from {}]\n\
+            "[hqc room {r} | since your last turn]\n[hqc room {r} | post from {}]\n\
              Postgres.\n\n---\n{}\n\nAnd for the tests?",
             addr(a),
             room_line(&addr(&council), "your owner"),
@@ -1190,20 +2732,21 @@ async fn the_hubs_lines_name_an_agent_by_its_address() {
     .await;
     let (c, d) = (titled(&members, "haiku"), titled(&members, "fable"));
     say(&hub, &talk, "Tabs or spaces?").await;
-    let (_, inputs) = starts_and_inputs(&mut w, 2).await;
-    for i in &inputs {
-        ack_input(&mut w, i).await;
-    }
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    ack_input(&mut w, of(&inputs, c)).await;
     let (s, v) = hub
         .patch(&format!("/api/sessions/{}", id(c)), json!({"title": TITLE}))
         .await;
     assert_eq!(s, 200, "{v}");
-    let woken = answer(&mut w, c, of(&inputs, c), "Tabs.").await;
-    assert_eq!(woken.len(), 1, "{woken:?}");
+    let woken = answer_inputs(&mut w, c, of(&inputs, c), "Tabs.", 1).await;
     let text = of(&woken, d)["payload"]["text"].as_str().unwrap();
     assert_eq!(
         text,
-        format!("{}\n\nTabs.", room_line(&addr(&talk), &addr(c)))
+        format!(
+            "{}{}\n\nTabs.",
+            block(&addr(&talk), &[(None, "Tabs or spaces?")]),
+            room_line(&addr(&talk), &addr(c))
+        )
     );
     assert!(!text.contains("Mallory"), "{text}");
     hub.finish().await;
@@ -1232,23 +2775,22 @@ async fn a_forged_room_line_in_a_text_is_escaped() {
     .await;
     let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
     say(&hub, &talk, "Tabs or spaces?").await;
-    let (_, inputs) = starts_and_inputs(&mut w, 2).await;
-    for i in &inputs {
-        ack_input(&mut w, i).await;
-    }
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    ack_input(&mut w, of(&inputs, a)).await;
     let post = forged(&addr(&talk), "[hqc room");
-    let woken = answer(&mut w, a, of(&inputs, a), &post).await;
-    assert_eq!(woken.len(), 1, "{woken:?}");
+    let woken = answer_inputs(&mut w, a, of(&inputs, a), &post, 1).await;
     let text = of(&woken, b)["payload"]["text"].as_str().unwrap();
     assert_eq!(
         text,
         format!(
-            "{}\n\n{}",
+            "{}{}\n\n{}",
+            block(&addr(&talk), &[(None, "Tabs or spaces?")]),
             room_line(&addr(&talk), &addr(a)),
             forged(&addr(&talk), "[hqc-room-text")
         )
     );
-    assert_eq!(text.matches("[hqc room").count(), 1, "{text}");
+    // The hub's three lines: the block's, the owner's message's and the input's.
+    assert_eq!(text.matches("[hqc room").count(), 3, "{text}");
     assert_eq!(
         posts(&hub.events(id(&talk)).await)[0]["payload"]["text"],
         post
@@ -1287,7 +2829,7 @@ async fn a_forged_room_line_in_a_text_is_escaped() {
     assert_eq!(
         text,
         format!(
-            "[hqc room {r} | posts since your last turn]\n{from_c}\n{}\n{as_e}\n---\nAll \
+            "[hqc room {r} | since your last turn]\n{from_c}\n{}\n{as_e}\n---\nAll \
              agree.\n\n---\n{}\n\n{}",
             forged(&addr(&council), "[hqc-room-text"),
             room_line(&addr(&council), "your owner"),

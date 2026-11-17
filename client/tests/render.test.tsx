@@ -758,6 +758,31 @@ describe("tool groups (T26)", () => {
     expect(rows[1].querySelector(".tool-more")!.textContent).toBe("+3 lines");
   });
 
+  it("shows the first line of a script whose arguments the worker cut at 4 KB", async () => {
+    const t = new Timeline();
+    // A worker before SPEC 0.155: `command` the first key, the cut inside it, the other keys lost.
+    const script = `cat > /tmp/ruler.py <<'EOF'\n${"print('ruler')\n".repeat(400)}EOF`;
+    const cut = JSON.stringify({ command: script, description: "Check the ruler", timeout: 60000 }).slice(0, 4096);
+    t.apply(
+      ev("event.tool.call", (e) => {
+        e.seq = 2;
+        e.payload = { call_id: "a", tool: "Bash", args_preview: cut };
+      }),
+    );
+    t.apply(result(40, "a"));
+    t.apply(agentText(41, "Done.", true));
+    show(t);
+    const g = root.querySelector(".tool-group")!;
+    expect(g.querySelector(".tool-peek.mono")!.textContent).toBe("$ cat > /tmp/ruler.py <<'EOF'");
+    await act(async () =>
+      g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
+    );
+    const row = g.querySelector(".tool-row summary")!;
+    expect(row.querySelector(".tool-line")!.textContent).toBe("cat > /tmp/ruler.py <<'EOF'");
+    // Only the lines the preview carries are counted: at least that many follow.
+    expect(row.querySelector(".tool-more")!.textContent).toMatch(/^\+\d+\+ lines$/);
+  });
+
   it('says "N tool calls · time" and the tools called; other tools show their argument', async () => {
     const t = new Timeline();
     t.apply(agentText(1, "Done.", true));

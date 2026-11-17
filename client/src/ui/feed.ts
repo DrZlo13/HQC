@@ -414,14 +414,18 @@ export function callArgs(argsPreview: string): Record<string, unknown> {
 // `skill`: the Skill tool's skill name ("Skill worktree").
 const BRIEF_KEYS = ['file_path', 'notebook_path', 'path', 'pattern', 'url', 'query', 'command', 'description', 'prompt', 'skill'];
 
-/** One line for a call: `$ command` for Bash, else the tool and its main argument. */
-export function callLine(tool: string, argsPreview: string): { shell: boolean; text: string; more?: number } {
-  const args = callArgs(argsPreview);
+/** One line for a call: `$ command` for Bash, else the tool and its main argument. The
+ *  preview is read as far as it goes (cut at 4 KB, SPEC §4): a script longer than that, cut
+ *  inside its `command`, still shows its first line; `cut`: the preview was cut, so
+ *  more lines may follow than are counted. */
+export function callLine(tool: string, argsPreview: string): { shell: boolean; text: string; more?: number; cut?: boolean } {
+  const read = cutJson(argsPreview);
+  const args = read && isRecord(read.value) ? read.value : {};
   if (tool === 'Bash' && typeof args.command === 'string') {
     // A script (a heredoc, several commands) shows its first line and how many follow.
     const lines = args.command.trim().split('\n');
     const more = lines.slice(1).filter((l) => l.trim()).length;
-    return { shell: true, text: oneLine(lines[0], 400), more: more || undefined };
+    return { shell: true, text: oneLine(lines[0], 400), more: more || undefined, cut: read?.cut || undefined };
   }
   const key = BRIEF_KEYS.find((k) => typeof args[k] === 'string' && args[k]);
   return { shell: false, text: key ? oneLine(String(args[key]), 400) : '' };

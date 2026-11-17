@@ -3579,6 +3579,7 @@ fn a_task_notification_carries_its_call_status_and_task() {
 
 /// An `Agent` call's `args_preview` has its `prompt` last: with a prompt past the 4 KB cut the
 /// sorted keys lost `subagent_type` and `run_in_background`, which the subagent's card shows.
+/// The other fields go from the shortest value to the longest.
 #[test]
 fn an_agent_calls_prompt_goes_last_in_its_preview() {
     let mut core = Core::new(Uuid::now_v7(), false);
@@ -3601,10 +3602,71 @@ fn an_agent_calls_prompt_goes_last_in_its_preview() {
     assert_eq!(preview.len(), super::engine::PREVIEW_LIMIT);
     assert!(
         preview.starts_with(
-            r#"{"description":"Fix the nets","run_in_background":true,"subagent_type":"general-purpose","prompt":"xxx"#
+            r#"{"run_in_background":true,"description":"Fix the nets","subagent_type":"general-purpose","prompt":"xxx"#
         ),
         "{}",
         &preview[..120]
+    );
+}
+
+/// A call's `args_preview` past the 4 KB cut keeps its short fields whole: they go before the
+/// longest value. With the keys sorted a Write's `file_path` came after its `content` and was
+/// lost, so its row showed just "Write"; a Bash script took its `description` and `timeout`.
+#[test]
+fn a_cut_preview_keeps_the_short_fields() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let line = json!({"type": "assistant", "parent_tool_use_id": null,
+        "uuid": "6f1d0c3e-3c2f-4a55-9d0e-1a2b3c4d5e71",
+        "message": {"model": "claude-haiku-5-5", "role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_W1", "name": "Write",
+                "input": {"content": "x".repeat(5000), "file_path": "/w/marks.txt"}},
+            {"type": "tool_use", "id": "toolu_B1", "name": "Bash",
+                "input": {"command": "y".repeat(5000), "description": "Check the ruler",
+                    "timeout": 120000}}]}});
+    let previews: Vec<String> = emitted(core.on_line(&line.to_string()))
+        .into_iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Event(Event {
+                kind: EventKind::ToolCall { args_preview, .. },
+                ..
+            }) => Some(args_preview),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(previews.len(), 2);
+    assert!(
+        previews[0].starts_with(r#"{"file_path":"/w/marks.txt","content":"xxx"#),
+        "{}",
+        &previews[0][..80]
+    );
+    assert!(
+        previews[1]
+            .starts_with(r#"{"timeout":120000,"description":"Check the ruler","command":"yyy"#),
+        "{}",
+        &previews[1][..80]
+    );
+    assert!(previews
+        .iter()
+        .all(|p| p.len() == super::engine::PREVIEW_LIMIT));
+    // Two long values keep their sorted order: an Edit's `new_string` before its `old_string`,
+    // so the start of the new text comes, not only the old one.
+    let edit = super::engine::args_preview(
+        "Edit",
+        &json!({"file_path": "/w/a.rs", "old_string": "o".repeat(4500),
+            "new_string": "n".repeat(5000)}),
+    );
+    assert!(
+        edit.starts_with(r#"{"file_path":"/w/a.rs","new_string":"nnn"#),
+        "{}",
+        &edit[..60]
+    );
+    // An Agent's prompt goes last however short it is.
+    assert_eq!(
+        super::engine::args_preview(
+            "Agent",
+            &json!({"description": "Fix", "prompt": "Go", "subagent_type": "general-purpose"}),
+        ),
+        r#"{"description":"Fix","subagent_type":"general-purpose","prompt":"Go"}"#
     );
 }
 

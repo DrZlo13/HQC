@@ -651,7 +651,7 @@ mod tests {
         assert_eq!(args_preview.len(), PREVIEW_LIMIT);
         assert!(
             args_preview.starts_with(
-                "{\"description\":\"Fix the nets\",\"run_in_background\":true,\
+                "{\"run_in_background\":true,\"description\":\"Fix the nets\",\
                  \"subagent_type\":\"general-purpose\",\"prompt\":\"xxx"
             ),
             "{args_preview}"

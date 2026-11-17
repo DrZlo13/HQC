@@ -45,6 +45,81 @@ Acceptance: a paste over the threshold becomes an attachment the agent receives 
 text attachment; below it, and with Shift always, the text lands in the input; the attachment
 can be removed before sending.
 
+## From T3 Code, Orca and Claude Code (2026-11-16)
+
+What T3 Code, Orca, and Claude Code with its VS Code extension have and hqc does not, picked
+from the notes of #93 (`docs/notes/hqc-vs-t3code.md`, `docs/notes/hqc-vs-orca.md`) and from
+"Not used" in `docs/notes/hqc-vs-claude-code.md`; the second list comes after the first.
+
+First:
+- A side question to a running session, answered without touching its turn: T3 Code and Orca ask
+  it in a copy beside the session (`/side`, `/btw`); Claude Code has `side_question`, with no turn
+  and no trace in the agent's context.
+- `/goal` (T3 Code, Orca): the agent keeps working until a condition holds; a banner with the
+  goal, pause and reset.
+- The agent's task list (TodoWrite) as a pinned block: "3 of 7 tasks completed" (T3 Code, Orca).
+- How full the context window is, before the auto-compaction (T3 Code, Orca; Claude Code:
+  `get_context_usage`).
+- The prompt-cache timer: how long until Claude's cache of the session expires (Orca).
+- A secret from Bitwarden (Vaultwarden): the `hqc_secret` card (SPEC 0.147) takes the secret from
+  Bitwarden instead of a typed value, as T3 Code's card takes a 1Password reference.
+- "Send now" (Claude Code: `priority: "now"` with `origin: {kind: "human"}`): the CLI moves the
+  running Bash, MCP call or subagent to the background and takes the message into the same turn,
+  without waiting for the call to end. `origin` matters by itself too: without it the message is
+  "unattributed and fails closed at strict isHuman() trust gates".
+- A queued message taken back before the agent picks it up, and a Stop that clears the queue
+  (Claude Code: `cancel_async_message`, `interrupt {cancel_queued: true}`); now a message that
+  waited still runs after Stop.
+
+Second:
+- Mermaid diagrams in Markdown (T3 Code, Orca).
+- A "New" mark above what came while the owner was away (Orca).
+- A "Jump to latest" button while the feed is scrolled up (Orca).
+- Link previews on hover: a page, a GitHub issue or PR (Orca).
+- The session's local servers and ports, with Stop (T3 Code, Orca).
+- Going on after a usage limit resets: the session itself tells the agent to continue (T3 Code,
+  Orca).
+- Reasoning effort and Fast in the model picker, the thinking budget (T3 Code, Orca; Claude Code:
+  `--max-thinking-tokens`, `set_max_thinking_tokens`, `effort`).
+- The auto-compaction threshold, a compaction before the cache expires (T3 Code), and a manual
+  compaction (the VS Code extension's "N% of context remaining until auto-compact").
+- The machine kept awake while its agents work (T3 Code, Orca; desktop apps).
+- MCP Apps: an interactive page an MCP server returns with a tool result, shown under the call in
+  the feed (T3 Code; Claude Code since 2.1.301).
+- Signing in to Claude Code from hqc, a phone included, when the CLI on a node is signed out
+  (T3 Code; Claude Code: `--enable-auth-status`).
+- The last 8 KiB of a background build's or server's output on a click (Claude Code:
+  `get_task_output`).
+- A turn cut by a worker restart goes on after `--resume` instead of ending in "Agent process
+  exited during a turn" (Claude Code: `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1`; the VS Code
+  extension sets it with a limit of 1 hour); the hub then must not close a turn the worker will
+  continue.
+- The mirror from the CLI itself (Claude Code: `--session-mirror`, frames `transcript_mirror`):
+  the worker gets every record its process writes to the transcript, and the new file's path right
+  after `/clear`, so the mirror needs no matching by text with a 5 s wait; the class of bugs like
+  #42 and the extra session after `/clear` go away. Checked live that the CLI does it.
+- Notes to an answer to the agent's questions ("skipped", "answered in the chat") instead of the
+  general "The user did not answer the questions." (Claude Code: `annotations`).
+- The agent's MCP servers: which are up, reconnect a failed one or turn one off without a restart
+  (Claude Code: `mcp_status`, `mcp_reconnect`, `mcp_toggle`).
+- The session's state from the CLI itself (idle, running, waiting for a person) instead of the
+  worker's guesses (Claude Code: `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1`).
+- Why the agent failed to start, instead of the last line of stderr in 500 ms (Claude Code:
+  `CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1`).
+- A clean exit of the process on unload and kill instead of SIGTERM with code 143 (Claude Code:
+  `end_session`).
+- The subscription's spending and limits, as `/usage` shows them (Claude Code: `get_usage`,
+  `get_session_cost`).
+- Plugins and skills reloaded without restarting the session (Claude Code: `reload_plugins`,
+  `reload_skills`).
+- One TodoWrite instead of four task tools, as the VS Code extension does (Claude Code:
+  `CLAUDE_CODE_ENABLE_TASKS=0`).
+- The calls of a subagent's own subagents in the subagent's history (Claude Code: `initialize`
+  with `forwardNestedSubagentToolCalls`, `forwardSubagentText`).
+- A slash command the CLI runs at once in the middle of a turn, where hqc holds every command
+  until the turn ends (Claude Code: `command_lifecycle queued` with `ran_ahead`); by the code of
+  2.1.312, in stream mode only a plugin's local command marked `immediate` runs so.
+
 ## Earlier
 
 - Tombstones of deleted sessions, so the mirror does not bring them back:

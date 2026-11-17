@@ -3069,7 +3069,8 @@ no workspace, no worker and no agent (`agent.runtime: none`, `room_mode`, §3 Se
 process starts for it, it takes no `model`, `permission_mode`, `browser` or pause (`409 room`, §6), and
 it is no target of `hqc_send`, `hqc_ask`, `hqc_rename` with `session` or an agent's schedule
 (`not_found`, as a service session). An agent of a room sends nothing to another agent of the
-same room with `hqc_send` or `hqc_ask`: `invalid_args` "<target's address> is another agent of
+same room with `hqc_send` or `hqc_ask`, nor schedules it one with `hqc_schedule` (its own session
+it may): `invalid_args` "<target's address> is another agent of
 your room: your final message is posted to the room, and the other agents read it there; answer
 there, not in a message to them" (an agent told to discuss with the others asked one of them
 with `hqc_ask`, and the answer went past the room). `POST /api/projects/{id}/rooms` (§6) makes it with its
@@ -6011,7 +6012,7 @@ agents and leaves their inputs as they are, and a turn on a message from before 
 posts nothing unless a later one joined it. The hub decides and stores what a room
 does under one lock per room. A room is no
 target of `hqc_send` and takes no model, permission mode, browser or pause (`409 room`); an agent
-of a room sends nothing to another agent of it (`invalid_args`), and the room line tells it that the
+of a room sends or schedules nothing to another agent of it (`invalid_args`), and the room line tells it that the
 other agents read its final message in the room. The
 session object has `room_mode?` and `room_id?`; `system_prompt` of an agent is written on
 creation for the first time, at most 32 KiB (`400`), a NUL in it replaced. A room's input that

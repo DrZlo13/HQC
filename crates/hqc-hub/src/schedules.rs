@@ -356,6 +356,7 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
         }
         None => {
             let (t, to) = crate::peers::target(app, caller, &a.session).await?;
+            crate::peers::not_of_my_room(caller, &t, &to)?;
             (t.id, to)
         }
     };

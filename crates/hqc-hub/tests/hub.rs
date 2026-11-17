@@ -1080,6 +1080,71 @@ async fn session_start_precedes_input_after_hello() {
     hub.finish().await;
 }
 
+/// SPEC §5: an answer the worker sends after reconnecting, under the id of a frame of its
+/// earlier connection (an input it held until the agent took it), is no answer to a frame of
+/// the new one. With ids counted from 1 on each connection, the held input here went out as the
+/// fourth frame of the first connection (after `fs.stat`, `mirror.set` and the first start),
+/// and the new connection's first four frames are the starts of the four sessions with input
+/// pending: the ack matched one of them, and the hub sent that session's input before the
+/// worker had started it.
+#[tokio::test]
+async fn an_answer_to_an_earlier_connection_answers_no_frame_of_the_new_one() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let a = hub.create_session("held").await;
+    ack_start(&mut w, &a).await;
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{a}/input"), json!({"text": "one"}))
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let x = r["event"]["event_id"].clone();
+    // Held, not acknowledged, when the connection goes.
+    let held = w.expect("session.input").await;
+    assert_eq!(held["payload"]["event_id"], x);
+    let mut others = vec![];
+    for title in ["b", "c", "d"] {
+        let sid = hub.create_session(title).await;
+        ack_start(&mut w, &sid).await;
+        others.push(sid);
+    }
+    w.close().await;
+    hub.wait_session(&a, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let mut want = vec![x.clone()];
+    for sid in &others {
+        let (s, r) = hub
+            .post(
+                &format!("/api/sessions/{sid}/input"),
+                json!({"text": "two"}),
+            )
+            .await;
+        assert_eq!(s, 201, "{r}");
+        want.push(r["event"]["event_id"].clone());
+    }
+
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let mut starts = vec![];
+    for _ in 0..4 {
+        starts.push(w.expect("session.start").await);
+    }
+    // The agent takes the held input now: its ack goes under the old frame's id.
+    w.reply(&held["id"], "ack", json!({"event_id": x})).await;
+    // No start is acknowledged yet, so no input may come.
+    w.expect_silence(Duration::from_millis(300)).await;
+    for st in &starts {
+        w.reply(&st["id"], "ack", json!({})).await;
+    }
+    let mut got = vec![];
+    for _ in 0..4 {
+        got.push(w.expect("session.input").await["payload"]["event_id"].clone());
+    }
+    got.sort_by_key(|v| v.as_str().unwrap().to_string());
+    want.sort_by_key(|v| v.as_str().unwrap().to_string());
+    assert_eq!(got, want);
+    hub.finish().await;
+}
+
 /// 5. after_seq gives only newer events; agent.delta reaches the client without seq and is
 /// not stored.
 #[tokio::test]

@@ -1912,7 +1912,8 @@ pub async fn stop(
 
 /// `POST /stop` of room `room` (SPEC §7.1.1), under the room's lock: `system room_stopped`
 /// "Stopped" in the room, then for each agent its open requests cancelled with `stopped` and
-/// `session.stop` to its worker; `true` when one went out.
+/// `session.stop` to its worker, then the senders' notice ([`crate::rooms::round_ended`]); `true`
+/// when one went out.
 async fn stop_room(app: &AppState, room: &SessionRow) -> ApiResult<bool> {
     let _room = crate::rooms::lock(app, room.id).await;
     // The agents' inputs stay as they are: the worker keeps the ones it has after a stop. A final
@@ -1925,6 +1926,9 @@ async fn stop_room(app: &AppState, room: &SessionRow) -> ApiResult<bool> {
         sent |= send_to_worker(app, &m, HubFrame::SessionStop { session_id: m.id });
         app.session_changed(m.id);
     }
+    // After the agents are stopped: the senders of the room's messages are told how it ended, and
+    // a notice that fails leaves no agent running.
+    crate::rooms::round_ended(app, room, "stopped by the owner").await?;
     Ok(sent)
 }
 

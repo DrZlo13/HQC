@@ -40,7 +40,8 @@
 //!   owner stopped the room; in a council, when no agent has a turn open or an input waiting
 //!   ([`council_ended`]). Every end goes through [`round_ended`]: each session that is none of the
 //!   room's agents and wrote in it gets a `peer.message` from the room with how it ended and
-//!   what came in the room since its previous notice or its first message.
+//!   the last two entries that came in the room since its previous notice or its first message,
+//!   the others left to `hqc_read`.
 //! - All of it is decided and stored under the room's [`lock`].
 
 use hqc_proto::{api::RoomMode, event::Chain, frame::PermissionMode, mcp::MAX_ARGS};
@@ -68,6 +69,9 @@ const MAX_RUNTIME_TEXT: usize = 200;
 /// The words of the `room_stopped` line for the speaker's turn that ended without a post or a
 /// pass ([`decide`]).
 const ENDED: &str = "ended without a post";
+/// How many entries of the room a notice carries, the newest ones; the rest is read with
+/// `hqc_read`.
+const NOTICE_ENTRIES: usize = 2;
 /// What the hub's own lines in an input from a room start with.
 const MARK: &str = "[hqc room";
 /// What [`MARK`] becomes in a text the hub puts into such an input ([`escape`]).
@@ -1158,13 +1162,14 @@ async fn council_ended(app: &AppState, room: &SessionRow) -> anyhow::Result<()> 
 
 /// A round of room `room` ended for `reason`: every session that is none of its agents and wrote
 /// in it, the first message of the session that made it with `hqc_room` or an `hqc_send` into it,
-/// gets a `peer.message` from the room with how it ended and what came in the room since its
-/// previous notice or its first message (SPEC §7.1.1), as a send of the room wakes it (`delivery:
+/// gets a `peer.message` from the room with how it ended and the last two entries that came in
+/// the room since its previous notice or its first message (SPEC §7.1.1), as a send of the room wakes it (`delivery:
 /// pending`; [`notify`]). The owner, a person who reads the feed, gets none, nor a session that
 /// is archived or gone. The notice is stored under the room's [`lock`], which the caller holds,
 /// with the end that caused it, so one end tells a session once. Its chain is the last post's
 /// moved on ([`peers::moved_on`]), else that of the session's message, and holds whatever the
-/// limits; it is capped by the posts it carries ([`entries_cap`]), as an agent's input is. The
+/// limits; it is capped by every entry since the boundary, the left-out ones too, as an agent's
+/// input is by the posts in front of it ([`entries_cap`]). The
 /// reason is cleaned like a name ([`clean_name`]).
 pub async fn round_ended(app: &AppState, room: &SessionRow, reason: &str) -> anyhow::Result<()> {
     let senders: Vec<Uuid> = sqlx::query_scalar(&format!(
@@ -1199,8 +1204,9 @@ pub async fn round_ended(app: &AppState, room: &SessionRow, reason: &str) -> any
 
 /// The notice of [`round_ended`] to `sender`, when it is due: everything in the room after its
 /// previous notice (`notice_seq`), or, never told, after its first message there (that message
-/// itself left out), oldest first, as an agent's block has it ([`room_block`]), its own messages
-/// under "message from you". Due when anything came since; a session never told gets the reason
+/// itself left out), of which the notice shows the last two, oldest first, as an agent's block
+/// has it ([`room_block`]), its own messages under "message from you" ([`notice_text`]). Due
+/// when anything came since; a session never told gets the reason
 /// alone when nothing did.
 async fn notify(
     app: &AppState,
@@ -1296,10 +1302,10 @@ async fn notify(
     Ok(())
 }
 
-/// The text of a notice of room `address`: the line with `reason`, then the `entries` under the
-/// lines of an agent's block, from the newest back while they fit the limit of a text of
-/// `hqc_send` ([`MAX_ARGS`]); the older ones are left out, their count in the first line. The
-/// newest alone over the limit is cut instead.
+/// The text of a notice of room `address`: the line with `reason`, then the last [`NOTICE_ENTRIES`]
+/// of `entries` under the lines of an agent's block, from the newest back while they fit the limit
+/// of a text of `hqc_send` ([`MAX_ARGS`]); the others are left out, their count in the first line
+/// with a pointer to `hqc_read`. The newest alone over the limit is cut instead.
 fn notice_text(address: &str, reason: &str, entries: &[BlockEntry]) -> String {
     let part = |e: &BlockEntry, text: &str| {
         let from = if e.owner {
@@ -1319,16 +1325,17 @@ fn notice_text(address: &str, reason: &str, entries: &[BlockEntry]) -> String {
     let head = |left_out: usize| match left_out {
         0 => format!("[hqc room {address} | the discussion ended: {reason}]\n\n"),
         1 => format!(
-            "[hqc room {address} | the discussion ended: {reason} | 1 earlier entry left out]\n\n"
+            "[hqc room {address} | the discussion ended: {reason} | 1 earlier entry left out, \
+             read it with hqc_read]\n\n"
         ),
         n => format!(
             "[hqc room {address} | the discussion ended: {reason} | {n} earlier entries left \
-             out]\n\n"
+             out, read them with hqc_read]\n\n"
         ),
     };
     let budget = MAX_ARGS.saturating_sub(head(entries.len()).len());
     let (mut kept, mut size) = (Vec::new(), 0);
-    for e in entries.iter().rev() {
+    for e in entries.iter().rev().take(NOTICE_ENTRIES) {
         let p = part(e, &e.text);
         if size + p.len() > budget {
             if kept.is_empty() {

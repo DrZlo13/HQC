@@ -15,7 +15,8 @@
 //!   crash stores nothing. A paused (`enabled: false`) or deleted schedule never fires; a
 //!   deleted session takes its schedules with it (`ON DELETE CASCADE`).
 //! - A target that is archived, or driven from VS Code, takes no input (SPEC §6, §9.3): the
-//!   run is skipped.
+//!   run is skipped. So is a `cron` run while the target is paused (§17.3); an `at` run is
+//!   stored and waits for the resume.
 //! - Limits (SPEC §20): [`MAX_ACTIVE_PER_OWNER`] (counted and inserted under the owner's
 //!   lock), [`MIN_INTERVAL`], [`MAX_MESSAGE`]; runs sent per owner and hour
 //!   (`Limits::schedule_runs_per_owner_hour`, more are skipped).
@@ -635,6 +636,11 @@ async fn send(app: &AppState, r: &ScheduleRow, due: DateTime<Utc>) -> anyhow::Re
     if s.archived || s.system || s.locked_by == "vscode" {
         tracing::warn!(id = %r.id, session_id = %s.id, archived = s.archived, locked_by = %s.locked_by,
             "scheduled run skipped: the session takes no input");
+        return Ok(None);
+    }
+    if s.paused_at.is_some() && r.cron.is_some() {
+        // Its runs would pile up for the resume; an `at` runs once and waits (SPEC §16, §17.3).
+        tracing::warn!(id = %r.id, session_id = %s.id, "scheduled run skipped: the session is paused");
         return Ok(None);
     }
     db::clear_turn_error(&app.db, s.id).await?;

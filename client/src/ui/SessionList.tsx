@@ -17,7 +17,9 @@ import {
   IconMore,
   IconMove,
   IconOpenNew,
+  IconPause,
   IconPin,
+  IconPlay,
   IconPlus,
   IconRename,
   IconReorder,
@@ -116,6 +118,16 @@ function toggleFavorite(app: AppState, s: SessionInfo): void {
 /** Restarts the session's agent process; a refusal goes to the list's notice. */
 function restart(app: AppState, s: SessionInfo): void {
   app.api.restartSession(s.id).catch((e: Error) => app.setListNotice(`Not restarted: ${e.message}`));
+}
+
+/** Pauses the session; a refusal goes to the list's notice. */
+function pause(app: AppState, s: SessionInfo): void {
+  app.api.pauseSession(s.id).catch((e: Error) => app.setListNotice(`Not paused: ${e.message}`));
+}
+
+/** Resumes a paused session; a refusal goes to the list's notice. */
+function resume(app: AppState, s: SessionInfo): void {
+  app.api.resumeSession(s.id).catch((e: Error) => app.setListNotice(`Not resumed: ${e.message}`));
 }
 
 /** The `dataTransfer` type of a desktop row dragged onto a project of the bar; its data is the
@@ -566,12 +578,13 @@ function titleOf(s: SessionInfo): string {
 }
 
 /** A session's menu, the same on a desktop row and a phone row: Open in new tab, favorites,
- *  then Rename, Move to project…, Folder rules, then Restart session (not for an archived, a
- *  service, a VS Code-driven session or one whose worker is offline), Archive and Delete… (a
- *  step of its own). */
+ *  then Rename, Move to project…, Folder rules, then Restart session and Pause session (not for
+ *  an archived, a service, a VS Code-driven session or one whose worker is offline), or for a
+ *  paused session Resume session alone, Archive and Delete… (a step of its own). */
 function sessionMenu(app: AppState, s: SessionInfo, on: { onMove: () => void; onAskDelete: () => void }): MenuEntry[] {
   const rules = rulesHref(s);
   const restartable = !s.archived && !s.system && s.state !== 'locked_vscode' && s.state !== 'worker_offline';
+  const paused = !!s.paused_at;
   return [
     { label: 'Open in new tab', icon: <IconOpenNew />, cls: 'btn-open-tab', href: `#/s/${s.id}`, newTab: true },
     {
@@ -585,7 +598,13 @@ function sessionMenu(app: AppState, s: SessionInfo, on: { onMove: () => void; on
     { label: 'Move to project…', icon: <IconMove />, cls: 'btn-move', onSelect: on.onMove },
     ...(rules ? [{ label: 'Folder rules', icon: <IconShield />, cls: 'btn-rules', href: rules }] : []),
     'sep',
-    ...(restartable ? [{ label: 'Restart session', icon: <IconRestart />, cls: 'btn-restart', onSelect: () => restart(app, s) }] : []),
+    ...(restartable && !paused
+      ? [
+          { label: 'Restart session', icon: <IconRestart />, cls: 'btn-restart', onSelect: () => restart(app, s) },
+          { label: 'Pause session', icon: <IconPause />, cls: 'btn-pause', onSelect: () => pause(app, s) },
+        ]
+      : []),
+    ...(paused ? [{ label: 'Resume session', icon: <IconPlay />, cls: 'btn-resume', onSelect: () => resume(app, s) }] : []),
     { label: 'Archive', icon: <IconArchive />, cls: 'btn-archive', onSelect: () => app.archiveLater(s) },
     { label: 'Delete…', icon: <IconTrash />, cls: 'btn-delete', danger: true, keepOpen: true, onSelect: on.onAskDelete },
   ];

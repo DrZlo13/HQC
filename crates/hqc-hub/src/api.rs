@@ -1560,9 +1560,9 @@ pub async fn search(
     }
 }
 
-/// Input and a restart go only to a session that is not archived (`409 archived`) and that
-/// VS Code does not drive (`409 locked_vscode`).
-fn driven_from_hqc(s: &SessionRow) -> ApiResult<()> {
+/// Input, a restart, a pause and a resume go only to a session that is not archived (`409
+/// archived`) and that VS Code does not drive (`409 locked_vscode`).
+pub(crate) fn driven_from_hqc(s: &SessionRow) -> ApiResult<()> {
     if s.archived {
         return Err(ApiError::Conflict(
             "archived",

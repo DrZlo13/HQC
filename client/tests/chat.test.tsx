@@ -74,6 +74,7 @@ function setup(
     background_tasks?: number;
     foreground_calls?: string[];
     model?: string;
+    paused_at?: string;
   } = {},
 ) {
   const history = opts.history ?? HISTORY;
@@ -163,6 +164,7 @@ function setup(
     background_tasks: opts.background_tasks,
     foreground_calls: opts.foreground_calls,
     model: opts.model,
+    paused_at: opts.paused_at,
   };
   app.sessions.set('s1', info);
   app.sessions.set('sys', { ...info, id: 'sys', title: 'drzlo-mac', system: true, workspace_id: undefined, held_by: undefined, state: 'idle' });
@@ -604,6 +606,17 @@ describe('header', () => {
     await mount(app);
     expect($('.pill')!.textContent).toBe('Idle');
     expect($('.pill .pulse')).toBeNull();
+  });
+
+  it('says "Pausing after this turn" while a paused session\'s turn runs, Paused once it is paused', async () => {
+    let { app } = setup('running', { paused_at: '2026-11-15T09:00:00Z' });
+    await mount(app);
+    expect($('.pill')!.textContent).toBe('Pausing after this turn');
+    render(null, root);
+
+    ({ app } = setup('paused', { paused_at: '2026-11-15T09:00:00Z' }));
+    await mount(app);
+    expect($('.pill')!.textContent).toBe('Paused');
   });
 
   it('says Running while a background task runs after the turn ended, Idle once it ends', async () => {

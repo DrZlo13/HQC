@@ -676,6 +676,11 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
                 app.session_changed(sid);
             }
         }
+        // A pause's kill lost with the previous connection, or never sent while the worker was
+        // away or the hub down, is sent now (SPEC §17.3).
+        for sid in db::paused_sessions_to_stop(&app.db, conn.worker_id).await? {
+            crate::pause::stop_if_paused(app, sid).await?;
+        }
         for sid in db::sessions_to_restart(&app.db, conn.worker_id).await? {
             delivery::kick(app, sid, true).await;
         }

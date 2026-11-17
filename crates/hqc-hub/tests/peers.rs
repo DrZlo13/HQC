@@ -325,6 +325,45 @@ async fn refusals_come_at_once() {
         .all(|e| e["type"] != "peer.message"));
 }
 
+/// A paused target (SPEC §7.1, §17.3): an ask is refused at once, a send is still queued.
+#[tokio::test]
+async fn an_ask_to_a_paused_session_is_refused_at_once() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (_, ta) = started(&hub, &mut w, "Asker", None).await;
+    let (b, _) = started(&hub, &mut w, "Helper", None).await;
+    let (s, v) = hub
+        .post(&format!("/api/sessions/{b}/pause"), json!({}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    w.expect("session.kill").await;
+
+    let r = fast(&mut w, &ta, "hqc_ask", json!({"text": "hi", "session": b})).await;
+    assert_eq!(code(&r), "unavailable", "{r}");
+    assert_eq!(
+        r["error"]["message"],
+        "personal/helper is paused; it takes no questions until it is resumed"
+    );
+    let r = fast(
+        &mut w,
+        &ta,
+        "hqc_send",
+        json!({"text": "later", "session": b}),
+    )
+    .await;
+    assert!(r["result"].is_object(), "{r}");
+    let peers: Vec<Value> = hub
+        .events(&b)
+        .await
+        .into_iter()
+        .filter(|e| e["type"] == "peer.message")
+        .collect();
+    assert_eq!(peers.len(), 1, "{peers:?}");
+    assert_eq!(peers[0]["payload"]["text"], "later");
+    hub.finish().await;
+}
+
 #[tokio::test]
 async fn sends_wait_in_the_buffer_for_the_next_input() {
     let hub = TestHub::start().await;

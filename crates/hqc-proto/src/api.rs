@@ -98,6 +98,12 @@ pub struct Session {
     /// are per user. Absent — not a favorite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub favorite_at: Option<DateTime<Utc>>,
+    /// When the session was paused (`POST .../pause`, since SPEC 0.160), then, once the hub
+    /// itself stops the agent for the pause (at once, or at the end of the turn that ran), when
+    /// it did; a process that ends another way keeps the time of the pause (SPEC §17.3).
+    /// Absent — not paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_at: Option<DateTime<Utc>>,
 }
 
 /// `spawned_by` of a session: the spawning session and its address
@@ -129,6 +135,7 @@ impl Session {
             output_per_s: self.output_per_s,
             foreground_calls: self.foreground_calls.clone(),
             favorite_at: self.favorite_at,
+            paused_at: self.paused_at,
         }
     }
 }

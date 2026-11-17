@@ -29,6 +29,7 @@ pub mod icons;
 pub mod mcp;
 pub mod mirror;
 pub mod moves;
+pub mod pause;
 pub mod peers;
 pub mod providers;
 pub mod push;
@@ -114,6 +115,8 @@ pub fn router(app: AppState) -> Router {
         .route("/api/sessions/{id}/stop", post(api::stop))
         .route("/api/sessions/{id}/background", post(api::background))
         .route("/api/sessions/{id}/restart", post(api::restart))
+        .route("/api/sessions/{id}/pause", post(pause::pause))
+        .route("/api/sessions/{id}/resume", post(pause::resume))
         .route(
             "/api/providers",
             get(providers::list).post(providers::create),

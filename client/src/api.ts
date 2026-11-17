@@ -551,6 +551,17 @@ export class Api {
     await this.req('POST', `/api/sessions/${enc(id)}/restart`);
   }
 
+  /** Stops the agent once its turn ends and holds input until {@link Api.resumeSession}
+   *  (SPEC §17.3). */
+  async pauseSession(id: string): Promise<void> {
+    await this.req('POST', `/api/sessions/${enc(id)}/pause`);
+  }
+
+  /** Starts a paused session's agent again; it hears first how long the pause was. */
+  async resumeSession(id: string): Promise<void> {
+    await this.req('POST', `/api/sessions/${enc(id)}/resume`);
+  }
+
   async retry(id: string): Promise<void> {
     await this.req('POST', `/api/sessions/${enc(id)}/retry`);
   }

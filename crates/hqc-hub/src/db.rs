@@ -1555,6 +1555,10 @@ pub struct SessionRow {
     pub provider_id: Option<Uuid>,
     /// The owner gave the agent their Chrome (SPEC 0.148).
     pub browser: bool,
+    /// When the session was paused, then, once the hub itself stops the agent for the pause,
+    /// when it did; a process that ends another way keeps the time of the pause (SPEC §17.3).
+    /// Null while it is not paused.
+    pub paused_at: Option<DateTime<Utc>>,
 }
 
 const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.worker_id, s.cwd, \
@@ -1563,7 +1567,7 @@ const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.wo
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
     s.start_sent, s.system, s.vscode_active_at, s.held_by, s.vscode_held_at, s.commands, s.created_at, \
     s.updated_at, s.spawned_by, s.permission_mode, s.effective_permission_mode, \
-    s.permission_capped_by, s.subagents, s.background_tasks, s.provider_id, s.browser";
+    s.permission_capped_by, s.subagents, s.background_tasks, s.provider_id, s.browser, s.paused_at";
 
 pub async fn session(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SessionRow>> {
     sqlx::query_as(&format!(
@@ -2186,6 +2190,19 @@ pub async fn sessions_with_pending_input(db: &PgPool, worker_id: Uuid) -> sqlx::
         "SELECT s.id FROM sessions s WHERE s.worker_id = $1 AND NOT s.archived
            AND EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.delivery = 'pending')
          ORDER BY s.id",
+    )
+    .bind(worker_id)
+    .fetch_all(db)
+    .await
+}
+
+/// Paused sessions of the worker with no turn running whose process it last reported alive:
+/// the kill of their pause may have been lost (SPEC §17.3).
+pub async fn paused_sessions_to_stop(db: &PgPool, worker_id: Uuid) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT id FROM sessions WHERE worker_id = $1 AND paused_at IS NOT NULL
+           AND NOT turn_open AND process_state <> 'stopped'
+         ORDER BY id",
     )
     .bind(worker_id)
     .fetch_all(db)

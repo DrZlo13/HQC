@@ -25,7 +25,7 @@ import { PermissionBlock } from './permission';
 import { MoveSession } from './ProjectSettings';
 import { WaitedRequests } from './requests';
 import { SchedulesPanel } from './Schedules';
-import { archivedLabel, atWorkAfterTurn } from './sessions';
+import { archivedLabel, atWorkAfterTurn, pausingAfterTurn } from './sessions';
 
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
 /** Blocks of the feed rendered on open; scrolling to the top adds `SHOWN` more. */
@@ -422,7 +422,7 @@ export function Chat({
   const cost = info?.provider ? undefined : usage.cost;
   // Running, as in the list, while a background subagent or task works after the turn.
   const shown = info && atWorkAfterTurn(info) ? 'running' : state;
-  const pill = <StatePill state={shown} timeline={t} where={locked ? `In ${holder}${worker ? ` on ${worker}` : ''}` : undefined} />;
+  const pill = <StatePill state={shown} timeline={t} where={locked ? `In ${holder}${worker ? ` on ${worker}` : ''}` : undefined} pausing={!!info && pausingAfterTurn(info)} />;
   const agents = agentsLabel(info?.subagents);
   const conn = app.offline && <span class="conn-lost">offline</span>;
   // In the meta row on a computer; on a phone, where the row has no room for the address beside
@@ -835,13 +835,15 @@ function approvalCall(items: ReturnType<Timeline['items']>, t: Timeline, request
 }
 
 /** The state in the header: a pill, pulsing while the session works (a turn, or a background
- *  subagent after it). `where`: a session VS Code has ("In VS Code on <machine>"), marked `</>`. */
-function StatePill({ state, timeline, where }: { state: SessionState; timeline: Timeline; where?: string }) {
+ *  subagent after it). `where`: a session VS Code has ("In VS Code on <machine>"), marked `</>`.
+ *  `pausing`: paused while its turn runs, "Pausing after this turn". */
+function StatePill({ state, timeline, where, pausing }: { state: SessionState; timeline: Timeline; where?: string; pausing?: boolean }) {
   let label = where ?? STATE_LABELS[state];
   if (state === 'waiting') {
     const r = timeline.openRequests()[0];
     label = r?.type === 'approval.request' ? 'Waiting for permission' : 'Waiting for reply';
   }
+  if (pausing) label = 'Pausing after this turn';
   return (
     <span class={`state pill state-${state}`}>
       {where ? <IconCode size={12} /> : <span class={`pill-dot ${state === 'running' ? 'pulse' : ''}`} aria-hidden="true" />}

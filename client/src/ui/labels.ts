@@ -50,6 +50,7 @@ export const STATE_LABELS: Record<SessionState, string> = {
   waiting: 'Waiting for reply',
   error: 'Error',
   running: 'Running',
+  paused: 'Paused',
   queued: 'Queued',
   idle: 'Idle',
   unknown: 'Unknown',

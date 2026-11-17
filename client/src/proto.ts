@@ -25,6 +25,7 @@ export const SESSION_STATES = [
   'waiting',
   'error',
   'running',
+  'paused',
   'queued',
   'idle',
 ] as const;
@@ -927,6 +928,8 @@ export interface SessionSummary {
   foreground_calls?: string[];
   /** When the user made it a favorite; absent: not one. */
   favorite_at?: string;
+  /** When it was paused, then when the hub stopped its agent for the pause; absent: not paused. */
+  paused_at?: string;
 }
 
 /** A session waiting on another through an open `hqc_ask`, directly or along a chain. */
@@ -1028,6 +1031,7 @@ export function parseSummary(v: unknown): SessionSummary {
     output_per_s: optNum(s, 'output_per_s'),
     foreground_calls: optStrArr(s, 'foreground_calls'),
     favorite_at: optStr(s, 'favorite_at'),
+    paused_at: optStr(s, 'paused_at'),
   };
 }
 
@@ -1157,6 +1161,9 @@ export interface SessionInfo {
   foreground_calls?: string[];
   /** When the user made it a favorite (favorites are per user); absent: not one. */
   favorite_at?: string;
+  /** When it was paused (SPEC §17.3), then, once the hub itself stopped its agent for the
+   *  pause, when it did; absent: not paused. */
+  paused_at?: string;
   /** The model hqc starts the agent with (`agent.model`); absent: the runtime's default. */
   model?: string;
   /** The model provider the agent runs on (`agent.provider`, SPEC 0.144); absent: the
@@ -1289,6 +1296,7 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     output_per_s: optNum(o, 'output_per_s'),
     foreground_calls: optStrArr(o, 'foreground_calls'),
     favorite_at: optStr(o, 'favorite_at'),
+    paused_at: optStr(o, 'paused_at'),
     model: optStr(agent, 'model'),
     provider: optProviderRef(agent),
     browser: optBool(agent, 'browser') || undefined,

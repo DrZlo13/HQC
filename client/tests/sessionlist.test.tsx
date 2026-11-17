@@ -116,6 +116,15 @@ describe('list logic', () => {
     expect(subLabel(busy)).toBe('Running');
   });
 
+  it('a paused session says Paused among the idle ones; paused during its turn, "Pausing after this turn"', () => {
+    const held = sess('held', 'Held build', 'paused', at(1), { paused_at: at(1) });
+    expect(bucketOf(held)).toBe('idle');
+    expect(subLabel(held)).toBe('Paused');
+    expect(subLabel(sess('run', 'Still running', 'running', at(1), { paused_at: at(1) }))).toBe('Pausing after this turn');
+    expect(subLabel(sess('ask', 'Still asking', 'waiting', at(1), { paused_at: at(1) }))).toBe('Pausing after this turn');
+    expect(subLabel(sess('run', 'Still running', 'running', at(1)))).toBe('Running');
+  });
+
   it('groups by state and by recency, newest first, empty groups left out', () => {
     expect(groupSessions(LIST, 'state', NOW).map((g) => [g.label, g.items.map((s) => s.id)])).toEqual([
       ['Needs you', ['net']],
@@ -281,7 +290,7 @@ const menuOf = (title: string, x = 40, y = 120) =>
     rowOf(title).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
   });
 const menuItems = () => [...root.querySelectorAll('.menu .menu-item')].map((b) => b.textContent);
-const SESSION_MENU = ['Open in new tab', 'Add to favorites', 'Rename', 'Move to project…', 'Folder rules', 'Restart session', 'Archive', 'Delete…'];
+const SESSION_MENU = ['Open in new tab', 'Add to favorites', 'Rename', 'Move to project…', 'Folder rules', 'Restart session', 'Pause session', 'Archive', 'Delete…'];
 /** Archives a row from its menu's item. */
 async function archiveRow(title: string) {
   await menuOf(title);
@@ -784,7 +793,26 @@ describe('archive from the row (T50)', () => {
     expect(sent.filter((r) => r.url.endsWith('/restart'))).toEqual([{ method: 'POST', url: '/api/sessions/net/restart' }]);
 
     await menuOf('Opened in VS Code');
-    expect(menuItems()).toEqual(SESSION_MENU.filter((l) => l !== 'Restart session'));
+    expect(menuItems()).toEqual(SESSION_MENU.filter((l) => l !== 'Restart session' && l !== 'Pause session'));
+  });
+
+  it('pauses the session from the menu with POST /pause; a paused one has Resume instead of Restart and Pause', async () => {
+    const sent: { method?: string; url: string }[] = [];
+    const fetchHub: typeof fetch = async (input, init) => {
+      sent.push({ method: init?.method, url: String(input) });
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    const list = [...LIST, sess('held', 'Held build', 'paused', at(1), { paused_at: at(1) })];
+    await mount(<SessionList app={makeApp(list, Object.assign(new Api('', fetchHub), hubApi()))} />);
+    await menuOf('Network sync');
+    await click(root.querySelector('.menu .btn-pause'));
+    expect(root.querySelector('.ctx-menu')).toBeNull();
+    expect(sent.filter((r) => r.url.endsWith('/pause'))).toEqual([{ method: 'POST', url: '/api/sessions/net/pause' }]);
+
+    await menuOf('Held build');
+    expect(menuItems()).toEqual(['Open in new tab', 'Add to favorites', 'Rename', 'Move to project…', 'Folder rules', 'Resume session', 'Archive', 'Delete…']);
+    await click(root.querySelector('.menu .btn-resume'));
+    expect(sent.filter((r) => r.url.endsWith('/resume'))).toEqual([{ method: 'POST', url: '/api/sessions/held/resume' }]);
   });
 
   it('the menu: links to a new tab and to the folder rules, the move form in the column; Esc or a press away closes it', async () => {

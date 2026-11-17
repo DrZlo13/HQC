@@ -187,6 +187,20 @@ export const IconRestart = ({ size = 15 }: { size?: number }) => (
   </Svg>
 );
 
+/** "Pause session": two bars. */
+export const IconPause = ({ size = 15 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M7.5 5v10M12.5 5v10" />
+  </Svg>
+);
+
+/** "Resume session": a triangle pointing right. */
+export const IconPlay = ({ size = 15 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M7 4.5v11l8.5-5.5z" />
+  </Svg>
+);
+
 export const IconTrash = ({ size = 15 }: { size?: number }) => (
   <Svg size={size}>
     <path d="M4 6h12M8 6V4h4v2M5.5 6l.8 10a1 1 0 0 0 1 .9h5.4a1 1 0 0 0 1-.9l.8-10" />

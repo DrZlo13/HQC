@@ -27,6 +27,8 @@ use crate::adapter::AdapterEvent;
 const TICK: Duration = Duration::from_secs(2);
 /// The rate is the output tokens of this last stretch, per second.
 const WINDOW: Duration = Duration::from_secs(20);
+/// A transcript larger than this is not read for its title on a tick, only at a turn's end.
+const TITLE_MAX: u64 = 4 * 1024 * 1024;
 
 /// What has been read of one subagent's transcript.
 #[derive(Debug, Default)]
@@ -88,6 +90,12 @@ impl Tail {
     }
 }
 
+/// The transcript's title is read on this tick: during the first model turn of a new
+/// conversation ([`Core::fresh`]) while the process has sent no title.
+fn reads_title(working: bool, fresh: bool, titled: bool) -> bool {
+    working && fresh && !titled
+}
+
 /// Counts the rate of the process until it exits.
 pub(super) async fn meter(
     core: Arc<Mutex<Core>>,
@@ -106,20 +114,22 @@ pub(super) async fn meter(
             _ = tick.tick() => {}
             _ = exited.wait_for(Option::is_some) => return,
         }
-        let (mut tokens, working, session, live) = {
+        let (mut tokens, working, fresh, session, live) = {
             let mut c = lock(&core);
             (
                 c.take_output_tokens(),
                 c.working(),
+                c.fresh(),
                 c.cli_session().map(str::to_owned),
                 c.live_ids(),
             )
         };
         // Beside the session's transcript: `<CLI session id>/subagents`.
         let dir = io
-            .transcript
+            .transcript()
             .as_deref()
             .and_then(Path::parent)
+            .map(Path::to_path_buf)
             .zip(session)
             .map(|(p, s)| p.join(s).join("subagents"));
         if let Some(dir) = dir {
@@ -134,6 +144,15 @@ pub(super) async fn meter(
             }
         }
         was_live = live;
+        // The CLI writes its own title into the transcript during the first turn of a new
+        // conversation and does not stream it (`session_title_changed` carries only a
+        // person's): it is read on each tick of that turn until the process has one, not only
+        // at the turn's end (SPEC §8.1). A resumed conversation without one gets none, and its
+        // transcript, tens of MB, is not read every tick; nor is one over [`TITLE_MAX`], which a
+        // first turn the CLI writes no title in (a first message under 10 characters) grows.
+        if reads_title(working, fresh, lock(&io.title).is_some()) {
+            io.report_title(Some(TITLE_MAX)).await;
+        }
         let now = Instant::now();
         if working {
             window.push_back((now, tokens));
@@ -156,6 +175,16 @@ pub(super) async fn meter(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// SPEC §8.1: a tick reads the title only in a new conversation's first turn, until the
+    /// process has one; a resumed transcript without one, tens of MB, is not read every tick.
+    #[test]
+    fn a_tick_reads_the_title_only_in_a_new_conversation_first_turn() {
+        assert!(reads_title(true, true, false));
+        assert!(!reads_title(true, false, false), "a resumed conversation");
+        assert!(!reads_title(true, true, true), "the process has a title");
+        assert!(!reads_title(false, true, false), "no turn");
+    }
 
     fn line(id: &str, block: &str, output_tokens: u64) -> String {
         json!({

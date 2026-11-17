@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use hqc_proto::{
     api::{Agent, Session, SpawnedBy},
     event::SessionState,
-    frame::{LockedBy, PermissionMode, ProcessState, Runtime, TitleSource},
+    frame::{LockedBy, PermissionMode, ProcessState, Runtime, SlashCommand, TitleSource},
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -79,6 +79,38 @@ struct Aggregates {
     provider_label: Option<String>,
 }
 
+/// `sessions.commands` as stored: names before SPEC 0.162, `SlashCommand`s since.
+fn stored_commands(v: Value) -> Option<Vec<SlashCommand>> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Name(String),
+        Command(SlashCommand),
+    }
+    let list: Vec<Stored> = serde_json::from_value(v).ok()?;
+    Some(
+        list.into_iter()
+            .map(|c| match c {
+                Stored::Name(name) => SlashCommand {
+                    name,
+                    description: None,
+                    argument_hint: None,
+                },
+                Stored::Command(c) => c,
+            })
+            .collect(),
+    )
+}
+
+/// The names of `sessions.commands` as stored ([`stored_commands`]), without the rest of each
+/// command: all a list gives.
+fn stored_command_names(v: &Value) -> Option<Vec<String>> {
+    v.as_array()?
+        .iter()
+        .map(|c| c.as_str().or_else(|| c["name"].as_str()).map(str::to_owned))
+        .collect()
+}
+
 /// A stored enum name (`runtime`, `process_state`, `locked_by`) as its proto type.
 fn stored_enum<T: DeserializeOwned>(name: &str, fallback: T) -> T {
     serde_json::from_value(Value::String(name.to_string())).unwrap_or(fallback)
@@ -110,11 +142,22 @@ async fn aggregates(db: &PgPool, user: Uuid, ids: &[Uuid]) -> sqlx::Result<Vec<A
 }
 
 /// The session objects (SPEC §6) of the given rows for `user` (unread and favorite_at are per
-/// user), in the order given.
+/// user), in the order given, as a list gives them: without `command_info`, which only the
+/// answer about one session carries ([`view`]).
 pub async fn views(
     app: &AppState,
     user: Uuid,
     rows: Vec<SessionRow>,
+) -> sqlx::Result<Vec<Session>> {
+    build(app, user, rows, false).await
+}
+
+/// [`views`], with `command_info` when `info`.
+async fn build(
+    app: &AppState,
+    user: Uuid,
+    rows: Vec<SessionRow>,
+    info: bool,
 ) -> sqlx::Result<Vec<Session>> {
     let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
     let aggs = aggregates(&app.db, user, &ids).await?;
@@ -135,6 +178,17 @@ pub async fn views(
                 queue_len: a.queue_len,
             });
             let count = |n: i64| n.max(0) as u64;
+            let (commands, command_info) = match s.commands {
+                Some(v) if info => {
+                    let list = stored_commands(v);
+                    let names = list
+                        .as_ref()
+                        .map(|c| c.iter().map(|c| c.name.clone()).collect());
+                    (names, list)
+                }
+                Some(v) => (stored_command_names(&v), None),
+                None => (None, None),
+            };
             Some(Session {
                 id: s.id,
                 project_id: s.project_id,
@@ -175,7 +229,8 @@ pub async fn views(
                 created_at: s.created_at,
                 updated_at: s.updated_at,
                 held_by: s.held_by.and_then(|v| serde_json::from_value(v).ok()),
-                commands: s.commands.and_then(|v| serde_json::from_value(v).ok()),
+                commands,
+                command_info,
                 system: s.system,
                 permission_mode: s.permission_mode.as_deref().and_then(PermissionMode::parse),
                 effective_permission_mode: s
@@ -201,7 +256,7 @@ pub async fn views(
 }
 
 pub async fn view(app: &AppState, user: Uuid, row: SessionRow) -> sqlx::Result<Option<Session>> {
-    Ok(views(app, user, vec![row]).await?.pop())
+    Ok(build(app, user, vec![row], true).await?.pop())
 }
 
 #[cfg(test)]

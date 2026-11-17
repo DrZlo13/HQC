@@ -1532,7 +1532,8 @@ pub struct SessionRow {
     /// (SPEC §9.3), and since when.
     pub held_by: Option<Value>,
     pub vscode_held_at: Option<DateTime<Utc>>,
-    /// The runtime's slash commands (`session.state.commands`, SPEC §5.4): a JSON array.
+    /// The runtime's slash commands (`session.state.commands`, SPEC §5.4): a JSON array of
+    /// names, since SPEC 0.162 of `{name, description?, argument_hint?}`.
     pub commands: Option<Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -1825,9 +1826,14 @@ pub async fn set_user_title(db: &PgPool, id: Uuid, title: &str) -> sqlx::Result<
     Ok(())
 }
 
-/// The runtime's slash commands (`session.state.commands`, T27); written only when they
-/// changed, so a `session.state` without a new list does not touch `updated_at`.
-pub async fn set_commands(db: &PgPool, id: Uuid, commands: &[String]) -> sqlx::Result<()> {
+/// The runtime's slash commands (`session.state.commands`, T27), since SPEC 0.162 with their
+/// descriptions (`command_info`); written only when they changed, so a `session.state`
+/// without a new list does not touch `updated_at`.
+pub async fn set_commands(
+    db: &PgPool,
+    id: Uuid,
+    commands: &[hqc_proto::frame::SlashCommand],
+) -> sqlx::Result<()> {
     let v = serde_json::to_value(commands).unwrap_or(Value::Null);
     sqlx::query(
         "UPDATE sessions SET commands = $2
@@ -2345,6 +2351,9 @@ pub async fn turn_answered(db: &PgPool, session_id: Uuid, input_id: Uuid) -> sql
     .await
 }
 
+/// A worker's `session.state`. When the runtime goes on in another transcript (`/clear`,
+/// SPEC §8.1), the events the session has so far keep the one they were written in as
+/// `origin_runtime`: a fork before one of them cuts that transcript (SPEC §6).
 /// `updated_at`, which orders the session lists (SPEC §5.4, §6), moves only when
 /// `process_state`, `locked_by` or `runtime_session_id` changes: a repeat, such as the
 /// `session.state` the worker sends again after `hello`, keeps it.
@@ -2355,6 +2364,18 @@ pub async fn set_process_state(
     runtime_session_id: Option<&str>,
     locked_by: &str,
 ) -> sqlx::Result<()> {
+    let mut tx = db.begin().await?;
+    if let Some(new) = runtime_session_id {
+        sqlx::query(
+            "UPDATE events e SET origin_runtime = s.runtime_session_id FROM sessions s
+             WHERE s.id = $1 AND e.session_id = $1 AND e.origin_runtime IS NULL
+               AND s.runtime_session_id <> '' AND s.runtime_session_id <> $2",
+        )
+        .bind(id)
+        .bind(new)
+        .execute(&mut *tx)
+        .await?;
+    }
     sqlx::query(
         "UPDATE sessions SET process_state = $2,
             runtime_session_id = COALESCE($3, runtime_session_id), locked_by = $4,
@@ -2369,9 +2390,9 @@ pub async fn set_process_state(
     .bind(process_state)
     .bind(runtime_session_id)
     .bind(locked_by)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
+    tx.commit().await
 }
 
 // ---------------------------------------------------------------- mirror (SPEC §9)
@@ -3342,7 +3363,9 @@ pub async fn fork_cut_before_input(
 /// The `agent.message` events of session `id` before `seq`, newest first, at most `limit`:
 /// where a fork before that message may cut the conversation (SPEC §6). Each as the record it
 /// stands for: the id it got from the runtime and the transcript it was written in, a copy's
-/// origin (`events.origin_*`), else its own id in `runtime`, the session's transcript.
+/// origin (`events.origin_*`), else its own id in `runtime`, the session's transcript. Only
+/// those after the last `/clear` before `seq` (`system conversation_cleared`, the session's own
+/// or copied): the conversation before it is not the agent's any more.
 pub async fn agent_messages_before(
     db: &PgPool,
     id: Uuid,
@@ -3354,6 +3377,9 @@ pub async fn agent_messages_before(
         "SELECT COALESCE(origin_id, event_id), COALESCE(origin_runtime, $4) FROM events
          WHERE session_id = $1 AND seq < $2 AND type = 'agent.message'
            AND author ->> 'kind' = 'agent'
+           AND seq > COALESCE((SELECT max(seq) FROM events
+                               WHERE session_id = $1 AND seq < $2 AND type = 'system'
+                                 AND payload ->> 'code' = 'conversation_cleared'), 0)
          ORDER BY seq DESC LIMIT $3",
     )
     .bind(id)

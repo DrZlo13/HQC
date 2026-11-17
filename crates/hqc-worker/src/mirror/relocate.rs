@@ -122,6 +122,7 @@ pub fn relocate(
             offset: size,
             last_prompt: old.last_prompt,
             title: old.title,
+            custom_title: old.custom_title,
         },
     )?;
     let place = || -> anyhow::Result<()> {
@@ -290,6 +291,25 @@ mod tests {
         assert_eq!(
             s.store.get(&s.from).unwrap().unwrap().cwd,
             Some(s.root.join("a").to_string_lossy().into_owned())
+        );
+    }
+
+    /// The row for the new path keeps the old row's titles, a person's too (SPEC §9.2).
+    #[test]
+    fn the_new_row_keeps_the_titles() {
+        let s = setup();
+        let row = FileRow {
+            cwd: Some(s.root.join("a").to_string_lossy().into_owned()),
+            title: Some("Auto".into()),
+            custom_title: Some("Mine".into()),
+            ..FileRow::default()
+        };
+        s.store.put(&s.from, &row).unwrap();
+        assert_eq!(s.relocate(&OwnRecords::default()).unwrap(), Some(s.to()));
+        let moved = s.store.get(&s.to()).unwrap().unwrap();
+        assert_eq!(
+            (moved.title.as_deref(), moved.custom_title.as_deref()),
+            (Some("Auto"), Some("Mine"))
         );
     }
 }

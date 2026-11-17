@@ -23,7 +23,7 @@ pub mod rules;
 pub mod scripted;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -83,6 +83,41 @@ impl Live {
 impl Drop for Live {
     fn drop(&mut self) {
         self.0.end(self.1, self.2);
+    }
+}
+
+/// A transcript the live process wrote before its `/clear`, in [`OwnRecords`] up to its
+/// length at the switch (`until`) until the process ends: the mirror may read what it wrote
+/// there last only after the switch.
+struct Earlier(Arc<OwnRecords>, Uuid);
+
+impl Earlier {
+    fn new(own: Arc<OwnRecords>, uuid: Uuid, until: u64) -> Self {
+        own.begin_earlier(uuid, until);
+        Self(own, uuid)
+    }
+}
+
+impl Drop for Earlier {
+    fn drop(&mut self) {
+        self.0.end_earlier(self.1);
+    }
+}
+
+/// The transcript folder of a process that cleared its conversation, marked in [`OwnRecords`]
+/// until the process names the new transcript, the turn of `/clear` ends or the process does.
+struct Clearing(Arc<OwnRecords>, PathBuf);
+
+impl Clearing {
+    fn new(own: Arc<OwnRecords>, folder: PathBuf) -> Self {
+        own.mark_clearing(&folder);
+        Self(own, folder)
+    }
+}
+
+impl Drop for Clearing {
+    fn drop(&mut self) {
+        self.0.unmark_clearing(&self.1);
     }
 }
 
@@ -372,12 +407,13 @@ struct Io {
     stdin: tokio::sync::Mutex<Pin<Box<dyn AsyncWrite + Send>>>,
     events: EventSink,
     signal: SignalFn,
-    /// The session's transcript, where the CLI writes `ai-title` (SPEC §8.1).
-    transcript: Option<PathBuf>,
+    /// The session's transcript, where the CLI writes `ai-title` (SPEC §8.1); another one
+    /// after `/clear` ([`Io::moved_to`]).
+    transcript: Mutex<Option<PathBuf>>,
     /// The last title reported by this process.
     title: Mutex<Option<String>>,
     /// The transcript's uuid and the registry its records go to (SPEC §9.3).
-    runtime: Uuid,
+    runtime: Mutex<Uuid>,
     own: Arc<OwnRecords>,
 }
 
@@ -386,9 +422,11 @@ impl Io {
         for a in actions {
             match a {
                 Action::Emit(ev @ AdapterEvent::TurnEnded { .. }) => {
-                    self.report_title().await;
+                    self.report_title(None).await;
                     let _ = self.events.send(ev).await;
                 }
+                // A person's title (`/rename`): the transcript gives the same one later.
+                Action::Emit(AdapterEvent::Title(t)) => self.title_changed(t).await,
                 Action::Emit(ev) => {
                     // The session task is gone only when the session is being torn down.
                     let _ = self.events.send(ev).await;
@@ -407,23 +445,39 @@ impl Io {
         Ok(())
     }
 
-    /// After a turn: the last `ai-title` of the transcript, if there is one and it is new.
-    /// The CLI writes it after the first prompt; a missing file or title is not an error.
-    async fn report_title(&self) {
-        let Some(path) = &self.transcript else {
+    /// After a turn, and during the first turn of a new conversation until the process has a
+    /// title ([`rate::meter`]): the transcript's title (its last `custom-title`, else its last
+    /// `ai-title`), if there is one and it is new. The CLI writes `ai-title` after the first
+    /// prompt; a missing file or title is not an error. `max`: a transcript larger than this
+    /// many bytes is not read.
+    async fn report_title(&self, max: Option<u64>) {
+        let Some(path) = self.transcript() else {
             return;
         };
-        let text = match tokio::fs::read_to_string(path).await {
+        if let Some(max) = max {
+            if tokio::fs::metadata(&path)
+                .await
+                .is_ok_and(|m| m.len() > max)
+            {
+                return;
+            }
+        }
+        let text = match tokio::fs::read_to_string(&path).await {
             Ok(t) => t,
             Err(e) => {
                 tracing::debug!(session_id = %self.session_id, "no transcript for ai-title: {e}");
                 return;
             }
         };
-        let Some(title) = hqc_claude_jsonl::last_ai_title(&text) else {
+        let Some(title) = hqc_claude_jsonl::last_title(&text) else {
             return;
         };
-        let title = hqc_proto::replace_nul(&title).into_owned();
+        self.title_changed(hqc_proto::replace_nul(&title).into_owned())
+            .await;
+    }
+
+    /// [`AdapterEvent::Title`] unless `title` is the one last reported.
+    async fn title_changed(&self, title: String) {
         {
             let mut last = lock(&self.title);
             if last.as_deref() == Some(title.as_str()) {
@@ -432,6 +486,25 @@ impl Io {
             *last = Some(title.clone());
         }
         let _ = self.events.send(AdapterEvent::Title(title)).await;
+    }
+
+    fn transcript(&self) -> Option<PathBuf> {
+        lock(&self.transcript).clone()
+    }
+
+    fn runtime(&self) -> Uuid {
+        *lock(&self.runtime)
+    }
+
+    /// After `/clear` the CLI writes transcript `new` in the same folder (SPEC §8.1). The title
+    /// sent before is forgotten here, not at `conversation_reset`: a tick between the two reads
+    /// the old transcript and would store its title again.
+    fn moved_to(&self, new: Uuid) {
+        *lock(&self.title) = None;
+        *lock(&self.runtime) = new;
+        if let Some(p) = lock(&self.transcript).as_mut() {
+            p.set_file_name(format!("{new}.jsonl"));
+        }
     }
 
     fn signal(&self, s: Sig) {
@@ -455,6 +528,15 @@ pub enum Launch {
     /// `--resume <fork_copy_path(uuid)> --fork-session --session-id <uuid> --resume-session-at
     /// <at>`: a new transcript with the source's records up to `at`.
     Fork { at: Uuid },
+}
+
+impl Launch {
+    /// A new session's conversation, the one the CLI writes its `ai-title` for in the first
+    /// turn: a fork's CLI takes the source's conversation as titled, and the hub keeps a fork's
+    /// own title.
+    pub fn new_conversation(&self) -> bool {
+        matches!(self, Launch::New)
+    }
 }
 
 /// The copy of a fork's source transcript, cut right after the record the fork starts at
@@ -907,7 +989,8 @@ impl ClaudeCodeAdapter {
         };
         let mut core = Core::new(self.session_id, spec.restricted)
             .with_policy(Arc::new(Policy::new(&spec.environment.permissions)))
-            .with_cost_baseline(cost_baseline);
+            .with_cost_baseline(cost_baseline)
+            .with_new_conversation(launch.new_conversation());
         if let Some(rules) = &spec.folder_rules {
             core = core.with_folder(rules.clone(), spec.workspace.clone());
         }
@@ -918,9 +1001,9 @@ impl ClaudeCodeAdapter {
             stdin: tokio::sync::Mutex::new(spawned.stdin),
             events: self.events.clone(),
             signal: spawned.signal,
-            transcript,
+            transcript: Mutex::new(transcript),
             title: Mutex::new(None),
-            runtime: uuid,
+            runtime: Mutex::new(uuid),
             own: self.opts.own_records.clone(),
         });
         let pid = spawned.pid;
@@ -1072,7 +1155,7 @@ impl Adapter for ClaudeCodeAdapter {
         let p = self.running()?;
         let actions = lock(&p.core).input_with_images(input, images);
         // Before the write: the mirror may read the prompt's record before its echo.
-        p.io.own.sent(p.io.runtime, &input.text);
+        p.io.own.sent(p.io.runtime(), &input.text);
         tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude");
         p.io.run(actions).await
     }
@@ -1095,7 +1178,7 @@ impl Adapter for ClaudeCodeAdapter {
         let Some(actions) = lock(&p.core).inject_with_images(input, images) else {
             return Ok(false);
         };
-        p.io.own.sent(p.io.runtime, &input.text);
+        p.io.own.sent(p.io.runtime(), &input.text);
         tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude during the turn");
         p.io.run(actions).await?;
         Ok(true)
@@ -1189,7 +1272,7 @@ impl Adapter for ClaudeCodeAdapter {
         let action = lock(&p.core).set_model(model);
         // The CLI writes the switch into the transcript as a typed `/model <name>`; it is ours,
         // not a prompt of someone else for the mirror to import.
-        p.io.own.sent(p.io.runtime, &format!("/model {model}"));
+        p.io.own.sent(p.io.runtime(), &format!("/model {model}"));
         p.io.run(vec![action]).await
     }
 
@@ -1249,13 +1332,15 @@ async fn monitor(
     mut exited: watch::Receiver<Option<ExitInfo>>,
     mut gate: watch::Receiver<bool>,
     stderr_tail: Arc<Mutex<String>>,
-    live: Live,
+    mut live: Live,
     ssh_agent: Option<crate::ssh::SshAgent>,
     secrets: Option<Arc<crate::secrets::ProcessSecrets>>,
     fork_copy: Option<RemoveOnDrop>,
 ) {
     let mut rd = BufReader::new(stdout);
     let mut buf = Vec::new();
+    let mut clearing: Option<Clearing> = None;
+    let mut earlier: Vec<Earlier> = Vec::new();
     let mut drain = exited.clone();
     let after_exit = async move {
         let _ = drain.wait_for(Option::is_some).await;
@@ -1269,13 +1354,42 @@ async fn monitor(
                 Ok(_) => {
                     let line = String::from_utf8_lossy(&buf).into_owned();
                     buf.clear();
-                    let (actions, seen) = {
+                    let (actions, seen, cleared) = {
                         let mut c = lock(&core);
                         let a = c.on_line(&line);
-                        (a, c.take_seen())
+                        (a, c.take_seen(), c.clearing())
                     };
+                    // `/clear`: the CLI begins the new transcript before the `init` that names
+                    // it (~70 ms, `w1-clear`); the mirror is not to take it for someone else's.
+                    if cleared && clearing.is_none() {
+                        clearing = io
+                            .transcript()
+                            .as_deref()
+                            .and_then(Path::parent)
+                            .map(|d| Clearing::new(io.own.clone(), d.to_path_buf()));
+                    }
+                    // After `/clear` the process writes the new transcript: its records from
+                    // this line on are that one's, and the old one is no longer written; what
+                    // it wrote there stays its own (SPEC §9.2).
+                    for a in &actions {
+                        if let Action::Emit(AdapterEvent::RuntimeSessionId(r)) = a {
+                            if let Ok(new) = r.parse::<Uuid>() {
+                                let until = match io.transcript() {
+                                    Some(p) => tokio::fs::metadata(p).await.map_or(0, |m| m.len()),
+                                    None => 0,
+                                };
+                                io.moved_to(new);
+                                earlier.push(Earlier::new(io.own.clone(), live.1, until));
+                                live = Live::new(io.own.clone(), new, live.2);
+                            }
+                        }
+                    }
+                    // Unmarked once the new transcript is live, or the turn of `/clear` ended.
+                    if !cleared {
+                        clearing = None;
+                    }
                     for u in seen {
-                        io.own.add(io.runtime, u);
+                        io.own.add(io.runtime(), u);
                     }
                     if let Err(e) = io.run(actions).await {
                         tracing::warn!(session_id = %io.session_id, "{e:#}");
@@ -1293,6 +1407,8 @@ async fn monitor(
     // The process wrote its last record: the mirror may treat what follows as another
     // writer's.
     drop(live);
+    drop(earlier);
+    drop(clearing);
     // Its ssh-agent goes with it (T44), its secrets (SPEC 0.147) and the fork copy it resumed
     // (SPEC §8.1).
     drop(secrets);

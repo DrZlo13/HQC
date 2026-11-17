@@ -22,7 +22,17 @@
 //!   task_notification` with the summary, and `<tool-use-id>`, `<status>` and `<task-id>` of
 //!   the text before `<summary>` as `call_id`, `status` and `task_id`. While the worker's own
 //!   process runs the session the mirror does not emit it: the adapter reported the
-//!   stream-json line, whose uuid differs.
+//!   stream-json line, whose uuid differs;
+//! - the CLI's own lines written as `user` text: `[Request interrupted by user]` and `[Request
+//!   interrupted by user for tool use]` → `system turn_interrupted` "Interrupted";
+//!   `<command-name>/x</command-name>…<command-args>a</command-args>` (or with
+//!   `<command-message>` first) → `user.message` `/x a`;
+//!   `<local-command-stdout>…` / `<local-command-stderr>…` → `system command_output` with the
+//!   output, none for an empty one; never a `user.message` with the tags;
+//! - `system` `local_command` (a slash command's output, 2.1.312) → `system command_output`
+//!   the same way;
+//! - the summary record after a `system` `compact_boundary` → `system context_compacted` with
+//!   the summary ([`compaction`]), as from the adapter.
 //!
 //! Empty thinking (2.1.308 writes only a signature), images and unknown blocks give no event.
 //! `session_id` and the author ids are nil: the worker does not know the hqc session, the
@@ -36,13 +46,20 @@ use hqc_proto::event::{Author, ClarifyAnswer, Delivery, Event, EventKind};
 use uuid::Uuid;
 
 use crate::adapter::claude_code::engine::{
-    args_preview, parse_questions, preview, result_text, text, ERROR_TEXT_LIMIT, PREVIEW_LIMIT,
-    SYNTHETIC_MODEL, TASK_NOTIFICATION,
+    args_preview, parse_questions, preview, result_text, text, COMMAND_OUTPUT, CONTEXT_COMPACTED,
+    CONTEXT_COMPACTED_TEXT, ERROR_TEXT_LIMIT, PREVIEW_LIMIT, SYNTHETIC_MODEL, TASK_NOTIFICATION,
+    TURN_INTERRUPTED, TURN_INTERRUPTED_TEXT,
 };
 
 /// `origin.kind` of the `user` record of a background task's notification (2.1.312), and
 /// `commandMode` of the `queued_command` of one that came while a turn ran.
 const TASK_NOTIFICATION_ORIGIN: &str = "task-notification";
+
+/// The texts of the `user` record the CLI writes when an interrupt stops a turn (2.1.312).
+const INTERRUPTED: [&str; 2] = [
+    "[Request interrupted by user]",
+    "[Request interrupted by user for tool use]",
+];
 
 /// A main-chain record of a background task's notification: a `user` record, or an
 /// `attachment` of a task's end that came while a turn ran ([`queued_notification`]).
@@ -99,8 +116,110 @@ pub fn record_events(record: &Record, in_reply_to: Option<Uuid>) -> Vec<Event> {
             }
             _ => queued(a),
         },
+        Record::System(s) => local_command(s),
         _ => vec![],
     }
+}
+
+/// A main-chain `system` `local_command` record: a slash command's output.
+pub fn is_local_command(record: &Record) -> bool {
+    matches!(record, Record::System(s) if s.subtype.as_deref() == Some("local_command") && !s.is_sidechain)
+}
+
+/// The uuid of a main-chain `system` `compact_boundary` record: a compaction began there.
+pub fn compact_boundary(record: &Record) -> Option<Uuid> {
+    match record {
+        Record::System(s)
+            if s.subtype.as_deref() == Some("compact_boundary") && !s.is_sidechain =>
+        {
+            s.uuid
+        }
+        _ => None,
+    }
+}
+
+/// The summary record a compaction writes after its `compact_boundary` (`isCompactSummary`),
+/// of the main chain; the next one after the boundary, though not always its child (2.1.312
+/// puts attachments between them).
+pub fn is_compact_summary(record: &Record) -> bool {
+    matches!(record, Record::User(m) if m.is_compact_summary && !m.is_sidechain)
+}
+
+/// The compaction of summary record `summary`: `system context_compacted` with the summary's
+/// text, "Context compacted" when it has none, the id derived from the uuid of the
+/// `compact_boundary` before it as the adapter derives it, from the summary's own without
+/// one.
+pub fn compaction(summary: &Message, boundary: Option<Uuid>) -> Event {
+    let body = summary
+        .blocks()
+        .iter()
+        .filter(|b| b["type"] == "text")
+        .filter_map(|b| b["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let t = if body.trim().is_empty() {
+        CONTEXT_COMPACTED_TEXT.into()
+    } else {
+        text(&body)
+    };
+    system_at(
+        boundary.unwrap_or(summary.uuid),
+        ts(summary),
+        0,
+        CONTEXT_COMPACTED,
+        t,
+    )
+}
+
+/// A slash command's output of a `system` `local_command` record.
+fn local_command(s: &hqc_claude_jsonl::System) -> Vec<Event> {
+    let (Some(uuid), Some(t)) = (s.uuid, s.content.as_str()) else {
+        return vec![];
+    };
+    if s.subtype.as_deref() != Some("local_command") || s.is_sidechain || s.is_meta {
+        return vec![];
+    }
+    command_output(t)
+        .map(|o| system_at(uuid, parse_ts(s.timestamp.as_deref()), 0, COMMAND_OUTPUT, o))
+        .into_iter()
+        .collect()
+}
+
+/// Text a slash command printed: it starts with `<local-command-stdout>` or
+/// `<local-command-stderr>`.
+fn is_command_output(t: &str) -> bool {
+    t.starts_with("<local-command-stdout>") || t.starts_with("<local-command-stderr>")
+}
+
+/// What `<local-command-stdout>` and `<local-command-stderr>` of `t` hold, one after the
+/// other, at most [`PREVIEW_LIMIT`] bytes; `None` when both are empty.
+fn command_output(t: &str) -> Option<String> {
+    let out: Vec<&str> = ["local-command-stdout", "local-command-stderr"]
+        .iter()
+        .filter_map(|name| tag(t, name))
+        .collect();
+    (!out.is_empty()).then(|| preview(&out.join("\n"), PREVIEW_LIMIT))
+}
+
+/// `/x a` of a slash command record, which the CLI writes as
+/// `<command-name>/x</command-name> <command-message>…</command-message>
+/// <command-args>a</command-args>` (a skill's, up to 2.1.309 at least, with
+/// `<command-message>…` first); `None` for other text.
+fn command(t: &str) -> Option<String> {
+    let t = t.trim();
+    if !t.starts_with("<command-name>") && !t.starts_with("<command-message>") {
+        return None;
+    }
+    let tag = |name: &str| {
+        let (open, close) = (format!("<{name}>"), format!("</{name}>"));
+        let rest = &t[t.find(&open)? + open.len()..];
+        Some(rest[..rest.find(&close)?].trim())
+    };
+    let name = tag("command-name")?;
+    Some(match tag("command-args").filter(|a| !a.is_empty()) {
+        Some(args) => format!("{name} {args}"),
+        None => name.to_string(),
+    })
 }
 
 /// The `user.message` among `events`: a prompt typed by a person, the `in_reply_to` of the
@@ -147,6 +266,24 @@ fn event_at(uuid: Uuid, ts: DateTime<Utc>, index: usize, author: Author, kind: E
 
 fn agent() -> Author {
     Author::Agent { id: Uuid::nil() }
+}
+
+/// `system` `code` with `text` at `ts`, the id of content block `index` of record `uuid`.
+fn system_at(uuid: Uuid, ts: DateTime<Utc>, index: usize, code: &str, text: String) -> Event {
+    event_at(
+        uuid,
+        ts,
+        index,
+        Author::System,
+        EventKind::System {
+            text,
+            code: code.into(),
+            call_id: None,
+            status: None,
+            task_id: None,
+            fork: None,
+        },
+    )
 }
 
 /// The text of `<tag>…</tag>` in a notification, trimmed; `None` when absent or empty.
@@ -200,14 +337,34 @@ fn user(m: &Message) -> Vec<Event> {
         match b["type"].as_str() {
             Some("text") => {
                 let t = b["text"].as_str().unwrap_or("");
-                if t.trim().is_empty() {
+                let line = t.trim();
+                if line.is_empty() {
                     continue;
                 }
+                // The CLI's own lines are no message a person typed.
+                if INTERRUPTED.contains(&line) {
+                    out.push(system_at(
+                        m.uuid,
+                        ts(m),
+                        i,
+                        TURN_INTERRUPTED,
+                        TURN_INTERRUPTED_TEXT.into(),
+                    ));
+                    continue;
+                }
+                if is_command_output(line) {
+                    out.extend(
+                        command_output(line)
+                            .map(|o| system_at(m.uuid, ts(m), i, COMMAND_OUTPUT, o)),
+                    );
+                    continue;
+                }
+                let typed = command(line);
                 out.push(event(
                     m,
                     i,
                     Author::User { id: Uuid::nil() },
-                    user_message(t),
+                    user_message(typed.as_deref().unwrap_or(t)),
                 ));
             }
             Some("tool_result") => {
@@ -404,34 +561,23 @@ pub fn typed_text(record: &Record) -> Option<String> {
         .filter(|b| b["type"] == "text")
         .find_map(|b| b["text"].as_str())?
         .trim();
-    let tag = |name: &str| {
-        let (open, close) = (format!("<{name}>"), format!("</{name}>"));
-        let rest = &t[t.find(&open)? + open.len()..];
-        Some(rest[..rest.find(&close)?].trim())
-    };
-    Some(
-        match tag("command-name").filter(|_| t.starts_with("<command-name>")) {
-            Some(name) => match tag("command-args").filter(|a| !a.is_empty()) {
-                Some(args) => format!("{name} {args}"),
-                None => name.to_string(),
-            },
-            None => t.to_string(),
-        },
-    )
+    Some(command(t).unwrap_or_else(|| t.to_string()))
 }
 
 /// `uuid` of a record that counts for the foreign-writer check (SPEC §9.3): a main-chain
-/// `user`/`assistant` record or a message typed while a turn ran that maps to at least one
-/// event. A signature-only thinking record, which stream-json may not repeat, is not evidence
-/// of another writer.
+/// `user`/`assistant` record, a message typed while a turn ran or a `system` record that maps
+/// to at least one event, and a compaction's summary record. A signature-only thinking
+/// record, which stream-json may not repeat, is not evidence of another writer.
 pub fn counted_uuid(record: &Record) -> Option<Uuid> {
     match record {
+        Record::User(m) if is_compact_summary(record) => Some(m.uuid),
         Record::User(m) | Record::Assistant(m)
             if m.is_main() && !record_events(record, None).is_empty() =>
         {
             Some(m.uuid)
         }
         Record::Attachment(a) if !record_events(record, None).is_empty() => a.uuid,
+        Record::System(s) if !record_events(record, None).is_empty() => s.uuid,
         _ => None,
     }
 }
@@ -863,5 +1009,141 @@ mod tests {
             .unwrap();
         assert_eq!(counted_uuid(thinking), None);
         assert!(records.iter().filter_map(counted_uuid).count() == 6);
+    }
+
+    /// The CLI's own lines (the shapes of records on 2.1.263, 2.1.308 and 2.1.312): an interrupt
+    /// is `system turn_interrupted`, a slash command `/x args`, its output `system command_output`
+    /// (none when empty), also from a `system local_command` record; the caveat gives nothing;
+    /// never a `user.message` with the tags.
+    #[test]
+    fn service_lines_of_the_cli() {
+        let user = |content: serde_json::Value, meta: bool| {
+            serde_json::json!({"type": "user", "uuid": Uuid::new_v4(), "isMeta": meta,
+                "timestamp": "2026-11-11T22:34:41.584Z",
+                "message": {"role": "user", "content": content}})
+            .to_string()
+        };
+        let system = |subtype: &str, content: &str| {
+            serde_json::json!({"type": "system", "subtype": subtype, "content": content,
+                "level": "info", "isMeta": false, "uuid": Uuid::new_v4(),
+                "timestamp": "2026-11-11T22:34:41.584Z"})
+            .to_string()
+        };
+        let cases = [
+            (
+                user(
+                    serde_json::json!([{"type": "text", "text": "[Request interrupted by user for tool use]"}]),
+                    false,
+                ),
+                vec!["system:turn_interrupted:Interrupted"],
+            ),
+            (
+                user(serde_json::json!("[Request interrupted by user]"), false),
+                vec!["system:turn_interrupted:Interrupted"],
+            ),
+            (
+                user(
+                    serde_json::json!("<local-command-caveat>Caveat: The messages below were generated by the user while running local commands.</local-command-caveat>"),
+                    true,
+                ),
+                vec![],
+            ),
+            (
+                user(
+                    serde_json::json!("<command-name>/cost</command-name>\n            <command-message>cost</command-message>\n            <command-args></command-args>"),
+                    false,
+                ),
+                vec!["user:/cost"],
+            ),
+            (
+                user(
+                    serde_json::json!("<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>haiku</command-args>"),
+                    false,
+                ),
+                vec!["user:/model haiku"],
+            ),
+            (
+                user(
+                    serde_json::json!("<command-message>architect</command-message>\n<command-name>/architect</command-name>"),
+                    false,
+                ),
+                vec!["user:/architect"],
+            ),
+            (
+                user(
+                    serde_json::json!("<local-command-stdout>Total cost: $0.0123</local-command-stdout>"),
+                    false,
+                ),
+                vec!["system:command_output:Total cost: $0.0123"],
+            ),
+            (
+                user(
+                    serde_json::json!("<local-command-stdout></local-command-stdout>"),
+                    false,
+                ),
+                vec![],
+            ),
+            (
+                user(
+                    serde_json::json!("<local-command-stderr>Unknown model</local-command-stderr>"),
+                    false,
+                ),
+                vec!["system:command_output:Unknown model"],
+            ),
+            (
+                system(
+                    "local_command",
+                    "<local-command-stdout>Design agent access granted.</local-command-stdout>",
+                ),
+                vec!["system:command_output:Design agent access granted."],
+            ),
+            (system("stop_hook_summary", ""), vec![]),
+        ];
+        for (line, want) in cases {
+            let rec = hqc_claude_jsonl::parse_line(&line).unwrap();
+            let evs = record_events(&rec, None);
+            let got: Vec<String> = evs
+                .iter()
+                .map(|e| match &e.kind {
+                    EventKind::System { code, text, .. } => format!("system:{code}:{text}"),
+                    other => label(&Event {
+                        kind: other.clone(),
+                        ..e.clone()
+                    }),
+                })
+                .collect();
+            assert_eq!(got, want, "{line}");
+            assert_eq!(counted_uuid(&rec).is_some(), !want.is_empty(), "{line}");
+            let prompt = want.first().is_some_and(|w| w.starts_with("user:"));
+            assert_eq!(prompt_id(&evs).is_some(), prompt, "{line}");
+        }
+    }
+
+    /// A compaction is one `context_compacted` from its summary record, the id derived from the
+    /// boundary's uuid as the adapter derives it (fixture `resume-compact`); without the
+    /// boundary, from the summary's own.
+    #[test]
+    fn compaction_from_its_summary() {
+        let (records, _) = parse_str(include_str!(
+            "../../../hqc-claude-jsonl/fixtures/resume-compact-2.1.308.jsonl"
+        ));
+        let boundary = records.iter().find_map(compact_boundary).unwrap();
+        let Some(Record::User(summary)) = records.iter().find(|r| is_compact_summary(r)) else {
+            panic!("no summary");
+        };
+        let e = compaction(summary, Some(boundary));
+        assert_eq!(e.event_id, Event::id_from_claude_block(&boundary, 0));
+        let EventKind::System { code, text, .. } = &e.kind else {
+            panic!("{:?}", e.kind)
+        };
+        assert_eq!(code, CONTEXT_COMPACTED);
+        assert!(
+            text.starts_with("This session is being continued"),
+            "{text}"
+        );
+        assert_eq!(
+            compaction(summary, None).event_id,
+            Event::id_from_claude_block(&summary.uuid, 0)
+        );
     }
 }

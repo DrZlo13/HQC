@@ -70,17 +70,29 @@
 //!   `background_requested` and `tool_deferred` ([`turn_end_line`]), then `status idle`, end
 //!   of turn;
 //!   `usage.cost_usd` is the growth of the CLI's cumulative `total_cost_usd` since the previous
-//!   `usage` with a `cost_usd` (or since the transcript's last `cost-state` after `--resume`),
-//!   `session_cost_usd` the total itself;
+//!   `usage` with a `cost_usd` (or since the transcript's last `cost-state` after `--resume`,
+//!   or since 0 after `conversation_reset`), `session_cost_usd` the total itself;
 //!   a request of the main agent or of a foreground subagent still open then gets
 //!   `approval.cancel` / `clarify.cancel` `stopped`, any other subagent's stays open until its
 //!   `task_notification`, which cancels it; an input written during the turn and not echoed
 //!   is taken, carried into the next turn or not taken by its last `command_lifecycle` (SPEC
 //!   §17.2); a carried input `cancelled` after the `result` ends the turn it was carried
 //!   into; a carried local command is taken by its own `result`;
-//! - `system` `init` → the model, and [`AdapterEvent::Commands`] when its `slash_commands`
-//!   differ from what this process reported (the CLI sends `init` before every turn); one
-//!   while no turn of ours runs (a turn the CLI starts by itself) → `status running` first;
+//! - `system` `init` → the model, and [`AdapterEvent::Commands`] when the commands differ
+//!   from what this process reported (the CLI sends `init` before every turn): those of the
+//!   CLI's answer to our `initialize` or of its latest `system` `commands_changed`, with
+//!   their descriptions and argument hints, else the names of `slash_commands`, without
+//!   `terminal_slash_commands` ([`Core::report_commands`]); the answer and
+//!   `commands_changed` report them too; one `init` while no turn of ours runs (a turn the CLI
+//!   starts by itself) → `status running` first;
+//! - `conversation_reset` (`/clear`) → `system conversation_cleared`, and the cost baseline
+//!   starts from 0 again; the next `system` `init` with another `session_id` →
+//!   [`AdapterEvent::RuntimeSessionId`] with it, the transcript the CLI writes from then on;
+//! - `system` `session_title_changed` (a person's title, `/rename`; the CLI's own is only in
+//!   the transcript) → [`AdapterEvent::Title`] at once;
+//! - the result of the main agent's `ScheduleWakeup` call → [`AdapterEvent::Wakeup`] with its
+//!   `scheduledFor`, none for 0; a `command_lifecycle` `started` with `wakeup_source:
+//!   loop_wakeup` and that `scheduled_for` → [`AdapterEvent::Wakeup`] with none;
 //! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint` and the hqc
 //!   rules suggested for the call) / `clarify.request`, an immediate allow by a `session`
 //!   rule or by the folder's hqc rules (T48), or an immediate deny plus `system
@@ -91,8 +103,7 @@
 //!   `set_permission_mode` → [`AdapterEvent::PermissionMode`] when it changes (T38), and
 //!   on every success of our `set_permission_mode` (T39);
 //! - the CLI's answers to our `set_model`, `background_tasks` and `stop_task` are only logged;
-//! - the CLI's answer to our `initialize` ([`Core::initialize`]) and the other
-//!   `control_response` lines, the CLI's echo of ours, are skipped.
+//! - the other `control_response` lines, the CLI's echo of ours, are skipped.
 //!
 //! U+0000 in any text taken from the CLI (binary tool output) becomes U+FFFD ([`text`],
 //! [`preview`]): the hub's Postgres refuses it (SPEC §5.2).
@@ -109,7 +120,7 @@ use hqc_proto::event::{
     ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAnswer, ClarifyQuestion, Event,
     EventKind, LiveKind, LiveSubagent, SessionState,
 };
-use hqc_proto::frame::{PermissionMode, SessionInput};
+use hqc_proto::frame::{PermissionMode, SessionInput, SlashCommand};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -149,10 +160,25 @@ pub const TURN_INTERRUPTED_TEXT: &str = "Interrupted";
 /// `terminal_reason` other than `completed`, `background_requested` and `tool_deferred` (SPEC
 /// §4, §8.1).
 pub const TURN_ENDED_EARLY: &str = "turn_ended_early";
+/// `system.code` of `/clear`: stream-json `conversation_reset`, after which the CLI goes on in
+/// a new conversation, another transcript (SPEC §4, §8.1).
+pub const CONVERSATION_CLEARED: &str = "conversation_cleared";
+pub const CONVERSATION_CLEARED_TEXT: &str = "Conversation cleared";
+/// `system.code` of a slash command's output in a transcript the mirror reads:
+/// `<local-command-stdout>` / `<local-command-stderr>` (SPEC §4, §9.1).
+pub const COMMAND_OUTPUT: &str = "command_output";
+/// At most this many bytes of a slash command's description and argument hint are reported.
+pub const COMMAND_TEXT_LIMIT: usize = 200;
+/// At most this many slash commands are reported, and none whose name is longer than
+/// [`COMMAND_NAME_LIMIT`] characters: what the hub keeps (SPEC §5.4).
+pub const COMMANDS_LIMIT: usize = 500;
+pub const COMMAND_NAME_LIMIT: usize = 100;
 /// `message.model` of a reply the CLI wrote itself instead of the model ("Credit balance is
 /// too low", API errors; 2.1.312, stream-json and transcript alike): `agent.message` with
 /// `runtime: true`.
 pub const SYNTHETIC_MODEL: &str = "<synthetic>";
+/// `request_id` prefix of our `initialize` control request.
+const INIT_REQUEST: &str = "hqc-init-";
 /// `request_id` prefix of our `set_permission_mode` control requests.
 const MODE_REQUEST: &str = "hqc-mode-";
 /// `request_id` prefix of our `set_model` control requests.
@@ -310,13 +336,34 @@ pub struct Core {
     folder: Option<(FolderRules, std::path::PathBuf)>,
     model: Option<String>,
     /// The session's cumulative cost as of the last `usage` with a `cost_usd` (or the
-    /// transcript's last `cost-state` when resumed): the baseline of the next turn's cost.
+    /// transcript's last `cost-state` when resumed, none after `/clear`): the baseline of the
+    /// next turn's cost.
     cost_total: Option<f64>,
     /// A `compact_boundary` came since the last `result`: a `result` with no model turn costs
     /// for the compaction itself.
     compacted: bool,
     /// The slash commands last reported by this process.
-    commands: Option<Vec<String>>,
+    commands: Option<Vec<SlashCommand>>,
+    /// The commands of the CLI's answer to our `initialize` or of its latest `system`
+    /// `commands_changed`, with what it says of each ([`Core::report_commands`]).
+    listed: Option<Vec<SlashCommand>>,
+    /// `slash_commands` and `terminal_slash_commands` of the latest `system/init`.
+    init_commands: Option<Vec<String>>,
+    terminal_commands: Vec<String>,
+    /// A `conversation_reset` came (`/clear`): the next `system/init` with another
+    /// `session_id` names the transcript the CLI goes on in.
+    cleared: bool,
+    /// [`Core::clearing`]: from `conversation_reset` until that `system/init` or the `result`
+    /// of the turn it came in.
+    clearing: bool,
+    /// The conversation is new (a new session, `/clear`) and its first model turn has not
+    /// ended: the CLI writes its `ai-title` then.
+    fresh: bool,
+    /// Ids of the main agent's `ScheduleWakeup` `tool_use` blocks, until their result.
+    wakeup_calls: HashSet<String>,
+    /// When the wakeup the main agent armed last is due, in epoch ms (the `scheduledFor` of
+    /// its `ScheduleWakeup` result), until it starts or a later call replaces or stops it.
+    wakeup: Option<i64>,
     /// The permission mode last reported by this process.
     permission_mode: Option<PermissionMode>,
     /// Message uuids read since the last [`Core::take_seen`].
@@ -370,6 +417,12 @@ pub struct Core {
 }
 
 impl Core {
+    /// A `conversation_reset` came, and neither has a `system/init` named the new transcript
+    /// yet nor has the turn it came in ended.
+    pub fn clearing(&self) -> bool {
+        self.clearing
+    }
+
     /// Uuids of the main-chain `user`/`assistant` messages (with the prompt echoes) read
     /// from stdout since the last call, for [`crate::mirror::OwnRecords`].
     pub fn take_seen(&mut self) -> Vec<Uuid> {
@@ -406,6 +459,14 @@ impl Core {
             cost_total: None,
             compacted: false,
             commands: None,
+            listed: None,
+            init_commands: None,
+            terminal_commands: Vec::new(),
+            cleared: false,
+            clearing: false,
+            fresh: false,
+            wakeup_calls: HashSet::new(),
+            wakeup: None,
             permission_mode: None,
             seen: Vec::new(),
             quiet_tasks: HashMap::new(),
@@ -442,6 +503,18 @@ impl Core {
     pub fn with_cost_baseline(mut self, total: Option<f64>) -> Self {
         self.cost_total = total;
         self
+    }
+
+    /// The process starts a new session's conversation ([`super::Launch::new_conversation`]).
+    pub fn with_new_conversation(mut self, new: bool) -> Self {
+        self.fresh = new;
+        self
+    }
+
+    /// The conversation is new and its first model turn has not ended: the token rate's
+    /// ticker reads the transcript's title on each tick of it.
+    pub fn fresh(&self) -> bool {
+        self.fresh
     }
 
     /// Whether turn number `turn` (from [`Core::interrupt`]) is still running.
@@ -558,11 +631,12 @@ impl Core {
     /// of every process's stdin (SPEC §8.1): with it an `interrupt` stops the turn and spares
     /// the background subagents and workflows, which it kills otherwise (2.1.312). The CLI
     /// applies it only before the first user message: one after it is taken as a second
-    /// client's and changes nothing. Its answer is skipped ([`Core::on_control_response`]).
+    /// client's and changes nothing. Its answer gives the CLI's slash commands with their
+    /// descriptions ([`Core::on_control_response`]).
     pub fn initialize(&self) -> Action {
         Action::Write(json!({
             "type": "control_request",
-            "request_id": format!("hqc-init-{}", Uuid::now_v7()),
+            "request_id": format!("{INIT_REQUEST}{}", Uuid::now_v7()),
             "request": {"subtype": "initialize", "perTaskStopAffordance": true},
         }))
     }
@@ -795,11 +869,16 @@ impl Core {
                 self.seen.push(u);
             }
         }
-        // A Monitor's task is listed as a command ([`Core::bash_tasks`]), a subagent's too.
+        // A Monitor's task is listed as a command ([`Core::bash_tasks`]), a subagent's too. A
+        // wakeup is the main agent's only (2.1.312 arms none for a subagent).
         if ty == "assistant" {
             for b in blocks(&v) {
                 if b["type"] == "tool_use" && b["name"] == "Monitor" {
                     self.monitor_calls
+                        .extend(b["id"].as_str().map(str::to_owned));
+                }
+                if b["type"] == "tool_use" && b["name"] == "ScheduleWakeup" && !sub {
+                    self.wakeup_calls
                         .extend(b["id"].as_str().map(str::to_owned));
                 }
             }
@@ -831,6 +910,16 @@ impl Core {
             "result" => self.on_result(&v),
             "control_request" => self.on_control_request(&v),
             "control_response" => self.on_control_response(&v),
+            // `/clear` (2.1.312): the CLI goes on in a new conversation, whose transcript the
+            // next `system/init` names, and counts `total_cost_usd` from 0 again.
+            "conversation_reset" => {
+                tracing::info!(session_id = %self.session_id, trigger = ?v["trigger"].as_str(), "conversation cleared");
+                self.cleared = true;
+                self.clearing = true;
+                self.fresh = true;
+                self.cost_total = None;
+                vec![self.emit_system(CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT.into())]
+            }
             "system" => match v["subtype"].as_str() {
                 Some("init") => {
                     // The CLI sends `init` before every turn; one without ours is its own, and
@@ -846,7 +935,19 @@ impl Core {
                         }));
                     }
                     self.model = v["model"].as_str().map(str::to_owned);
-                    self.cli_session = v["session_id"].as_str().map(str::to_owned);
+                    // The first `init` after `/clear` comes with the new conversation's id, the
+                    // name of its transcript (`w1-clear`): the session goes on there.
+                    let id = v["session_id"].as_str();
+                    if let Some(new) = id
+                        .filter(|id| self.cleared && Some(*id) != self.cli_session.as_deref())
+                        .and_then(|id| id.parse::<Uuid>().ok())
+                    {
+                        self.cleared = false;
+                        self.clearing = false;
+                        tracing::info!(session_id = %self.session_id, runtime_session_id = %new, "the conversation goes on in a new transcript");
+                        out.push(Action::Emit(AdapterEvent::RuntimeSessionId(new.to_string())));
+                    }
+                    self.cli_session = id.map(str::to_owned);
                     out.extend(self.on_mode(&v["permissionMode"], false));
                     out.extend(self.on_init(&v));
                     out
@@ -938,6 +1039,24 @@ impl Core {
                     );
                     vec![]
                 }
+                // A person gave the session a title (`/rename`), at once. The CLI's own title
+                // is not streamed (2.1.312): the adapter reads it from the transcript.
+                Some("session_title_changed") => v["title"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(|t| Action::Emit(AdapterEvent::Title(text(t))))
+                    .into_iter()
+                    .collect(),
+                // The whole list again after a change during the session (a skill found as
+                // the agent works in a subfolder, `/reload-plugins`).
+                Some("commands_changed") => match command_list(&v["commands"]) {
+                    Some(list) => {
+                        self.listed = Some(list);
+                        self.report_commands()
+                    }
+                    None => vec![],
+                },
                 _ => vec![],
             },
             _ => vec![],
@@ -972,13 +1091,23 @@ impl Core {
         vec![Action::Emit(AdapterEvent::PermissionMode(mode))]
     }
 
-    /// The CLI's answer to our `set_permission_mode`, `set_model`, `background_tasks` or
-    /// `stop_task` (the latter three logged); the answer to our `initialize` (the CLI's
-    /// commands, models and account, or an error) and every other `control_response`, the echo
-    /// of one of ours, are skipped.
+    /// The CLI's answer to our `initialize` (its slash commands with their descriptions, its
+    /// models and account, or an error), `set_permission_mode`, `set_model`,
+    /// `background_tasks` or `stop_task` (the latter three logged); every other
+    /// `control_response`, the echo of one of ours, is skipped.
     fn on_control_response(&mut self, v: &Value) -> Vec<Action> {
         let r = &v["response"];
         let id = r["request_id"].as_str().unwrap_or("");
+        if id.starts_with(INIT_REQUEST) {
+            let Some(list) =
+                command_list(&r["response"]["commands"]).filter(|_| r["subtype"] == "success")
+            else {
+                tracing::warn!(session_id = %self.session_id, error = %r["error"], "claude answered initialize without commands");
+                return vec![];
+            };
+            self.listed = Some(list);
+            return self.report_commands();
+        }
         if id.starts_with(STOP_TASK_REQUEST) {
             if r["subtype"] == "success" {
                 tracing::info!(session_id = %self.session_id, request_id = id, "task stopped");
@@ -1013,9 +1142,8 @@ impl Core {
         vec![]
     }
 
-    /// `slash_commands` of `system/init` without those that only work in the terminal UI
-    /// (`terminal_slash_commands`) and the CLI's internal ones (`__name`); reported once per
-    /// process and again only when the list changes (`/reload-plugins`, a new skill).
+    /// `slash_commands` and `terminal_slash_commands` of `system/init`, for
+    /// [`Core::report_commands`].
     fn on_init(&mut self, v: &Value) -> Vec<Action> {
         // An older CLI without the list: nothing to report.
         if !v["slash_commands"].is_array() {
@@ -1029,12 +1157,43 @@ impl Core {
                 .map(|c| text(c.trim().trim_start_matches('/')))
                 .collect()
         };
-        let terminal = names(&v["terminal_slash_commands"]);
-        let mut list: Vec<String> = Vec::new();
-        for c in names(&v["slash_commands"]) {
-            if !c.is_empty() && !c.starts_with('_') && !terminal.contains(&c) && !list.contains(&c)
+        self.terminal_commands = names(&v["terminal_slash_commands"]);
+        self.init_commands = Some(names(&v["slash_commands"]));
+        self.report_commands()
+    }
+
+    /// The CLI's slash commands: those of its answer to `initialize` or of its latest
+    /// `commands_changed` with their descriptions and argument hints, else (before either, or
+    /// a CLI without them) the names of `slash_commands` of the latest `system/init`; without
+    /// those that only work in the terminal UI (`terminal_slash_commands` of the latest
+    /// `init`) and the CLI's internal ones (`__name`), within [`COMMANDS_LIMIT`] and
+    /// [`COMMAND_NAME_LIMIT`]. Reported once per process and again only when the list changes
+    /// (`/reload-plugins`, a new skill).
+    fn report_commands(&mut self) -> Vec<Action> {
+        let all: Vec<SlashCommand> = match (&self.listed, &self.init_commands) {
+            (Some(l), _) => l.clone(),
+            (None, Some(names)) => names
+                .iter()
+                .map(|n| SlashCommand {
+                    name: n.clone(),
+                    description: None,
+                    argument_hint: None,
+                })
+                .collect(),
+            (None, None) => return vec![],
+        };
+        let mut list: Vec<SlashCommand> = Vec::new();
+        for c in all {
+            if !c.name.is_empty()
+                && !c.name.starts_with('_')
+                && c.name.chars().count() <= COMMAND_NAME_LIMIT
+                && !self.terminal_commands.contains(&c.name)
+                && !list.iter().any(|l| l.name == c.name)
             {
                 list.push(c);
+                if list.len() == COMMANDS_LIMIT {
+                    break;
+                }
             }
         }
         if self.commands.as_ref() == Some(&list) {
@@ -1215,6 +1374,15 @@ impl Core {
     /// `local_command_without_echo_is_taken`; `/cost` on 2.1.312).
     fn on_lifecycle(&mut self, v: &Value) -> Vec<Action> {
         self.lifecycle = true;
+        // The armed wakeup fired: its turn starts, with the CLI's own `command_uuid`. One armed
+        // later while this fire waited is still due (`scheduled_for` names the one that fired).
+        if v["state"] == "started"
+            && v["wakeup_source"] == "loop_wakeup"
+            && self.wakeup.is_some()
+            && v["scheduled_for"].as_i64() == self.wakeup
+        {
+            return self.set_wakeup(None);
+        }
         let Some(uuid) = v["command_uuid"]
             .as_str()
             .and_then(|u| u.parse::<Uuid>().ok())
@@ -1250,6 +1418,18 @@ impl Core {
             self.turn += 1;
         }
         vec![Action::Emit(AdapterEvent::TurnEnded { carried, dropped })]
+    }
+
+    /// The wakeup now armed, `at` in epoch ms: [`AdapterEvent::Wakeup`] when it changed.
+    fn set_wakeup(&mut self, at: Option<i64>) -> Vec<Action> {
+        if self.wakeup == at {
+            return vec![];
+        }
+        tracing::info!(session_id = %self.session_id, scheduled_for = ?at, "wakeup");
+        self.wakeup = at;
+        vec![Action::Emit(AdapterEvent::Wakeup(
+            at.and_then(chrono::DateTime::from_timestamp_millis),
+        ))]
     }
 
     /// Subagent `task_id` started (`add`) or ended by the CLI's word: the new count when it
@@ -1565,6 +1745,15 @@ impl Core {
             out.extend(self.flush(false));
             let text = result_text(&block["content"]);
             let error = block["is_error"] == true;
+            // The wakeup a `ScheduleWakeup` call armed, `scheduledFor: 0` for none (`stopped`);
+            // a failed call changed nothing.
+            let call = block["tool_use_id"].as_str().unwrap_or("");
+            if self.wakeup_calls.remove(call) && !error {
+                let at = v["tool_use_result"]["scheduledFor"]
+                    .as_i64()
+                    .filter(|t| *t > 0);
+                out.extend(self.set_wakeup(at));
+            }
             out.push(self.emit(
                 record_event_id(&uuid, i),
                 EventKind::ToolResult {
@@ -1582,6 +1771,13 @@ impl Core {
 
     fn on_result(&mut self, v: &Value) -> Vec<Action> {
         self.self_turn = false;
+        // The turn of `/clear` ended without an `init` naming the new transcript: the folder is
+        // not held for it any longer.
+        self.clearing = false;
+        // A local command's result (`/clear`'s own) ends no model turn.
+        if v["local_command"].is_null() {
+            self.fresh = false;
+        }
         let mut out: Vec<Action> = self.flush(true).into_iter().collect();
         // A request the CLI no longer waits for: after "No" to one of two parallel calls it
         // ends the turn and drops the other. Without the cancel the hub keeps its card open
@@ -2140,6 +2336,32 @@ fn blocks(v: &Value) -> Vec<Value> {
         .as_array()
         .cloned()
         .unwrap_or_default()
+}
+
+/// The `commands` of the CLI's answer to `initialize` and of `system/commands_changed`
+/// (2.1.312: `{name, description, argumentHint, aliases?, builtin?}`): the name without `/`,
+/// the first line of the description and the argument hint, each at most
+/// [`COMMAND_TEXT_LIMIT`] bytes, an empty one absent; `None` unless `v` is a list.
+fn command_list(v: &Value) -> Option<Vec<SlashCommand>> {
+    let line = |s: &Value| {
+        s.as_str()
+            .and_then(|s| s.lines().next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| preview(s, COMMAND_TEXT_LIMIT))
+    };
+    Some(
+        v.as_array()?
+            .iter()
+            .filter_map(|c| {
+                Some(SlashCommand {
+                    name: text(c["name"].as_str()?.trim().trim_start_matches('/')),
+                    description: line(&c["description"]),
+                    argument_hint: line(&c["argumentHint"]),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// The subagent a `can_use_tool` request comes from: its `agent_id`, the `task_id` of the

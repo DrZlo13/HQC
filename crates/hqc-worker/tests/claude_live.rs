@@ -47,6 +47,7 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::RuntimeSessionId(s) => format!("runtime_session_id:{s}"),
         AdapterEvent::Title(t) => format!("title:{t}"),
         AdapterEvent::Commands(c) => format!("commands:{}", c.len()),
+        AdapterEvent::Wakeup(at) => format!("wakeup:{at:?}"),
         AdapterEvent::PermissionMode(m) => format!("permission_mode:{}", m.as_str()),
         AdapterEvent::Limits(_) => "limits".into(),
         AdapterEvent::Subagents(n) => format!("subagents:{n}"),

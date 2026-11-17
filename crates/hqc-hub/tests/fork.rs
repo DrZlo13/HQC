@@ -559,6 +559,68 @@ async fn a_fork_of_a_fork_cuts_where_the_records_are() {
     hub.finish().await;
 }
 
+/// After `/clear` the runtime goes on in another transcript (SPEC §8.1): a fork before a
+/// message of the conversation before it cuts the transcript that conversation was written in,
+/// one after the first answer after it the new one, and one before that answer starts a new
+/// conversation.
+#[tokio::test]
+async fn a_fork_before_a_clear_cuts_the_transcript_before_it() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    let start = ack_start(&mut w, &sid).await;
+    input(&hub, &mut w, &sid, "Remember APPLE.").await;
+    let a1 = reply(&mut w, &sid, "OK, APPLE.").await;
+    let m2 = input(&hub, &mut w, &sid, "/clear").await;
+    // The worker's line of `conversation_reset`, sent before the new transcript's state.
+    let mut line = agent_event(
+        &sid,
+        "system",
+        json!({"code": "conversation_cleared", "text": "Conversation cleared"}),
+    );
+    line["author"] = json!({"kind": "system"});
+    w.event(line).await;
+    // `/clear`'s own result ends its turn: no answer of the agent.
+    w.event(agent_event(
+        &sid,
+        "status",
+        json!({"state": "idle", "in_reply_to": m2["event_id"]}),
+    ))
+    .await;
+    let cleared = uuid::Uuid::new_v4().to_string();
+    for runtime in [runtime_of(&start), cleared.clone(), cleared.clone()] {
+        w.send(
+            "session.state",
+            json!({"session_id": sid, "process_state": "running", "locked_by": "hqc",
+                "runtime_session_id": runtime}),
+        )
+        .await;
+        w.expect("ack").await;
+    }
+    let m3 = input(&hub, &mut w, &sid, "What did I say?").await;
+    let a2 = reply(&mut w, &sid, "Nothing to remember.").await;
+    let m4 = input(&hub, &mut w, &sid, "And now?").await;
+
+    let f = fork(&hub, &sid, &m2).await;
+    let fs = ack_start(&mut w, &f).await;
+    assert_eq!(
+        fs["payload"]["fork"],
+        json!({"runtime_session_id": runtime_of(&start), "at_event_ids": [a1["event_id"]]})
+    );
+    // Before the first answer after `/clear` the agent's context was empty: a new conversation.
+    let f = fork(&hub, &sid, &m3).await;
+    let fs = ack_start(&mut w, &f).await;
+    assert!(fs["payload"]["fork"].is_null(), "{fs}");
+    let f = fork(&hub, &sid, &m4).await;
+    let fs = ack_start(&mut w, &f).await;
+    assert_eq!(
+        fs["payload"]["fork"],
+        json!({"runtime_session_id": cleared, "at_event_ids": [a2["event_id"]]})
+    );
+    hub.finish().await;
+}
+
 /// The text the worker gets for a person's input, acknowledged.
 async fn sent_text(hub: &TestHub, w: &mut FakeWorker, sid: &str, text: &str) -> Value {
     let (s, r) = hub

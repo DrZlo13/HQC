@@ -11,10 +11,15 @@
 //! prompt record with a new uuid (2.1.312, a message typed while a fresh process started). The
 //! mirror asks the registry whether a record is the adapter's and whether a process of the
 //! session runs right now. Keyed by `runtime_session_id` (the transcript's uuid); in memory only:
-//! after a worker restart the mirror's offsets on disk say what was already handled.
+//! after a worker restart the mirror's offsets on disk say what was already handled. After
+//! `/clear` the process goes on in a new transcript of the same folder, which the CLI writes
+//! before it names it (`w1-clear`): until then the folder is marked
+//! ([`OwnRecords::mark_clearing`]); the transcript before stays the process's until it ends
+//! ([`OwnRecords::begin_earlier`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use uuid::Uuid;
@@ -25,6 +30,9 @@ const INPUTS: usize = 32;
 #[derive(Debug, Default)]
 pub struct OwnRecords {
     inner: Mutex<HashMap<Uuid, Entry>>,
+    /// Transcript folders where a process cleared its conversation and has not named the
+    /// new transcript yet, with how many such processes.
+    clearing: Mutex<HashMap<PathBuf, u32>>,
 }
 
 #[derive(Debug, Default)]
@@ -33,6 +41,10 @@ struct Entry {
     /// Processes of the session alive now (a new one may start before the old one's
     /// monitor has finished).
     live: u32,
+    /// Live processes that wrote the transcript and went on in another after `/clear`.
+    earlier: u32,
+    /// The transcript's length when the last of them went on in another one.
+    earlier_until: u64,
     /// Their pids, when known: their entries in Claude Code's session registry are not
     /// another holder (SPEC §9.3).
     pids: Vec<u32>,
@@ -110,8 +122,64 @@ impl OwnRecords {
         self.lock().get(&session).is_some_and(|e| e.live > 0)
     }
 
+    /// The live process of transcript `session` went on in another one after `/clear`: what
+    /// it wrote there, the file's first `until` bytes, stays its own until it ends
+    /// ([`OwnRecords::of_live_process`]).
+    pub fn begin_earlier(&self, session: Uuid, until: u64) {
+        let mut m = self.lock();
+        let e = m.entry(session).or_default();
+        e.earlier += 1;
+        e.earlier_until = e.earlier_until.max(until);
+    }
+
+    /// That process is gone.
+    pub fn end_earlier(&self, session: Uuid) {
+        if let Some(e) = self.lock().get_mut(&session) {
+            e.earlier = e.earlier.saturating_sub(1);
+        }
+    }
+
+    /// A process of this worker writes the transcript now ([`OwnRecords::is_live`]), or it
+    /// still runs and wrote the record ending at byte `end` before its `/clear`: a record
+    /// added after the switch is another writer's (`--resume` of the old id).
+    pub fn of_live_process(&self, session: Uuid, end: u64) -> bool {
+        self.lock()
+            .get(&session)
+            .is_some_and(|e| e.live > 0 || (e.earlier > 0 && end <= e.earlier_until))
+    }
+
+    /// A process with its transcript in `folder` cleared its conversation (`/clear`): a
+    /// transcript the CLI begins there before the process's next `init` names it is that
+    /// process's.
+    pub fn mark_clearing(&self, folder: &Path) {
+        *self
+            .lock_clearing()
+            .entry(folder.to_path_buf())
+            .or_default() += 1;
+    }
+
+    /// That process named its new transcript, or it is gone.
+    pub fn unmark_clearing(&self, folder: &Path) {
+        let mut m = self.lock_clearing();
+        if let Some(n) = m.get_mut(folder) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                m.remove(folder);
+            }
+        }
+    }
+
+    /// A process of `folder` cleared its conversation and has not named the new transcript.
+    pub fn is_clearing(&self, folder: &Path) -> bool {
+        self.lock_clearing().contains_key(folder)
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, Entry>> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock_clearing(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, u32>> {
+        self.clearing.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 

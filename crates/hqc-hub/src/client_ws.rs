@@ -308,7 +308,11 @@ impl Client {
                     Ok(Some(s)) if s.owner_id == self.user.id => s,
                     _ => return true,
                 };
-                match state::view(&self.app, self.user.id, row).await {
+                // The summary carries no command_info: built as in a list.
+                match state::views(&self.app, self.user.id, vec![row])
+                    .await
+                    .map(|mut v| v.pop())
+                {
                     Ok(Some(v)) => {
                         self.send(ServerFrame::SessionSummary {
                             session: v.summary(),

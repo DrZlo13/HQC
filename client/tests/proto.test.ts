@@ -150,6 +150,15 @@ describe('examples/wire', () => {
     expect(s.spawned_by).toEqual({ session_id: '0199f3a2-7c10-7000-8000-000000000002', address: 'hqc/planner' });
     expect(sys.spawned_by).toBeUndefined();
     expect(() => parseSessionInfo({ ...(load('api.session.json') as object), commands: [1] })).toThrow();
+    // SPEC 0.162: the same commands with what the runtime says of each.
+    expect(s.command_info?.[0]).toEqual({
+      name: 'compact',
+      description: 'Clear conversation history but keep a summary in context. Optional: /compact [instructions for summarization]',
+      argument_hint: '<optional custom summarization instructions>',
+    });
+    expect(s.command_info?.[3]).toEqual({ name: 'code-review', description: undefined, argument_hint: undefined });
+    expect(sys.command_info).toBeUndefined();
+    expect(() => parseSessionInfo({ ...(load('api.session.json') as object), command_info: [{ description: 'x' }] })).toThrow();
     // T50: when it was archived; absent for a live one.
     expect(parseSessionInfo(load('api.session.archived.json'))).toMatchObject({ archived: true, archived_at: '2026-11-01T22:45:00Z' });
     expect(s.archived_at).toBeUndefined();

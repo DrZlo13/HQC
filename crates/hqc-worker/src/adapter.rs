@@ -73,14 +73,24 @@ pub enum AdapterEvent {
     /// The usage limits of the account the runtime runs on (Claude Code: `rate_limit_event`,
     /// SPEC §8.1); sent as `worker.limits`, the account being the worker's.
     Limits(hqc_proto::frame::Limits),
-    /// The runtime reported its own session id (ACP); sent in `session.state`.
+    /// The runtime reported its own session id (ACP), or the session goes on under another
+    /// one (Claude Code: after `/clear`, the new transcript, SPEC §8.1); sent in
+    /// `session.state`, and later starts continue it.
     RuntimeSessionId(String),
-    /// The runtime named the session (Claude Code: `ai-title` in the transcript, read when
-    /// a turn ends, SPEC §8.1); sent as `session.state.title`. Reported when it changes.
+    /// The runtime named the session (Claude Code: a title a person gave, `/rename`, from
+    /// `system/session_title_changed` at once; the transcript's title, the CLI's own included,
+    /// read every 2 s of the first model turn of a new session (`Launch::New`) or after
+    /// `/clear` while this process has sent no title, and at the end of each turn, SPEC §8.1);
+    /// sent as `session.state.title`. Reported when it changes.
     Title(String),
-    /// The runtime's slash commands, without `/` (Claude Code: `system/init`, SPEC §8.1);
-    /// sent as `session.state.commands`. Reported when the list changes.
-    Commands(Vec<String>),
+    /// The runtime's slash commands, without `/`, with what it says of each (Claude Code: the
+    /// answer to `initialize`, `system/commands_changed`, `system/init`, SPEC §8.1); sent as
+    /// `session.state.commands` and `command_info`. Reported when the list changes.
+    Commands(Vec<hqc_proto::frame::SlashCommand>),
+    /// When the wakeup the agent armed for itself is due (Claude Code: the result of its
+    /// `ScheduleWakeup` call), `None` once it fired or was stopped: until then idle unload
+    /// waits for it (SPEC §17.3). Reported when it changes.
+    Wakeup(Option<chrono::DateTime<chrono::Utc>>),
     /// The permission mode the runtime runs in (T38, Claude Code: `permissionMode` of
     /// `system/init` and `system/status`); sent as `session.state.permission_mode`.
     /// Reported when it changes.

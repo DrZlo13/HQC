@@ -10,12 +10,14 @@ use hqc_proto::event::{
     ApprovalCanonical, Author, CancelReason, ClarifyAnswer, ClarifyQuestion, Event, EventKind,
     LiveKind, SessionState,
 };
-use hqc_proto::frame::{Runtime, SessionInput};
+use hqc_proto::frame::{Runtime, SessionInput, SlashCommand};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::engine::{Action, Core};
+use super::engine::{
+    Action, Core, COMMAND_TEXT_LIMIT, CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT,
+};
 use super::process::{CommandSpec, OsSpawner, Sig};
 use super::scripted::ScriptedClaude;
 use super::{ClaudeCodeAdapter, ClaudeCodeAdapters, ClaudeOptions, Launch};
@@ -275,6 +277,7 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::RuntimeSessionId(_) => "runtime_session_id".into(),
             AdapterEvent::Title(_) => "title".into(),
             AdapterEvent::Commands(_) => "commands".into(),
+            AdapterEvent::Wakeup(at) => format!("wakeup:{}", at.is_some()),
             // Every `system/init` carries it; the T38 tests look at it on their own.
             AdapterEvent::PermissionMode(_) => continue,
             // Every turn's `rate_limit_event`; `limits_of_a_rate_limit_event` looks at it.
@@ -375,7 +378,7 @@ fn approval_options(evs: &[AdapterEvent]) -> Vec<(String, ApprovalCanonical)> {
 }
 
 /// T13 (SPEC §8.1): when the turn ends the adapter reads the transcript and reports its
-/// last `ai-title` before `TurnEnded`.
+/// last `ai-title` before `TurnEnded` (a tick during the turn may read it earlier).
 #[tokio::test]
 async fn ai_title_is_reported_at_turn_end() {
     let fx = fixture!("permission-allow");
@@ -393,11 +396,43 @@ async fn ai_title_is_reported_at_turn_end() {
     let evs = h
         .turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
         .await;
-    assert_eq!(shape(&evs[evs.len() - 2..]), ["title", "turn_ended"]);
-    assert_eq!(
-        evs[evs.len() - 2],
-        AdapterEvent::Title("Touch a file".into())
+    assert_eq!(titles_in(&evs), ["Touch a file"]);
+}
+
+/// The titles among `evs`.
+fn titles_in(evs: &[AdapterEvent]) -> Vec<&str> {
+    evs.iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Title(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// SPEC §8.1: a title a person gave (`custom-title`) is the one reported at the end of the
+/// turn, over an `ai-title` written after it.
+#[tokio::test]
+async fn a_custom_title_is_reported_at_turn_end() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start(fx.stream, fx.claude_session()).await;
+    let (work, config) = &h._dirs;
+    let transcript = super::paths::transcript_path(
+        config.path(),
+        &work.path().canonicalize().unwrap(),
+        &fx.claude_session(),
     );
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let titles = [
+        r#"{"type":"custom-title","customTitle":"Mine","sessionId":"x"}"#,
+        r#"{"type":"ai-title","aiTitle":"Touch a file","sessionId":"x"}"#,
+    ]
+    .join("\n");
+    std::fs::write(&transcript, format!("{}{titles}\n", fx.transcript)).unwrap();
+
+    let evs = h
+        .turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
+        .await;
+    assert_eq!(titles_in(&evs), ["Mine"]);
 }
 
 #[tokio::test]
@@ -1803,23 +1838,232 @@ async fn every_process_gets_initialize_first() {
     h.adapter.kill().await.unwrap();
 }
 
-/// The CLI's answer to `initialize`, a success (2.1.312: the commands, models and account) or
-/// an error, gives nothing.
+/// The CLI's answer to `initialize` (2.1.312, shape of a live answer: `{name, description,
+/// argumentHint, aliases?, builtin?}`) gives the commands with the first line of each
+/// description and the argument hint, before any `system/init`; an error gives nothing. Its
+/// list wins over the names of `system/init`, whose `terminal_slash_commands` it loses, and
+/// `commands_changed` replaces it.
 #[test]
-fn the_answer_to_initialize_is_skipped() {
+fn the_answer_to_initialize_gives_the_commands() {
     let mut core = Core::new(Uuid::now_v7(), false);
     let init = writes(&[core.initialize()]);
     let id = init[0]["request_id"].as_str().unwrap();
-    for answer in [
-        json!({"type": "control_response", "response": {"subtype": "success", "request_id": id,
-            "response": {"commands": [{"name": "compact", "description": "Clear conversation history but keep a summary in context", "argumentHint": ""}],
-                "agents": [], "output_style": "default", "models": [], "account": {}, "pid": 4242},
-            "pending_permission_requests": [], "pending_user_dialog_requests": []}}),
-        json!({"type": "control_response", "response": {"subtype": "error", "request_id": id,
-            "error": "initialize: skills must be an array of strings"}}),
+    let error = json!({"type": "control_response", "response": {"subtype": "error", "request_id": id,
+        "error": "initialize: skills must be an array of strings"}});
+    assert!(core.on_line(&error.to_string()).is_empty());
+    let long = "x".repeat(300);
+    let answer = json!({"type": "control_response", "response": {"subtype": "success", "request_id": id,
+        "response": {"commands": [
+            {"name": "compact", "description": "Clear conversation history but keep a summary in context. Optional: /compact [instructions for summarization]", "argumentHint": "<optional custom summarization instructions>", "builtin": true},
+            {"name": "claude-api", "description": format!("Build apps with the Claude API.\nTRIGGER when: {long}"), "argumentHint": ""},
+            {"name": "doctor", "description": "Health-check the user's Claude Code setup", "argumentHint": "[prompt-audit [<path>]]", "aliases": ["checkup"], "builtin": true},
+            {"name": "__remote-workflow", "description": "Run the workflow script", "argumentHint": "", "builtin": true},
+            {"name": "long", "description": long, "argumentHint": ""}],
+            "agents": [], "output_style": "default", "models": [], "account": {}, "pid": 4242},
+        "pending_permission_requests": [], "pending_user_dialog_requests": []}});
+    let one = |name: &str, description: Option<&str>, argument_hint: Option<&str>| SlashCommand {
+        name: name.into(),
+        description: description.map(Into::into),
+        argument_hint: argument_hint.map(Into::into),
+    };
+    let reported = |actions: &[Action]| -> Vec<Vec<SlashCommand>> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Emit(AdapterEvent::Commands(c)) => Some(c.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let compact = one(
+        "compact",
+        Some("Clear conversation history but keep a summary in context. Optional: /compact [instructions for summarization]"),
+        Some("<optional custom summarization instructions>"),
+    );
+    let api = one("claude-api", Some("Build apps with the Claude API."), None);
+    let doctor = one(
+        "doctor",
+        Some("Health-check the user's Claude Code setup"),
+        Some("[prompt-audit [<path>]]"),
+    );
+    let cut = one("long", Some(&long[..COMMAND_TEXT_LIMIT]), None);
+    assert_eq!(
+        reported(&core.on_line(&answer.to_string())),
+        [vec![compact.clone(), api.clone(), doctor, cut.clone()]],
+        "before any turn"
+    );
+    let init = json!({"type": "system", "subtype": "init", "session_id": CLI_SESSION,
+        "model": "claude-haiku-5-5", "permissionMode": "default",
+        "slash_commands": ["compact", "claude-api", "doctor", "__remote-workflow", "long", "other"],
+        "terminal_slash_commands": ["doctor"]});
+    assert_eq!(
+        reported(&core.on_line(&init.to_string())),
+        [vec![compact.clone(), api.clone(), cut.clone()]],
+        "the terminal's own go; the names of init add nothing"
+    );
+    let changed = json!({"type": "system", "subtype": "commands_changed",
+        "commands": [{"name": "compact", "description": "Compact", "argumentHint": ""},
+            {"name": "new-skill", "description": "A skill found in a subfolder", "argumentHint": "<file>"}],
+        "uuid": Uuid::new_v4(), "session_id": CLI_SESSION});
+    let list = vec![
+        one("compact", Some("Compact"), None),
+        one(
+            "new-skill",
+            Some("A skill found in a subfolder"),
+            Some("<file>"),
+        ),
+    ];
+    assert_eq!(reported(&core.on_line(&changed.to_string())), [list]);
+    assert!(
+        core.on_line(&changed.to_string()).is_empty(),
+        "the same list: not reported again"
+    );
+}
+
+/// The commands reported are those the hub keeps (SPEC §5.4): a name longer than 100
+/// characters is dropped and the list stops at 500, so a CLI with more does not make the frame
+/// the hub refuses.
+#[test]
+fn the_commands_reported_are_what_the_hub_keeps() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let mut names = vec!["x".repeat(101), "y".repeat(100)];
+    names.extend((0..600).map(|i| format!("c{i}")));
+    let changed = json!({"type": "system", "subtype": "commands_changed",
+        "commands": names.iter().map(|n| json!({"name": n, "description": "", "argumentHint": ""}))
+            .collect::<Vec<_>>(),
+        "uuid": Uuid::new_v4(), "session_id": CLI_SESSION});
+    let lists: Vec<Vec<SlashCommand>> = emitted(core.on_line(&changed.to_string()))
+        .into_iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Commands(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+    let [list] = lists.as_slice() else {
+        panic!("{} lists", lists.len())
+    };
+    assert_eq!(list.len(), 500);
+    assert_eq!(list[0].name, "y".repeat(100));
+    assert_eq!(list[499].name, "c498");
+}
+
+/// A new conversation, whose title the ticker reads during its first model turn: a new session's
+/// or the one `/clear` starts, not a resumed one or a fork; `/clear`'s own result does not end
+/// that turn.
+#[test]
+fn a_new_conversation_lasts_until_its_first_model_turn_ends() {
+    assert!(Launch::New.new_conversation());
+    assert!(!Launch::Resume.new_conversation());
+    assert!(!Launch::Fork { at: Uuid::nil() }.new_conversation());
+    let sid = Uuid::now_v7();
+    let result = |local: Option<&str>| {
+        let mut v = json!({"type": "result", "subtype": "success", "is_error": false,
+            "num_turns": 1, "total_cost_usd": 0.0, "session_id": "s", "uuid": Uuid::new_v4()});
+        if let Some(l) = local {
+            v["local_command"] = json!(l);
+        }
+        v.to_string()
+    };
+    assert!(!Core::new(sid, false).fresh(), "a resumed conversation");
+    let mut core = Core::new(sid, false).with_new_conversation(true);
+    assert!(core.fresh());
+    core.on_line(&result(None));
+    assert!(!core.fresh(), "the first model turn ended");
+    core.on_line(
+        &json!({"type": "conversation_reset", "trigger": "clear", "session_id": "s"}).to_string(),
+    );
+    assert!(core.fresh(), "/clear starts a new conversation");
+    core.on_line(&result(Some("clear")));
+    assert!(core.fresh(), "/clear's own result is no model turn");
+    core.on_line(&result(None));
+    assert!(!core.fresh());
+}
+
+/// `/clear` (the lines of the live run `w1-clear`, 2.1.312): `conversation_reset` says
+/// "Conversation cleared" and starts the cost from 0, as the CLI's `total_cost_usd` does; the
+/// first `system/init` after it, with the new conversation's id, moves the session to that
+/// transcript, once.
+#[test]
+fn clear_moves_the_session_to_a_new_transcript() {
+    const OLD: &str = "8ff09d1d-af14-46c9-ac99-63cd19302d2c";
+    const NEW: &str = "4d4b2f4f-a1f2-47a3-9438-c1d3d9733c6f";
+    let init = |session: &str| {
+        json!({"type": "system", "subtype": "init", "session_id": session,
+            "model": "claude-haiku-5-5", "permissionMode": "bypassPermissions",
+            "slash_commands": ["clear", "compact"], "uuid": Uuid::new_v4()})
+        .to_string()
+    };
+    let echo_in = |session: &str, text: &str| {
+        json!({"type": "user", "message": {"role": "user", "content": text},
+            "session_id": session, "parent_tool_use_id": null, "uuid": Uuid::new_v4(),
+            "timestamp": "2026-11-11T22:34:40.295Z", "isReplay": true})
+        .to_string()
+    };
+    let result = |session: &str, total: f64, tokens: u64, local: Option<&str>| {
+        let mut v = json!({"type": "result", "subtype": "success", "is_error": false,
+            "num_turns": 1, "total_cost_usd": total, "session_id": session,
+            "usage": {"input_tokens": tokens, "output_tokens": tokens}, "uuid": Uuid::new_v4()});
+        if let Some(l) = local {
+            v["local_command"] = json!(l);
+        }
+        v.to_string()
+    };
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let mut actions = Vec::new();
+    written(&mut core, sid, "Reply with exactly: ONE");
+    for l in [
+        init(OLD),
+        echo_in(OLD, "Reply with exactly: ONE"),
+        reply("ONE"),
+        result(OLD, 0.00232649, 3, None),
     ] {
-        assert!(core.on_line(&answer.to_string()).is_empty(), "{answer}");
+        actions.extend(core.on_line(&l));
     }
+    written(&mut core, sid, "/clear");
+    let reset = json!({"type": "conversation_reset", "new_conversation_id": "45db54bd-8b7d-44bd-a9a9-a73c5d0f6bf4",
+        "uuid": "45db54bd-8b7d-44bd-a9a9-a73c5d0f6bf4", "trigger": "clear",
+        "user_message_uuid": Uuid::new_v4(), "timestamp": "2026-11-11T22:34:41.884Z", "session_id": OLD});
+    for l in [
+        reset.to_string(),
+        init(NEW),
+        echo_in(
+            NEW,
+            "<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>",
+        ),
+        result(NEW, 0.0, 0, Some("clear")),
+    ] {
+        actions.extend(core.on_line(&l));
+    }
+    written(&mut core, sid, "What did I ask you to reply before?");
+    for l in [
+        init(NEW),
+        echo_in(NEW, "What did I ask you to reply before?"),
+        reply("NOTHING TWO"),
+        result(NEW, 0.00232689, 3, None),
+    ] {
+        actions.extend(core.on_line(&l));
+    }
+    assert_eq!(
+        system_events(&actions),
+        [(
+            CONVERSATION_CLEARED.to_string(),
+            CONVERSATION_CLEARED_TEXT.to_string()
+        )]
+    );
+    let moved: Vec<&AdapterEvent> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(e @ AdapterEvent::RuntimeSessionId(_)) => Some(e),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(moved, [&AdapterEvent::RuntimeSessionId(NEW.into())]);
+    assert_eq!(
+        costs_and_commands(&actions).0,
+        [(0.00232649, 0.00232649), (0.00232689, 0.00232689)],
+        "the turn after /clear costs what the new total says"
+    );
 }
 
 #[tokio::test]
@@ -3696,7 +3940,9 @@ fn costs_and_commands(actions: &[Action]) -> (Vec<(f64, f64)>, Vec<Vec<String>>)
                     costs.push((c, t));
                 }
             }
-            Action::Emit(AdapterEvent::Commands(c)) => commands.push(c.clone()),
+            Action::Emit(AdapterEvent::Commands(c)) => {
+                commands.push(c.iter().map(|c| c.name.clone()).collect())
+            }
             _ => {}
         }
     }
@@ -6065,4 +6311,638 @@ fn the_browser_only_where_it_is_given() {
     for t in super::BROWSER_DISALLOWED {
         assert!(on[pos..].iter().any(|x| x == t), "{t} in {on:?}");
     }
+}
+
+/// After `/clear` the process writes the new transcript (SPEC §8.1, §9.3): its records and the
+/// inputs written from then on are registered under the new id, which is live, and the old one
+/// is not; the title is read from the new transcript.
+#[tokio::test]
+async fn after_clear_the_process_writes_the_new_transcript() {
+    let (old, new) = (Uuid::new_v4(), Uuid::new_v4());
+    let answer = Uuid::new_v4();
+    let init = |session: Uuid| {
+        json!({"type": "system", "subtype": "init", "session_id": session,
+            "model": "claude-haiku-5-5", "permissionMode": "default"})
+        .to_string()
+    };
+    let done = |session: Uuid| {
+        json!({"type": "result", "subtype": "success", "is_error": false, "num_turns": 1,
+            "total_cost_usd": 0.001, "session_id": session,
+            "usage": {"input_tokens": 4, "output_tokens": 2}})
+        .to_string()
+    };
+    let stream = [
+        init(old),
+        reply("ONE"),
+        done(old),
+        json!({"type": "conversation_reset", "new_conversation_id": Uuid::new_v4(),
+            "trigger": "clear", "session_id": old})
+        .to_string(),
+        init(new),
+        json!({"type": "assistant", "message": {"model": "claude-haiku-5-5", "role": "assistant",
+            "content": [{"type": "text", "text": "TWO"}]},
+            "parent_tool_use_id": null, "session_id": new, "uuid": answer})
+        .to_string(),
+        done(new),
+    ]
+    .join("\n");
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let workdir = work.path().canonicalize().unwrap();
+    for (session, title) in [(old, "Before"), (new, "After")] {
+        let t = super::paths::transcript_path(config.path(), &workdir, &session);
+        std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+        std::fs::write(
+            &t,
+            format!(
+                "{{\"type\":\"ai-title\",\"aiTitle\":\"{title}\",\"sessionId\":\"{session}\"}}\n"
+            ),
+        )
+        .unwrap();
+    }
+    let opts = options(config.path());
+    let own = opts.own_records.clone();
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(ScriptedClaude::new(&stream)));
+    let s = spec(Uuid::now_v7(), work.path(), old);
+    let (tx, mut events) = mpsc::channel(1024);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let input = |text: &str| SessionInput {
+        session_id: s.session_id,
+        event_id: Uuid::now_v7(),
+        text: text.into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+        schedule_id: None,
+    };
+    a.input(&input("x")).await.unwrap();
+    let mut titles = Vec::new();
+    while titles.len() < 2 {
+        let ev = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let AdapterEvent::Title(t) = ev {
+            titles.push(t);
+        }
+    }
+    assert_eq!(titles, ["Before", "After"]);
+    assert!(own.is_live(new) && !own.is_live(old));
+    assert!(own.is_own(new, answer) && !own.is_own(old, answer));
+    a.input(&input("next")).await.unwrap();
+    assert!(own.claim(new, Uuid::new_v4(), Some("next")));
+    a.kill().await.unwrap();
+    assert!(!own.is_live(new));
+}
+
+/// From `conversation_reset` until the `init` that names the new transcript the folder of the
+/// session's transcript is marked in the registry, as the CLI begins the new one before it
+/// names it (SPEC §9.3); the end of the process unmarks it too. A question the agent asks
+/// holds the scripted CLI at each point.
+#[tokio::test]
+async fn a_cleared_folder_is_marked_until_init() {
+    let (old, new) = (Uuid::new_v4(), Uuid::new_v4());
+    let init = |session: Uuid| {
+        json!({"type": "system", "subtype": "init", "session_id": session,
+            "model": "claude-haiku-5-5", "permissionMode": "default"})
+        .to_string()
+    };
+    let reset = |session: Uuid| {
+        json!({"type": "conversation_reset", "trigger": "clear", "session_id": session}).to_string()
+    };
+    let ask = |id: &str| {
+        json!({"type": "control_request", "request_id": id, "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+                {"question": "Go on?", "header": "Go", "multiSelect": false,
+                    "options": [{"label": "Yes"}]}]}}})
+        .to_string()
+    };
+    let stream = [
+        init(old),
+        reset(old),
+        ask("q1"),
+        init(new),
+        ask("q2"),
+        reset(new),
+        ask("q3"),
+    ]
+    .join("\n");
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let folder =
+        super::paths::transcript_path(config.path(), &work.path().canonicalize().unwrap(), &old)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+    let opts = options(config.path());
+    let own = opts.own_records.clone();
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(ScriptedClaude::new(&stream)));
+    let s = spec(Uuid::now_v7(), work.path(), old);
+    let (tx, mut events) = mpsc::channel(1024);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let question = |ev: &AdapterEvent| match ev {
+        AdapterEvent::Event(e) => match &e.kind {
+            EventKind::ClarifyRequest { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    assert!(!own.is_clearing(&folder));
+    a.input(&SessionInput {
+        session_id: s.session_id,
+        event_id: Uuid::now_v7(),
+        text: "/clear".into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+        schedule_id: None,
+    })
+    .await
+    .unwrap();
+    let q1 = first(&mut events, question).await;
+    assert!(own.is_clearing(&folder), "after conversation_reset");
+    a.answer_clarify(&q1, &BTreeMap::new()).await.unwrap();
+    let q2 = first(&mut events, question).await;
+    assert!(!own.is_clearing(&folder), "the init named it");
+    assert!(own.is_live(new));
+    a.answer_clarify(&q2, &BTreeMap::new()).await.unwrap();
+    first(&mut events, question).await;
+    assert!(own.is_clearing(&folder), "cleared again");
+    a.kill().await.unwrap();
+    assert!(!own.is_clearing(&folder), "the process is gone");
+}
+
+/// A `/clear` whose turn ends with no `init` naming a new transcript unmarks the folder at that
+/// turn's `result` (SPEC §9.2): the mark does not hold the mirror back until the process ends.
+/// A question holds the scripted CLI after `conversation_reset`.
+#[tokio::test]
+async fn a_cleared_folder_is_unmarked_when_the_turn_of_clear_ends() {
+    let old = Uuid::new_v4();
+    let stream = [
+        json!({"type": "system", "subtype": "init", "session_id": old,
+            "model": "claude-haiku-5-5", "permissionMode": "default"})
+        .to_string(),
+        json!({"type": "conversation_reset", "trigger": "clear", "session_id": old}).to_string(),
+        json!({"type": "control_request", "request_id": "q1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+                {"question": "Go on?", "header": "Go", "multiSelect": false,
+                    "options": [{"label": "Yes"}]}]}}})
+        .to_string(),
+        json!({"type": "result", "subtype": "success", "is_error": false, "num_turns": 1,
+            "total_cost_usd": 0.0, "session_id": old, "local_command": "clear",
+            "usage": {"input_tokens": 0, "output_tokens": 0}})
+        .to_string(),
+    ]
+    .join("\n");
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let folder =
+        super::paths::transcript_path(config.path(), &work.path().canonicalize().unwrap(), &old)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+    let opts = options(config.path());
+    let own = opts.own_records.clone();
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(ScriptedClaude::new(&stream)));
+    let s = spec(Uuid::now_v7(), work.path(), old);
+    let (tx, mut events) = mpsc::channel(1024);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    a.input(&user_input(s.session_id, "/clear")).await.unwrap();
+    let q1 = first(&mut events, |ev| match ev {
+        AdapterEvent::Event(e) => match &e.kind {
+            EventKind::ClarifyRequest { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        },
+        _ => None,
+    })
+    .await;
+    assert!(own.is_clearing(&folder), "after conversation_reset");
+    a.answer_clarify(&q1, &BTreeMap::new()).await.unwrap();
+    first(&mut events, |ev| {
+        matches!(ev, AdapterEvent::TurnEnded { .. }).then_some(())
+    })
+    .await;
+    assert!(!own.is_clearing(&folder), "the turn of /clear ended");
+    a.kill().await.unwrap();
+}
+
+/// What the process wrote to its transcript right before `/clear` and the mirror reads only
+/// after the switch stays the process's (SPEC §9.2): the output of `/cost` there is no
+/// `mirror.event`, which the hub, with the session on the new transcript, would import as a
+/// session of someone else's. A record another writer adds there after the switch is a
+/// `mirror.event`. A question holds the scripted CLI after the switch.
+#[tokio::test]
+async fn a_command_output_before_clear_is_the_processs_after_the_switch() {
+    let (old, new) = (Uuid::new_v4(), Uuid::new_v4());
+    let init = |session: Uuid| {
+        json!({"type": "system", "subtype": "init", "session_id": session,
+            "model": "claude-haiku-5-5", "permissionMode": "default"})
+        .to_string()
+    };
+    let stream = [
+        init(old),
+        json!({"type": "conversation_reset", "trigger": "clear", "session_id": old}).to_string(),
+        init(new),
+        json!({"type": "control_request", "request_id": "q1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+                {"question": "Go on?", "header": "Go", "multiSelect": false,
+                    "options": [{"label": "Yes"}]}]}}})
+        .to_string(),
+    ]
+    .join("\n");
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let workdir = work.path().canonicalize().unwrap();
+    let transcript = super::paths::transcript_path(config.path(), &workdir, &old);
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    // The shape of 2.1.312.
+    let first_uuid = Uuid::new_v4();
+    let output = json!({"parentUuid": null, "isSidechain": false, "uuid": first_uuid,
+        "timestamp": "2026-11-16T10:00:00.000Z", "cwd": workdir.display().to_string(),
+        "sessionId": old, "type": "system", "subtype": "local_command",
+        "content": "<local-command-stdout>Total cost: $0.0123</local-command-stdout>",
+        "level": "info", "isMeta": false});
+    std::fs::write(&transcript, format!("{output}\n")).unwrap();
+    let opts = options(config.path());
+    let own = opts.own_records.clone();
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(ScriptedClaude::new(&stream)));
+    let s = spec(Uuid::now_v7(), work.path(), old);
+    let (tx, mut events) = mpsc::channel(1024);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    a.input(&user_input(s.session_id, "/clear")).await.unwrap();
+    first(&mut events, |ev| match ev {
+        AdapterEvent::Event(e) => matches!(e.kind, EventKind::ClarifyRequest { .. }).then_some(()),
+        _ => None,
+    })
+    .await;
+    assert!(own.is_live(new) && !own.is_live(old), "switched");
+    let mut mirror = crate::mirror::Mirror::new(
+        config.path().join("projects"),
+        Arc::new(crate::mirror::store::Store::memory()),
+        own.clone(),
+    );
+    mirror.set(workdir.clone(), true, vec![]);
+    let out = mirror.poll(std::time::Instant::now(), std::time::SystemTime::now());
+    assert!(
+        !out.iter()
+            .any(|o| matches!(o, crate::mirror::Output::Event(_))),
+        "{out:?}"
+    );
+    // Another writer of the old transcript after the switch (`--resume` of the old id,
+    // `w2-resume-old`): what it adds is not the process's.
+    let later = json!({"parentUuid": first_uuid, "isSidechain": false, "uuid": Uuid::new_v4(),
+        "timestamp": "2026-11-16T10:01:00.000Z", "cwd": workdir.display().to_string(),
+        "sessionId": old, "type": "system", "subtype": "local_command",
+        "content": "<local-command-stdout>Total cost: $0.0456</local-command-stdout>",
+        "level": "info", "isMeta": false});
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    std::io::Write::write_all(&mut f, format!("{later}\n").as_bytes()).unwrap();
+    let out = mirror.poll(std::time::Instant::now(), std::time::SystemTime::now());
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, crate::mirror::Output::Event(_))),
+        "{out:?}"
+    );
+    a.kill().await.unwrap();
+}
+
+/// What `want` makes of the first adapter event it takes, within 5 s each.
+async fn first<T>(
+    events: &mut mpsc::Receiver<AdapterEvent>,
+    want: impl Fn(&AdapterEvent) -> Option<T>,
+) -> T {
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("no adapter event in 5 s")
+            .expect("event channel closed");
+        if let Some(t) = want(&ev) {
+            return t;
+        }
+    }
+}
+
+/// The CLI's own title, which it writes into the transcript during the first turn and does not
+/// stream (2.1.312), is reported while the turn still runs (SPEC §8.1): a question holds the
+/// scripted turn open.
+#[tokio::test]
+async fn a_title_written_during_a_turn_is_reported_before_its_end() {
+    let claude_session = Uuid::new_v4();
+    let stream = [
+        json!({"type": "system", "subtype": "init", "session_id": CLI_SESSION,
+            "model": "claude-haiku-5-5", "permissionMode": "default"})
+        .to_string(),
+        json!({"type": "control_request", "request_id": "q1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+                {"question": "Go on?", "header": "Go", "multiSelect": false,
+                    "options": [{"label": "Yes"}]}]}}})
+        .to_string(),
+    ]
+    .join("\n");
+    let mut h = Harness::start(&stream, claude_session).await;
+    let transcript = super::paths::transcript_path(
+        h._dirs.1.path(),
+        &h._dirs.0.path().canonicalize().unwrap(),
+        &claude_session,
+    );
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    h.adapter
+        .input(&SessionInput {
+            session_id: h.session_id,
+            event_id: Uuid::now_v7(),
+            text: "Fix the build".into(),
+            artifact_ids: vec![],
+            peer_prefix: vec![],
+            peer: None,
+            permission_cap: None,
+            schedule_id: None,
+        })
+        .await
+        .unwrap();
+    first(&mut h.events, |ev| match ev {
+        AdapterEvent::Event(e) => matches!(e.kind, EventKind::ClarifyRequest { .. }).then_some(()),
+        _ => None,
+    })
+    .await;
+    std::fs::write(
+        &transcript,
+        format!("{{\"type\":\"ai-title\",\"aiTitle\":\"Build fix\",\"sessionId\":\"{claude_session}\"}}\n"),
+    )
+    .unwrap();
+    let title = first(&mut h.events, |ev| match ev {
+        AdapterEvent::Title(t) => Some(t.clone()),
+        AdapterEvent::TurnEnded { .. } => panic!("the turn ended"),
+        _ => None,
+    })
+    .await;
+    assert_eq!(title, "Build fix");
+}
+
+/// After `/clear` in a process that has sent a title, the title the CLI writes into the new
+/// transcript during the new conversation's first model turn is reported while that turn still
+/// runs (SPEC §8.1): the title sent before is forgotten at the switch. A question holds
+/// the turn.
+#[tokio::test]
+async fn after_clear_the_new_title_is_reported_during_the_first_turn() {
+    let (old, new) = (Uuid::new_v4(), Uuid::new_v4());
+    let init = |session: Uuid| {
+        json!({"type": "system", "subtype": "init", "session_id": session,
+            "model": "claude-haiku-5-5", "permissionMode": "default"})
+        .to_string()
+    };
+    let done = |session: Uuid, local: Option<&str>| {
+        let mut v = json!({"type": "result", "subtype": "success", "is_error": false,
+            "num_turns": 1, "total_cost_usd": 0.001, "session_id": session,
+            "usage": {"input_tokens": 4, "output_tokens": 2}});
+        if let Some(l) = local {
+            v["local_command"] = json!(l);
+        }
+        v.to_string()
+    };
+    let stream = [
+        init(old),
+        reply("ONE"),
+        done(old, None),
+        json!({"type": "conversation_reset", "trigger": "clear", "session_id": old}).to_string(),
+        init(new),
+        done(new, Some("clear")),
+        init(new),
+        json!({"type": "control_request", "request_id": "q1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+                {"question": "Go on?", "header": "Go", "multiSelect": false,
+                    "options": [{"label": "Yes"}]}]}}})
+        .to_string(),
+    ]
+    .join("\n");
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let workdir = work.path().canonicalize().unwrap();
+    let path = |session: &Uuid| super::paths::transcript_path(config.path(), &workdir, session);
+    let title_line = |session: Uuid, title: &str| {
+        format!("{{\"type\":\"ai-title\",\"aiTitle\":\"{title}\",\"sessionId\":\"{session}\"}}\n")
+    };
+    std::fs::create_dir_all(path(&old).parent().unwrap()).unwrap();
+    std::fs::write(path(&old), title_line(old, "Before")).unwrap();
+    let factory = ClaudeCodeAdapters::new(
+        options(config.path()),
+        Arc::new(ScriptedClaude::new(&stream)),
+    );
+    let s = spec(Uuid::now_v7(), work.path(), old);
+    let (tx, mut events) = mpsc::channel(1024);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    a.input(&user_input(s.session_id, "x")).await.unwrap();
+    let title = |ev: &AdapterEvent| match ev {
+        AdapterEvent::Title(t) => Some(t.clone()),
+        _ => None,
+    };
+    assert_eq!(first(&mut events, title).await, "Before");
+    first(&mut events, |ev| match ev {
+        AdapterEvent::Event(e) => matches!(e.kind, EventKind::ClarifyRequest { .. }).then_some(()),
+        _ => None,
+    })
+    .await;
+    std::fs::write(path(&new), title_line(new, "After")).unwrap();
+    let after = first(&mut events, |ev| match ev {
+        AdapterEvent::TurnEnded { .. } => panic!("the turn ended"),
+        ev => title(ev),
+    })
+    .await;
+    assert_eq!(after, "After");
+    a.kill().await.unwrap();
+}
+
+/// A tick between `conversation_reset` and the `init` that names the new transcript (~70 ms,
+/// `w1-clear`) reads the old transcript and stores its title; the switch forgets it, so the ticks
+/// of the new conversation's first turn still read its title (SPEC §8.1).
+#[tokio::test]
+async fn a_title_read_before_the_switch_does_not_stop_the_new_ones() {
+    let (old, new) = (Uuid::new_v4(), Uuid::new_v4());
+    let dir = tempfile::tempdir().unwrap();
+    let old_path = dir.path().join(format!("{old}.jsonl"));
+    std::fs::write(
+        &old_path,
+        format!("{{\"type\":\"ai-title\",\"aiTitle\":\"Before\",\"sessionId\":\"{old}\"}}\n"),
+    )
+    .unwrap();
+    let (tx, mut events) = mpsc::channel(16);
+    let stdin: std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>> = Box::pin(tokio::io::sink());
+    let io = super::Io {
+        session_id: Uuid::now_v7(),
+        stdin: tokio::sync::Mutex::new(stdin),
+        events: tx,
+        signal: Box::new(|_: Sig| -> std::io::Result<()> { Ok(()) }),
+        transcript: std::sync::Mutex::new(Some(old_path)),
+        title: std::sync::Mutex::new(None),
+        runtime: std::sync::Mutex::new(old),
+        own: options(dir.path()).own_records,
+    };
+    io.report_title(None).await;
+    assert!(matches!(events.try_recv(), Ok(AdapterEvent::Title(t)) if t == "Before"));
+    io.moved_to(new);
+    assert!(
+        super::lock(&io.title).is_none(),
+        "the old transcript's title would keep the ticks from reading the new one"
+    );
+}
+
+/// A transcript over 4 MiB is not read for its title on the ticks of a first turn, only when
+/// the turn ends (SPEC §8.1): without a title of the CLI's (a first message under 10
+/// characters) the reads would go on for the whole turn. A question holds the turn.
+#[tokio::test]
+async fn a_large_transcript_is_read_for_its_title_only_at_the_turns_end() {
+    let claude_session = Uuid::new_v4();
+    let stream = [
+        json!({"type": "system", "subtype": "init", "session_id": CLI_SESSION,
+            "model": "claude-haiku-5-5", "permissionMode": "default"})
+        .to_string(),
+        json!({"type": "control_request", "request_id": "q1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+                {"question": "Go on?", "header": "Go", "multiSelect": false,
+                    "options": [{"label": "Yes"}]}]}}})
+        .to_string(),
+        json!({"type": "result", "subtype": "success", "is_error": false, "num_turns": 1,
+            "total_cost_usd": 0.001, "session_id": CLI_SESSION,
+            "usage": {"input_tokens": 4, "output_tokens": 2}})
+        .to_string(),
+    ]
+    .join("\n");
+    let mut h = Harness::start(&stream, claude_session).await;
+    let transcript = super::paths::transcript_path(
+        h._dirs.1.path(),
+        &h._dirs.0.path().canonicalize().unwrap(),
+        &claude_session,
+    );
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    h.adapter
+        .input(&user_input(h.session_id, "Hi"))
+        .await
+        .unwrap();
+    let q1 = first(&mut h.events, |ev| match ev {
+        AdapterEvent::Event(e) => match &e.kind {
+            EventKind::ClarifyRequest { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        },
+        _ => None,
+    })
+    .await;
+    let filler = json!({"type": "user", "message": {"role": "user",
+        "content": "x".repeat(4 * 1024 * 1024)}});
+    std::fs::write(
+        &transcript,
+        format!("{filler}\n{{\"type\":\"ai-title\",\"aiTitle\":\"Big\",\"sessionId\":\"{claude_session}\"}}\n"),
+    )
+    .unwrap();
+    // A tick at least: every 2 s.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    while let Ok(ev) = h.events.try_recv() {
+        assert!(
+            !matches!(ev, AdapterEvent::Title(_)),
+            "read on a tick: {ev:?}"
+        );
+    }
+    h.adapter
+        .answer_clarify(&q1, &BTreeMap::new())
+        .await
+        .unwrap();
+    let title = first(&mut h.events, |ev| match ev {
+        AdapterEvent::Title(t) => Some(t.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(title, "Big");
+}
+
+/// `system/session_title_changed` (2.1.312: a title a person gave, `/rename`) is the session's
+/// title at once, not at the end of the turn.
+#[test]
+fn a_title_from_the_stream_is_reported_at_once() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let line = |title: &str| {
+        json!({"type": "system", "subtype": "session_title_changed", "title": title,
+            "uuid": Uuid::new_v4(), "session_id": CLI_SESSION})
+        .to_string()
+    };
+    assert_eq!(
+        emitted(core.on_line(&line(" Fix the build "))),
+        [AdapterEvent::Title("Fix the build".into())]
+    );
+    assert!(core.on_line(&line("  ")).is_empty(), "no title");
+}
+
+/// A wakeup the main agent armed with `ScheduleWakeup` (lines of the live run
+/// `x6-wake-control`, 2.1.312) is reported from its result until the CLI starts it: a
+/// `command_lifecycle` `started` with `wakeup_source: loop_wakeup` and its `scheduled_for`.
+/// The fire of an older one, a failed call and a subagent's call change nothing; a stopped one
+/// (`scheduledFor: 0`) is none.
+#[test]
+fn a_wakeup_is_reported_until_it_fires() {
+    const DUE: i64 = 1794439200000;
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let call = |id: &str, parent: Option<&str>| {
+        json!({"type": "assistant", "message": {"model": "claude-haiku-5-5", "role": "assistant",
+            "content": [{"type": "tool_use", "id": id, "name": "ScheduleWakeup",
+                "input": {"delaySeconds": 70, "reason": "probe", "prompt": "WAKEUP-FIRED", "noop": false}}]},
+            "parent_tool_use_id": parent, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+        .to_string()
+    };
+    let done = |id: &str, at: i64, error: bool, parent: Option<&str>| {
+        json!({"type": "user", "message": {"role": "user", "content": [{"tool_use_id": id,
+            "type": "tool_result", "is_error": error, "content": "Next wakeup scheduled for 02:20:00 (in 72s)."}]},
+            "parent_tool_use_id": parent, "session_id": CLI_SESSION, "uuid": Uuid::new_v4(),
+            "tool_use_result": {"scheduledFor": at, "clampedDelaySeconds": 70, "wasClamped": false}})
+        .to_string()
+    };
+    let fired = |at: i64| {
+        json!({"type": "command_lifecycle", "command_uuid": Uuid::new_v4(), "state": "started",
+            "wakeup_source": "loop_wakeup", "scheduled_for": at,
+            "uuid": Uuid::new_v4(), "session_id": CLI_SESSION})
+        .to_string()
+    };
+    let wakeups = |actions: Vec<Action>| -> Vec<Option<i64>> {
+        emitted(actions)
+            .into_iter()
+            .filter_map(|e| match e {
+                AdapterEvent::Wakeup(at) => Some(at.map(|t| t.timestamp_millis())),
+                _ => None,
+            })
+            .collect()
+    };
+    core.on_line(&call("toolu_01TWrwmcrfbR9Z62ePaNnJTw", None));
+    assert_eq!(
+        wakeups(core.on_line(&done("toolu_01TWrwmcrfbR9Z62ePaNnJTw", DUE, false, None))),
+        [Some(DUE)]
+    );
+    assert!(
+        wakeups(core.on_line(&fired(DUE - 60_000))).is_empty(),
+        "an older one fired"
+    );
+    core.on_line(&call("toolu_failed", None));
+    assert!(wakeups(core.on_line(&done("toolu_failed", 0, true, None))).is_empty());
+    core.on_line(&call("toolu_sub", Some("toolu_agent")));
+    assert!(
+        wakeups(core.on_line(&done("toolu_sub", DUE + 1, false, Some("toolu_agent")))).is_empty(),
+        "a subagent's"
+    );
+    assert_eq!(wakeups(core.on_line(&fired(DUE))), [None]);
+    core.on_line(&call("toolu_again", None));
+    assert_eq!(
+        wakeups(core.on_line(&done("toolu_again", DUE + 70_000, false, None))),
+        [Some(DUE + 70_000)]
+    );
+    core.on_line(&call("toolu_stop", None));
+    assert_eq!(
+        wakeups(core.on_line(&done("toolu_stop", 0, false, None))),
+        [None],
+        "stopped"
+    );
 }

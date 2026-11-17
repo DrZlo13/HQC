@@ -1160,6 +1160,9 @@ export interface SessionInfo {
   /** The runtime's slash commands without `/`, for completing `/` in the composer (T27);
    *  absent until a process of the session reported them. */
   commands?: string[];
+  /** The same commands with what the runtime says of each (since SPEC 0.162): only in the
+   *  hub's answer about one session, not in its lists. */
+  command_info?: SlashCommand[];
   /** The session whose agent started this one with `hqc_spawn` (SPEC §7), while it exists. */
   spawned_by?: SpawnedBy;
   /** The mode hqc asks the worker for (T38); absent: the worker's own default. */
@@ -1223,6 +1226,15 @@ export function parseModelProvider(v: unknown): ModelProvider {
     context_tokens: optNum(o, 'context_tokens'),
     workers: optStrArr(o, 'workers') ?? [],
   };
+}
+
+/** A slash command of the runtime (`command_info`, SPEC 0.162). */
+export interface SlashCommand {
+  name: string;
+  /** One line on what it does. */
+  description?: string;
+  /** What it takes after the name, e.g. `[--force]`. */
+  argument_hint?: string;
 }
 
 /** `spawned_by` of a session: the spawning session and its address. */
@@ -1308,6 +1320,12 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     system: optBool(o, 'system') ?? false,
     held_by: optHeldBy(o),
     commands: optStrArr(o, 'commands'),
+    command_info: present(o, 'command_info')
+      ? arr(o, 'command_info').map((c, i) => {
+          const p = obj(c, `command_info[${i}]`);
+          return { name: str(p, 'name'), description: optStr(p, 'description'), argument_hint: optStr(p, 'argument_hint') };
+        })
+      : undefined,
     spawned_by: optSpawnedBy(o),
     permission_mode: optPermissionMode(o, 'permission_mode'),
     effective_permission_mode: optPermissionMode(o, 'effective_permission_mode'),

@@ -26,8 +26,8 @@ use futures_util::{SinkExt, StreamExt};
 use hqc_proto::{
     event::CancelReason,
     frame::{
-        error_code, Ack, Envelope, Hello, HubFrame, ProcessState, ResultBody, WireError,
-        WorkerFrame,
+        error_code, Ack, Envelope, Hello, HubFrame, ProcessState, ResultBody, SlashCommand,
+        WireError, WorkerFrame,
     },
     PROTOCOL_VERSION,
 };
@@ -449,6 +449,7 @@ async fn handle_text(
             title,
             held_by,
             commands,
+            command_info,
             permission_mode,
             capped_input,
             subagents,
@@ -463,6 +464,7 @@ async fn handle_text(
                 title,
                 held_by,
                 commands,
+                command_info,
                 permission_mode,
                 capped_input,
                 subagents,
@@ -712,6 +714,7 @@ struct StateFrame {
     title: Option<String>,
     held_by: Option<Option<hqc_proto::frame::HeldBy>>,
     commands: Option<Vec<String>>,
+    command_info: Option<Vec<SlashCommand>>,
     permission_mode: Option<hqc_proto::frame::PermissionMode>,
     capped_input: Option<Uuid>,
     subagents: u32,
@@ -733,6 +736,7 @@ async fn on_session_state(
         title,
         held_by,
         commands,
+        command_info,
         permission_mode,
         capped_input,
         subagents,
@@ -779,6 +783,18 @@ async fn on_session_state(
     if let Some(t) = title.as_deref().and_then(runtime_title) {
         db::set_runtime_title(&app.db, session_id, &t).await?;
     }
+    // With what the runtime says of each since SPEC 0.162; an older worker sends the names.
+    let commands = command_info.or_else(|| {
+        commands.map(|c| {
+            c.into_iter()
+                .map(|name| SlashCommand {
+                    name,
+                    description: None,
+                    argument_hint: None,
+                })
+                .collect()
+        })
+    });
     if let Some(c) = commands {
         db::set_commands(&app.db, session_id, &runtime_commands(c)).await?;
     }
@@ -855,25 +871,43 @@ pub(crate) fn runtime_calls(list: Vec<String>) -> Vec<String> {
     out
 }
 
-/// At most this many slash commands are kept, each at most [`MAX_COMMAND`] characters.
+/// At most this many slash commands are kept, each name at most [`MAX_COMMAND`] characters,
+/// its description and argument hint at most [`MAX_COMMAND_TEXT`].
 pub(crate) const MAX_COMMANDS: usize = 500;
 pub(crate) const MAX_COMMAND: usize = 100;
+pub(crate) const MAX_COMMAND_TEXT: usize = 200;
 
 /// Slash commands as stored (T27): names without the leading `/`, without whitespace or
 /// control characters, unique, in the worker's order, cut to [`MAX_COMMANDS`]; longer or
-/// empty names are dropped. The worker is trusted for the list, not for its size.
-pub(crate) fn runtime_commands(list: Vec<String>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+/// empty names are dropped; a description or argument hint in one line, cut to
+/// [`MAX_COMMAND_TEXT`] characters, absent when empty. The worker is trusted for the list, not
+/// for its size.
+pub(crate) fn runtime_commands(list: Vec<SlashCommand>) -> Vec<SlashCommand> {
+    let line = |t: Option<String>| {
+        let t: String = t?
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(MAX_COMMAND_TEXT)
+            .collect();
+        (!t.is_empty()).then(|| hqc_proto::replace_nul(&t).into_owned())
+    };
+    let mut out: Vec<SlashCommand> = Vec::new();
     for c in list {
-        let c = c.trim().trim_start_matches('/');
-        if c.is_empty()
-            || c.chars().count() > MAX_COMMAND
-            || c.chars().any(|ch| ch.is_whitespace() || ch.is_control())
-            || out.iter().any(|o| o == c)
+        let name = c.name.trim().trim_start_matches('/');
+        if name.is_empty()
+            || name.chars().count() > MAX_COMMAND
+            || name.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+            || out.iter().any(|o| o.name == name)
         {
             continue;
         }
-        out.push(c.to_string());
+        out.push(SlashCommand {
+            name: name.to_string(),
+            description: line(c.description),
+            argument_hint: line(c.argument_hint),
+        });
         if out.len() == MAX_COMMANDS {
             break;
         }

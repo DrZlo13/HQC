@@ -981,14 +981,15 @@ impl ClaudeCodeAdapter {
             let _ = self.events.send(AdapterEvent::Event(ev)).await;
         }
 
-        // The CLI carries the session's cost over `--resume` from the transcript's last
-        // `cost-state`; per-turn costs are counted from there (T27). It resurrects the
-        // session's cron jobs from it too (SPEC §8.1). The transcript is dropped after this.
+        // The CLI carries the session's cost and `modelUsage` over `--resume` from the
+        // transcript's last `cost-state`; per-turn costs are counted from there (T27). It
+        // resurrects the session's cron jobs from it too (SPEC §8.1). The transcript is dropped
+        // after this.
         let cost_baseline = match transcript.as_ref().filter(|_| resume) {
             Some(p) => match tokio::fs::read_to_string(p).await {
                 Ok(t) => {
                     cron_jobs = resurrected_cron_jobs(&t, chrono::Utc::now().timestamp_millis());
-                    hqc_claude_jsonl::last_cost_total(&t)
+                    hqc_claude_jsonl::last_cost_state(&t)
                 }
                 Err(_) => None,
             },

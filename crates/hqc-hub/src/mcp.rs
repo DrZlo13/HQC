@@ -104,6 +104,10 @@ pub const REGISTRY: &[HubTool] = &[
         run: |app, caller, c| Box::pin(now(search_history(app, caller, c.args.clone()))),
     },
     HubTool {
+        name: hqc_proto::mcp::READ,
+        run: |app, caller, c| Box::pin(now(read(app, caller, c.args.clone()))),
+    },
+    HubTool {
         name: hqc_proto::mcp::SPAWN,
         run: |app, caller, c| Box::pin(crate::spawn::spawn(app, caller, c)),
     },
@@ -422,6 +426,99 @@ async fn search_history(app: &AppState, caller: &SessionRow, v: Value) -> ToolRe
     let mut out = json!({ "results": results });
     if let Some(c) = page.next_cursor {
         out["next_cursor"] = json!(c);
+    }
+    Ok(out)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadArgs {
+    session: String,
+    before_seq: Option<i64>,
+    after_seq: Option<i64>,
+}
+
+/// Most events of one `hqc_read` answer.
+const READ_EVENTS: i64 = 100;
+
+/// How many of the events whose serialized sizes `sizes` lists, nearest first, fit
+/// [`hqc_proto::mcp::MAX_ARGS`] bytes together; at least one if there is any.
+fn events_within_budget(sizes: impl Iterator<Item = usize>) -> usize {
+    let mut total = 0;
+    let mut keep = 0;
+    for n in sizes {
+        total += n;
+        if keep > 0 && total > hqc_proto::mcp::MAX_ARGS {
+            break;
+        }
+        keep += 1;
+    }
+    keep
+}
+
+/// `hqc_read(session, before_seq?, after_seq?)` (SPEC §7): the events of one session of the
+/// calling session's owner, as `GET /api/sessions/{id}/events` returns them, in pages of at
+/// most [`READ_EVENTS`] events and [`hqc_proto::mcp::MAX_ARGS`] bytes: `{address, title,
+/// events (oldest first), last_seq, earlier?, later?}`. No side effects.
+async fn read(app: &AppState, caller: &SessionRow, v: Value) -> ToolResult {
+    let a: ReadArgs = args(v)?;
+    if a.before_seq.is_some() && a.after_seq.is_some() {
+        return Err(err(
+            error_code::INVALID_ARGS,
+            "before_seq and after_seq cannot be given together",
+        ));
+    }
+    let (s, address) = crate::peers::reader(app, caller, &a.session).await?;
+    let forward = a.after_seq.is_some();
+    let rows = match a.after_seq {
+        Some(n) => db::events_after(&app.db, s.id, n, READ_EVENTS).await,
+        None => {
+            db::events_before(&app.db, s.id, a.before_seq.unwrap_or(i64::MAX), READ_EVENTS).await
+        }
+    }
+    .map_err(internal)?;
+    let mut events = db::events_for_clients(&app.db, &rows)
+        .await
+        .map_err(internal)?;
+    // Over the byte budget the far end of the page goes, but one event always stays.
+    let sizes = events.iter().map(|e| e.to_string().len());
+    let keep = if forward {
+        events_within_budget(sizes)
+    } else {
+        events_within_budget(sizes.rev())
+    };
+    if forward {
+        events.truncate(keep);
+    } else {
+        events.drain(..events.len() - keep);
+    }
+    let (first, last) = (
+        events.first().and_then(|e| e["seq"].as_i64()),
+        events.last().and_then(|e| e["seq"].as_i64()),
+    );
+    let mut out = json!({
+        "address": address,
+        "title": s.title,
+        "events": events,
+        "last_seq": s.last_seq.max(0),
+    });
+    if let Some(first) = first {
+        if !db::events_before(&app.db, s.id, first, 1)
+            .await
+            .map_err(internal)?
+            .is_empty()
+        {
+            out["earlier"] = json!(first);
+        }
+    }
+    if let Some(last) = last {
+        if !db::events_after(&app.db, s.id, last, 1)
+            .await
+            .map_err(internal)?
+            .is_empty()
+        {
+            out["later"] = json!(last);
+        }
     }
     Ok(out)
 }

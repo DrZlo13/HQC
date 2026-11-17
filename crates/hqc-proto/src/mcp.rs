@@ -31,6 +31,7 @@ pub const ATTACH: &str = "hqc_attach";
 pub const SEND: &str = "hqc_send";
 pub const ASK: &str = "hqc_ask";
 pub const SEARCH_HISTORY: &str = "hqc_search_history";
+pub const READ: &str = "hqc_read";
 pub const SPAWN: &str = "hqc_spawn";
 pub const ROOM: &str = "hqc_room";
 pub const SCHEDULE: &str = "hqc_schedule";
@@ -59,7 +60,8 @@ pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's 
     inside the session's workspace, so copy a file you made elsewhere (a scratchpad in /tmp) into \
     .hqc/out/ of the workspace first, not elsewhere in it: hqc keeps .hqc/ out of git. \
     Other sessions: hqc_list_sessions, hqc_send, hqc_ask, hqc_spawn, hqc_room \
-    (a room of several agents); history: hqc_search_history; later or recurring messages: hqc_schedule; moving this session to \
+    (a room of several agents); history: hqc_search_history to find, hqc_read to read a \
+    session or a room in full; later or recurring messages: hqc_schedule; moving this session to \
     another folder or project, only when the user asks (a folder that is not one of the user's \
     workspaces in the same environment waits for the user to allow it): hqc_move; renaming a \
     session: hqc_rename; where this machine allows it, a password or an ssh key from the user \
@@ -219,6 +221,43 @@ pub const TOOLS: &[Tool] = &[
                     }
                 },
                 "required": ["query"],
+                "additionalProperties": false
+            })
+        },
+    },
+    Tool {
+        name: READ,
+        description: "Read one hqc session of your owner from the hub, in full, page by page: \
+            any session of your owner, archived ones, a room and this session itself. You get \
+            the events as the hqc chat shows them: the messages of users and agents, messages \
+            between sessions, a room's posts, tool calls with their output, and hqc's own \
+            lines. Without `before_seq` and `after_seq` you get the last events, oldest first. \
+            A page is at most 100 events and 64 KiB; when the page leaves out older events the \
+            answer has `earlier`, pass it as `before_seq` for the page before; when it leaves \
+            out newer ones it has `later`, pass it as `after_seq` for the page after. Each \
+            event has its `seq`. To find where to read, use hqc_search_history, whose hits \
+            give the session's address and the event's `seq`. Reading changes nothing.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "session": {
+                        "type": "string",
+                        "description": "The session's address `<project-slug>/<session-slug>` \
+                            or its id."
+                    },
+                    "before_seq": {
+                        "type": "integer",
+                        "description": "The last events before this `seq`; `earlier` of the \
+                            previous answer."
+                    },
+                    "after_seq": {
+                        "type": "integer",
+                        "description": "The first events after this `seq`; `later` of the \
+                            previous answer. Not together with `before_seq`."
+                    }
+                },
+                "required": ["session"],
                 "additionalProperties": false
             })
         },
@@ -603,6 +642,7 @@ mod tests {
         assert!(tool(ATTACH).is_some());
         assert!(tool(SEND).is_some() && tool(ASK).is_some());
         assert!(tool(SEARCH_HISTORY).is_some());
+        assert!(tool(READ).is_some());
         assert!(tool(MOVE).is_some());
         assert!(tool(RENAME).is_some());
     }

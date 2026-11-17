@@ -1,585 +1,618 @@
-# hqc против Claude Code и вкладки VS Code: что мы обрабатываем не так
+# hqc against Claude Code and the VS Code extension: what we handle wrong
 
-Сравнение того, что присылает Claude Code CLI, и того, что вкладка VS Code из этого делает
-(справочник `docs/notes/claude-code-api.md`, ссылки «спр. N.N»), с тем, что делает hqc: воркер,
-хаб, клиент. Четыре списка: «неправильно» (показываем не то или не там), «частично» (часть случаев
-обработана), «не обрабатываем» (сведения приходят и пропадают), «не используем» (что CLI и вкладка
-умеют, а мы нет). Ограничения первой версии («на просмотр диффов забей» и подобные) в списках на
-общих основаниях, с пометкой «отложено в первой версии» и словами владельца.
+A comparison of what the Claude Code CLI sends and what the VS Code extension makes of it
+(the reference `docs/notes/claude-code-api.md`, cited as "ref. N.N") with what hqc does: worker,
+hub, client. Four lists: "wrong" (we show the wrong thing or in the wrong place), "partly" (some
+cases handled), "not handled" (the data arrives and is lost), "not used" (what the CLI and the
+extension can do and we do not). Limits of the first version ("forget about viewing diffs" and the
+like) are in the lists on equal terms, marked "deferred in the first version", with the owner's words.
 
-Сравнение сделано по нашей сборке — master плюс наши неслитые правки. Коммитов `bf4d73d` и
-`c1f1771` в этом репозитории нет: пути файлов есть и в master, номера строк — из этих коммитов; чем
-отличается master, сказано при пунктах («Апстрим») и в последнем разделе. «§3», «SPEC §2.7» —
-заметки нашего проекта, не `docs/SPEC.md` этого репозитория; «SPEC hqc» — `docs/SPEC.md` этого
-репозитория.
+The comparison was made on our build — master plus our unmerged changes. Commits `bf4d73d` and
+`c1f1771` are not in this repository: the file paths exist in master too, the line numbers are from
+these commits; how master differs is said at the items ("Upstream") and in the last section. "§3",
+"SPEC §2.7" are notes of our project, not `docs/SPEC.md` of this repository; "SPEC hqc" is
+`docs/SPEC.md` of this repository.
 
-## Что сравнивалось
+## What was compared
 
-- Воркер — сборка `bf4d73d` (дерево `../hqc/.claude/worktrees/worker-str`); на всех шести воркерах
-  стоит `4443c03`, это `bf4d73d` плюс текст инструкций MCP-сервера (`crates/hqc-proto/src/mcp.rs`),
-  разбор потока тот же. Пути `crates/hqc-worker/…` и `crates/hqc-claude-jsonl/…` — на этом коммите.
-- Хаб и клиент — ветка `new-look` `c1f1771`, с которой работает наш хаб. Пути `crates/hqc-hub/…`,
-  `crates/hqc-proto/…`, `client/…` — на этом коммите. После него в `new-look` три клиентских коммита
-  (`ec52bf0`, `1ff2acf`, `3679f00`); из них `ec52bf0` и `3679f00` закрывают дифф правок в ленте
-  (строка «Дифф правки и файл» в «не используем»), остальное сравнения не меняет.
-- Апстрим — `origin/master` `bcb10b1`. Если про апстрим не сказано, там так же.
-- CLI 2.1.312 (`vendor-src/cli-2.1.312.pretty.js`, ссылки `cli:N`), вкладка 2.1.319
+- Worker — build `bf4d73d` (tree `../hqc/.claude/worktrees/worker-str`); all six workers run
+  `4443c03`, which is `bf4d73d` plus the MCP server's instructions text (`crates/hqc-proto/src/mcp.rs`),
+  with the same stream parsing. Paths `crates/hqc-worker/…` and `crates/hqc-claude-jsonl/…` are at
+  this commit.
+- Hub and client — branch `new-look` `c1f1771`, which our hub runs. Paths `crates/hqc-hub/…`,
+  `crates/hqc-proto/…`, `client/…` are at this commit. After it `new-look` has three client commits
+  (`ec52bf0`, `1ff2acf`, `3679f00`); of them `ec52bf0` and `3679f00` cover the edit diff in the feed
+  (the "Edit diff and file" line in "not used"), the rest does not change the comparison.
+- Upstream — `origin/master` `bcb10b1`. Where nothing is said about upstream, it is the same there.
+- CLI 2.1.312 (`vendor-src/cli-2.1.312.pretty.js`, references `cli:N`), the extension 2.1.319
   (`vendor-src/ext-2.1.319-webview.js` — `web:N`, `ext-2.1.319-extension.js` — `ext:N`).
-- Живые прогоны — стенд agent-node-227, `/home/claude/cc-api-probe/captures/`: прежние записи
-  справочника и три новых — `w1-clear` (`/clear` посреди сессии), `w2-resume-old` (`--resume` старого
-  id после `/clear`, как сделает воркер после перезапуска), `w3-stop-bg-agent` (`interrupt` без
-  `initialize`, как шлёт воркер, при работающем фоновом субагенте), и прогоны с флагами воркера
-  (`--permission-prompt-tool stdio`, `--setting-sources user,local`, `claude-vscode`, режим `auto` или
-  `default`): `x1-handback`, `x2-perm-*`, `x2b-perm-*`, `x3-ambient`, `x4-session-mirror`,
-  `x5-preview-*` и `x5n-*`, `x6-wake-*`. Два случая сняты в нашем hqc на пробных сессиях haiku проекта
-  agent-trader на agent-node-227 (рабочая папка с включённым зеркалом): `/clear` и будильник при
-  выгрузке по простою. Что не снималось вживую, сказано при пункте.
-- Частоты — `vendor-src/scripts/count_results.py` по 52 основным транскриптам ноутбука из 1648
-  (3,2 %; изменённые за двое суток до 2026-11-11 22:47 UTC, список — `vendor-src/scripts/recent.txt`;
-  сессии VS Code и воркера ноутбука вперемешку). Прогон 2026-11-12: 12 894 результата инструментов,
-  из них с картинкой 410 (3,2 %), с текстом длиннее 4096 байт 1179 (9,1 %).
+- Live runs — test bench agent-node-227, `/home/claude/cc-api-probe/captures/`: the reference's
+  earlier captures and three new ones — `w1-clear` (`/clear` mid-session), `w2-resume-old` (`--resume`
+  of the old id after `/clear`, as the worker will do after a restart), `w3-stop-bg-agent`
+  (`interrupt` without `initialize`, as the worker sends it, with a background subagent running), and
+  runs with the worker's flags (`--permission-prompt-tool stdio`, `--setting-sources user,local`,
+  `claude-vscode`, mode `auto` or `default`): `x1-handback`, `x2-perm-*`, `x2b-perm-*`, `x3-ambient`,
+  `x4-session-mirror`, `x5-preview-*` and `x5n-*`, `x6-wake-*`. Two cases were captured in our hqc on
+  trial haiku sessions of the agent-trader project on agent-node-227 (a working folder with the mirror
+  on): `/clear` and a wakeup timer when the process is unloaded for idleness. What was not captured
+  live is said at the item.
+- Frequencies — `vendor-src/scripts/count_results.py` over 52 of the laptop's 1648 main transcripts
+  (3.2 %; those changed in the two days before 2026-11-11 22:47 UTC, the list is
+  `vendor-src/scripts/recent.txt`; VS Code sessions and the laptop worker's sessions mixed). Run of
+  2026-11-12: 12 894 tool results, of them 410 with an image (3.2 %), 1179 with text longer than
+  4096 bytes (9.1 %).
 
-## Коротко
+## In short
 
-| Список | Пунктов |
+| List | Items |
 | --- | ---: |
-| Неправильно | 14 |
-| Частично | 18 |
-| Не обрабатываем | 9 |
-| Не используем | 29 |
+| Wrong | 14 |
+| Partly | 18 |
+| Not handled | 9 |
+| Not used | 29 |
 
-Самое заметное для пользователя:
+Most visible to the user:
 
-1. **Stop убивает фоновых субагентов.** Лечится одним кадром `initialize` при старте процесса
-   («Stop убивает фоновых субагентов»).
-2. **Перезапуск воркера обрывает ход каждой работающей сессии**, хотя CLI умеет сам продолжить
-   прерванный ход после `--resume` («Продолжение хода после перезапуска»).
-3. **`/clear` ломает сессию**: процесс уходит в новый разговор, воркер остаётся на старом, зеркало
-   заводит из нового файла лишнюю сессию, стоимость сессии в шапке падает; после выгрузки агент снова
-   помнит то, что было до `/clear`.
-4. **Повторы запроса к API и сообщения хуков не видны**: при перегрузке API сессия минутами стоит в
-   «Agent is working» без единого слова.
-5. **Прерванный ответ выглядит законченным**: после Stop нет отметки «прервано», а причину раннего
-   конца хода (ошибка, лимит ходов) воркер присылает, но клиент её не рисует.
-6. **Картинки в результатах — «[image]», результат длиннее 4 КБ обрезан без «Full result»**: 3,2 % и
-   9,1 % результатов в выборке.
-7. **Сообщение, которое агент возьмёт только следующим ходом, стоит над ответом, который его не
-   видел.**
-8. **В режиме Auto отчёт каждого фонового субагента в ленте — служебная фраза** «This agent's report
-   was delivered to you as a message…»: CLI в режиме `auto` (так воркер запускает сессии hqc в Auto)
-   доставляет отчёты через `SubagentHandback`, а hqc берёт текст строки из поля для модели.
+1. **Stop kills background subagents.** Fixed by one `initialize` frame at process start
+   ("Stop kills background subagents").
+2. **A worker restart cuts the turn of every running session**, although the CLI can continue an
+   interrupted turn by itself after `--resume` ("Continuing a turn after a restart").
+3. **`/clear` breaks the session**: the process moves to a new conversation, the worker stays on the
+   old one, the mirror creates an extra session from the new file, the session cost in the header
+   drops; after unloading, the agent again remembers what was before `/clear`.
+4. **API request retries and hook messages are not visible**: when the API is overloaded, the session
+   sits in "Agent is working" for minutes without a single word.
+5. **An interrupted answer looks finished**: after Stop there is no "interrupted" mark, and the
+   reason for an early end of a turn (an error, the turn limit) the worker sends, but the client does
+   not draw it.
+6. **Images in results are "[image]", a result longer than 4 KB is cut without "Full result"**:
+   3.2 % and 9.1 % of results in the sample.
+7. **A message the agent will take only on the next turn stands above the answer that did not
+   see it.**
+8. **In Auto mode every background subagent's report in the feed is a service phrase** "This agent's
+   report was delivered to you as a message…": the CLI in `auto` mode (this is how the worker starts
+   hqc sessions in Auto) delivers reports through `SubagentHandback`, and hqc takes the line's text
+   from the field meant for the model.
 
 ---
 
-## Неправильно — показываем не то или не там
+## Wrong — we show the wrong thing or in the wrong place
 
-**Stop убивает фоновых субагентов и workflow.**
-- Видно: нажал Stop, чтобы прервать ответ, — фоновые субагенты тоже остановлены, а при
-  `CLAUDE_CODE_ENTRYPOINT=claude-vscode` в фон уходит любой `Agent`; в ленте остаётся строка с их
-  описанием, без слова «остановлен».
-- hqc: кнопка `client/src/ui/Chat.tsx:453–463` → `POST /stop` (`crates/hqc-hub/src/api.rs:1582–1592`)
-  → воркер шлёт голый `interrupt` (`crates/hqc-worker/src/adapter/claude_code/engine.rs:482–492`),
-  `initialize` не шлёт вовсе (`crates/hqc-worker/src/adapter/claude_code.rs:461–477`).
-- Claude Code: без `initialize {perTaskStopAffordance: true}` прерывание останавливает фоновые
-  `local_agent` и `local_workflow` (`cli:1504650–1504655`, `cli:742336–742345`); вкладка флаг ставит
-  (`ext:138053`). Спр. 1.3, 3.3, 5.4. Вживую `w3-stop-bg-agent`: строка 60 — `task_started
-  {task_type: local_agent, is_backgrounded: true}` на просьбу без `run_in_background`; после
-  `interrupt` — строка 105 `task_updated {status: killed}`, 106 `task_notification {status:
+**Stop kills background subagents and workflows.**
+- Seen: you press Stop to interrupt the answer, and the background subagents are stopped too, while
+  with `CLAUDE_CODE_ENTRYPOINT=claude-vscode` every `Agent` goes to the background; the feed keeps a
+  line with their description, without the word "stopped".
+- hqc: the button `client/src/ui/Chat.tsx:453–463` → `POST /stop` (`crates/hqc-hub/src/api.rs:1582–1592`)
+  → the worker sends a bare `interrupt` (`crates/hqc-worker/src/adapter/claude_code/engine.rs:482–492`)
+  and never sends `initialize` (`crates/hqc-worker/src/adapter/claude_code.rs:461–477`).
+- Claude Code: without `initialize {perTaskStopAffordance: true}` an interrupt stops background
+  `local_agent` and `local_workflow` (`cli:1504650–1504655`, `cli:742336–742345`); the extension sets
+  the flag (`ext:138053`). Ref. 1.3, 3.3, 5.4. Live run `w3-stop-bg-agent`: line 60 — `task_started
+  {task_type: local_agent, is_backgrounded: true}` on a request without `run_in_background`; after
+  `interrupt` — line 105 `task_updated {status: killed}`, 106 `task_notification {status:
   stopped}`, 113 `result {terminal_reason: aborted_tools}`.
-- Чинить: первым кадром stdin — `control_request initialize {perTaskStopAffordance: true}`.
-  Остановка одного субагента — `stop_task` («Остановить один субагент»).
+- Fix: the first stdin frame — `control_request initialize {perTaskStopAffordance: true}`.
+  Stopping one subagent — `stop_task` ("Stop one subagent").
 
-**`/clear` уводит CLI в новую сессию, воркер остаётся в старой.**
-- Видно: после `/clear` агент работает в чистом разговоре, лента идёт сплошной, без разделителя;
-  стоимость сессии в шапке падает до нуля. После выгрузки по простою, перезапуска воркера или
-  переезда агент снова продолжает разговор до `/clear`.
-- hqc: id транскрипта берётся только из `session.start` (`claude_code.rs:422–431`, `598–610`);
-  новый `session_id` из `system/init` лишь запоминается для файлов субагентов (`engine.rs:719`);
-  свои записи регистрируются под старым id (`claude_code.rs:670`, `974`); база расхода не
-  сбрасывается (`engine.rs:868–873`); кадр `conversation_reset` не разбирается
+**`/clear` takes the CLI to a new session, the worker stays in the old one.**
+- Seen: after `/clear` the agent works in a clean conversation, the feed runs on without a separator;
+  the session cost in the header drops to zero. After an unload for idleness, a worker restart or a
+  move, the agent again continues the conversation from before `/clear`.
+- hqc: the transcript id is taken only from `session.start` (`claude_code.rs:422–431`, `598–610`);
+  a new `session_id` from `system/init` is only remembered for subagent files (`engine.rs:719`);
+  own records are registered under the old id (`claude_code.rs:670`, `974`); the spending base is
+  not reset (`engine.rs:868–873`); the `conversation_reset` frame is not parsed
   (`engine.rs:690–781`).
-- Claude Code: спр. 2.1 `conversation_reset` («после него `total_cost_usd` считается заново»),
-  `cli:992300–992333`. Вживую `w1-clear`: строка 18 — кадр `conversation_reset {trigger: clear}`
-  (свой тип, не подтип `system`); `init.session_id` до — `8ff09d1d…` (строка 3), после —
-  `4d4b2f4f…` (строки 19, 25); `total_cost_usd` 0,00232649 → 0 → 0,00232689; на диске два файла.
-  `w2-resume-old` (`--resume 8ff09d1d…`): разговор до `/clear` вернулся, итог стоимости продолжает
-  старый. Вкладка на `system/init` с другим `session_id` очищает ленту (`web:171347–171386`).
-- Вживую в hqc (пробная сессия `agent-trader/session-8`, 2026-11-11 23:18 UTC): после `/clear` на ноде
-  рядом со старым файлом разговора появился новый (`b7c1de4d….jsonl`), и через секунду в проекте
-  появилась сессия `session-9` «Session imported from Claude Code»: первой репликой пользователя в ней
-  стоят сырые `<command-name>/clear</command-name>…`, второй — копия следующего сообщения, ответа агента
-  нет. Записи нового файла зеркало не считает своими (`crates/hqc-worker/src/mirror/registry.rs:71`,
-  `89–101`). На вопрос «что я просил раньше» агент ответил «NOTHING»; ход после `/clear` записан с
-  `cost_usd` 0, стоимость сессии упала с 0,0088 до 0,0033 $.
-- Чинить: на `conversation_reset` перевести сессию на новый id (`RuntimeSessionId`), свои записи —
-  туда же, обнулить базу расхода, строка «Conversation cleared»; либо не пускать `/clear` и
-  предлагать новую сессию.
+- Claude Code: ref. 2.1 `conversation_reset` ("after it `total_cost_usd` is counted anew"),
+  `cli:992300–992333`. Live run `w1-clear`: line 18 — a `conversation_reset {trigger: clear}` frame
+  (its own type, not a `system` subtype); `init.session_id` before — `8ff09d1d…` (line 3), after —
+  `4d4b2f4f…` (lines 19, 25); `total_cost_usd` 0.00232649 → 0 → 0.00232689; two files on disk.
+  `w2-resume-old` (`--resume 8ff09d1d…`): the conversation from before `/clear` came back, the cost
+  total continues the old one. The extension clears the feed on a `system/init` with a different
+  `session_id` (`web:171347–171386`).
+- Live in hqc (trial session `agent-trader/session-8`, 2026-11-11 23:18 UTC): after `/clear` a new
+  conversation file (`b7c1de4d….jsonl`) appeared on the node next to the old one, and a second later
+  the project got a session `session-9` "Session imported from Claude Code": its first user message is
+  the raw `<command-name>/clear</command-name>…`, the second is a copy of the next message, and there
+  is no agent answer. The mirror does not count the new file's records as its own
+  (`crates/hqc-worker/src/mirror/registry.rs:71`, `89–101`). To the question "what did I ask before"
+  the agent answered "NOTHING"; the turn after `/clear` is recorded with `cost_usd` 0, the session
+  cost fell from $0.0088 to $0.0033.
+- Fix: on `conversation_reset` move the session to the new id (`RuntimeSessionId`), own records
+  there too, zero the spending base, a "Conversation cleared" line; or do not let `/clear` through
+  and offer a new session.
 
-**Прерванный ответ выглядит законченным, отметки «прервано» нет.**
-- Видно: ответ, оборванный Stop или пришедшим сообщением, стоит обычным финальным сообщением
-  агента; после Stop во время инструмента в ленте вообще ничего не говорит, что ход прерван.
-- hqc: `assistant` с `aborted: true` воркер берёт как любой текст и закрывает `final: true`
-  (`engine.rs:927–949`, `1266`); текстовые строки `user` (`[Request interrupted by user for tool
-  use]`) отбрасывает (`engine.rs:1237–1245`; SPEC hqc: «mapped to nothing»); хаб на `POST /stop`
-  строки не пишет.
-- Claude Code: спр. 2.1 `assistant` (`aborted`), 3.2, 5.4. Вживую `p9-now-during-text`: строка 59 —
-  `assistant {aborted: true}`, 63 — `result {terminal_reason: aborted_streaming}`. Вкладка рисует
-  «Interrupted» и «Tool interrupted» (`web:161382`, `web:161386–161445`, спр. 8).
-- Чинить: при `aborted: true` или `terminal_reason: aborted_*` помечать сообщение прерванным и
-  ставить строку «Interrupted».
+**An interrupted answer looks finished, there is no "interrupted" mark.**
+- Seen: an answer cut off by Stop or by an incoming message stands as an ordinary final agent
+  message; after Stop during a tool, nothing in the feed says the turn was interrupted.
+- hqc: the worker takes an `assistant` with `aborted: true` like any text and closes it with
+  `final: true` (`engine.rs:927–949`, `1266`); it drops `user` text lines (`[Request interrupted by
+  user for tool use]`) (`engine.rs:1237–1245`; SPEC hqc: "mapped to nothing"); the hub writes no line
+  on `POST /stop`.
+- Claude Code: ref. 2.1 `assistant` (`aborted`), 3.2, 5.4. Live run `p9-now-during-text`: line 59 —
+  `assistant {aborted: true}`, 63 — `result {terminal_reason: aborted_streaming}`. The extension draws
+  "Interrupted" and "Tool interrupted" (`web:161382`, `web:161386–161445`, ref. 8).
+- Fix: on `aborted: true` or `terminal_reason: aborted_*` mark the message interrupted and add an
+  "Interrupted" line.
 
-**Сообщение, ждавшее конца хода, стоит над ответом, который его не видел.**
-- Видно: написал, пока агент ждал ответа на запрос прав, или в секунды перед финальным ответом, или
-  набрал слэш-команду во время хода, — сообщение в ленте над всей последующей работой и ответом, а
-  ответили на него только следующим ходом; пока ждёт, подписано «awaiting delivery», как при
-  выключенном воркере.
-- hqc: ввод ложится по `seq` в момент отправки; под текст уходит только с `during_text`
-  (`crates/hqc-hub/src/events.rs:297–299`, `client/src/timeline.ts:401–423`); воркер не вливает ввод
-  при открытом запросе, слэш-команды и запуски расписания (SPEC hqc §17.2), CLI не вливает во время
-  финального ответа (спр. 5.5); подпись — `client/src/ui/cards.tsx:545`. Когда агент взял ввод, хаб
-  знает: `delivered_at` по `ack` воркера (`crates/hqc-hub/src/delivery.rs:241–276`).
-- Вкладка: держит своё сообщение внизу (`web:169128–169134`, `web:260461–260471`) и ставит в ленту по
-  `command_lifecycle started` или эху (`web:169215–169254`, спр. 9).
-- Чинить (только клиент, данные есть): невлитое сообщение ставить по `delivered_at`; пока оно ждёт
-  при идущем ходе — внизу ленты с подписью «queued for the next turn».
+**A message that waited for the end of the turn stands above the answer that did not see it.**
+- Seen: you wrote while the agent waited for an answer to a permission request, or in the seconds
+  before the final answer, or typed a slash command during a turn — the message sits in the feed
+  above all the following work and the answer, yet it was answered only on the next turn; while it
+  waits, it is labeled "awaiting delivery", as with a worker that is off.
+- hqc: input is placed by `seq` at the moment of sending; it goes below the text only with
+  `during_text` (`crates/hqc-hub/src/events.rs:297–299`, `client/src/timeline.ts:401–423`); the
+  worker does not merge in input while a request is open, nor slash commands and schedule runs (SPEC
+  hqc §17.2), and the CLI does not merge in during the final answer (ref. 5.5); the label is
+  `client/src/ui/cards.tsx:545`. The hub knows when the agent took the input: `delivered_at` from the
+  worker's `ack` (`crates/hqc-hub/src/delivery.rs:241–276`).
+- Extension: keeps its own message at the bottom (`web:169128–169134`, `web:260461–260471`) and puts
+  it into the feed on `command_lifecycle started` or the echo (`web:169215–169254`, ref. 9).
+- Fix (client only, the data is there): place a message that was not merged in by `delivered_at`;
+  while it waits during a running turn — at the bottom of the feed, labeled "queued for the next turn".
 
-**Вызов без результата «работает» вечно; строка активности показывает старую команду.**
-- Видно: после перезапуска воркера или падения агента группа вызовов прошлого хода навсегда
-  «running»; в новом ходе, пока агент не вызвал инструмент, внизу «Running $ <старая команда>
-  2:13:05».
-- hqc: `groupState` — «running», пока у вызова нет результата (`client/src/ui/feed.ts:205–209`);
-  `runningCall` берёт последний `tool.call` ленты без результата, какого бы хода он ни был
+**A call without a result "runs" forever; the activity line shows an old command.**
+- Seen: after a worker restart or an agent crash, the call group of the previous turn is "running"
+  forever; in a new turn, until the agent calls a tool, the bottom shows "Running $ <old command>
+  2:13:05".
+- hqc: `groupState` is "running" while the call has no result (`client/src/ui/feed.ts:205–209`);
+  `runningCall` takes the feed's last `tool.call` without a result, whatever turn it belongs to
   (`client/src/timeline.ts:298–307`).
-- Вкладка: нет результата и сессия не занята — «failure» (`web:161966–161975`, спр. 8).
-- Чинить: вызов без результата, после которого в ленте конец хода, — «не завершён»; `runningCall`
-  ищет только после последнего конца хода. Сколько таких вызовов в базе хаба — не мерено.
+- Extension: no result and the session not busy — "failure" (`web:161966–161975`, ref. 8).
+- Fix: a call without a result that is followed by an end of turn in the feed — "not finished";
+  `runningCall` searches only after the last end of turn. How many such calls the hub's database
+  holds — not measured.
 
-**Долгий тихий вызов сторож хаба объявляет потерянным ходом.**
-- Видно: вызов MCP-инструмента дольше 15 минут — «turn_lost · no events for 900 s», сессия в
-  Error, хотя агент работает и потом отвечает.
-- hqc: сторож — `crates/hqc-hub/src/watchdog.rs:42–66`, предел по умолчанию 900 с
-  (`crates/hqc-hub/src/config.rs:331`); часы сбрасывает любое событие воркера
-  (`crates/hqc-hub/src/app.rs:300–306`), в том числе `tokens.rate`, но его воркер шлёт только при
-  изменении скорости (`crates/hqc-worker/src/supervisor.rs:1724–1728`) — на тихом вызове скорость
-  падает до 0 и событий нет.
-- Claude Code: у долгого вызова главного потока раз в 30 с — «пульс» `tool_progress` (спр. 2.1,
-  вживую `p3p5-bash-heartbeat`); воркер его не читает (`engine.rs:780`). У вкладки сторожа нет.
-- Чинить: воркер на `tool_progress` шлёт хабу кадр активности. Редко: Bash в переднем плане по
-  умолчанию не дольше 10 минут, `hqc_ask` сторож не считает.
+**The hub's watchdog declares a long quiet call a lost turn.**
+- Seen: an MCP tool call longer than 15 minutes — "turn_lost · no events for 900 s", the session in
+  Error, although the agent works and answers later.
+- hqc: the watchdog is `crates/hqc-hub/src/watchdog.rs:42–66`, default limit 900 s
+  (`crates/hqc-hub/src/config.rs:331`); any worker event resets the clock
+  (`crates/hqc-hub/src/app.rs:300–306`), including `tokens.rate`, but the worker sends it only when
+  the rate changes (`crates/hqc-worker/src/supervisor.rs:1724–1728`) — on a quiet call the rate
+  falls to 0 and there are no events.
+- Claude Code: a long call of the main thread gets a `tool_progress` "heartbeat" every 30 s
+  (ref. 2.1, live run `p3p5-bash-heartbeat`); the worker does not read it (`engine.rs:780`). The
+  extension has no watchdog.
+- Fix: on `tool_progress` the worker sends the hub an activity frame. Rare: a foreground Bash is
+  10 minutes at most by default, and the watchdog does not count `hqc_ask`.
 
-**Отчёт фонового субагента подменён служебной фразой для модели.**
-- Видно: в сессии в Auto каждый фоновый субагент кончается в ленте строкой «This agent's report was
-  delivered to you as a message from "…" (its SubagentHandback call). Read it there; it is not
-  repeated here.», самого отчёта нет; его пересказ агентом приходит следующим ходом, который CLI
-  начинает сам.
-- hqc: текст строки — `summary` (`engine.rs:1594–1600`), `handback_report` не читается; Auto в hqc —
-  `--permission-mode auto` (`crates/hqc-worker/src/adapter/claude_code.rs:512–515`).
-- Claude Code: отчёт через `SubagentHandback` включается в режиме `auto`, если не выключен
-  переменной `CLAUDE_CODE_SENDMESSAGE_HANDBACK` (по умолчанию флаг `tengu_lively_waffle` = `true`,
-  `cli:194998–195005`); «When present, `summary` holds harness notes written for the model»
-  (`cli:108830`), «render it instead of `summary`, with its `warning` … above its `text`»
-  (`cli:108836`); спр. 2.1 `task_notification`, 5.6. Вживую `x1-handback` (sonnet, `auto`): строка 85 —
-  `task_notification {status: completed, handback: send}`, `summary` — эта фраза,
-  `handback_report: {text: "HANDBACK-DONE (…)"}`; дальше CLI сам открыл ход, и агент пересказал
-  отчёт.
-- Чинить: при `handback_report` — его `text` (и `warning` над ним) вместо `summary`.
+**A background subagent's report is replaced by a service phrase meant for the model.**
+- Seen: in a session in Auto every background subagent ends in the feed with the line "This agent's
+  report was delivered to you as a message from "…" (its SubagentHandback call). Read it there; it is
+  not repeated here.", and the report itself is absent; the agent's retelling of it comes in the next
+  turn, which the CLI starts by itself.
+- hqc: the line's text is `summary` (`engine.rs:1594–1600`), `handback_report` is not read; Auto in
+  hqc is `--permission-mode auto` (`crates/hqc-worker/src/adapter/claude_code.rs:512–515`).
+- Claude Code: the report through `SubagentHandback` is on in `auto` mode unless turned off by the
+  `CLAUDE_CODE_SENDMESSAGE_HANDBACK` variable (by default the flag `tengu_lively_waffle` = `true`,
+  `cli:194998–195005`); "When present, `summary` holds harness notes written for the model"
+  (`cli:108830`), "render it instead of `summary`, with its `warning` … above its `text`"
+  (`cli:108836`); ref. 2.1 `task_notification`, 5.6. Live run `x1-handback` (sonnet, `auto`): line
+  85 — `task_notification {status: completed, handback: send}`, `summary` is this phrase,
+  `handback_report: {text: "HANDBACK-DONE (…)"}`; then the CLI opened a turn by itself, and the agent
+  retold the report.
+- Fix: with `handback_report` — its `text` (and the `warning` above it) instead of `summary`.
 
-**Служебные задачи CLI считаются работой сессии.**
-- Видно: сессия стоит в Running и не выгружается по простою, пока CLI делает своё фоновое
-  (сохранение памяти, наблюдатели); их конец может дать строку в ленте.
-- hqc: в счёт идут все `tasks` списка (`engine.rs:1074–1081`), счёт держит процесс от выгрузки
-  (`crates/hqc-worker/src/supervisor.rs:1063–1075`); `skip_transcript` у `task_notification` не
-  проверяется.
-- Claude Code: «hosts should exclude them from activity indicators» (`d312:6406–6413`); признак
-  `ambient` — `cli:330956–330958`, такие задачи — `post_turn_memory`, `auto_mode_scan`,
-  `monitor_ws`; вкладка их исключает (`ext:123912–123914`). Вживую не воспроизвелось: в `x3-ambient`
-  (флаги воркера, sonnet, `auto`, три хода, в том числе «запомни на будущее», и минута паузы после
-  каждого) — ни одной такой задачи, память агент записал сам обычными `Write`; во всех записях стенда
-  задачи только `local_agent`, `local_bash`, `mcp_task`. Расхождение с CLI в коде есть, на наших
-  настройках оно пока ни разу не сработало.
-- Чинить: не считать задачи с `ambient: true`, не давать строку при `skip_transcript: true`.
+**The CLI's service tasks count as the session's work.**
+- Seen: the session stays in Running and is not unloaded for idleness while the CLI does its own
+  background work (saving memory, watchers); their end can give a feed line.
+- hqc: all `tasks` of the list are counted (`engine.rs:1074–1081`), and the count keeps the process
+  from being unloaded (`crates/hqc-worker/src/supervisor.rs:1063–1075`); `skip_transcript` on
+  `task_notification` is not checked.
+- Claude Code: "hosts should exclude them from activity indicators" (`d312:6406–6413`); the
+  `ambient` flag is `cli:330956–330958`, such tasks are `post_turn_memory`, `auto_mode_scan`,
+  `monitor_ws`; the extension excludes them (`ext:123912–123914`). Not reproduced live: in
+  `x3-ambient` (worker flags, sonnet, `auto`, three turns, including "remember for the future", and a
+  minute of pause after each) — not one such task, the agent wrote the memory itself with ordinary
+  `Write`s; in all of the test bench's captures the tasks are only `local_agent`, `local_bash`,
+  `mcp_task`. The mismatch with the CLI is in the code; with our settings it has not fired once so far.
+- Fix: do not count tasks with `ambient: true`, give no line with `skip_transcript: true`.
 
-**Запрос, который CLI велит показать человеку, воркер может разрешить сам.**
-- Видно: вызов, который классификатор режима auto не пропустил и передал человеку, или вызов по
-  правилу `ask` проходит без карточки, если его покрыло «Allow for this session» или правило папки;
-  «Always allow» предлагается там, где CLI его запрещает.
-- hqc: правила сессии и папки разрешают до карточки (`engine.rs:1463–1474`);
-  `requires_user_interaction`, `matched_ask_rule`, `suppress_always_allow_rule` не читаются
+**A request the CLI says to show to a human, the worker may allow by itself.**
+- Seen: a call that the auto mode classifier did not let through and passed to a human, or a call
+  under an `ask` rule, goes through without a card if "Allow for this session" or a folder rule covers
+  it; "Always allow" is offered where the CLI forbids it.
+- hqc: session and folder rules allow before the card (`engine.rs:1463–1474`);
+  `requires_user_interaction`, `matched_ask_rule`, `suppress_always_allow_rule` are not read
   (`engine.rs:1522–1530`).
-- Claude Code: `requires_user_interaction` — «no stored grant or automatic approval may answer it»
-  (`cli:110389`), `matched_ask_rule` (`cli:110374`), `suppress_always_allow_rule` (`cli:110364–110368`);
-  спр. 4.1.
-- Вживую: `requires_user_interaction: true` пришёл на каждом из 12 запросов `AskUserQuestion`
-  (`x5-*`, `x5n-*`) — их воркер и так показывает карточкой вопроса, вреда нет. На вызовах Bash в
-  `x2-perm-*` и `x2b-perm-*` (правило `ask` из `--settings`, режимы `auto` и `default`) ни одного из
-  трёх флагов не было: правило `ask` приходит как `decision_reason_type: rule`, свои вопросы
-  инструмента — как `subcommandResults`, `other` или `blocked_path`. В `auto` до человека дошли только
-  вызовы по правилу `ask`, остальные решил сам CLI. Вызов, который CLI отдаёт только человеку, на
-  Bash не воспроизведён.
-- Чинить: при этих флагах не применять правила сессии и папки, убрать «always» и «session», передать
-  хабу признак «только человеку».
+- Claude Code: `requires_user_interaction` — "no stored grant or automatic approval may answer it"
+  (`cli:110389`), `matched_ask_rule` (`cli:110374`), `suppress_always_allow_rule`
+  (`cli:110364–110368`); ref. 4.1.
+- Live: `requires_user_interaction: true` came on each of the 12 `AskUserQuestion` requests
+  (`x5-*`, `x5n-*`) — the worker shows these as a question card anyway, no harm. On Bash calls in
+  `x2-perm-*` and `x2b-perm-*` (an `ask` rule from `--settings`, modes `auto` and `default`) none of
+  the three flags appeared: an `ask` rule arrives as `decision_reason_type: rule`, the tool's own
+  questions as `subcommandResults`, `other` or `blocked_path`. In `auto` only calls under the `ask`
+  rule reached a human, the CLI decided the rest itself. A call the CLI gives only to a human was not
+  reproduced on Bash.
+- Fix: with these flags do not apply session and folder rules, remove "always" and "session", pass
+  the hub a "human only" mark.
 
-**Отказ модели с переходом на запасную: отозванные сообщения остаются в ленте.**
-- Видно: CLI отзывает показанные сообщения отказавшей попытки и присылает ответ запасной модели — в
-  hqc видны и отозванные, и новый, и не сказано, что модель сменилась.
-- hqc: `supersedes` у `assistant` не читается (`engine.rs:927–973`), `system/model_refusal_fallback`
-  уходит в пустую ветку (`engine.rs:778`); протокол не умеет отзывать показанное («History is never
-  rewritten», SPEC hqc).
-- Claude Code: «Evict the named messages on arrival» (`cli:107172–107176`); спр. 2.1, 5.10; в
-  транскриптах ноутбука `model_refusal_fallback` — 44 раза (спр. 7.4). Вкладка убирает строки из
-  `retracted_message_uuids` (`web:171121–171140`).
-- Чинить: событие отзыва — пометкой поверх, не удалением (нужен хаб) — и строка о смене модели.
+**A model refusal with a switch to the fallback: retracted messages stay in the feed.**
+- Seen: the CLI retracts the shown messages of the refused attempt and sends the fallback model's
+  answer — hqc shows both the retracted ones and the new one, and does not say the model changed.
+- hqc: `supersedes` on `assistant` is not read (`engine.rs:927–973`), `system/model_refusal_fallback`
+  goes to an empty branch (`engine.rs:778`); the protocol cannot retract what was shown ("History is
+  never rewritten", SPEC hqc).
+- Claude Code: "Evict the named messages on arrival" (`cli:107172–107176`); ref. 2.1, 5.10; in the
+  laptop's transcripts `model_refusal_fallback` occurs 44 times (ref. 7.4). The extension removes the
+  lines in `retracted_message_uuids` (`web:171121–171140`).
+- Fix: a retraction event — as a mark on top, not a deletion (needs the hub) — and a line about the
+  model change.
 
-**Отказ в смене модели виден только в журнале воркера.**
-- Видно: выбрал модель, CLI её не принял — шапка показывает выбранную, агент работает на прежней.
-- hqc: ответ `error` на `set_model` — в журнал (`engine.rs:813–823`), модель уже записана в сессию
-  (`supervisor.rs:1238–1253`).
-- Claude Code: ошибка с `error_code` и полем `model` — какая модель осталась (`cli:1509084–1509106`,
-  спр. 3.3).
-- Чинить: на `error` вернуть хабу модель из ответа и строку с причиной.
+**A refused model switch is visible only in the worker's log.**
+- Seen: you chose a model, the CLI did not accept it — the header shows the chosen one, the agent
+  works on the previous one.
+- hqc: the `error` response to `set_model` goes to the log (`engine.rs:813–823`), the model is
+  already written into the session (`supervisor.rs:1238–1253`).
+- Claude Code: an error with `error_code` and a `model` field — which model stayed
+  (`cli:1509084–1509106`, ref. 3.3).
+- Fix: on `error` return the model from the response to the hub, and a line with the reason.
 
-**Сообщение во время хода, который CLI начал сам, стирает последний текст этого хода.**
-- Видно: изредка пропадает последний ответ агента на конец фоновой задачи — если сообщение
-  пользователя пришло между этим ответом и концом хода.
-- hqc: на новый ввод удержанный текст обнуляется, а не отпускается (`engine.rs:429`); у хода, начатого
-  CLI, нет хода супервизора, ввод идёт как новый (`supervisor.rs:1433–1450`); запись числится своей
-  (`claude_code.rs:974`), зеркало её не восполнит. По коду.
-- Claude Code: окно между последним текстом и `result` по записям стенда — 9–100 мс.
-- Чинить: перед новым вводом отпускать удержанный текст.
+**A message during a turn the CLI started by itself erases that turn's last text.**
+- Seen: occasionally the agent's last answer to the end of a background task disappears — if a user
+  message arrived between that answer and the end of the turn.
+- hqc: on new input the held text is zeroed instead of released (`engine.rs:429`); a turn started by
+  the CLI has no supervisor turn, so the input goes as new (`supervisor.rs:1433–1450`); the record
+  counts as own (`claude_code.rs:974`), so the mirror will not restore it. Per the code.
+- Claude Code: the window between the last text and `result` in the test bench's captures is
+  9–100 ms.
+- Fix: release the held text before new input.
 
-**Текст брошенной попытки ответа склеивается со следующей.**
-- Видно (по коду, частота обрывов не мерена): при обрыве потока и повторе запроса в живом пузыре —
-  начало первой попытки и следом вторая; если повтор вернул только вызов инструмента, недописанный
-  текст висит до конца хода, и все сообщения этого времени помечаются «пришли во время текста».
-- hqc: в `agent.delta` нет признака попытки (`crates/hqc-proto/src/event.rs:227–234`); воркер на
-  `message_start` только обнуляет счётчик скорости (`engine.rs:878–880`); хаб дописывает
-  (`crates/hqc-hub/src/app.rs:197–219`), клиент чистит только на `agent.message` и конце хода
-  (`client/src/timeline.ts:175–191`).
-- Вкладка: `message_start` — новая попытка, строки прошлой убираются (`web:163707–163711`,
-  `web:171092–171099`, спр. 8).
-- Чинить: воркер на `message_start` главного потока шлёт сброс, хаб и клиент обнуляют живой текст.
+**The text of an abandoned answer attempt is glued to the next one.**
+- Seen (per the code, the frequency of cuts not measured): when the stream is cut and the request
+  retried, the live bubble shows the start of the first attempt followed by the second; if the retry
+  returned only a tool call, the unfinished text hangs until the end of the turn, and all messages of
+  that time are marked "arrived during the text".
+- hqc: `agent.delta` has no attempt mark (`crates/hqc-proto/src/event.rs:227–234`); on
+  `message_start` the worker only zeroes the rate counter (`engine.rs:878–880`); the hub appends
+  (`crates/hqc-hub/src/app.rs:197–219`), the client clears only on `agent.message` and at the end of
+  the turn (`client/src/timeline.ts:175–191`).
+- Extension: `message_start` is a new attempt, the previous one's lines are removed
+  (`web:163707–163711`, `web:171092–171099`, ref. 8).
+- Fix: on a main-thread `message_start` the worker sends a reset, the hub and the client zero the
+  live text.
 
-**Зеркало (сессии VS Code): служебные строки CLI — пузырями пользователя, вывод команд теряется.**
-- Видно: в истории из VS Code `[Request interrupted by user]`, `<command-name>/cost</command-name>…`
-  стоят репликами пользователя с сырыми тегами, вывод слэш-команды пропадает.
-- hqc: любой текст `user` без `isMeta` — `user.message` (`crates/hqc-worker/src/mirror/map.rs:128–178`),
-  `system` не читается (`map.rs:53–60`, `crates/hqc-claude-jsonl/src/lib.rs:16–30`).
-- Claude Code: спр. 7.6; на ноутбуке `[… for tool use]` — 358 строк, `<command-name>` и
-  `<local-command-stdout>` — 356 и 333. Вкладка рисует «Interrupted», «Tool interrupted», `/команда`.
-  Вживую в hqc: сессия, которую зеркало завело после `/clear` (пункт про `/clear`), открывается
-  репликой пользователя `<command-name>/clear</command-name>…`.
-- Отложено в первой версии: «ну вот это пофиг, да, одновременно использоваться не будет» (§3, «Отличия,
-  которые есть только у сессий VS Code (зеркало), не чиним»).
-- Чинить: распознавать тексты прерывания и `<command-name>`/`<local-command-*>`, читать
+**Mirror (VS Code sessions): the CLI's service lines as user bubbles, command output is lost.**
+- Seen: in history from VS Code, `[Request interrupted by user]` and
+  `<command-name>/cost</command-name>…` stand as user messages with raw tags, and the slash command's
+  output disappears.
+- hqc: any `user` text without `isMeta` is a `user.message`
+  (`crates/hqc-worker/src/mirror/map.rs:128–178`), `system` is not read (`map.rs:53–60`,
+  `crates/hqc-claude-jsonl/src/lib.rs:16–30`).
+- Claude Code: ref. 7.6; on the laptop `[… for tool use]` — 358 lines, `<command-name>` and
+  `<local-command-stdout>` — 356 and 333. The extension draws "Interrupted", "Tool interrupted",
+  `/command`. Live in hqc: the session the mirror created after `/clear` (the item about `/clear`)
+  opens with the user message `<command-name>/clear</command-name>…`.
+- Deferred in the first version: "well, that doesn't matter, yes, they won't be used at the same
+  time" (§3, "Differences only VS Code sessions (the mirror) have, we do not fix").
+- Fix: recognize the interruption texts and `<command-name>`/`<local-command-*>`, read
   `system/local_command`.
 
-## Частично — часть случаев обработана
+## Partly — some cases handled
 
-**Сжатие контекста: не видно ни начала, ни неудачи, ни сколько освобождено.**
-- Видно: «Context compacted» с выжимкой есть; во время сжатия (минута и больше) — «Agent is
-  working»; неудачное сжатие (ход идёт дальше переполненным) не видно вовсе; нет «авто/вручную» и
-  «N k tokens freed».
-- hqc: из `system/status` берётся только `permissionMode` (`engine.rs:724`), триггер — в журнал
-  (`engine.rs:770–777`); у события только `text` (`crates/hqc-proto/src/event.rs:384–391`).
-- Claude Code: спр. 5.7 (вживую `p10-autocompact`: первая попытка `compact_result: failed`,
-  `compact_error: too_few_groups` при 165 % окна); вкладка — «Compacted chat · auto|manual · N k
-  tokens freed» (`web:235028–235055`), «Compacting conversation» (`web:237680–237698`).
-- Апстрим: строка без выжимки (DrZlo13/hqc#54 открыт).
-- Чинить: «Compacting…» в строке активности на `status compacting`, строка об ошибке на
-  `compact_result: failed`, в событии — `trigger`, `pre_tokens`, `post_tokens`.
+**Context compaction: neither its start, nor a failure, nor how much was freed is visible.**
+- Seen: "Context compacted" with the summary is there; during compaction (a minute or more) —
+  "Agent is working"; a failed compaction (the turn goes on overfull) is not visible at all; there is
+  no "auto/manual" and no "N k tokens freed".
+- hqc: only `permissionMode` is taken from `system/status` (`engine.rs:724`), the trigger goes to the
+  log (`engine.rs:770–777`); the event has only `text` (`crates/hqc-proto/src/event.rs:384–391`).
+- Claude Code: ref. 5.7 (live run `p10-autocompact`: the first attempt `compact_result: failed`,
+  `compact_error: too_few_groups` at 165 % of the window); the extension — "Compacted chat ·
+  auto|manual · N k tokens freed" (`web:235028–235055`), "Compacting conversation"
+  (`web:237680–237698`).
+- Upstream: the line without the summary (DrZlo13/hqc#54 is open).
+- Fix: "Compacting…" in the activity line on `status compacting`, an error line on
+  `compact_result: failed`, and `trigger`, `pre_tokens`, `post_tokens` in the event.
 
-**Ход, кончившийся ошибкой, лимитом ходов или бюджетом, — без причины.**
-- Видно: ход, упавший исключением (`error_during_execution` не от Stop) или упёршийся в лимит, просто
-  кончается.
-- hqc: причину воркер кладёт в `status idle` `detail` (`engine.rs:1343–1350`), а клиент `status`
-  рисует только при `state: error` с `detail` (`client/src/ui/feed.ts:47–49`); у `success` с
-  `is_error: true` `detail` — буквально `"success"`; `errors[]`, `terminal_reason`,
-  `api_error_status` не читаются.
-- Claude Code: спр. 2.1 `result`, 5.2.
-- Чинить: строка «Turn ended early: …» с `terminal_reason` и `errors[]`, кроме прерывания по Stop
-  (там — «Interrupted», см. выше).
+**A turn that ended in an error, the turn limit or the budget — without a reason.**
+- Seen: a turn that failed with an exception (`error_during_execution` not from Stop) or hit a limit
+  simply ends.
+- hqc: the worker puts the reason into `status idle` `detail` (`engine.rs:1343–1350`), but the client
+  draws `status` only with `state: error` and a `detail` (`client/src/ui/feed.ts:47–49`); for
+  `success` with `is_error: true` the `detail` is literally `"success"`; `errors[]`,
+  `terminal_reason`, `api_error_status` are not read.
+- Claude Code: ref. 2.1 `result`, 5.2.
+- Fix: a line "Turn ended early: …" with `terminal_reason` and `errors[]`, except an interruption by
+  Stop (there — "Interrupted", see above).
 
-**Конец фоновой задачи — без итога, расхода и вывода.**
-- Видно: «Background task · <первая строка>»; убитый Stop субагент даёт строку с одним своим
-  описанием, упавший — тоже без слова «failed»; токены, время и путь полного вывода не видны.
-- hqc: `status`, `usage`, `output_file`, `resource_links` не читаются (`engine.rs:1580–1600`);
-  строка — `client/src/ui/cards.tsx:419–431`.
-- Claude Code: спр. 2.1 `task_notification`; у убитого `summary` — его описание (`cli:742344`, вживую
-  `w3-stop-bg-agent` строка 106); вкладка — карточка со `status`, `summary`, `result`, `usage`
-  (`web:161462`).
-- Чинить: `status` и `usage` в событии, значок итога и «N tokens · M tools · время», вывод —
-  вложением.
+**The end of a background task — without the outcome, spending and output.**
+- Seen: "Background task · <first line>"; a subagent killed by Stop gives a line with only its
+  description, a failed one — also without the word "failed"; tokens, time and the path of the full
+  output are not visible.
+- hqc: `status`, `usage`, `output_file`, `resource_links` are not read (`engine.rs:1580–1600`);
+  the line is `client/src/ui/cards.tsx:419–431`.
+- Claude Code: ref. 2.1 `task_notification`; for a killed one, `summary` is its description
+  (`cli:742344`, live run `w3-stop-bg-agent` line 106); the extension — a card with `status`,
+  `summary`, `result`, `usage` (`web:161462`).
+- Fix: `status` and `usage` in the event, an outcome icon and "N tokens · M tools · time", the output
+  as an attachment.
 
-**Фоновые задачи: сессия Running, но что работает — не видно.**
-- Видно: после конца хода сессия в Running, а что крутится в фоне — не сказано; в шапке «N agents» —
-  только субагенты.
-- hqc: воркер шлёт только число (`crates/hqc-proto/src/frame.rs:145–150`), клиент по нему лишь
-  переводит сессию в Running (`client/src/ui/sessions.ts:69–70`).
-- Вкладка: список фоновых задач с выводом и Stop (`web:238660–238690`).
-- Апстрим: и числа нет (DrZlo13/hqc#55 открыт).
-- Чинить: сразу — «N background» в шапке по числу; дальше — список из
-  `background_tasks_changed.tasks` с описанием из `task_started`.
+**Background tasks: the session is Running, but what runs is not visible.**
+- Seen: after the end of a turn the session is in Running, but what is spinning in the background is
+  not said; "N agents" in the header counts only subagents.
+- hqc: the worker sends only a number (`crates/hqc-proto/src/frame.rs:145–150`), and the client only
+  uses it to switch the session to Running (`client/src/ui/sessions.ts:69–70`).
+- Extension: a list of background tasks with output and Stop (`web:238660–238690`).
+- Upstream: not even the number (DrZlo13/hqc#55 is open).
+- Fix: right away — "N background" in the header from the number; later — a list from
+  `background_tasks_changed.tasks` with the description from `task_started`.
 
-**Результат инструмента длиннее 4 КБ обрезан, «Full result» не бывает.**
-- Видно: длинный вывод команды и отчёт субагента переднего плана обрываются — 9,1 % результатов в
-  выборке; итог `Agent` идёт текстом с хвостом agentId и usage; дифф большой правки в ленте тоже
-  обрезан («The preview is cut at 4 KB», `new-look` `ec52bf0`).
-- hqc: кнопка «Full result» есть (`client/src/ui/cards.tsx:753–757`), но воркер режет до 4096 байт и
-  `artifact_id` не ставит (`engine.rs:96`, `1252–1257`); `tool_use_result` не читается
+**A tool result longer than 4 KB is cut, there is never a "Full result".**
+- Seen: long command output and a foreground subagent's report are cut off — 9.1 % of results in the
+  sample; the `Agent` result comes as text with an agentId and usage tail; the diff of a big edit in
+  the feed is cut too ("The preview is cut at 4 KB", `new-look` `ec52bf0`).
+- hqc: the "Full result" button exists (`client/src/ui/cards.tsx:753–757`), but the worker cuts to
+  4096 bytes and sets no `artifact_id` (`engine.rs:96`, `1252–1257`); `tool_use_result` is not read
   (`engine.rs:1237–1262`).
-- Claude Code: вкладка показывает весь результат (`web:172021–172039`); для `Agent` — «render from it
-  instead of parsing the tool_result text» (`d312:6569–6572`).
-- Чинить: воркер кладёт длинный результат артефактом — клиент уже покажет «Full result»; итог `Agent`
-  — из `tool_use_result`.
+- Claude Code: the extension shows the whole result (`web:172021–172039`); for `Agent` — "render from
+  it instead of parsing the tool_result text" (`d312:6569–6572`).
+- Fix: the worker stores a long result as an artifact — the client will already show "Full result";
+  the `Agent` result — from `tool_use_result`.
 
-**Работа субагентов в ленту не попадает.**
-- Видно: что делал субагент (вызовы, результаты, текст), видно только в полосе живых субагентов и в
-  итоговой строке; транскрипт субагента не открыть.
-- hqc: строки с `parent_tool_use_id` отбрасываются (`engine.rs:669`, `692–695`).
-- Claude Code: вызовы и текст субагентов идут в поток (вживую `t2-subagent-progress` строки 86–87);
-  вкладка кладёт их в ленту и открывает транскрипт субагента (`web:238576`); файл —
-  `<сессия>/subagents/agent-<task_id>.jsonl` (спр. 7.5), воркер его уже читает для скорости токенов.
-- Решено владельцем, где показывать: «надо показать, просто сделать не так всрато как в vscode, когда
-  эти строки уплывают вверх в чате, а всегда внизу чтобы были живые субагенты привязаны» (§3).
-- Чинить: история субагента по клику на его строку в полосе.
+**Subagents' work does not reach the feed.**
+- Seen: what a subagent did (calls, results, text) is visible only in the live subagents bar and in
+  the final line; the subagent's transcript cannot be opened.
+- hqc: lines with `parent_tool_use_id` are dropped (`engine.rs:669`, `692–695`).
+- Claude Code: subagents' calls and text go into the stream (live run `t2-subagent-progress` lines
+  86–87); the extension puts them into the feed and opens the subagent's transcript (`web:238576`); the
+  file is `<session>/subagents/agent-<task_id>.jsonl` (ref. 7.5), the worker already reads it for the
+  token rate.
+- The owner decided where to show it: "it needs to be shown, just not as crappily as in vscode, where
+  these lines float up the chat; the live subagents should always be pinned at the bottom" (§3).
+- Fix: the subagent's history on a click on its line in the bar.
 
-**Упавшие MCP-серверы и ошибки плагинов не сообщаются.**
-- Видно: у агента нет инструментов MCP (в том числе сервера `hqc`), и в ленте ни слова.
-- hqc: из `system/init` берутся модель, режим, команды, id (`engine.rs:705–723`).
-- Claude Code: `mcp_servers[].status`, `plugin_errors` (спр. 2.1); вживую `p13-*`: сервер не
-  подключился за ~27 с — `status: failed`, во втором ходе повторной попытки нет (спр. 1.2).
-- Чинить: строка на `status` ≠ `connected` и на непустые `plugin_errors`; переподключение —
+**Failed MCP servers and plugin errors are not reported.**
+- Seen: the agent has no MCP tools (including those of the `hqc` server), and not a word in the feed.
+- hqc: the model, mode, commands and id are taken from `system/init` (`engine.rs:705–723`).
+- Claude Code: `mcp_servers[].status`, `plugin_errors` (ref. 2.1); live run `p13-*`: the server did
+  not connect within ~27 s — `status: failed`, no retry in the second turn (ref. 1.2).
+- Fix: a line on `status` ≠ `connected` and on non-empty `plugin_errors`; reconnecting —
   `mcp_reconnect`.
 
-**Отзыв запроса CLI не обрабатывается.**
-- Видно: карточка разрешения или вопроса, которую CLI уже отозвал, висит до конца хода, у фонового
-  субагента — до его конца; ответ уходит в пустоту.
-- hqc: ветки `control_cancel_request` нет (`engine.rs:691–781`); карточки закрываются только на
-  `result` и `task_notification` (`engine.rs:1274–1282`, `1584–1587`).
-- Claude Code: спр. 2.4, 4, 4.5 (`cli:1468141–1468157`); SDK вкладки прерывает колбэк по отзыву
-  (`ext:110378–110381`).
-- Чинить: на `control_cancel_request {request_id}` — `approval.cancel` / `clarify.cancel`.
+**A CLI request withdrawal is not handled.**
+- Seen: a permission or question card the CLI has already withdrawn hangs until the end of the turn,
+  for a background subagent until its end; the answer goes into the void.
+- hqc: there is no `control_cancel_request` branch (`engine.rs:691–781`); cards are closed only on
+  `result` and `task_notification` (`engine.rs:1274–1282`, `1584–1587`).
+- Claude Code: ref. 2.4, 4, 4.5 (`cli:1468141–1468157`); the extension's SDK aborts the callback on
+  withdrawal (`ext:110378–110381`).
+- Fix: on `control_cancel_request {request_id}` — `approval.cancel` / `clarify.cancel`.
 
-**Лимиты подписки: только проценты двух окон и только в меню.**
-- Видно: проценты 5-часового и 7-дневного окна — только если открыть меню More; «лимит исчерпан»,
-  предупреждение и перерасход не видны.
-- hqc: `engine.rs:697–700`, `1721–1734`; `client/src/ui/limits.tsx:31–52`, загрузка при открытии
-  меню (`client/src/ui/Chat.tsx:471`).
-- Claude Code: `rate_limit_event` — `status`, `rateLimitType`, `overage*` (спр. 2.1); вкладка рисует
-  полосу при ≥ 70 % и «You've hit your 5-hour limit · resets …» при `rejected` (`web:172185–172222`).
-- Чинить: передавать `status` и `resetsAt`; полоса над полем ввода при ≥ 70 % или `rejected`.
+**Subscription limits: only the percentages of two windows and only in the menu.**
+- Seen: the percentages of the 5-hour and 7-day windows — only if you open the More menu; "limit
+  reached", the warning and overage are not visible.
+- hqc: `engine.rs:697–700`, `1721–1734`; `client/src/ui/limits.tsx:31–52`, loaded when the menu
+  opens (`client/src/ui/Chat.tsx:471`).
+- Claude Code: `rate_limit_event` — `status`, `rateLimitType`, `overage*` (ref. 2.1); the extension
+  draws a bar at ≥ 70 % and "You've hit your 5-hour limit · resets …" on `rejected`
+  (`web:172185–172222`).
+- Fix: pass `status` and `resetsAt`; a bar above the composer at ≥ 70 % or on `rejected`.
 
-**Будильник агента не переживает выгрузку по простою.**
-- Видно: агент поставил «разбуди меня через час» (`ScheduleWakeup`), процесс выгрузили через 30 минут
-  простоя — будильник не срабатывает ни в срок, ни потом, когда сессию поднимает следующее сообщение.
-- Вживую в hqc (пробная сессия `agent-trader/session-7`): `ScheduleWakeup` на 1980 с в 23:13:47 UTC
-  («Next wakeup scheduled for … in 1992s», срок 23:47:00); в 23:43:49 воркер — «idle timeout, stopping
-  the agent», процесс убит; в срок ни одного события; сообщение в 23:50 подняло процесс, агент ответил
-  на него, будильник не сработал и за две минуты после. На стенде то же: в живом процессе
-  будильник срабатывает (`x6-wake-control`: `command_lifecycle started {wakeup_source: loop_wakeup}`,
-  ход «WOKE»), после SIGTERM и `--resume` — нет (`x6-wake-kill`, `x6-wake-resume`: 100 с простоя, ход
-  на сообщение и ещё 40 с — ни одного срабатывания); на диске будильник не хранится.
-- hqc: простой не учитывает взведённый будильник (`supervisor.rs:1063–1075`); `wakeup_source`,
-  `scheduled_for` из `command_lifecycle` не читаются (`engine.rs:1010–1047`).
-- Claude Code: «A host that keeps an idle session alive for a wakeup should stop waiting only when
-  this equals the time it is waiting for» (`cli:109505`); спр. 2.2. SPEC §2.7: за месяц 68 вызовов
-  `ScheduleWakeup` в 15 сессиях.
-- Отложено в первой версии: «ну там же есть выгрузка по времени, в целом хватит ее же» (§3, выгрузка
-  только по простою).
-- Чинить: держать процесс до `scheduledFor` или поднимать его к этому времени.
+**The agent's wakeup timer does not survive an unload for idleness.**
+- Seen: the agent set "wake me in an hour" (`ScheduleWakeup`), the process was unloaded after 30
+  minutes idle — the wakeup fires neither on time nor later, when the next message brings the session
+  up.
+- Live in hqc (trial session `agent-trader/session-7`): `ScheduleWakeup` for 1980 s at 23:13:47 UTC
+  ("Next wakeup scheduled for … in 1992s", due 23:47:00); at 23:43:49 the worker — "idle timeout,
+  stopping the agent", the process killed; not one event at the due time; a message at 23:50 brought
+  the process up, the agent answered it, and the wakeup did not fire in the two minutes after either.
+  The same on the test bench: in a live process the wakeup fires (`x6-wake-control`:
+  `command_lifecycle started {wakeup_source: loop_wakeup}`, a "WOKE" turn), after SIGTERM and
+  `--resume` it does not (`x6-wake-kill`, `x6-wake-resume`: 100 s idle, a turn on a message and
+  another 40 s — not one firing); the wakeup is not stored on disk.
+- hqc: idleness does not take an armed wakeup into account (`supervisor.rs:1063–1075`);
+  `wakeup_source`, `scheduled_for` from `command_lifecycle` are not read (`engine.rs:1010–1047`).
+- Claude Code: "A host that keeps an idle session alive for a wakeup should stop waiting only when
+  this equals the time it is waiting for" (`cli:109505`); ref. 2.2. SPEC §2.7: 68 `ScheduleWakeup`
+  calls in 15 sessions over a month.
+- Deferred in the first version: "well, there's the unload by time anyway, on the whole that's
+  enough" (§3, unloading only on idleness).
+- Fix: keep the process until `scheduledFor` or bring it up by that time.
 
-**Карточка разрешения: без причины вопроса; план — обрезком JSON.**
-- Видно: не видно, почему CLI спрашивает (проверка безопасности, правило `ask`, хук); у
-  `ExitPlanMode` и любого инструмента без `command`/`file_path`/`url` — первые 300 байт JSON.
-- hqc: `engine.rs:1795–1809`; клиент не знает ключа `plan` (`client/src/ui/permission.tsx:37–61`).
-- Claude Code: `decision_reason`, `title`, `display_name` (спр. 4.1, `cli:110322–110327`); вкладка
-  показывает план своим окном (`web:154442`). В выборке 0 вызовов `ExitPlanMode`.
-- Чинить: показывать `decision_reason` и `display_name`, у `ExitPlanMode` — `plan` Markdown'ом.
+**The permission card: no reason for the question; a plan as a cut piece of JSON.**
+- Seen: it is not visible why the CLI asks (a safety check, an `ask` rule, a hook); for
+  `ExitPlanMode` and any tool without `command`/`file_path`/`url` — the first 300 bytes of JSON.
+- hqc: `engine.rs:1795–1809`; the client does not know the `plan` key
+  (`client/src/ui/permission.tsx:37–61`).
+- Claude Code: `decision_reason`, `title`, `display_name` (ref. 4.1, `cli:110322–110327`); the
+  extension shows the plan in its own window (`web:154442`). 0 `ExitPlanMode` calls in the sample.
+- Fix: show `decision_reason` and `display_name`, for `ExitPlanMode` — `plan` as Markdown.
 
-**Запрос прав от субагента не говорит, какой субагент спрашивает.**
-- Видно: «The agent wants to run a command» — главный агент это или фоновый субагент, не понять;
-  строка субагента в полосе не говорит «ждёт разрешения».
-- hqc: в `approval.request` поля субагента нет (`crates/hqc-proto/src/event.rs:277–294`).
-- Вкладка: запрос связан с субагентом по `agentId`, карточка субагента — «waiting for <tool>»
-  (`web:238474–238476`).
-- Чинить: воркер кладёт в запрос задачу субагента, клиент — «Subagent "<задача>" wants to…». Ценность
-  ниже: владелец почти всегда в Auto.
+**A permission request from a subagent does not say which subagent asks.**
+- Seen: "The agent wants to run a command" — you cannot tell whether it is the main agent or a
+  background subagent; the subagent's line in the bar does not say "waiting for permission".
+- hqc: `approval.request` has no subagent field (`crates/hqc-proto/src/event.rs:277–294`).
+- Extension: the request is tied to the subagent by `agentId`, the subagent's card — "waiting for
+  <tool>" (`web:238474–238476`).
+- Fix: the worker puts the subagent's task into the request, the client — "Subagent "<task>" wants
+  to…". Lower value: the owner is almost always in Auto.
 
-**Вопрос агента, оборванный перезапуском воркера или Stop, — ответить нельзя.**
-- Видно: карточка «Cancelled: worker restarted», варианты серые; ответ набирать заново.
-- hqc: поля отключены у закрытой карточки (`client/src/ui/cards.tsx:919`).
-- Вкладка: при открытии сессии с последним вопросом без ответа показывает его снова и шлёт ответ
-  обычным сообщением «Answering your earlier question "…": …» (`web:168984–169013`,
-  `web:162062–162070`, спр. 8.2).
-- Чинить (только клиент): у вопроса, отменённого перезапуском или Stop, карточка остаётся активной и
-  шлёт ответ сообщением в том же виде.
+**An agent's question cut off by a worker restart or Stop cannot be answered.**
+- Seen: the card "Cancelled: worker restarted", the options are grey; the answer has to be typed
+  again.
+- hqc: the fields are disabled on a closed card (`client/src/ui/cards.tsx:919`).
+- Extension: on opening a session whose last question has no answer, it shows the question again and
+  sends the answer as an ordinary message "Answering your earlier question "…": …"
+  (`web:168984–169013`, `web:162062–162070`, ref. 8.2).
+- Fix (client only): for a question cancelled by a restart or Stop, the card stays active and sends
+  the answer as a message in the same form.
 
-**Название и слэш-команды — с опозданием и без описаний; Rename не доходит до CLI.**
-- Видно: название появляется только после конца хода; новый скилл — только со следующего хода; в
-  подсказке по «/» — голые имена без описания и аргументов; имя, данное в hqc, не видно в истории VS
-  Code.
-- hqc: `ai-title` читается из файла после хода (`claude_code.rs:346–369`); команды — из `init`
-  (`engine.rs:837–864`); `session_title_changed` и `commands_changed` уходят в пустую ветку
-  (`engine.rs:778`); подсказка — `client/src/ui/Chat.tsx:869–882`.
-- Claude Code: спр. 2.1 `commands_changed`, 2.2 `session_title_changed`, 1.3 (ответ `initialize` —
-  команды с `description` и `argumentHint`), 3.3 `rename_session`.
-- Чинить: брать оба кадра из потока, команды — из ответа `initialize`; Rename и `hqc_rename` дублировать
-  `rename_session`.
+**The title and slash commands — late and without descriptions; Rename does not reach the CLI.**
+- Seen: the title appears only after the end of the turn; a new skill — only from the next turn; the
+  "/" hint shows bare names without description and arguments; a name given in hqc is not visible in
+  the VS Code history.
+- hqc: `ai-title` is read from the file after the turn (`claude_code.rs:346–369`); commands — from
+  `init` (`engine.rs:837–864`); `session_title_changed` and `commands_changed` go to an empty branch
+  (`engine.rs:778`); the hint is `client/src/ui/Chat.tsx:869–882`.
+- Claude Code: ref. 2.1 `commands_changed`, 2.2 `session_title_changed`, 1.3 (the `initialize`
+  response — commands with `description` and `argumentHint`), 3.3 `rename_session`.
+- Fix: take both frames from the stream, commands — from the `initialize` response; duplicate Rename
+  and `hqc_rename` with `rename_session`.
 
-**Ссылки в результатах — простой текст; ссылка `Artifact` спрятана в группе.**
-- Видно: агент опубликовал страницу инструментом `Artifact` — ссылка внутри свёрнутой группы, в
-  `<pre>`, не кликается (19 вызовов `Artifact` в выборке).
-- hqc: результат рисуется `<pre>` (`client/src/ui/cards.tsx:752`).
-- Вкладка: результат `Artifact` с адресом открывает сама (`web:171198–171217`).
-- Чинить (только клиент): результат `Artifact` — отдельной строкой со ссылкой вне группы; адреса в
-  `<pre>` — ссылками.
+**Links in results are plain text; the `Artifact` link is hidden in a group.**
+- Seen: the agent published a page with the `Artifact` tool — the link is inside a collapsed group,
+  in a `<pre>`, not clickable (19 `Artifact` calls in the sample).
+- hqc: the result is drawn as `<pre>` (`client/src/ui/cards.tsx:752`).
+- Extension: opens an `Artifact` result with a URL by itself (`web:171198–171217`).
+- Fix (client only): the `Artifact` result — a separate line with the link outside the group; URLs
+  in `<pre>` — as links.
 
-**Транскрипт стёрт — агент молча начинает с нуля.**
-- Видно: старая сессия продолжается без памяти о разговоре, ничего не сказано.
-- hqc: нет файла — `--session-id`, новый разговор (`claude_code.rs:604–610`).
-- Апстрим: **уже исправлено** — строка `transcript_missing` в `master`
-  (`crates/hqc-worker/src/adapter/claude_code.rs:31–37`, `647–662` на `bcb10b1`); в сборке воркеров её
-  нет.
-- Чинить: собрать воркеры с этой правкой.
+**The transcript is erased — the agent silently starts from scratch.**
+- Seen: an old session continues without memory of the conversation, nothing is said.
+- hqc: no file — `--session-id`, a new conversation (`claude_code.rs:604–610`).
+- Upstream: **already fixed** — the `transcript_missing` line in `master`
+  (`crates/hqc-worker/src/adapter/claude_code.rs:31–37`, `647–662` at `bcb10b1`); the workers'
+  build does not have it.
+- Fix: build the workers with this change.
 
-**Зеркало (сессии VS Code): что из истории теряется.**
-- Видно: в истории из VS Code нет отметки сжатия, сообщений других сессий, картинок из промпта, а
-  название из `/rename` заменено автоназванием.
-- hqc: `isMeta` и выжимка выкидываются (`crates/hqc-claude-jsonl/src/lib.rs:68–70`); из `user` —
-  только текст (`map.rs:141–154`); название — только `ai-title` (`mirror/mod.rs:489–496`).
-- Claude Code: `custom-title` — 6 198 записей на ноутбуке (спр. 7.3), сообщений других сессий в
-  `isMeta` — 1 505 (спр. 7.4).
-- Отложено в первой версии: «ну вот это пофиг, да, одновременно использоваться не будет» (§3); строка
-  сжатия — только у сессий, которые ведёт hqc (§3, запись о «Context compacted»).
-- Чинить: `custom-title` поверх `ai-title`; строка сжатия по `compact_boundary`.
+**Mirror (VS Code sessions): what is lost from history.**
+- Seen: history from VS Code has no compaction mark, no messages from other sessions, no images from
+  the prompt, and the title from `/rename` is replaced by the automatic title.
+- hqc: `isMeta` and the summary are dropped (`crates/hqc-claude-jsonl/src/lib.rs:68–70`); only text
+  is taken from `user` (`map.rs:141–154`); the title is only `ai-title` (`mirror/mod.rs:489–496`).
+- Claude Code: `custom-title` — 6 198 records on the laptop (ref. 7.3), messages from other sessions
+  in `isMeta` — 1 505 (ref. 7.4).
+- Deferred in the first version: "well, that doesn't matter, yes, they won't be used at the same
+  time" (§3); the compaction line — only for sessions hqc runs (§3, the entry about "Context
+  compacted").
+- Fix: `custom-title` over `ai-title`; a compaction line from `compact_boundary`.
 
-**«(no content)» рисуется как ответ (гипотеза).**
-- hqc: воркер пропускает только пустой текст (`engine.rs:941`), клиент рисует любой `agent.message`.
-- Вкладка: текст, ровно равный «(no content)», не рисует (`web:160683–160694`, спр. 8.0).
-- Приходит ли такая заглушка в stream-json — не проверено.
+**"(no content)" is drawn as an answer (hypothesis).**
+- hqc: the worker skips only empty text (`engine.rs:941`), the client draws any `agent.message`.
+- Extension: does not draw a text exactly equal to "(no content)" (`web:160683–160694`, ref. 8.0).
+- Whether such a placeholder arrives in stream-json — not checked.
 
-## Не обрабатываем — сведения приходят и пропадают
+## Not handled — the data arrives and is lost
 
-**Повторы запроса к API (`system/api_retry`).** При перегрузке API (529, 5xx, обрыв) сессия
-минутами показывает «Agent is working» без единого слова. Воркер: пустая ветка (`engine.rs:778`).
-Claude Code: `attempt`, `max_retries`, `retry_delay_ms`, `error_status` (спр. 2.1, 5.10,
-`cli:768796–768805`). Вкладка тоже не показывает. Чинить: «Retrying 3/10 (529), next in 8 s» в
-строке активности.
+**API request retries (`system/api_retry`).** When the API is overloaded (529, 5xx, a cut
+connection) the session shows "Agent is working" for minutes without a single word. Worker: an empty
+branch (`engine.rs:778`). Claude Code: `attempt`, `max_retries`, `retry_delay_ms`, `error_status`
+(ref. 2.1, 5.10, `cli:768796–768805`). The extension does not show it either. Fix: "Retrying 3/10
+(529), next in 8 s" in the activity line.
 
-**Сообщения CLI и хуков (`system/informational`, `system/notification`).** Не видно «<хук> says: …»,
-почему хук `UserPromptSubmit` не пропустил промпт, что хук `Stop` не дал закончить, что конфиг
-применился частично. Воркер: `engine.rs:778`. Claude Code: спр. 2.1 (`cli:722945–722953`,
-`cli:1489336–1489344`); вкладка рисует строку при `level` ≠ `info` (`web:171481–171486`). Хуки у
-владельца на 9 событиях (SPEC §2.7). Клиент незнакомый `system`-код уже показывает текстом
-(`client/src/ui/cards.tsx:393–414`). Чинить: воркер шлёт `system` с текстом для `level` ≠ `info`.
+**CLI and hook messages (`system/informational`, `system/notification`).** Not visible: "<hook>
+says: …", why a `UserPromptSubmit` hook did not let the prompt through, that a `Stop` hook did not
+let the turn finish, that the config was applied partly. Worker: `engine.rs:778`. Claude Code: ref.
+2.1 (`cli:722945–722953`, `cli:1489336–1489344`); the extension draws a line when `level` ≠ `info`
+(`web:171481–171486`). The owner has hooks on 9 events (SPEC §2.7). The client already shows an
+unknown `system` code as text (`client/src/ui/cards.tsx:393–414`). Fix: the worker sends `system`
+with text for `level` ≠ `info`.
 
-**Картинки в результатах инструментов.** Скриншот `mcp__curator__screenshot` (85 вызовов в выборке),
-chrome-devtools (29), `Read` картинки — в результате «[image]»; с картинкой 3,2 % результатов.
-Воркер: блок не текста — `[{type}]` (`engine.rs:1862–1877`). Вкладка свой браузерный скриншот рисует
-в результате (`web:229388–229396`). Чинить: воркер сохраняет картинку артефактом
-(`tool.result.artifact_id` в протоколе есть), клиент — миниатюрой в строке вызова, клик — во вьювер
-(вьювер — PR DrZlo13/hqc#57).
+**Images in tool results.** A `mcp__curator__screenshot` screenshot (85 calls in the sample),
+chrome-devtools (29), a `Read` of an image — the result says "[image]"; 3.2 % of results have an
+image. Worker: a non-text block becomes `[{type}]` (`engine.rs:1862–1877`). The extension draws its
+own browser screenshot in the result (`web:229388–229396`). Fix: the worker saves the image as an
+artifact (the protocol has `tool.result.artifact_id`), the client shows it as a thumbnail in the call
+line, a click opens the viewer (the viewer is PR DrZlo13/hqc#57).
 
-**Смена модели CLI и отказ без запасной.** Модель недоступна — CLI перешёл на запасную
-(`model_fallback`, `model_consent_fallback`), hqc молчит, и строка расхода подписана прежней моделью;
-при отказе без запасной (`model_refusal_no_fallback`, 28 раз на ноутбуке) текст отказа не показан.
-Воркер: `engine.rs:778`, модель строки расхода — из `init` (`engine.rs:1304–1308`). Claude Code: спр.
-2.1, 2.2, 5.10. Чинить: строка «<модель> → <запасная>» и текст отказа.
+**The CLI's model switch and a refusal without a fallback.** The model is unavailable — the CLI
+switched to the fallback (`model_fallback`, `model_consent_fallback`), hqc is silent, and the
+spending line is labeled with the previous model; on a refusal without a fallback
+(`model_refusal_no_fallback`, 28 times on the laptop) the refusal text is not shown. Worker:
+`engine.rs:778`, the spending line's model comes from `init` (`engine.rs:1304–1308`). Claude Code:
+ref. 2.1, 2.2, 5.10. Fix: a line "<model> → <fallback>" and the refusal text.
 
-**MCP-сервер просит ввод (`elicitation`).** Сервер, которому нужно подтверждение, поле или вход
-OAuth, получает отказ; до человека вопрос не доходит. Воркер: на любой запрос, кроме `can_use_tool`, —
-`error` (`engine.rs:1400–1417`). Claude Code: спр. 4.4. Чинить: карточка вопроса по
-`requested_schema` или `url`.
+**An MCP server asks for input (`elicitation`).** A server that needs a confirmation, a field or an
+OAuth sign-in gets a refusal; the question does not reach a human. Worker: `error` on any request
+except `can_use_tool` (`engine.rs:1400–1417`). Claude Code: ref. 4.4. Fix: a question card from
+`requested_schema` or `url`.
 
-**`PushNotification` агента не доходит до телефона.** Агент «отправил уведомление» — в ленте вызов,
-пуша нет. Claude Code: инструмент шлёт `os_notification`, `-p` такие кадры выбрасывает
-(`cli:1244105`, `cli:1489270`). Чинить: вызов `PushNotification` → Web Push хаба с его `message`.
+**The agent's `PushNotification` does not reach the phone.** The agent "sent a notification" — the
+feed has the call, there is no push. Claude Code: the tool sends `os_notification`, `-p` throws such
+frames away (`cli:1244105`, `cli:1489270`). Fix: a `PushNotification` call → the hub's Web Push with
+its `message`.
 
-**«Пульс» долгого вызова (`tool_progress`).** Не видно, сколько уже идёт долгая команда, и что
-субагент упёрся в повторы API (`subagent_retry`). Воркер: `engine.rs:780`. Claude Code: спр. 2.1,
-вживую `p3p5-bash-heartbeat`. Чинить: время в строке идущего вызова; заодно — кадр активности для
-сторожа хаба (пункт про долгий тихий вызов).
+**The "heartbeat" of a long call (`tool_progress`).** Not visible: how long a long command has been
+running, and that a subagent got stuck in API retries (`subagent_retry`). Worker: `engine.rs:780`.
+Claude Code: ref. 2.1, live run `p3p5-bash-heartbeat`. Fix: the time in the running call's line;
+along with it — an activity frame for the hub's watchdog (the item about a long quiet call).
 
-**Оценка скрытого размышления (`system/thinking_tokens`).** Когда текст размышления не приходит,
-не видно, сколько оно уже заняло. Воркер: `engine.rs:778`. Claude Code: спр. 2.1, 5.11. Чинить:
-оценка в строке Thinking.
+**The estimate of hidden thinking (`system/thinking_tokens`).** When the thinking text does not
+arrive, it is not visible how much it has taken already. Worker: `engine.rs:778`. Claude Code: ref.
+2.1, 5.11. Fix: the estimate in the Thinking line.
 
-**Запись в кэш (`usage.cache_write`).** Приходит (`client/src/proto.ts:252`), в строке расхода
-только `cache_read` (`client/src/ui/cards.tsx:611–626`). Вкладка считает и её
-(`web:171732–171741`). Ценность низкая.
+**Cache write (`usage.cache_write`).** It arrives (`client/src/proto.ts:252`), the spending line has
+only `cache_read` (`client/src/ui/cards.tsx:611–626`). The extension counts it too
+(`web:171732–171741`). Low value.
 
-## Не используем — что CLI и вкладка умеют, а мы нет
+## Not used — what the CLI and the extension can do and we do not
 
-Воркер не шлёт `initialize` и из запросов к CLI шлёт только `interrupt`, `set_permission_mode`,
-`set_model` (`claude_code.rs:461–564`, `engine.rs:455–518`).
+The worker does not send `initialize`, and of the requests to the CLI sends only `interrupt`,
+`set_permission_mode`, `set_model` (`claude_code.rs:461–564`, `engine.rs:455–518`).
 
-| Что | Что дало бы пользователю hqc | Справочник |
+| What | What it would give an hqc user | Reference |
 | --- | --- | --- |
-| `initialize {perTaskStopAffordance: true}` | Stop прерывает ход, фоновых субагентов и workflow не трогает | 1.3 |
-| `stop_task {task_id}` — **остановить один субагент** | кнопка «стоп» у строки субагента или фоновой команды, без Stop всего хода; вкладка — «Stop agent» (`web:238560–238600`) | 3.3 |
-| `get_task_output {task_id}` | последние 8 КиБ вывода фоновой сборки или сервера по клику | 3.3 |
-| `background_tasks {tool_use_id}` | «увести в фон» долгий вызов, агент продолжает; вкладка — «Run in background» (`web:240825`) | 3.3 |
-| `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` — **продолжение хода после перезапуска** | выкатка воркера не обрывает работающих агентов: CLI сам продолжает ход после `--resume`; сейчас — «Agent process exited during a turn» и `turn_lost` (`supervisor.rs:1759–1797`). Вкладка ставит её с `_MAX_AGE_MS` = 1 ч (`ext:132853–132866`). Нужна и правка хаба: не закрывать ход, который воркер продолжит | 1.2, 5.3 |
-| `--session-mirror` → `transcript_mirror` | воркер знает каждую строку, которую его процесс пишет в транскрипт, и новый путь после `/clear`: зеркалу не нужна сверка по тексту с ожиданием 5 с (`mirror/mod.rs:507–546`), уходит класс ошибок вроде DrZlo13/hqc#42, и лишней сессии после `/clear` не будет. Вживую `x4-session-mirror`: кадр `transcript_mirror {filePath, entries}` на каждую порцию записей (14, 2, 1, 3… записи), после `/clear` следующий же кадр (строка 25) — с путём нового файла, раньше нового `init` | 1.1, 2.2 |
-| `annotations` ответа на вопрос | заметки к ответу и «пропущено / ответил в чате» вместо общего отказа «The user did not answer the questions.». Переменная `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT=markdown`, которую ставит вкладка, на макеты не влияет: вживую `x5-*` (просьба приложить макеты) — макеты у всех вариантов в 3 из 3 прогонов и с ней, и без неё; `x5n-*` (о макетах ни слова) — 0 из 3 и там, и там (sonnet, `claude-vscode`) | 1.2 |
-| `priority: "now"` с `origin: {kind: human}` | «отправить сейчас»: CLI уводит в фон идущий Bash, MCP или субагента и вливает сообщение в тот же ход, не дожидаясь конца вызова (вживую `p9-now-*`). В §3 «кнопка steer» отвергнута мной, не владельцем. `origin` нужен и сам: без него реплика «unattributed and fails closed at strict isHuman() trust gates» (`d312:5596–5599`) | 3.2 |
-| `cancel_async_message {message_uuid}`, `interrupt {cancel_queued: true}` | забрать сообщение, пока агент его не взял; Stop, который снимает и очередь — сейчас ждавшее сообщение после Stop всё равно исполняется | 3.3, 5.4 |
-| `rewind_files` + `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` | откатить правки агента в файлах к выбранному сообщению; вкладка — окно Rewind (`web:244512–244530`); у hqc есть только «Fork from here» | 1.2, 3.3 |
-| `side_question` | вопрос «в сторону» без хода и без следа в контексте агента | 3.3 |
-| `get_context_usage`, `result.modelUsage[*].contextWindow` | сколько осталось до автосжатия, сжать вручную; вкладка — круг «N% of context remaining until auto-compact» (`web:251531–251556`). Настройку порога автосжатия владелец выкинул («давай выкинем просто эту фичу, она не очень нужная»), показ заполнения — не она | 2.1, 3.3, 5.7 |
-| `--max-thinking-tokens 31999`, `set_max_thinking_tokens`, `effort` | бюджет размышления как во вкладке, переключатель «думать больше» | 1.1, 3.3, 5.11 |
-| `rename_session` | имя из hqc — и в истории VS Code | 3.3 |
-| `mcp_status`, `mcp_reconnect`, `mcp_toggle` | какие MCP-серверы у агента живы, переподключить упавший без перезапуска | 3.3 |
-| `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1` | состояние `idle`/`running`/`requires_action` от самого CLI вместо догадок воркера по `init`, `result` и спискам задач | 1.2, 2.1 |
-| `CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1` | причина неудачного старта вместо последней строки stderr за 500 мс (`claude_code.rs:714–732`) | 1.2 |
-| `end_session` | чистое завершение при выгрузке и `session.kill` вместо SIGTERM (код 143) | 3.3, 5.9 |
-| `set_cwd {path}` | переезд папки без перезапуска процесса, фоновые команды выживают. Отложено в первой версии: выбор владельца «Убивать фоновые команды», затем «убить и сообщить агенту» (§3) | 3.3 |
-| ответ `initialize` (`commands`, `models`, `account`), `list_models` | автодополнение слэш-команд с описаниями, выбор модели из настоящего каталога | 1.3, 3.3 |
-| `--include-hook-events` | запуск и ошибки хуков владельца в ленте | 1.1, 2.1 |
-| `initialize {agentProgressSummaries: true}` | словесная сводка «что делает субагент» для полосы живых субагентов | 1.3 |
-| `initialize {forwardNestedSubagentToolCalls, forwardSubagentText}` | вызовы субагентов второго уровня — нужно для истории субагента | 1.3, 2.1 |
-| `initialize {promptSuggestions: true}` | подсказка следующего сообщения после хода; вкладка показ умеет, но не заказывает | 1.3, 2.1 |
-| режим плана (`set_permission_mode plan`, `get_plan`) | агент сначала пишет план, владелец утверждает; у hqc только Ask и Auto (`client/src/ui/Chat.tsx:848–856`); 0 вызовов `ExitPlanMode` в выборке | 3.3 |
-| `file_suggestions` | `@путь` с автодополнением, особенно с телефона | 3.3 |
-| `command_lifecycle queued {ran_ahead: true}` | слэш-команды, которые CLI исполняет сразу, во время хода; у hqc команда ждёт конца хода (SPEC hqc §17.2); какие команды так умеют — не проверено | 2.2 |
-| **дифф правки и файл**: `read_file`, `get_workspace_diff` | дифф Edit, MultiEdit, Write в ленте — **сделан после снимка** (`new-look` `ec52bf0`, `3679f00`, не в PR; владелец: «едиты надо диффом сделать как в vscode»); открыть файл и дифф всей папки — нет. Было отложено в первой версии: «на просмотр диффов забей, у нас же в основном авто-одобрение» (§3) | 3.3 |
-| прочее | `get_usage`/`get_session_cost` (панель `/usage`), `export_conversation`, `reload_plugins`/`reload_skills`, `--enable-auth-status` (вход в аккаунт с телефона, когда CLI на ноде разлогинен), `CLAUDE_CODE_ENABLE_TASKS=0` (вкладка ставит: `TodoWrite` вместо четырёх инструментов задач), закладки на ответах | 1.1, 1.2, 3.3 |
+| `initialize {perTaskStopAffordance: true}` | Stop interrupts the turn and leaves background subagents and workflows alone | 1.3 |
+| `stop_task {task_id}` — **stop one subagent** | a "stop" button on the line of a subagent or a background command, without Stop of the whole turn; the extension — "Stop agent" (`web:238560–238600`) | 3.3 |
+| `get_task_output {task_id}` | the last 8 KiB of a background build's or server's output on a click | 3.3 |
+| `background_tasks {tool_use_id}` | "move to the background" a long call, the agent goes on; the extension — "Run in background" (`web:240825`) | 3.3 |
+| `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` — **continuing a turn after a restart** | a worker rollout does not cut running agents: the CLI continues the turn by itself after `--resume`; now — "Agent process exited during a turn" and `turn_lost` (`supervisor.rs:1759–1797`). The extension sets it with `_MAX_AGE_MS` = 1 h (`ext:132853–132866`). A hub change is needed too: do not close a turn the worker will continue | 1.2, 5.3 |
+| `--session-mirror` → `transcript_mirror` | the worker knows every line its process writes to the transcript, and the new path after `/clear`: the mirror needs no text matching with a 5 s wait (`mirror/mod.rs:507–546`), a class of bugs like DrZlo13/hqc#42 goes away, and there will be no extra session after `/clear`. Live run `x4-session-mirror`: a `transcript_mirror {filePath, entries}` frame for each batch of records (14, 2, 1, 3… records), after `/clear` the very next frame (line 25) carries the new file's path, before the new `init` | 1.1, 2.2 |
+| `annotations` of a question answer | notes to the answer and "skipped / answered in the chat" instead of the generic refusal "The user did not answer the questions.". The `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT=markdown` variable the extension sets does not affect previews: live run `x5-*` (a request to attach previews) — previews on all options in 3 of 3 runs both with it and without it; `x5n-*` (not a word about previews) — 0 of 3 in both cases (sonnet, `claude-vscode`) | 1.2 |
+| `priority: "now"` with `origin: {kind: human}` | "send now": the CLI moves a running Bash, MCP call or subagent to the background and merges the message into the same turn without waiting for the call to end (live run `p9-now-*`). In §3 the "steer button" was rejected by me, not by the owner. `origin` is needed on its own too: without it a message is "unattributed and fails closed at strict isHuman() trust gates" (`d312:5596–5599`) | 3.2 |
+| `cancel_async_message {message_uuid}`, `interrupt {cancel_queued: true}` | take a message back before the agent takes it; a Stop that clears the queue too — now a waiting message is still executed after Stop | 3.3, 5.4 |
+| `rewind_files` + `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` | roll back the agent's file edits to a chosen message; the extension — the Rewind window (`web:244512–244530`); hqc has only "Fork from here" | 1.2, 3.3 |
+| `side_question` | a "side" question without a turn and without a trace in the agent's context | 3.3 |
+| `get_context_usage`, `result.modelUsage[*].contextWindow` | how much is left before auto-compaction, compact manually; the extension — a circle "N% of context remaining until auto-compact" (`web:251531–251556`). The owner dropped the auto-compaction threshold setting ("let's just drop this feature, it's not really needed"); showing the fill level is a different thing | 2.1, 3.3, 5.7 |
+| `--max-thinking-tokens 31999`, `set_max_thinking_tokens`, `effort` | a thinking budget as in the extension, a "think more" switch | 1.1, 3.3, 5.11 |
+| `rename_session` | the name from hqc shows in the VS Code history too | 3.3 |
+| `mcp_status`, `mcp_reconnect`, `mcp_toggle` | which of the agent's MCP servers are alive; reconnect a failed one without a restart | 3.3 |
+| `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1` | the `idle`/`running`/`requires_action` state from the CLI itself instead of the worker's guesses from `init`, `result` and task lists | 1.2, 2.1 |
+| `CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1` | the reason for a failed start instead of the last stderr line within 500 ms (`claude_code.rs:714–732`) | 1.2 |
+| `end_session` | a clean exit on unload and on `session.kill` instead of SIGTERM (code 143) | 3.3, 5.9 |
+| `set_cwd {path}` | a folder move without restarting the process, background commands survive. Deferred in the first version: the owner's choice "Kill background commands", then "kill them and tell the agent" (§3) | 3.3 |
+| the `initialize` response (`commands`, `models`, `account`), `list_models` | slash command completion with descriptions, model choice from the real catalog | 1.3, 3.3 |
+| `--include-hook-events` | starts and errors of the owner's hooks in the feed | 1.1, 2.1 |
+| `initialize {agentProgressSummaries: true}` | a verbal "what the subagent is doing" summary for the live subagents bar | 1.3 |
+| `initialize {forwardNestedSubagentToolCalls, forwardSubagentText}` | calls of second-level subagents — needed for the subagent's history | 1.3, 2.1 |
+| `initialize {promptSuggestions: true}` | a suggestion for the next message after a turn; the extension can show it but does not request it | 1.3, 2.1 |
+| plan mode (`set_permission_mode plan`, `get_plan`) | the agent writes a plan first, the owner approves it; hqc has only Ask and Auto (`client/src/ui/Chat.tsx:848–856`); 0 `ExitPlanMode` calls in the sample | 3.3 |
+| `file_suggestions` | `@path` with completion, especially from a phone | 3.3 |
+| `command_lifecycle queued {ran_ahead: true}` | slash commands the CLI runs at once, during a turn; in hqc a command waits for the end of the turn (SPEC hqc §17.2); which commands can do this — not checked | 2.2 |
+| **edit diff and file**: `read_file`, `get_workspace_diff` | the diff of Edit, MultiEdit, Write in the feed — **done after the snapshot** (`new-look` `ec52bf0`, `3679f00`, not in a PR; the owner: "edits should be shown as a diff like in vscode"); opening a file and the diff of the whole folder — no. It was deferred in the first version: "forget about viewing diffs, we mostly have auto-approval anyway" (§3) | 3.3 |
+| other | `get_usage`/`get_session_cost` (the `/usage` panel), `export_conversation`, `reload_plugins`/`reload_skills`, `--enable-auth-status` (signing in to the account from a phone when the CLI on the node is logged out), `CLAUDE_CODE_ENABLE_TASKS=0` (the extension sets it: `TodoWrite` instead of four task tools), bookmarks on answers | 1.1, 1.2, 3.3 |
 
-## Обработано верно
+## Handled right
 
-- Текст, вызовы, размышление (и по ходу — `--thinking-display summarized`), ответы CLI вместо модели
-  (`<synthetic>`) — служебной строкой; дубли — по `event_id` от `uuid` записи; битое и незнакомое
-  событие — свёрнутой карточкой с JSON.
-- Очередь ввода: склеенные CLI сообщения (каждое эхо снимает своё), ввод посреди хода вливается после
-  инструментов и помечен «joined the turn», во время финального ответа — переходит в следующий ход.
-- Ход, начатый CLI сам по концу фоновой задачи, — Running; ход без модели — без строки «0 → 0 tokens»;
-  фоновый Bash субагента через ~180 с и повторный `task_started` после промежуточного отчёта не рвут
-  счёт субагентов; уведомления-сироты после `--resume` дают строку.
-- Сжатие — строка, раскрывается в выжимку; живые субагенты — полосой над полем ввода; вопросы агента —
-  с описаниями, макетами, Other; отказ правилом и прочий отказ CLI — строкой.
-- Перезагрузка страницы посреди ответа: хаб отдаёт копию живого текста, размышления и список
-  субагентов, открытые запросы живут в базе; история грузится вся, без вытеснения (у вкладки — до
-  ~600 строк).
-- Зеркало: основная цепочка, набранное посреди хода, уведомления о фоновых задачах, отвеченные
-  вопросы, свои записи — по `uuid` и тексту, в том числе склеенные через `\n` (DrZlo13/hqc#42),
-  развилки — `session_forked`.
+- Text, calls, thinking (also as it goes — `--thinking-display summarized`), CLI answers in place of
+  the model (`<synthetic>`) as a service line; duplicates — by an `event_id` derived from the
+  record's `uuid`; a broken or unknown event — as a collapsed card with JSON.
+- Input queue: messages the CLI joined (each echo clears its own), input mid-turn is merged in after
+  the tools and marked "joined the turn", during the final answer it moves to the next turn.
+- A turn the CLI starts by itself at the end of a background task is Running; a turn without the
+  model has no "0 → 0 tokens" line; a subagent's background Bash after ~180 s and a repeated
+  `task_started` after an interim report do not break the subagent count; orphan notifications after
+  `--resume` give a line.
+- Compaction is a line that opens to the summary; live subagents are a bar above the composer; agent
+  questions come with descriptions, previews, Other; a denial by a rule and other CLI denials — as a
+  line.
+- A page reload mid-answer: the hub returns a copy of the live text, the thinking and the subagent
+  list, open requests live in the database; the whole history loads, without eviction (the extension
+  keeps up to ~600 lines).
+- Mirror: the main chain, what was typed mid-turn, background task notifications, answered
+  questions, own records — by `uuid` and text, including those joined with `\n` (DrZlo13/hqc#42),
+  forks — `session_forked`.
 
-## Отличия апстрима (`master` `bcb10b1`) от нашей сборки
+## How upstream (`master` `bcb10b1`) differs from our build
 
-- Нет в `master`: живого размышления и скорости токенов, выжимки в строке сжатия, полосы живых
-  субагентов, Running на ход, начатый CLI, правки расхода хода без модели, макетов вариантов вопроса,
-  пометки «joined the turn», числа фоновых задач — всё это наши открытые или неоткрытые PR.
-- Есть в `master`, нет у нас: строка `transcript_missing`; разбор транскрипта хранит `toolUseResult`
-  только с ответами на вопросы (память на больших `Read`); предел разбора ответа с вариантами
-  (4096 символов, 32 варианта, `crates/hqc-worker/src/mirror/map.rs:268–272`).
-- Остальные пункты всех четырёх списков в `master` такие же.
+- Not in `master`: live thinking and the token rate, the summary in the compaction line, the live
+  subagents bar, Running for a turn the CLI started, the fix for the spending of a turn without the
+  model, question option previews, the "joined the turn" mark, the number of background tasks — all
+  of these are our open or not yet opened PRs.
+- In `master`, not in ours: the `transcript_missing` line; transcript parsing keeps `toolUseResult`
+  only with answers to questions (memory on big `Read`s); a limit on parsing an answer with options
+  (4096 characters, 32 options, `crates/hqc-worker/src/mirror/map.rs:268–272`).
+- The other items of all four lists are the same in `master`.
 
-## Не проверено
+## Not checked
 
-- Вкладку глазами не смотрели: её поведение — по коду (спр. 10).
-- Не воспроизведены вживую: вызов Bash, который CLI отдаёт только человеку (флаги
-  `requires_user_interaction`, `matched_ask_rule`, `suppress_always_allow_rule` на Bash), и служебные
-  задачи CLI (`ambient`) при наших настройках.
-- Частоты не мерены: вызовы без результата в базе хаба, обрывы потока с повтором, «(no content)» в
-  stream-json.
-- Выборка частот — один ноутбук, двое суток; на нодах сессий hqc на 2.1.312 почти нет (спр. 7.7).
+- Nobody looked at the extension with their own eyes: its behavior is per the code (ref. 10).
+- Not reproduced live: a Bash call the CLI gives only to a human (the flags
+  `requires_user_interaction`, `matched_ask_rule`, `suppress_always_allow_rule` on Bash), and the
+  CLI's service tasks (`ambient`) with our settings.
+- Frequencies not measured: calls without a result in the hub's database, stream cuts with a retry,
+  "(no content)" in stream-json.
+- The frequency sample is one laptop, two days; the nodes have almost no hqc sessions on 2.1.312
+  (ref. 7.7).

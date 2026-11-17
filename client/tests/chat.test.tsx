@@ -1632,6 +1632,54 @@ describe('fork', () => {
     expect(location.hash).toBe('#/s/s2');
   });
 
+  it('while the hub makes the fork the message says so, and a second click makes no second session', async () => {
+    const { app, api } = setup('idle');
+    // The hub answers once it has copied the history: seconds for a long session.
+    let answer!: () => void;
+    const made = await api.forkSession();
+    api.forkSession.mockClear();
+    location.hash = '';
+    api.forkSession.mockImplementationOnce(() => new Promise((r) => (answer = () => r(made))));
+    await mount(app);
+    const second = HISTORY[3] as EventOf<'user.message'>;
+    const fork = () => root.querySelectorAll<HTMLButtonElement>('.btn-fork')[1];
+    await act(async () => {
+      fork().click();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect($('.forking')?.textContent).toBe(' · forking…');
+    expect(fork().disabled).toBe(true);
+    // Another request for the same message, as a click that reached the button would make.
+    expect(await app.forkSession('s1', second.event_id, second.payload.text)).toBeUndefined();
+    expect(api.forkSession).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      answer();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect($('.forking')).toBeNull();
+    expect(fork().disabled).toBe(false);
+    expect(location.hash).toBe('#/s/s2');
+  });
+
+  it('a fork the hub refuses frees the message: no "forking", the button works, the reason shown', async () => {
+    const { app, api } = setup('idle');
+    api.forkSession.mockRejectedValueOnce(new Error('boom'));
+    await mount(app);
+    const fork = () => root.querySelectorAll<HTMLButtonElement>('.btn-fork')[1];
+    await act(async () => {
+      fork().click();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect($('.forking')).toBeNull();
+    expect(fork().disabled).toBe(false);
+    expect(root.textContent).toContain('Not forked: boom');
+    await act(async () => {
+      fork().click();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(api.forkSession).toHaveBeenCalledTimes(2);
+  });
+
   it('the service session has no fork', async () => {
     const { app } = setup('idle');
     root = document.createElement('div');

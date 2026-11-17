@@ -1088,14 +1088,33 @@ export class AppState {
     return s;
   }
 
+  /** The user's messages a fork is being made before, by event id: the hub copies the
+   *  source's history into the new session first, seconds for a long one (SPEC §6). */
+  private readonly forks = new Set<string>();
+
+  /** A fork before the user's message `eventId` is under way. */
+  forking(eventId: string): boolean {
+    return this.forks.has(eventId);
+  }
+
   /** Forks the session before the user's message `eventId`: the new session joins the list
-   *  with `text`, the message left out, as its draft. */
-  async forkSession(sessionId: string, eventId: string, text: string): Promise<SessionInfo> {
-    const s = await this.api.forkSession(sessionId, eventId);
-    this.sessions.set(s.id, s);
-    this.setDraft(s.id, text);
-    this.edited();
-    return s;
+   *  with `text`, the message left out, as its draft. One at a time per message: while a fork
+   *  before it is under way, another is not asked for (`undefined`), since each request makes
+   *  a session of its own. */
+  async forkSession(sessionId: string, eventId: string, text: string): Promise<SessionInfo | undefined> {
+    if (this.forks.has(eventId)) return undefined;
+    this.forks.add(eventId);
+    this.changed();
+    try {
+      const s = await this.api.forkSession(sessionId, eventId);
+      this.sessions.set(s.id, s);
+      this.setDraft(s.id, text);
+      this.edited();
+      return s;
+    } finally {
+      this.forks.delete(eventId);
+      this.changed();
+    }
   }
 
   /** Switches the session's permission mode (T38); the hub tells a running agent at once. */

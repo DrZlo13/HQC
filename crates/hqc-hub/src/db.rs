@@ -3407,6 +3407,33 @@ pub async fn copy_events(
     Ok(n)
 }
 
+/// Events whose search words [`index_copied`] writes per statement: each is a short
+/// transaction of its own, so no statement holds thousands of rows, and a hub stopped midway
+/// keeps what it has written.
+const INDEX_BATCH: i64 = 500;
+
+/// The search words of the events [`copy_events`] put into session `id` at `seq` 1..=`last`,
+/// written as soon as the copy is in, without the fork's answer waiting for them (SPEC §15):
+/// a copy goes in without them (migration `0048`), and gets them here for the index but not
+/// for `search_vocab`, which has them from the source.
+pub async fn index_copied(db: &PgPool, id: Uuid, last: i64) -> sqlx::Result<()> {
+    let mut from = 0;
+    while from < last {
+        sqlx::query(
+            "UPDATE events SET search_words = event_search_words(type, payload)
+             WHERE session_id = $1 AND seq > $2 AND seq <= $3 AND origin_id IS NOT NULL
+               AND search_words IS NULL",
+        )
+        .bind(id)
+        .bind(from)
+        .bind(from + INDEX_BATCH)
+        .execute(db)
+        .await?;
+        from += INDEX_BATCH;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- read cursors, push
 
 pub async fn set_read_cursor<'e>(

@@ -128,6 +128,56 @@ async fn a_fork_before_a_message_starts_from_the_conversation_up_to_it() {
     hub.finish().await;
 }
 
+/// SPEC §15: a fork's copy gets its search words without the answer waiting for them, and adds
+/// none to `search_vocab` (the source's are there).
+#[tokio::test]
+async fn a_forks_copy_is_indexed_later_and_adds_no_words_to_the_vocabulary() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    input(&hub, &mut w, &sid, "Remember PINEAPPLE.").await;
+    reply(&mut w, &sid, "OK, PINEAPPLE.").await;
+    let m2 = input(&hub, &mut w, &sid, "Remember BANANA.").await;
+    // The source's events put the word into the vocabulary; take it out to see a copy add it.
+    let db = &hub.app.db;
+    let vocab = "SELECT count(*) FROM search_vocab WHERE word LIKE 'pineappl%'";
+    let words = || async {
+        sqlx::query_scalar::<_, i64>(vocab)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    };
+    assert!(words().await > 0);
+    sqlx::query("DELETE FROM search_vocab WHERE word LIKE 'pineappl%'")
+        .execute(db)
+        .await
+        .unwrap();
+
+    let fid = fork(&hub, &sid, &m2).await;
+    let fork_id = uuid::Uuid::parse_str(&fid).unwrap();
+    // Both copied texts with the word come into the index.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let found: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events
+             WHERE session_id = $1 AND search_words @@ to_tsquery('hqc', 'pineapple')",
+        )
+        .bind(fork_id)
+        .fetch_one(db)
+        .await
+        .unwrap();
+        if found == 2 {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "indexed: {found}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(words().await, 0);
+    hub.finish().await;
+}
+
 /// The runtime session id a `session.start` names.
 fn runtime_of(start: &Value) -> String {
     start["payload"]["runtime_session_id"]

@@ -6707,6 +6707,14 @@ button.ps-look {
   color: var(--muted);
 }
 
+/* A fork under way (SPEC §6): its button waits, dimmed and without the hover. */
+.btn-copy.btn-fork:disabled {
+  opacity: 0.5;
+  background: transparent;
+  color: var(--muted);
+  cursor: progress;
+}
+
 /* ---- diffs and paths in markdown (T16) ---- */
 
 .md-code-diff .diff-add {

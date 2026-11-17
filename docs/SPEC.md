@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.155, 2026-11-16. Status: the architecture agreed after six reviews and a survey of
+Version 0.156, 2026-11-17. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1644,8 +1644,9 @@ the rest is marked "later"):
   `agent.message`, `agent.thinking`, `tool.call`, `tool.result`, `attachment`, `peer.message`
   and `system` events before the message under new ids, at `seq` 1.., none of them an input to
   deliver, then `system forked_from`, all read by the owner; requests, statuses and usage stay
-  with the source. Since 0.82 a copy keeps its origin (`events.origin_id`, `origin_runtime`,
-  not on the wire): the id the runtime's record gave the event and the transcript that record
+  with the source. Since 0.156 the copies go in without their search words, which the hub
+  writes as soon as the copy is in, without the answer waiting for them (§15). Since 0.82 a
+  copy keeps its origin (`events.origin_id`, `origin_runtime`, not on the wire): the id the runtime's record gave the event and the transcript that record
   was first written in. The cut's events are each named by their origin, and the fork goes to
   the transcript of the newest one with only the events in it: a fork of a fork before a
   message of its copied history cuts in the transcript that history came from, which stays on
@@ -2064,9 +2065,12 @@ from here." while it is held, else "VS Code was the last to run this session." w
 here" (§9.3). "Retry" of a failed session is a filled button. In the feed a message's time
 stands at the right end of its first line, inside the bubble or plate for the user's, after a
 note on that line ("joined the turn", §17.2; "instead of the request", §10.1) and before "·
-scheduled", "· awaiting delivery" or "· not delivered"; its buttons show on hover: the user's
-copy and "Fork from here" inside the bubble left of the time, an agent message's copy in the
-margin left of the feed, on a phone under the message. A run of tool calls is "N tool calls ·
+scheduled", "· awaiting delivery", "· not delivered" or "· forking…"; its buttons show on hover:
+the user's copy and "Fork from here" inside the bubble left of the time, an agent message's copy
+in the margin left of the feed, on a phone under the message. Since 0.156, until the hub answers
+a fork (it copies the source's history first, seconds for a long session) the message says "·
+forking…" and its "Fork from here" is disabled; the client asks for no second fork before the
+same message meanwhile. A run of tool calls is "N tool calls ·
 time" and the call's line when it is one, else the tools it called, each once, in the order
 first called ("(Bash, Read, chrome-devtools/take_screenshot)", an MCP tool as
 `<server>/<tool>`); a Skill call's line names its skill; thinking and tool lines are fainter
@@ -4808,10 +4812,11 @@ it finds commands, their output and word forms and puts the best match first:
   its `answers`); in previews the JSON escapes `\n`, `\r`, `\t` are read as spaces, so a word
   after a line break stays a word, and everywhere `/` and `.` are, so a path, a file name, an
   address or a URL is a sequence of words (`search` finds `crates/hqc-hub/src/search.rs`). Not
-  thinking, requests or attachments. One stored generated column of `events`, `search_words`,
-  the `tsvector` of that text in the `hqc` configuration, weighted A for messages and answers,
-  B for calls, D for output, so Postgres keeps it on every insert and the migration's table
-  rewrite backfills old rows; a GIN index on it and one on session titles (an expression
+  thinking, requests or attachments. One column of `events`, `search_words`, the `tsvector` of
+  that text in the `hqc` configuration, weighted A for messages and answers, B for calls, D for
+  output, which Postgres keeps on every insert (a stored generated column until 0.156, a
+  trigger since, which leaves out a fork's copy — below) and the migration's table rewrite
+  backfilled for old rows; a GIN index on it and one on session titles (an expression
   index, as titles change).
 - **Configuration `hqc`.** A copy of `russian` whose Latin words go to an English and the rest
   to a Russian Snowball stemmer, both without stop words, so every word stays searchable and
@@ -4836,6 +4841,13 @@ it finds commands, their output and word forms and puts the best match first:
   migration collects and a trigger on `events` adds to; it finds typos (`pg_trgm` is a trusted
   extension, created by migration `0016`). Titles are matched with the same query; a title hit
   has no `seq`.
+- **A fork's copy** (since 0.156, migration `0048`). `search_words` is a plain column a
+  trigger fills as an event is written or its `type` or `payload` change, except for the
+  events a fork copies (`origin_id` set, §6): they go in without words, so neither the index
+  nor `search_vocab` takes them then, and the hub writes their words as soon as the copy is in,
+  without the fork's answer waiting for them, 500 events per statement, into the index only —
+  `search_vocab` has them from the source. Until it has, the copy is not found; a hub stopped meanwhile leaves the rest of that
+  copy unindexed, its source still found.
 - **Order and pages.** Best match first: `ts_rank(search_words, q, 1)` (the query without its
   `-word`s), then newest; a title is ranked as text of weight A; since 0.111 `order=newest`
   puts the newest first instead. The cursor is the number of hits already shown, so a page
@@ -5329,6 +5341,19 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.149 → 0.156 (a fork is quick, and says so while it is made)
+§6, §15: the events a fork copies go in without their search words and the hub writes them
+once the copy is in, without the answer waiting for them, into the index but not into
+`search_vocab` (migration `0048`:
+`search_words` is no longer a generated column but filled by a trigger, `event_search_words`
+computes what the column did). Copying 14 545 events of a long session took 9–12 s, most of it
+the vocabulary and the words; on a test install the same copy took 5.7 s, without the
+vocabulary 2.4 s, without search 0.1–0.2 s. §6 client layout: until the hub answers
+`POST /api/sessions/{id}/fork`, the user's message says "· forking…" after its time and its
+"Fork from here" is disabled, and the client sends no second request for the same message:
+three clicks on a button that showed nothing made three forks.
+0.150–0.155 are taken by open pull requests; migrations 0046 and 0047 by open branches.
 
 ### 0.149 → 0.155 (a call whose arguments are cut at 4 KB keeps its short fields)
 §8.1, §9.1: `args_preview` had the input's keys sorted, so a cut at 4 KB took every field after a

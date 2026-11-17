@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.156, 2026-11-17. Status: the architecture agreed after six reviews and a survey of
+Version 0.161, 2026-11-17. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1275,7 +1275,8 @@ MCP calls (worker → hub → worker):
   the session's `subagents` and sets 0 on a worker restart.
   `background_tasks` (since 0.104) — how many background tasks the runtime lists for the agent
   now: its own background commands and monitors, its background subagents and their commands
-  (Claude Code: the list of `background_tasks_changed`, §8.1), 0 when it is stopped; absent —
+  (Claude Code: the list of `background_tasks_changed`, since 0.161 without the tasks marked
+  `ambient`, §8.1), 0 when it is stopped; absent —
   0, and like `subagents` every report says it. The hub stores it as the session's
   `background_tasks` and sets 0 on a worker restart.
   `foreground_calls` (since 0.125) — the `call_id`s of the calls of the agent itself that the
@@ -3242,13 +3243,15 @@ a running subagent until `task_notification`, or a `task_updated` whose `patch.s
 the background since) cannot outlive the main turn and stops counting at its `result` at the
 latest, as an interrupt, a denied call or `error_max_turns` during it may bring neither line;
 the count goes into `session.state.subagents` (§5.4). `system` `background_tasks_changed`
-(2.1.312) carries `tasks[]` (`task_id`, `task_type`, and `parent_task_id` for a task a subagent
-started, as in its `task_started`): the CLI's whole list of the session's running background
-tasks, subagents and shell commands, sent on every change and `[]` at the end. A subagent also
-counts while the latest list holds it (`task_type: local_agent`) or a task of the list has it
-as `parent_task_id`, the latter until a `task_notification` with its report (`handback`) and
-again from its next `task_started`: a command a subagent that reported left running is a
-background task of the session, not a running subagent. With `CLAUDE_CODE_ENTRYPOINT=claude-vscode` 2.1.312 moves a subagent's
+(2.1.312) carries `tasks[]` (`task_id`, `task_type`, `parent_task_id` for a task a subagent
+started, as in its `task_started`, and `ambient`): the CLI's whole list of the session's
+running background tasks, subagents and shell commands, sent on every change and `[]` at the
+end. A subagent also counts while the latest list holds it (`task_type: local_agent`) or a task
+of the list not marked `ambient` has it as `parent_task_id` (since 0.161: the comment watcher of
+a page a subagent published names the subagent and stays for the whole process), the latter
+until a `task_notification` with its report (`handback`) and again from its next
+`task_started`: a command a subagent that reported left running is a background task of the
+session, not a running subagent. With `CLAUDE_CODE_ENTRYPOINT=claude-vscode` 2.1.312 moves a subagent's
 Bash call that runs for more than about 180 s to the background (the agent's own 240 s Bash
 call stays in the foreground) and reports the subagent ended (`task_updated` `completed`,
 `task_notification` "This agent has not reported yet: it is waiting on its own background
@@ -3261,7 +3264,12 @@ Monitor waiting for the `ping`, kept the list from going empty), so a drop of th
 `result` before the end of the turn). The
 number of tasks in the list goes into `session.state.background_tasks` (since 0.104, §5.4); the
 agent is not idle while it is above 0 (§17.3), and a move tells the agent how many it stopped
-(§5.3).
+(§5.3). Since 0.161 a task with `ambient: true` is not counted: 2.1.312 sets it on tasks that
+are no activity, its own housekeeping (`skip_transcript`) and every live-update watcher, such as
+the one that follows the comments on a page the agent published with Claude Code's Artifact tool
+(`monitor_ws`, `persistent`, no timeout, so it stays for the whole process; it leaves the list
+and comes back when its connection is renewed). The SDK tells hosts to leave such tasks out of
+activity, and the VS Code tab does.
 Since 0.113 the adapter sends the subagents of that count one by one as `subagents.live` (§4),
 whenever they or a title change and on every `system` `task_progress` of one of them (2.1.312:
 `task_id`, `description` — what it does now, "Running Sleep for 6 seconds" —, `usage
@@ -5053,7 +5061,9 @@ send from a session in a lower mode (§7.1).
 - An idle agent is left alone by default. With the worker's `idle_timeout` > 0 the
   process exits, and the next input brings it back via resume. Since 0.70 an agent is not idle
   while its subagents run (`session.state.subagents` > 0, §5.4) or while Claude Code lists
-  background tasks of the session (`background_tasks_changed`, §8.1). Since 0.70 the worker's
+  background tasks of the session (`background_tasks_changed`, §8.1; since 0.161 not those
+  marked `ambient`). An idle exit stops such a watcher with the process: while the agent is
+  unloaded, comments on a page it published start no turn of it. Since 0.70 the worker's
   reconnect to the hub and a change of the holder of any transcript (§9.3: Claude Code in VS
   Code or a terminal on the same machine) do not count as the agent's activity; a holder of
   the session's own transcript stops the agent anyway.
@@ -5341,6 +5351,19 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.156 → 0.161 (a watcher the CLI keeps by itself is no background work)
+§5.4, §8.1, §17.3: Claude Code 2.1.312 lists among the session's background tasks, with
+`ambient: true`, tasks that are no activity: its own housekeeping and every live-update watcher,
+such as the one that follows the comments on a page the agent published with its Artifact tool,
+which stays for the whole process. The worker counted them, so such a session stayed Running
+after its last turn and was never unloaded by `idle_timeout`, and a move told its agent it
+stopped background work. `session.state.background_tasks` now counts the tasks without `ambient:
+true`, and such a task no longer keeps the subagent it names as `parent_task_id` counted: the
+watcher of a page a subagent published kept that subagent running for good after it ended. An
+idle exit now stops such a watcher with the process, and comments on the page start no turn of
+the agent while it is unloaded. Only the worker changes. (0.157–0.160 are taken by open
+pull requests.)
 
 ### 0.149 → 0.156 (a fork is quick, and says so while it is made)
 §6, §15: the events a fork copies go in without their search words and the hub writes them

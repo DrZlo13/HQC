@@ -2711,6 +2711,20 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   `session_id`: the address is what the other tools take). `project` is a slug or an id of
   the owner's project (else `not_found`); a refused query is `invalid_args`. No side effects,
   so a repeated call simply runs again.
+- `hqc_read(session, before_seq?, after_seq?)` — one session read from the hub in full, page by
+  page, where `hqc_search_history` only finds. `session` is an address or an id of a session
+  of the calling session's owner: an archived one, the calling one itself and a room are read
+  too; another owner's session, a service session and a deleted one are `not_found`. The
+  events are those of `GET /api/sessions/{id}/events` (the client's shape: user and agent
+  messages, messages between sessions, a room's posts, tool calls and output, hqc's lines). Without a cursor the answer is the last events; `before_seq: N` the last events
+  with `seq < N`; `after_seq: N` the first events with `seq > N`; both together are
+  `invalid_args`. A page is at most 100 events and 64 KiB of serialized `events`; over the
+  budget the events at the far end of the page are left out (the oldest, for `after_seq` the
+  newest), but one event is always returned, however large. The result is `{address, title,
+  events (oldest first), last_seq, earlier?, later?}`: `earlier` (the `seq` of the first event
+  returned, to pass as `before_seq`) only when older events exist, `later` (the last one's, to
+  pass as `after_seq`) only when newer ones do. No side effects: no read cursor moves, nothing
+  is written.
 - `hqc_schedule(session, at|cron, message)` — the hub's cron (§16). Since 0.38 (T35):
   `hqc_schedule(session, message, at?, cron?, timezone?, catch_up?)`; `session` — an address or
   an id of the owner's session (the calling one too), by the target rules of §7.1 except that a
@@ -6154,6 +6168,16 @@ lines. §3 Event, §16 and §17.2 name the room's input next to a person's messa
 posts too, that agents take `provider_id`, and what the client shows of the agents: their open
 requests in the room's feed, their rate and count on the project bar. Hub migration
 `0046_rooms` adds both columns.
+
+§7, `hqc_read` (owner's request, 2026-11-18: "make it possible to read a room and a session in
+full, from the hub, not only from the same machine"): an agent could find history with `hqc_search_history`
+(snippets of 160 characters) or read a Claude Code transcript on its own machine; a session of
+another machine had no way to be read, and a room has no transcript at all. `hqc_read(session,
+before_seq?, after_seq?)` returns the events of one session of the caller's owner (archived ones,
+rooms and the caller itself too) as `GET /api/sessions/{id}/events` does, at most 100 events and
+64 KiB a page, with `earlier` and `later` to page on; no side effects; a room's notice points at it
+for the entries it leaves out. `hqc_send` and the other tools keep refusing an archived session
+and, but for a send, a room (`peers::target`); the reader's lookup is `peers::reader`.
 
 ### 0.166 → 0.167 (quick messages)
 §3 Project `quick_messages` (hub migration `0049_project_quick_messages`), §6 `PATCH

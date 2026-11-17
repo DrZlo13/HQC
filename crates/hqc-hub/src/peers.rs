@@ -107,22 +107,9 @@ pub async fn address(app: &AppState, s: &SessionRow) -> anyhow::Result<String> {
     ))
 }
 
-/// The owner's session `addr` points at (an address or an id), with its address.
-pub(crate) async fn target(
-    app: &AppState,
-    caller: &SessionRow,
-    addr: &str,
-) -> Result<(SessionRow, String), McpError> {
-    find(app, caller, addr, false).await
-}
-
-/// [`target`]; with `rooms` a room is found too.
-async fn find(
-    app: &AppState,
-    caller: &SessionRow,
-    addr: &str,
-    rooms: bool,
-) -> Result<(SessionRow, String), McpError> {
+/// The session of the caller's owner `addr` points at (an address or an id), archived or not,
+/// a room too; never another owner's, a service session or a deleted one.
+async fn locate(app: &AppState, caller: &SessionRow, addr: &str) -> Result<SessionRow, McpError> {
     let not_found = || err(error_code::NOT_FOUND, format!("no session {addr}"));
     let addr = addr.trim();
     let found = if let Ok(id) = addr.parse::<Uuid>() {
@@ -141,16 +128,49 @@ async fn find(
             .into_iter()
             .find(|x| x.slug == s)
     };
+    found
+        .filter(|t| t.owner_id == caller.owner_id && !t.system)
+        .ok_or_else(not_found)
+}
+
+/// The owner's live (not archived) session `addr` points at (an address or an id), with its
+/// address.
+pub(crate) async fn target(
+    app: &AppState,
+    caller: &SessionRow,
+    addr: &str,
+) -> Result<(SessionRow, String), McpError> {
+    find(app, caller, addr, false).await
+}
+
+/// [`target`]; with `rooms` a room is found too.
+async fn find(
+    app: &AppState,
+    caller: &SessionRow,
+    addr: &str,
+    rooms: bool,
+) -> Result<(SessionRow, String), McpError> {
     // A room has no agent: its agents are the targets, and a room itself only of a send
     // (SPEC §7.1.1).
-    let t = found
-        .filter(|t| {
-            t.owner_id == caller.owner_id
-                && !t.archived
-                && !t.system
-                && (rooms || t.room_mode.is_none())
-        })
-        .ok_or_else(not_found)?;
+    let t = locate(app, caller, addr).await.and_then(|t| {
+        if t.archived || (!rooms && t.room_mode.is_some()) {
+            Err(err(error_code::NOT_FOUND, format!("no session {addr}")))
+        } else {
+            Ok(t)
+        }
+    })?;
+    let a = address(app, &t).await.map_err(internal)?;
+    Ok((t, a))
+}
+
+/// The owner's session `addr` points at for reading, archived ones and rooms too, with its
+/// address.
+pub(crate) async fn reader(
+    app: &AppState,
+    caller: &SessionRow,
+    addr: &str,
+) -> Result<(SessionRow, String), McpError> {
+    let t = locate(app, caller, addr).await?;
     let a = address(app, &t).await.map_err(internal)?;
     Ok((t, a))
 }

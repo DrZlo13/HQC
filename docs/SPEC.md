@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.156, 2026-11-17. Status: the architecture agreed after six reviews and a survey of
+Version 0.164, 2026-11-17. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2122,7 +2122,8 @@ placeholder says "Enter to send, Shift+Enter for a new line". On a computer the 
 caret when the chat opens, once its newest page is in, unless a request waits for an answer (an open
 approval in the feed, or the session `waiting`), another field has the focus, or a menu or the
 slid-out column is open; on a phone only when the chat replaces a new session's window. An open chat
-stays at its bottom while its images load: only a scroll up lets go of the bottom.
+stays at its bottom while its images load: only a scroll up lets go of the bottom, and a move up
+while the feed's scroll range changed is the browser's, not a scroll up (since 0.164).
 
 than the text, and an open thinking block is prose in the feed's font. Quote (since 0.74): on a
 computer a right click on text selected in the feed opens the client's menu with "Quote" (into
@@ -2134,8 +2135,9 @@ input takes the caret when the chat opens, once its newest page is in, unless a 
 for an answer (an open approval in the feed, or the session `waiting`), another field has the
 focus, or a menu or the slid-out column is open; on a phone only when the chat replaces a new
 session's window. An open chat stays at its bottom while its images load: only a scroll up lets
-go of the bottom. In WebKit outside Chromium (Safari, the macOS app), while the user's own wheel
-or trackpad scroll of the feed goes on, momentum included, until 400 ms after its last wheel
+go of the bottom, and a move up while the feed's scroll range changed is the browser's, not a
+scroll up (since 0.164). In WebKit outside Chromium (Safari, the macOS app), while the user's own
+wheel or trackpad scroll of the feed goes on, momentum included, until 400 ms after its last wheel
 event, the chat sets no scroll position of its own: it neither follows the bottom nor renders
 older blocks, so a scroll up stops at the top of the rendered blocks until the gesture settles.
 Once it settles, the chat follows the bottom if the feed still holds it and something moved it
@@ -5341,6 +5343,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.156 → 0.164 (a chat with images opens at its bottom in WebKit)
+§6 client layout: in Safari and the macOS app a chat whose newest messages carry images opened
+screens above its bottom, at the images. As the images' names gave way to the images not loaded
+yet, the feed got shorter and the browser moved its position up; WebKit delivered that scroll
+after the images had loaded and the feed had grown again, far from the bottom, and the chat took
+it for a scroll up and let go of the bottom. A move up now lets go of the bottom only if the
+feed's scroll range (`scrollHeight - clientHeight`) is what it was at the scroll before. On a test
+install in WebKit (Playwright 1.49, four 720×1280 images in the newest messages) the chat opened
+1372–1432 px above its bottom in 9 of 10 openings before, at its bottom in 10 of 10 after; in
+Chromium it opened at its bottom before and after. 0.157–0.163 are taken by other pull requests.
 
 ### 0.149 → 0.156 (a fork is quick, and says so while it is made)
 §6, §15: the events a fork copies go in without their search words and the hub writes them

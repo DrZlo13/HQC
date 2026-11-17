@@ -811,6 +811,26 @@ describe("tool groups (T26)", () => {
     expect(rows[2].querySelector(".mark-error")).not.toBeNull();
   });
 
+  it("a SendMessage row says what was sent: its summary, else its message", async () => {
+    const t = new Timeline();
+    t.apply(agentText(1, "Done.", true));
+    // As Claude Code 2.1.312 writes them: the recipient, a summary, the message.
+    t.apply(call(2, "a", "SendMessage", { to: "a07b414bf5db5fff8", summary: "Round 1 answers", message: "Answers to your questions.\n\n1. MRI: normal." }));
+    t.apply(result(3, "a"));
+    t.apply(call(4, "b", "SendMessage", { to: "researcher", message: "Check the API.\nThen report." }));
+    t.apply(result(5, "b"));
+    show(t);
+    const g = root.querySelector(".tool-group")!;
+    await act(async () =>
+      g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
+    );
+    const rows = [...g.querySelectorAll(".tool-row summary")];
+    expect(rows.map((s) => s.querySelector(".tool-line")!.textContent)).toEqual([
+      "Round 1 answers",
+      "Check the API. Then report.",
+    ]);
+  });
+
   it("a group lists each tool once, in the order first called, an MCP tool as server/tool; one call shows its line", async () => {
     const t = new Timeline();
     t.apply(agentText(1, "Looking.", true));

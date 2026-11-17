@@ -411,8 +411,9 @@ export function callArgs(argsPreview: string): Record<string, unknown> {
   return {};
 }
 
-// `skill`: the Skill tool's skill name ("Skill worktree").
-const BRIEF_KEYS = ['file_path', 'notebook_path', 'path', 'pattern', 'url', 'query', 'command', 'description', 'prompt', 'skill'];
+// `skill`: the Skill tool's skill name ("Skill worktree"). `summary`, then `message`: what a
+// SendMessage call sent, its summary, else its plain-text message on one line.
+const BRIEF_KEYS = ['file_path', 'notebook_path', 'path', 'pattern', 'url', 'query', 'command', 'description', 'prompt', 'skill', 'summary', 'message'];
 
 /** One line for a call: `$ command` for Bash, else the tool and its main argument. The
  *  preview is read as far as it goes (cut at 4 KB, SPEC §4): a script longer than that, cut

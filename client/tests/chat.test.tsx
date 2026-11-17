@@ -1322,6 +1322,38 @@ describe('history', () => {
     expect(scroller.scrollTop).toBe(4000);
   });
 
+  it('a move up the browser made as the feed got shorter, delivered after it grew again, does not let go of the bottom', async () => {
+    let height = 5000;
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? height : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? 600 : 0;
+    });
+    const { app } = setup('idle', { history: long });
+    await mount(app);
+    const scroller = root.querySelector<HTMLElement>('.timeline')!;
+    const scroll = (top: number) =>
+      act(async () => {
+        scroller.scrollTop = top;
+        scroller.dispatchEvent(new Event('scroll'));
+      });
+    const next = (seq: number) => act(async () => subscriber!.onEvent(ev('event.agent.message', seq, (e) => (e.payload.text = `more ${seq}`))));
+    await scroll(4400);
+    // The names of four images give way to the images not loaded yet: the feed is 300 px
+    // shorter and the browser moves the position up with it. WebKit delivers that scroll after
+    // the images loaded and the feed grew 1000 px.
+    height = 6000;
+    await scroll(4100);
+    await next(451);
+    expect(scroller.scrollTop).toBe(6000);
+    // A scroll up of the user's still lets go.
+    await scroll(3000);
+    height = 6200;
+    await next(452);
+    expect(scroller.scrollTop).toBe(3000);
+  });
+
   it('while a wheel gesture goes on, the feed neither follows its bottom nor renders older blocks; both come once it settles', async () => {
     // Every block 100 px high, the window 600 px.
     vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {

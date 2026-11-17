@@ -254,6 +254,11 @@ export function Chat({
   // after the feed grew (an image loaded) and before it is followed: far from the bottom then,
   // but the user did not leave it.
   const lastTop = useRef(0);
+  // The feed's scroll range (`scrollHeight - clientHeight`) at that position: a move up counts
+  // only if the range stayed. A feed that got shorter (the names of images giving way to the
+  // images not loaded yet) moves the position up by itself, and WebKit delivers that scroll
+  // after the images loaded and the feed grew again, far from the bottom.
+  const lastRange = useRef(0);
   // The user's own wheel or trackpad scroll, momentum included, while it goes on the chat does
   // not set the feed's position: WebKit applies the gesture's next step to the position it had,
   // so a position set in between is lost. The older blocks rendered above a feed scrolled near
@@ -628,8 +633,10 @@ export function Chat({
         onScroll={(e) => {
           const el = e.currentTarget as HTMLDivElement;
           const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-          if (near || el.scrollTop < lastTop.current) stick.current = near;
+          const range = el.scrollHeight - el.clientHeight;
+          if (near || (el.scrollTop < lastTop.current && range === lastRange.current)) stick.current = near;
           lastTop.current = el.scrollTop;
+          lastRange.current = range;
           if (el.scrollTop < 400 && start > 0) {
             if (wheeling()) more.current = true;
             else showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));

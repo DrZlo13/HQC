@@ -3660,6 +3660,52 @@ describe('a room', () => {
     expect(['room', 'm1', 'm2', 'x1', 'net'].map((id) => app.sessions.has(id))).toEqual([false, false, false, true, true]);
   });
 
+  it("a room's row has the room icon after its title, with its mode and agents in the tooltip; a session's has none; the phone's first screen shows it too", async () => {
+    const app = makeApp([
+      ...LIST,
+      room(),
+      member('m2', 'Sonnet', 'idle'),
+      member('m1', 'Opus', 'idle'),
+      room({ id: 'council', title: 'Votes', room_mode: 'council' }),
+    ]);
+    await mount(<SessionList app={app} current="net" />);
+    const icon = (title: string) => rowOf(title).querySelector<HTMLElement>('.session-title ~ .session-room');
+    // Agents in the order they were made (their ids), not as the client got them.
+    expect(icon('Glaze review')!.title).toBe('Room · Conversation · Opus, Sonnet');
+    expect(icon('Glaze review')!.querySelector('svg')).not.toBeNull();
+    expect(icon('Votes')!.title).toBe('Room · Council');
+    expect(icon('Network sync')).toBeNull();
+    // The same row in a phone's Sessions view.
+    app.phoneView = 'sessions';
+    render(null, root);
+    await mount(<PhoneHome app={app} />);
+    expect(root.querySelector('.session-room')!.getAttribute('title')).toBe('Room · Conversation · Opus, Sonnet');
+  });
+
+  it("a room's menu has no \"Move to project…\" or \"Restart session\", and its row is not dragged onto a project", async () => {
+    const app = makeApp([...LIST, room()]);
+    await mount(<SessionList app={app} current="net" />);
+    await menuOf('Glaze review');
+    expect(menuItems()).not.toContain('Move to project…');
+    expect(menuItems()).not.toContain('Restart session');
+    expect(menuItems()).toContain('Archive');
+    await pressKey('Escape');
+    render(null, root);
+    await mount(<SessionList app={app} current="net" />);
+    const dt = Object.assign(new DataTransfer(), { setDragImage: vi.fn() });
+    const start = (title: string) =>
+      act(async () => {
+        const e = new MouseEvent('dragstart', { bubbles: true, cancelable: true });
+        Object.defineProperty(e, 'dataTransfer', { value: dt });
+        rowOf(title).querySelector('a.session-row')!.dispatchEvent(e);
+      });
+    await start('Glaze review');
+    expect(dt.getData(SESSION_DRAG)).toBe('');
+    await start('Network sync');
+    expect(dt.getData(SESSION_DRAG)).toBe('net');
+    await act(async () => void rowOf('Network sync').querySelector('a.session-row')!.dispatchEvent(new MouseEvent('dragend', { bubbles: true })));
+  });
+
   describe('the form', () => {
     /** The hash change and the hub's (mocked) replies. */
     const settle = () =>
@@ -3722,7 +3768,9 @@ describe('a room', () => {
         'Allow all',
       ]);
       expect(form()!.querySelectorAll('.room-agent')).toHaveLength(2);
-      expect([...form()!.querySelectorAll('.room-agent .field-label')].map((l) => l.textContent)).toEqual(['Model', 'Prompt', 'Model', 'Prompt']);
+      expect([...form()!.querySelectorAll('.room-agent .field-label')].map((l) => l.textContent)).toEqual(['Name', 'Model', 'Prompt', 'Name', 'Model', 'Prompt']);
+      // The name's placeholder is the agent's model.
+      expect($f<HTMLInputElement>('input[name=agent_name]').placeholder).toBe('default');
 
       await set($f('input[name=title]'), 'Glaze review');
       await act(async () => {
@@ -3734,6 +3782,11 @@ describe('a room', () => {
       await set($f('input[name=cwd]'), ' net ');
       await set($f('select[name=permission_mode]'), 'ask', ['change']);
       await set($f('select[name=model]', 0), 'opus', ['change']);
+      // What the hub titles the agent: the model as typed, numbered when another unnamed agent has it.
+      expect($f<HTMLInputElement>('input[name=agent_name]').placeholder).toBe('opus');
+      await set($f('select[name=model]', 1), 'opus', ['change']);
+      expect($f<HTMLInputElement>('input[name=agent_name]', 1).placeholder).toBe('opus 2');
+      await set($f('input[name=agent_name]', 0), ' Judge ');
       await set($f('textarea[name=system_prompt]', 0), 'You judge glazes by their chemistry.');
       await set($f('select[name=model]', 1), 'haiku', ['change']);
       await set($f('textarea[name=system_prompt]', 1), 'You count the cost.');
@@ -3741,6 +3794,8 @@ describe('a room', () => {
       await click($f('.btn-add-agent'));
       expect(form()!.querySelectorAll('.room-agent')).toHaveLength(3);
       await set($f('select[name=model]', 2), 'custom', ['change']);
+      // Blank spaces are no name.
+      await set($f('input[name=agent_name]', 2), '   ');
       await set($f('input[name=model_name]'), 'claude-sonnet-5-5', ['input', 'change']);
       await click($f('.btn-remove-agent', 1));
       expect([...form()!.querySelectorAll('.room-agent-name')].map((n) => n.textContent)).toEqual(['Agent 1', 'Agent 2']);
@@ -3761,7 +3816,7 @@ describe('a room', () => {
         workspace_id: 'w2',
         cwd: 'net',
         permission_mode: 'ask',
-        agents: [{ model: 'opus', system_prompt: 'You judge glazes by their chemistry.' }, { model: 'claude-sonnet-5-5' }],
+        agents: [{ name: 'Judge', model: 'opus', system_prompt: 'You judge glazes by their chemistry.' }, { model: 'claude-sonnet-5-5' }],
       };
       expect(api.createRoom.mock.calls).toEqual([
         ['p1', body],

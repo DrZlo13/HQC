@@ -65,8 +65,8 @@ export class ChatSession {
   /** Loads the newest page of history (unless it is in) and subscribes after what is loaded;
    *  resolves then, so a long chat shows at once. A chat whose page was in fetches it again
    *  for the fields changed meanwhile (`Timeline.refresh`). The older pages load after that,
-   *  newest first (`Timeline.olderFrom`). */
-  async open(): Promise<void> {
+   *  newest first (`Timeline.olderFrom`), unless `older` is false. */
+  async open({ older = true }: { older?: boolean } = {}): Promise<void> {
     const run = ++this.run;
     this.isOpen = true;
     const t = this.timeline;
@@ -86,7 +86,7 @@ export class ChatSession {
       onReset: () => t.reset(),
     });
     if (kept) void this.refresh(run);
-    void this.loadOlder(run);
+    if (older) void this.loadOlder(run);
   }
 
   private async refresh(run: number): Promise<void> {

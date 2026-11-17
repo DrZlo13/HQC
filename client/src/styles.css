@@ -3010,6 +3010,26 @@ select.input {
 .msg-agent > .meta {
   margin-top: 8px;
 }
+/* An agent's post in its room: its name (colored inline), model and time over the text. */
+.room-post-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin-bottom: 4px;
+}
+.room-post-name {
+  font-weight: 600;
+}
+.room-post-model,
+.room-post-when {
+  font-size: 12px;
+  color: var(--muted);
+}
+.room-post-when {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
 
 .meta {
   display: flex;
@@ -3670,6 +3690,11 @@ select.input {
 
 .activity-label {
   color: var(--accent-text);
+}
+/* A room's agent leading its line. */
+.activity-name {
+  flex: none;
+  color: var(--text2);
 }
 
 .activity-queued .activity-label {
@@ -7913,6 +7938,11 @@ button.ps-look {
   flex: none;
   display: inline-flex;
   color: var(--browser);
+}
+.session-room {
+  flex: none;
+  display: inline-flex;
+  color: var(--muted);
 }
 .rail-item.has-browser .rail-project {
   outline: 2px dashed var(--browser);

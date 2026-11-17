@@ -746,9 +746,10 @@ export class AppState {
     return !s.archived && !s.system && !s.room_id && s.id !== this.pendingArchive?.id;
   }
 
-  /** The member sessions of room `roomId` the client has: its agents. */
+  /** The member sessions of room `roomId` the client has: its agents, in the order they were
+   *  made (the ids are time-ordered), which is the order of the form that made the room. */
   roomMembers(roomId: string): SessionInfo[] {
-    return [...this.sessions.values()].filter((s) => s.room_id === roomId);
+    return [...this.sessions.values()].filter((s) => s.room_id === roomId).sort((a, b) => a.id.localeCompare(b.id));
   }
 
   /** A session as the lists and the marks show it. A room takes the state of the room and its

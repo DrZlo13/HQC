@@ -32,7 +32,7 @@ export type Route =
 
 /** Hash routes, so the hub can serve the client as static files: `#/p/<project>`,
  *  `#/p/<project>/new` (a new session, not on the hub until its first message),
- *  `#/p/<project>/new-room` (the form of a new room), `#/p/<project>/settings` (the project's
+ *  `#/p/<project>/new-room` (the chat window of a new room), `#/p/<project>/settings` (the project's
  *  settings, T49), `#/p/<project>/rules/<workspace>`
  *  (`?session=<id>`: opened from that session; the folder's rules, T48), `#/s/<session>` (`?seq=<seq>`:
  *  scrolled to that event, a search hit), `#/search` (the search page; `?q=…` and its filters,
@@ -176,7 +176,7 @@ export function App({ app }: { app: AppState }) {
       main = <NewSessionChat key={route.projectId} app={app} projectId={route.projectId} phone={phone} sessions={sessions} />;
       break;
     case 'newRoom':
-      main = <NewRoom key={route.projectId} app={app} projectId={route.projectId} phone={phone} />;
+      main = <NewRoom key={route.projectId} app={app} projectId={route.projectId} phone={phone} sessions={sessions} />;
       break;
     case 'search': {
       const pid = app.currentProjectId;

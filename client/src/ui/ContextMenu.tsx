@@ -32,14 +32,16 @@ export type MenuEntry = MenuItem | 'sep';
 /** The space kept between a menu and the window's edge, px. */
 const MARGIN = 8;
 
-/** Moves fixed box `box`, placed at (`x`, `y`), left and up as far as it overflows the window. */
-function fitInView(box: HTMLElement, x: number, y: number): void {
+/** Moves fixed box `box`, placed at (`x`, `y`), left and up as far as it overflows the window;
+ *  with `above` (its bottom stands at `y`, see below) left only. */
+function fitInView(box: HTMLElement, x: number, y: number, above: boolean): void {
   const view = box.ownerDocument.defaultView;
   if (!view) return;
   const r = box.getBoundingClientRect();
   const dx = Math.max(0, r.right - (view.innerWidth - MARGIN));
-  const dy = Math.max(0, r.bottom - (view.innerHeight - MARGIN));
   box.style.left = `${Math.max(MARGIN, x - dx)}px`;
+  if (above) return;
+  const dy = Math.max(0, r.bottom - (view.innerHeight - MARGIN));
   box.style.top = `${Math.max(MARGIN, y - dy)}px`;
 }
 
@@ -87,9 +89,16 @@ export function ContextMenu({
   useLayoutEffect(() => {
     const el = box.current;
     if (!el) return;
-    // Upwards: placed by the height it has now, then kept in the window as any.
-    if (above) el.style.top = `${y - el.offsetHeight}px`;
-    fitInView(el, x, above ? y - el.offsetHeight : y);
+    // Upwards: its bottom stands at `y`, so a menu that grows (a text box that follows its text)
+    // grows upwards, and it is no taller than the space above `y`: past that it scrolls.
+    if (above) {
+      const view = el.ownerDocument.defaultView;
+      el.style.top = 'auto';
+      el.style.bottom = `${(view?.innerHeight ?? 0) - y}px`;
+      el.style.maxHeight = `${y - MARGIN}px`;
+      el.style.overflowY = 'auto';
+    }
+    fitInView(el, x, y, !!above);
   }, [x, y, step]);
   // Where the focus was before the menu; it goes back there when the menu closes and the focus
   // was in the menu or nowhere (Esc, an item picked), not when a press away moved it.

@@ -3682,7 +3682,7 @@ describe('a room', () => {
     expect(['room', 'm1', 'm2', 'x1', 'net'].map((id) => app.sessions.has(id))).toEqual([false, false, false, true, true]);
   });
 
-  it("a room's row has the room icon after its title, with its mode and agents in the tooltip; a session's has none; the phone's first screen shows it too", async () => {
+  it("a room's row has the room icon as its state mark, in place of the dot, with its mode and agents in the tooltip; a session's has the dot; the phone's first screen shows it too", async () => {
     const app = makeApp([
       ...LIST,
       room(),
@@ -3691,17 +3691,24 @@ describe('a room', () => {
       room({ id: 'council', title: 'Votes', room_mode: 'council' }),
     ]);
     await mount(<SessionList app={app} current="net" />);
-    const icon = (title: string) => rowOf(title).querySelector<HTMLElement>('.session-title ~ .session-room');
+    const mark = (title: string) => rowOf(title).querySelector<HTMLElement>('.mark-room');
     // Agents in the order they were made (their ids), not as the client got them.
-    expect(icon('Glaze review')!.title).toBe('Room · Conversation · Opus, Sonnet');
-    expect(icon('Glaze review')!.querySelector('svg')).not.toBeNull();
-    expect(icon('Votes')!.title).toBe('Room · Council');
-    expect(icon('Network sync')).toBeNull();
+    expect(mark('Glaze review')!.title).toBe('Room · Conversation · Opus, Sonnet');
+    expect(mark('Glaze review')!.querySelector('svg')).not.toBeNull();
+    expect(mark('Votes')!.title).toBe('Room · Council');
+    // The mark stands where the dot does, and takes its place: no dot, nothing after the title.
+    expect(rowOf('Glaze review').querySelector('.dot')).toBeNull();
+    expect(rowOf('Glaze review').querySelector('.session-room')).toBeNull();
+    expect(rowOf('Glaze review').querySelector('a.session-row')!.firstElementChild).toBe(mark('Glaze review'));
+    expect(mark('Network sync')).toBeNull();
+    expect(rowOf('Network sync').querySelector('.dot')).not.toBeNull();
+    // It carries the state the dot would.
+    expect(mark('Glaze review')!.classList.contains('mark-idle')).toBe(true);
     // The same row in a phone's Sessions view.
     app.phoneView = 'sessions';
     render(null, root);
     await mount(<PhoneHome app={app} />);
-    expect(root.querySelector('.session-room')!.getAttribute('title')).toBe('Room · Conversation · Opus, Sonnet');
+    expect(root.querySelector('.mark-room')!.getAttribute('title')).toBe('Room · Conversation · Opus, Sonnet');
   });
 
   it("a room's menu has no \"Move to project…\" or \"Restart session\", and its row is not dragged onto a project", async () => {
@@ -3728,25 +3735,61 @@ describe('a room', () => {
     await act(async () => void rowOf('Network sync').querySelector('a.session-row')!.dispatchEvent(new MouseEvent('dragend', { bubbles: true })));
   });
 
-  describe('the form', () => {
+  describe('the window', () => {
     /** The hash change and the hub's (mocked) replies. */
     const settle = () =>
       act(async () => {
         for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
       });
-    const form = () => root.querySelector<HTMLFormElement>('.main form.room-form');
-    const $f = <E extends Element>(sel: string, i = 0) => form()!.querySelectorAll<E>(sel)[i];
+    const win = () => root.querySelector<HTMLElement>('.main .chat-new');
+    const chips = () => [...root.querySelectorAll('.chat-new .new-chip')].map((c) => c.textContent);
+    const input = () => root.querySelector<HTMLTextAreaElement>('.chat-new .composer-input')!;
+    const typeMessage = (text: string) =>
+      act(async () => {
+        input().value = text;
+        input().dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    const sendMessage = () =>
+      act(async () => {
+        root.querySelector('.chat-new form.composer')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        for (let i = 0; i < 5; i++) await Promise.resolve();
+      });
     /** A field's new value, and the events a user's typing or pick sends. */
     const set = (el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, value: string, events = ['input']) =>
       act(async () => {
         el.value = value;
         for (const e of events) el.dispatchEvent(new Event(e, { bubbles: true }));
       });
-    const submit = () =>
-      act(async () => {
-        form()!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-        for (let i = 0; i < 5; i++) await Promise.resolve();
-      });
+    const menuField = <E extends Element>(sel: string, i = 0) => root.querySelectorAll<E>(`.ctx-menu ${sel}`)[i];
+    /** Opens agent `i`'s menu from its chip. */
+    const openAgent = (i: number) => click(root.querySelectorAll('.chat-new .btn-chip-agent')[i]);
+
+    function roomApp() {
+      let app!: AppState;
+      const api = {
+        ...hubApi(),
+        workspaces: async () => app.workspaces.get('p1') ?? [],
+        createRoom: vi.fn(async (_p: string, _b: unknown) => room({ room_mode: 'council' })),
+        eventsBefore: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, count: 0 })),
+        input: vi.fn(async (id: string, text: string, op: string, ids: string[]) =>
+          parseEvent({
+            session_id: id,
+            event_id: '0199f3a2-7c10-7000-8000-000000000203',
+            seq: 1,
+            ts: at(0),
+            author: { kind: 'user', id: 'u' },
+            type: 'user.message',
+            payload: { text, artifact_ids: ids },
+            client_op_id: op,
+            delivery: 'pending',
+          }),
+        ),
+        readCursor: vi.fn(async () => {}),
+      };
+      app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
+      Object.assign(app.socket, { subscribe: vi.fn(() => () => {}) });
+      return { app, api };
+    }
 
     beforeEach(() => windowWidth(1280));
     afterEach(() => {
@@ -3754,157 +3797,160 @@ describe('a room', () => {
       windowWidth(1024);
     });
 
-    it('"New room" beside "+" opens it; "Create room" sends the title, the mode, where the agents work and each agent, then opens the room', async () => {
-      let app!: AppState;
-      const api = {
-        ...hubApi(),
-        workspaces: async () => app.workspaces.get('p1') ?? [],
-        createRoom: vi.fn(async (_p: string, _b: unknown) => room({ room_mode: 'council' })),
-        eventsBefore: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, count: 0 })),
-        readCursor: vi.fn(async () => {}),
-      };
-      app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
-      Object.assign(app.socket, { subscribe: vi.fn(() => () => {}) });
+    it('"New room" beside "+" opens a chat window with its chips; the first message creates the room with what they chose, then goes into it as its first message', async () => {
+      const { app, api } = roomApp();
       location.hash = '#/p/p1';
       await mount(<App app={app} />);
       await click(root.querySelector('.side-head .btn-new-room'));
       await settle();
       expect(location.hash).toBe('#/p/p1/new-room');
-      expect(root.querySelector('.main .bar .title')!.textContent).toBe('New room');
-      // Conversation, the project's first workspace, the worker's permissions, two agents.
-      expect([...form()!.querySelectorAll('.room-mode')].map((m) => m.textContent)).toEqual([
-        "ConversationAn agent's reply wakes the other agents",
-        "CouncilOnly your message wakes the agents, all at once; they see the room's history",
-      ]);
-      expect($f<HTMLInputElement>('input[name=mode][value=conversation]').checked).toBe(true);
-      const workspace = $f<HTMLSelectElement>('select[name=workspace]');
-      expect([...workspace.options].map((o) => o.textContent)).toEqual([
-        'phys-mp — home-mac:~/work/games/phys-mp',
-        'phys-det — drzlo-mac:~/work/games/phys-det',
-      ]);
-      expect(workspace.value).toBe('w1');
-      expect([...$f<HTMLSelectElement>('select[name=permission_mode]').options].map((o) => o.textContent)).toEqual([
-        "The worker's default",
-        'Ask',
-        'Auto',
-        'Allow all',
-      ]);
-      expect(form()!.querySelectorAll('.room-agent')).toHaveLength(2);
-      expect([...form()!.querySelectorAll('.room-agent .field-label')].map((l) => l.textContent)).toEqual(['Name', 'Model', 'Prompt', 'Name', 'Model', 'Prompt']);
-      // The name's placeholder is the agent's model.
-      expect($f<HTMLInputElement>('input[name=agent_name]').placeholder).toBe('default');
+      expect(win()!.querySelector('.chat-title')!.textContent).toBe('New room');
+      expect(win()!.querySelector('.chat-meta')!.textContent).toBe('Drafthome-mac/~/work/games/phys-mp');
+      expect(win()!.querySelector('.new-empty')!.textContent).toBe(
+        "Write the first message — the room starts with itMode, agents, workspace, folder and permissions are above the box; an agent's name, model and prompt open from its chip.",
+      );
+      // Two agents, the mode, the workspace, the folder and the permissions; nothing on the hub yet.
+      expect(chips()).toEqual(['default', 'default 2', 'Agent', 'Mode: Conversation', 'phys-mp · home-mac', 'Folder .', "Permissions: worker's default"]);
+      expect(api.createRoom).not.toHaveBeenCalled();
 
-      await set($f('input[name=title]'), 'Glaze review');
-      await act(async () => {
-        const council = $f<HTMLInputElement>('input[name=mode][value=council]');
-        council.checked = true;
-        council.dispatchEvent(new Event('change', { bubbles: true }));
-      });
-      await set(workspace, 'w2', ['change']);
-      await set($f('input[name=cwd]'), ' net ');
-      await set($f('select[name=permission_mode]'), 'ask', ['change']);
-      await set($f('select[name=model]', 0), 'opus', ['change']);
-      // What the hub titles the agent: the model as typed, numbered when another unnamed agent has it.
-      expect($f<HTMLInputElement>('input[name=agent_name]').placeholder).toBe('opus');
-      await set($f('select[name=model]', 1), 'opus', ['change']);
-      expect($f<HTMLInputElement>('input[name=agent_name]', 1).placeholder).toBe('opus 2');
-      await set($f('input[name=agent_name]', 0), ' Judge ');
-      await set($f('textarea[name=system_prompt]', 0), 'You judge glazes by their chemistry.');
-      await set($f('select[name=model]', 1), 'haiku', ['change']);
-      await set($f('textarea[name=system_prompt]', 1), 'You count the cost.');
-      // A third agent with another model; the second goes, the third keeps its fields.
-      await click($f('.btn-add-agent'));
-      expect(form()!.querySelectorAll('.room-agent')).toHaveLength(3);
-      await set($f('select[name=model]', 2), 'custom', ['change']);
-      // Blank spaces are no name.
-      await set($f('input[name=agent_name]', 2), '   ');
-      await set($f('input[name=model_name]'), 'claude-sonnet-5-5', ['input', 'change']);
-      await click($f('.btn-remove-agent', 1));
-      expect([...form()!.querySelectorAll('.room-agent-name')].map((n) => n.textContent)).toEqual(['Agent 1', 'Agent 2']);
-      expect($f<HTMLInputElement>('input[name=model_name]').value).toBe('claude-sonnet-5-5');
+      // The mode's menu: each with what it does.
+      await click(root.querySelector('.btn-chip-mode'));
+      // An `above` menu stands on its bottom and is no taller than the space over it: it grows
+      // upwards, and scrolls when even that is not enough.
+      const ctx = root.querySelector<HTMLElement>('.ctx-menu')!;
+      expect([ctx.style.bottom !== '', ctx.style.top, ctx.style.maxHeight !== '', ctx.style.overflowY]).toEqual([true, 'auto', true, 'auto']);
+      expect(menuItems()).toEqual([
+        'ConversationAgents answer one at a time, in turn; each sees what was said since its last turn',
+        "CouncilYour message wakes every agent at once; they see the room's history",
+      ]);
+      await click(root.querySelector('.ctx-menu .btn-mode-council'));
+      expect(chips()[3]).toBe('Mode: Council');
+      await click(root.querySelector('.btn-chip-workspace'));
+      await click(root.querySelectorAll('.ctx-menu .btn-pick-workspace')[1]);
+      await click(root.querySelector('.btn-chip-folder'));
+      await set(menuField('input[name=cwd]'), ' net ');
+      await click(root.querySelector('.btn-chip-permissions'));
+      await click(root.querySelector('.ctx-menu .btn-permissions-ask'));
 
-      // The hub refuses: its reason under the form, nothing opened.
-      api.createRoom.mockRejectedValueOnce(new ApiError(400, 'the workspace is not ready', 'bad_request'));
-      await submit();
+      // An agent's menu: its name (the placeholder is what the hub would title it), model, prompt.
+      await openAgent(0);
+      expect(menuField<HTMLInputElement>('input[name=agent_name]').placeholder).toBe('default');
+      expect(menuField<HTMLTextAreaElement>('textarea[name=system_prompt]').getAttribute('rows')).toBe('8');
+      await set(menuField('select[name=model]'), 'opus', ['change']);
+      expect(menuField<HTMLInputElement>('input[name=agent_name]').placeholder).toBe('opus');
+      await set(menuField('input[name=agent_name]'), ' Judge ');
+      await set(menuField('textarea[name=system_prompt]'), 'You judge glazes by their chemistry.');
+      expect(chips()[0]).toBe('Judge · Opus');
+      await pressKey('Escape');
+      await openAgent(1);
+      await set(menuField('select[name=model]'), 'haiku', ['change']);
+      await set(menuField('textarea[name=system_prompt]'), 'You count the cost.');
+      await pressKey('Escape');
+      // "+ Agent" adds a third and opens its menu; it goes again by "Remove agent", the others stay.
+      await click(root.querySelector('.btn-add-agent'));
+      expect(root.querySelectorAll('.chat-new .btn-chip-agent')).toHaveLength(3);
+      expect(menuField('input[name=agent_name]')).not.toBeNull();
+      await click(menuField('.btn-remove-agent'));
+      expect(chips().slice(0, 3)).toEqual(['Judge · Opus', 'haiku', 'Agent']);
+
+      await typeMessage('Which glaze for cone 6?');
+      await sendMessage();
       await settle();
-      expect(form()!.querySelector('.error-text')!.textContent).toBe('the workspace is not ready');
-      expect(location.hash).toBe('#/p/p1/new-room');
-
-      await submit();
-      await settle();
-      const body = {
-        title: 'Glaze review',
-        mode: 'council',
-        workspace_id: 'w2',
-        cwd: 'net',
-        permission_mode: 'ask',
-        agents: [{ name: 'Judge', model: 'opus', system_prompt: 'You judge glazes by their chemistry.' }, { model: 'claude-sonnet-5-5' }],
-      };
       expect(api.createRoom.mock.calls).toEqual([
-        ['p1', body],
-        ['p1', body],
+        [
+          'p1',
+          {
+            mode: 'council',
+            workspace_id: 'w2',
+            cwd: 'net',
+            permission_mode: 'ask',
+            agents: [{ name: 'Judge', model: 'opus', system_prompt: 'You judge glazes by their chemistry.' }, { model: 'haiku', system_prompt: 'You count the cost.' }],
+          },
+        ],
       ]);
-      // The room's chat, and the room in the list.
+      // The message goes into the room as its first one, and its chat takes the window's place.
+      expect(api.input.mock.calls.map(([id, text]) => [id, text])).toEqual([['room', 'Which glaze for cone 6?']]);
       expect(location.hash).toBe('#/s/room');
-      expect(form()).toBeNull();
+      expect(win()).toBeNull();
       expect(root.querySelector('.main .chat-title')!.textContent).toBe('Glaze review');
       expect(root.querySelector('.main .chat-room')!.textContent).toBe('Room · Council');
       expect(titles()).toContain('Glaze review');
     });
 
-    it("an agent's model menu has the providers the workspace's worker allows; Create room sends the one picked", async () => {
-      let app!: AppState;
-      const api = {
-        ...hubApi(),
-        workspaces: async () => app.workspaces.get('p1') ?? [],
-        createRoom: vi.fn(async (_p: string, _b: unknown) => room()),
-        eventsBefore: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, count: 0 })),
-        readCursor: vi.fn(async () => {}),
-      };
-      app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
+    it("an agent's prompt box is as tall as its text, and as tall as its text when the menu opens with one already in it", async () => {
+      const { app } = roomApp();
+      // The DOM here has no layout: the text's height is what the test says it is.
+      let text = 300;
+      const was = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight');
+      Object.defineProperty(HTMLElement.prototype, 'scrollHeight', { configurable: true, get: () => text });
+      try {
+        location.hash = '#/p/p1/new-room';
+        await mount(<App app={app} />);
+        await settle();
+        await openAgent(0);
+        const box = () => menuField<HTMLTextAreaElement>('textarea[name=system_prompt]');
+        expect(box().style.height).toBe('300px');
+        text = 900;
+        await set(box(), 'one\n\ntwo\n\nthree');
+        expect(box().style.height).toBe('900px');
+        await pressKey('Escape');
+        text = 700;
+        await openAgent(0);
+        expect(box().value).toBe('one\n\ntwo\n\nthree');
+        expect(box().style.height).toBe('700px');
+      } finally {
+        if (was) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', was);
+        else delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+      }
+    });
+
+    it('a create the hub refuses keeps the window, the chips and the text, says why, and the next message creates it', async () => {
+      const { app, api } = roomApp();
+      api.createRoom.mockRejectedValueOnce(new ApiError(400, 'the workspace is not ready', 'bad_request'));
+      location.hash = '#/p/p1/new-room';
+      await mount(<App app={app} />);
+      await settle();
+      await openAgent(0);
+      await set(menuField('input[name=agent_name]'), 'Judge');
+      await pressKey('Escape');
+      await typeMessage('Which glaze?');
+      await sendMessage();
+      await settle();
+      expect(location.hash).toBe('#/p/p1/new-room');
+      expect(api.input).not.toHaveBeenCalled();
+      expect(root.querySelector('.chat-new .notice')!.textContent).toBe('Not created: the workspace is not ready');
+      expect(input().value).toBe('Which glaze?');
+      expect(chips()[0]).toBe('Judge · default');
+      await sendMessage();
+      await settle();
+      expect(api.createRoom).toHaveBeenCalledTimes(2);
+      expect(api.createRoom.mock.calls[1][1]).toMatchObject({ agents: [{ name: 'Judge' }, {}] });
+      expect(location.hash).toBe('#/s/room');
+    });
+
+    it("an agent's model menu has the providers the workspace's worker allows; a provider the newly chosen workspace's worker does not allow is neither shown nor sent", async () => {
+      const { app, api } = roomApp();
       app.providers = [
         { id: 'pr1', name: 'qwen-local', label: 'Qwen 3.8 (local)', base_url: 'http://192.168.1.229:8082', model: 'qwen3.8-27b', workers: ['wk1'] },
         { id: 'pr2', name: 'zai', label: 'GLM', base_url: 'https://api.z.ai/api/anthropic', model: 'glm-5', workers: ['wk2'] },
       ];
-      Object.assign(app.socket, { subscribe: vi.fn(() => () => {}) });
       location.hash = '#/p/p1/new-room';
       await mount(<App app={app} />);
       await settle();
       // The project's first workspace, on home-mac: its provider only, under the Claude models.
-      const options = [...$f<HTMLSelectElement>('select[name=model]', 0).options].map((o) => o.textContent);
+      await openAgent(0);
+      const options = [...menuField<HTMLSelectElement>('select[name=model]').options].map((o) => o.textContent);
       expect(options.slice(-1)).toEqual(['Qwen 3.8 (local)']);
       expect(options).not.toContain('GLM');
-      await set($f('select[name=model]', 0), 'provider:pr1', ['change']);
-      expect($f<HTMLSelectElement>('select[name=model]', 0).value).toBe('provider:pr1');
-      await submit();
-      await settle();
-      expect(api.createRoom.mock.calls).toEqual([['p1', { mode: 'conversation', workspace_id: 'w1', agents: [{ provider_id: 'pr1' }, {}] }]]);
-    });
-
-    it("a provider the newly chosen workspace's worker does not allow is neither shown nor sent, as on a new session", async () => {
-      let app!: AppState;
-      const api = {
-        ...hubApi(),
-        workspaces: async () => app.workspaces.get('p1') ?? [],
-        createRoom: vi.fn(async (_p: string, _b: unknown) => room()),
-        eventsBefore: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, count: 0 })),
-        readCursor: vi.fn(async () => {}),
-      };
-      app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
-      app.providers = [
-        { id: 'pr1', name: 'qwen-local', label: 'Qwen 3.8 (local)', base_url: 'http://192.168.1.229:8082', model: 'qwen3.8-27b', workers: ['wk1'] },
-      ];
-      Object.assign(app.socket, { subscribe: vi.fn(() => () => {}) });
-      location.hash = '#/p/p1/new-room';
-      await mount(<App app={app} />);
-      await settle();
-      await set($f('select[name=model]', 0), 'provider:pr1', ['change']);
+      await set(menuField('select[name=model]'), 'provider:pr1', ['change']);
+      expect(chips()[0]).toBe('Qwen 3.8 (local)');
+      await pressKey('Escape');
       // drzlo-mac's workspace: home-mac's provider is not there.
-      await set($f('select[name=workspace]'), 'w2', ['change']);
-      const model = $f<HTMLSelectElement>('select[name=model]', 0);
-      expect([...model.options].map((o) => o.textContent)).not.toContain('Qwen 3.8 (local)');
-      expect(model.value).toBe('');
-      await submit();
+      await click(root.querySelector('.btn-chip-workspace'));
+      await click(root.querySelectorAll('.ctx-menu .btn-pick-workspace')[1]);
+      expect(chips()[0]).toBe('default');
+      await typeMessage('Hi');
+      await sendMessage();
       await settle();
       expect(api.createRoom.mock.calls).toEqual([['p1', { mode: 'conversation', workspace_id: 'w2', agents: [{}, {}] }]]);
     });

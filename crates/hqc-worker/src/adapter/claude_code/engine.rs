@@ -2397,6 +2397,7 @@ impl Core {
                 call_id: v["tool_use_id"].as_str().map(str::to_owned).or(started),
                 status: v["status"].as_str().map(str::to_owned),
                 task_id: id.map(str::to_owned),
+                from_session_id: None,
                 fork: None,
             },
         ))));
@@ -2500,6 +2501,7 @@ impl Core {
                 call_id: None,
                 status: None,
                 task_id: None,
+                from_session_id: None,
                 fork: None,
             },
         );

@@ -282,6 +282,7 @@ fn system_at(uuid: Uuid, ts: DateTime<Utc>, index: usize, code: &str, text: Stri
             call_id: None,
             status: None,
             task_id: None,
+            from_session_id: None,
             fork: None,
         },
     )
@@ -324,6 +325,7 @@ fn notification(uuid: Uuid, ts: DateTime<Utc>, blocks: &[serde_json::Value]) -> 
             call_id: field("tool-use-id"),
             status: field("status"),
             task_id: field("task-id"),
+            from_session_id: None,
             fork: None,
         },
     )
@@ -691,6 +693,7 @@ mod tests {
                 call_id: Some("toolu_01DNPTCZTgycgC11D8VMjfaD".into()),
                 status: Some("completed".into()),
                 task_id: Some("b1b20u6dl".into()),
+                from_session_id: None,
                 fork: None,
             }]
         );
@@ -783,6 +786,7 @@ mod tests {
                 call_id: None,
                 status: None,
                 task_id: Some("blyhf7ajv".into()),
+                from_session_id: None,
                 fork: None,
             }]
         );
@@ -901,6 +905,7 @@ mod tests {
                 call_id: Some("toolu_01B2anRdzK42h65tA2gdwhb2".into()),
                 status: Some("completed".into()),
                 task_id: Some("a52af2b436ded4cea".into()),
+                from_session_id: None,
                 fork: None,
             }]
         );

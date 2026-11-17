@@ -340,6 +340,7 @@ impl Mirror {
                 call_id: None,
                 status: None,
                 task_id: None,
+                from_session_id: None,
                 fork: Some(SessionForked {
                     at_uuid: f.at,
                     branch_from: if hqc { "hqc" } else { "vscode" }.into(),

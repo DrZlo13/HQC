@@ -1304,6 +1304,20 @@ select.input {
 .dot-vs .icon {
   stroke-width: 2.2;
 }
+/* A room's icon stands there too (`dot-vs mark-room`), in the colors of the dot of its group. */
+.mark-wait {
+  color: var(--waiting);
+}
+.mark-wait.state-error {
+  color: var(--danger);
+}
+.mark-run {
+  color: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.mark-idle {
+  color: var(--muted);
+}
 
 .session-main {
   flex: 1;
@@ -4900,7 +4914,9 @@ a.relay-peer {
   padding: 12px 28px 0;
   border-top: 1px solid var(--border);
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
 }
 .new-chips + .composer-wrap {
   border-top: 0;
@@ -5274,64 +5290,22 @@ a.relay-peer {
   font-size: 16px;
 }
 
-/* ---- a new room: its title and mode, where its agents work, the agents ---- */
+/* ---- a new room: an agent's menu over the input ---- */
 
-/* As wide as the page and no wider at 390 px: the form, the mode's fieldset (min-content by
-   default) and the text beside a radio may shrink; fields are 100 % wide. */
-.room-form {
-  min-width: 0;
-}
-.room-modes {
+.menu-agent {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-.room-mode {
-  display: flex;
-  align-items: flex-start;
   gap: 10px;
-  padding: 12px 14px;
-  cursor: pointer;
+  width: calc(100vw - 32px);
+  max-width: 560px;
+  padding: 6px;
 }
-.room-mode input {
-  flex: none;
-  margin: 3px 0 0;
-}
-.room-mode-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.room-mode-name {
-  font-weight: 600;
-}
-.room-add-workspace {
+.menu-agent .btn-remove-agent {
   align-self: flex-start;
-}
-.room-agent {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-width: 0;
-  padding: 12px 14px;
-}
-.room-agent-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.room-agent-name {
-  flex: 1;
-  min-width: 0;
-  font-weight: 600;
 }
 .room-prompt {
   resize: vertical;
+  max-height: 45vh;
 }
 
 /* ---- project settings (T49) ---- */
@@ -7938,11 +7912,6 @@ button.ps-look {
   flex: none;
   display: inline-flex;
   color: var(--browser);
-}
-.session-room {
-  flex: none;
-  display: inline-flex;
-  color: var(--muted);
 }
 .rail-item.has-browser .rail-project {
   outline: 2px dashed var(--browser);

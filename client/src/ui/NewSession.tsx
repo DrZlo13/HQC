@@ -8,7 +8,7 @@ import type { ComponentChildren } from 'preact';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { AppState, NewSessionDraft } from '../app';
 import { onBack, replaceHash } from '../nav';
-import type { PermissionMode, Workspace } from '../proto';
+import { ROOM_MODES, type PermissionMode, type RoomMode, type SessionInfo } from '../proto';
 import type { OutgoingFile } from '../session';
 import { Timeline, type Item } from '../timeline';
 import { MODEL_ALIASES } from './agentSettings';
@@ -16,8 +16,8 @@ import { ChatItems, type ChatActions } from './cards';
 import { Composer, SessionsButton, toOutgoing, type SessionsToggle } from './Chat';
 import { ContextMenu, type MenuEntry } from './ContextMenu';
 import { useSubscription } from './hooks';
-import { IconBack, IconChevronUp, IconFolder, IconModel, IconPlus, IconShield, IconWorkspace } from './icons';
-import { homePath, modeConfirm, modelName } from './labels';
+import { IconBack, IconChevronUp, IconFolder, IconModel, IconPlus, IconRoom, IconShield, IconWorkspace } from './icons';
+import { ROOM_MODE_LABELS, ROOM_MODE_NOTES, homePath, modeConfirm, modelName } from './labels';
 import { workspaceName } from './ProjectSettings';
 
 /** The first message: shown as being sent until the session exists. */
@@ -34,15 +34,10 @@ export function newSessionWhere(app: AppState, d: NewSessionDraft): { worker?: s
   return { worker: app.workerName(w.worker_id), path: app.sessionPath({ project_id: d.projectId, workspace_id: w.id, cwd: d.cwd.trim() }) };
 }
 
-/** The window of a new session: the header says "Draft" and where it will run, the feed what
- *  to do, the chips over the input what it starts with. The first message creates it with the
- *  chips' choices (`AppState.startNewSession`) and goes in as its first input; until then the
- *  input sends nothing more ("Starting…"), and what is typed and attached meanwhile stays.
- *  Once the chat's first page is in, the address becomes the session's and its chat replaces
- *  this window: the message in its feed, the text and files not sent in its input, the caret
- *  there. A create the hub refuses keeps the draft, the text back in the input and the files
- *  with it. Files dropped on the window are attached, as on a chat. `sessions`: a window
- *  900–1079 px wide, "Sessions" at the left of the header. */
+/** The window of a new session: the chips are `NewSessionChips` over the draft the app keeps
+ *  (`AppState.newSession`), and the first message creates the session
+ *  (`AppState.startNewSession`). `sessions`: a window 900–1079 px wide, "Sessions" at the left
+ *  of the header. */
 export function NewSessionChat({
   app,
   projectId,
@@ -61,12 +56,60 @@ export function NewSessionChat({
     return () => app.closeNewSession();
   }, [app, projectId]);
   const draft: NewSessionDraft = app.newSession?.projectId === projectId ? app.newSession : { projectId, cwd: '' };
+  return (
+    <NewChatWindow
+      app={app}
+      projectId={projectId}
+      phone={phone}
+      sessions={sessions}
+      kind="session"
+      where={newSessionWhere(app, draft)}
+      hint="Workspace, folder, permissions and model are above the box; the defaults are already picked."
+      create={() => app.startNewSession()}
+      chips={(disabled) => (
+        <NewSessionChips app={app} projectId={projectId} values={draft} onChange={(patch) => app.setNewSession(patch)} withModel disabled={disabled} phone={phone} />
+      )}
+    />
+  );
+}
+
+/** The window of a new session or room: the header says "Draft" and where it will run, the
+ *  feed what to do, the `chips` over the input what it starts with. The first message makes it
+ *  with `create` and goes in as its first input; until then the input sends nothing more
+ *  ("Starting…"), and what is typed and attached meanwhile stays. Once the chat's first page is
+ *  in, the address becomes its own and its chat replaces this window: the message in its feed,
+ *  the text and files not sent in its input, the caret there. A create the hub refuses keeps
+ *  everything, the text back in the input and the files with it. Files dropped on the window
+ *  are attached, as on a chat. */
+export function NewChatWindow({
+  app,
+  projectId,
+  phone,
+  sessions,
+  kind,
+  where: { worker, path },
+  hint,
+  create,
+  chips,
+}: {
+  app: AppState;
+  projectId: string;
+  phone: boolean;
+  sessions?: SessionsToggle;
+  kind: 'session' | 'room';
+  /** The worker and the folder it will run in, for the header. */
+  where: { worker?: string; path?: string };
+  /** Under the feed's "Write the first message", what the chips hold. */
+  hint: string;
+  create: () => Promise<SessionInfo>;
+  /** The chips over the input; `disabled` once the first message is on its way. */
+  chips: (disabled: boolean) => ComponentChildren;
+}) {
   const [notice, setNotice] = useState<string | null>(null);
   const list = app.workspaces.get(projectId);
   useEffect(() => {
     app.loadWorkspaces(projectId).catch((e: Error) => setNotice(`Workspaces not loaded: ${e.message}`));
   }, [app, projectId]);
-  const { worker, path } = newSessionWhere(app, draft);
 
   const [files, setFiles] = useState<OutgoingFile[]>([]);
   // As the create ends: the files attached while the session was being created.
@@ -95,9 +138,9 @@ export function NewSessionChat({
     reads.current = Promise.all([reads.current, done.catch(() => {})]);
   };
   const [dragging, setDragging] = useState(false);
-  // The first message, while the session is being created.
+  // The first message, while it is being created.
   const [first, setFirst] = useState<Outgoing | null>(null);
-  // The input is made again, with the text of the message, when the session was not created.
+  // The input is made again, with the text of the message, when it was not created.
   const [input, setInput] = useState({ text: '', n: 0 });
   const typed = useRef('');
   const left = useRef(false);
@@ -108,9 +151,10 @@ export function NewSessionChat({
     [],
   );
 
+  const done = kind === 'room' ? 'created' : 'started';
   const start = async (m: Outgoing) => {
     try {
-      const s = await app.startNewSession();
+      const s = await create();
       const chat = app.chat(s.id);
       chat.send(m.text, m.files);
       // The chat opens with its first page (the line of its start) and the message, as this
@@ -133,7 +177,7 @@ export function NewSessionChat({
       const reason = (e as Error).message;
       // Left meanwhile: nothing keeps the message, the list says so.
       if (left.current) {
-        app.setListNotice(`Not started: ${reason} — your message was not sent`);
+        app.setListNotice(`Not ${done}: ${reason} — your message was not sent`);
         return;
       }
       const text = [m.text, typed.current].filter((t) => t.trim()).join('\n\n');
@@ -141,10 +185,10 @@ export function NewSessionChat({
       setFirst(null);
       setFiles((cur) => [...m.files, ...cur]);
       setInput((cur) => ({ text, n: cur.n + 1 }));
-      setNotice(`Not started: ${reason}`);
+      setNotice(`Not ${done}: ${reason}`);
     }
   };
-  // The first message starts the session; the input sends nothing more until the chat is here.
+  // The first message makes it; the input sends nothing more until the chat is here.
   const send = (text: string) => {
     const m = { text, files };
     // The input clears it: what is typed from here on stays for the chat.
@@ -211,7 +255,7 @@ export function NewSessionChat({
         )}
         {sessions && <SessionsButton sessions={sessions} />}
         <div class="chat-head-main">
-          <h1 class="chat-title">New session</h1>
+          <h1 class="chat-title">New {kind}</h1>
           <div class="chat-meta">
             <span class="pill">Draft</span>
             {phone ? (
@@ -243,13 +287,13 @@ export function NewSessionChat({
           <div class="new-empty">
             {none ? (
               <>
-                <div class="new-empty-title">The project has no workspaces: a session needs a folder on a worker.</div>
+                <div class="new-empty-title">The project has no workspaces: a {kind} needs a folder on a worker.</div>
                 <a href={`#/p/${projectId}/settings`}>Add a workspace</a>
               </>
             ) : (
               <>
-                <div class="new-empty-title">Write the first message — the session starts with it</div>
-                <div>Workspace, folder, permissions and model are above the box; the defaults are already picked.</div>
+                <div class="new-empty-title">Write the first message — the {kind} starts with it</div>
+                <div>{hint}</div>
               </>
             )}
           </div>
@@ -260,7 +304,7 @@ export function NewSessionChat({
           {notice}
         </div>
       )}
-      <NewSessionChips app={app} draft={draft} list={list} phone={phone} disabled={!!first} />
+      <div class="new-chips">{chips(!!first)}</div>
       <Composer
         key={input.n}
         initial={input.text}
@@ -278,7 +322,7 @@ export function NewSessionChat({
   );
 }
 
-type Chip = 'workspace' | 'folder' | 'permissions' | 'model';
+type Chip = 'mode' | 'workspace' | 'folder' | 'permissions' | 'model';
 
 /** The permission modes a new session or room starts in. */
 export const PERMISSIONS: [PermissionMode | undefined, string][] = [
@@ -288,33 +332,94 @@ export const PERMISSIONS: [PermissionMode | undefined, string][] = [
   ['allow_all', 'Allow all'],
 ];
 
-/** The chips over a new session's input: the workspace (each of the project's with its worker
- *  and whole path, the default marked, "Add a workspace…" under them), the folder inside it
- *  (typed), the permissions (the worker's default, Ask, Auto, Allow all) and the model (Claude Code's
- *  default, an alias, another name typed). Each opens its menu upwards; a pick gives the caret
- *  back to the input. */
-function NewSessionChips({
+/** What the chips choose, as a new session's draft keeps it. */
+export type ChipValues = Pick<NewSessionDraft, 'workspace_id' | 'cwd' | 'permission_mode' | 'model' | 'provider_id'>;
+
+/** Where a chip's menu opens: its top left corner, and the chip that toggles it. */
+export interface ChipAt {
+  x: number;
+  y: number;
+  anchor: HTMLElement;
+}
+
+/** A chip over a new session's or room's input: a button that toggles its menu (`open`), which
+ *  opens upwards from the chip. A mouse press leaves the caret in the input. */
+export function ChipButton({
+  cls,
+  open,
+  label,
+  disabled,
+  onOpen,
+  onClose,
+  children,
+}: {
+  cls: string;
+  open: boolean;
+  label?: string;
+  disabled: boolean;
+  onOpen: (at: ChipAt) => void;
+  onClose: () => void;
+  children: ComponentChildren;
+}) {
+  return (
+    <button
+      type="button"
+      class={`new-chip ${cls} ${open ? 'is-open' : ''}`}
+      aria-label={label}
+      title={label}
+      aria-haspopup="menu"
+      aria-expanded={open}
+      disabled={disabled}
+      // A mouse press leaves the caret in the input: the menu gives the focus back there.
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={(e) => {
+        if (open) return onClose();
+        const el = e.currentTarget as HTMLElement;
+        const r = el.getBoundingClientRect();
+        onOpen({ x: r.left, y: r.top - 6, anchor: el });
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** The chips over a new session's or room's input: the workspace (each of the project's with
+ *  its worker and whole path, the default marked, "Add a workspace…" under them), the folder
+ *  inside it (typed), the permissions (the worker's default, Ask, Auto, Allow all) and, with
+ *  `withModel`, the model (Claude Code's default, an alias, another name typed); with `mode`,
+ *  a room's mode first. Each opens its menu upwards; a pick gives the caret back to the input.
+ *  `values` are what is chosen, `onChange` takes what a pick changes. */
+export function NewSessionChips({
   app,
-  draft,
-  list,
+  projectId,
+  values,
+  onChange,
+  withModel,
+  mode: room,
   phone,
   disabled,
 }: {
   app: AppState;
-  draft: NewSessionDraft;
-  list?: Workspace[];
+  projectId: string;
+  values: ChipValues;
+  onChange: (patch: Partial<ChipValues>) => void;
+  withModel?: boolean;
+  /** A room's: Conversation or Council, with what each does. */
+  mode?: { value: RoomMode; onChange: (mode: RoomMode) => void };
   phone: boolean;
-  /** The first message is on its way: the session takes what was chosen then. */
+  /** The first message is on its way: it takes what was chosen then. */
   disabled: boolean;
 }) {
-  const [open, setOpen] = useState<{ chip: Chip; x: number; y: number; anchor: HTMLElement; custom?: boolean } | null>(null);
-  const project = app.project(draft.projectId);
-  const id = app.newSessionWorkspace(draft);
+  const [open, setOpen] = useState<(ChipAt & { chip: Chip; custom?: boolean }) | null>(null);
+  const project = app.project(projectId);
+  const list = app.workspaces.get(projectId);
+  const id = app.newSessionWorkspace({ projectId, ...values });
   const workspace = list?.find((w) => w.id === id);
   const worker = workspace && app.workerName(workspace.worker_id);
-  const custom = draft.model !== undefined && !(MODEL_ALIASES as readonly string[]).includes(draft.model);
+  const custom = values.model !== undefined && !(MODEL_ALIASES as readonly string[]).includes(values.model);
   // A provider the draft chose that this workspace's worker does not allow is not shown.
-  const chosenProvider = app.providersFor(workspace?.worker_id).find((p) => p.id === draft.provider_id);
+  const chosenProvider = app.providersFor(workspace?.worker_id).find((p) => p.id === values.provider_id);
   const close = () => setOpen(null);
   // Enter in a menu's field closes it: the field has set its value already.
   const enterCloses = (e: KeyboardEvent) => {
@@ -324,41 +429,34 @@ function NewSessionChips({
   };
 
   const chip = (which: Chip, icon: ComponentChildren, face: ComponentChildren, label?: string) => (
-    <button
-      type="button"
-      class={`new-chip btn-chip-${which} ${open?.chip === which ? 'is-open' : ''}`}
-      aria-label={label}
-      title={label}
-      aria-haspopup="menu"
-      aria-expanded={open?.chip === which}
-      disabled={disabled}
-      // A mouse press leaves the caret in the input: the menu gives the focus back there.
-      onMouseDown={(e) => e.preventDefault()}
-      onClick={(e) => {
-        if (open?.chip === which) return close();
-        const el = e.currentTarget as HTMLElement;
-        const r = el.getBoundingClientRect();
-        setOpen({ chip: which, x: r.left, y: r.top - 6, anchor: el });
-      }}
-    >
+    <ChipButton cls={`btn-chip-${which}`} open={open?.chip === which} label={label} disabled={disabled} onOpen={(at) => setOpen({ ...at, chip: which })} onClose={close}>
       {icon}
       {face}
-    </button>
+    </ChipButton>
   );
 
   let menu: ComponentChildren = null;
   if (open) {
     const at = { x: open.x, y: open.y, above: true, anchor: open.anchor, backdrop: phone, onClose: close };
-    if (open.chip === 'workspace') {
+    if (open.chip === 'mode' && room) {
+      const items: MenuEntry[] = ROOM_MODES.map((m) => ({
+        label: ROOM_MODE_LABELS[m],
+        detail: ROOM_MODE_NOTES[m],
+        cls: `btn-mode-${m}`,
+        checked: room.value === m,
+        onSelect: () => room.onChange(m),
+      }));
+      menu = <ContextMenu {...at} label="Mode" items={items} />;
+    } else if (open.chip === 'workspace') {
       const items: MenuEntry[] = (list ?? []).map((w) => ({
         label: `${workspaceName(w)}${w.id === project?.default_workspace_id ? ' (default)' : ''}`,
         detail: [app.workerName(w.worker_id), homePath(w.path)].filter(Boolean).join(':'),
         cls: 'btn-pick-workspace',
         checked: w.id === id,
-        onSelect: () => app.setNewSession({ workspace_id: w.id }),
+        onSelect: () => onChange({ workspace_id: w.id }),
       }));
       if (items.length) items.push('sep');
-      items.push({ label: 'Add a workspace…', icon: <IconPlus />, cls: 'btn-add-workspace', href: `#/p/${draft.projectId}/settings` });
+      items.push({ label: 'Add a workspace…', icon: <IconPlus />, cls: 'btn-add-workspace', href: `#/p/${projectId}/settings` });
       menu = <ContextMenu {...at} label="Workspace" heading="Workspace" items={items} />;
     } else if (open.chip === 'folder') {
       menu = (
@@ -370,8 +468,8 @@ function NewSessionChips({
               name="cwd"
               placeholder="."
               data-focus
-              value={draft.cwd}
-              onInput={(e) => app.setNewSession({ cwd: (e.currentTarget as HTMLInputElement).value })}
+              value={values.cwd}
+              onInput={(e) => onChange({ cwd: (e.currentTarget as HTMLInputElement).value })}
               onKeyDown={enterCloses}
             />
           </label>
@@ -381,36 +479,36 @@ function NewSessionChips({
       const items: MenuEntry[] = PERMISSIONS.map(([mode, label]) => ({
         label,
         cls: `btn-permissions-${mode ?? 'default'}`,
-        checked: draft.permission_mode === mode,
+        checked: values.permission_mode === mode,
         onSelect: () => {
           // Auto and Allow all after a one-line confirmation of their own; Ask and the default
           // at once.
-          const line = mode && mode !== draft.permission_mode ? modeConfirm(mode) : undefined;
+          const line = mode && mode !== values.permission_mode ? modeConfirm(mode) : undefined;
           if (line && !confirm(line)) return;
-          app.setNewSession({ permission_mode: mode });
+          onChange({ permission_mode: mode });
         },
       }));
       menu = <ContextMenu {...at} label="Permissions" items={items} />;
     } else if (open.custom) {
       menu = (
         <ContextMenu {...at} label="Model">
-          <ModelName value={custom ? draft.model! : ''} onChange={(model) => app.setNewSession({ model })} onKeyDown={enterCloses} />
+          <ModelName value={custom ? values.model! : ''} onChange={(model) => onChange({ model })} onKeyDown={enterCloses} />
         </ContextMenu>
       );
-    } else {
-      const claude = !draft.provider_id;
+    } else if (open.chip === 'model') {
+      const claude = !values.provider_id;
       const items: MenuEntry[] = [
         {
           label: "Claude Code's default",
           cls: 'btn-model-default',
-          checked: claude && draft.model === undefined,
-          onSelect: () => app.setNewSession({ model: undefined, provider_id: undefined }),
+          checked: claude && values.model === undefined,
+          onSelect: () => onChange({ model: undefined, provider_id: undefined }),
         },
         ...MODEL_ALIASES.map((m) => ({
           label: modelName(m),
           cls: `btn-model-${m}`,
-          checked: claude && draft.model === m,
-          onSelect: () => app.setNewSession({ model: m, provider_id: undefined }),
+          checked: claude && values.model === m,
+          onSelect: () => onChange({ model: m, provider_id: undefined }),
         })),
         // Another model waits for its name, in the menu.
         {
@@ -419,7 +517,7 @@ function NewSessionChips({
           checked: claude && custom,
           keepOpen: true,
           onSelect: () => {
-            app.setNewSession({ provider_id: undefined });
+            onChange({ provider_id: undefined });
             setOpen({ ...open, custom: true });
           },
         },
@@ -433,8 +531,8 @@ function NewSessionChips({
             label: p.label,
             detail: p.model,
             cls: 'btn-model-provider',
-            checked: draft.provider_id === p.id,
-            onSelect: () => app.setNewSession({ provider_id: p.id }),
+            checked: values.provider_id === p.id,
+            onSelect: () => onChange({ provider_id: p.id }),
           });
         }
       }
@@ -442,51 +540,58 @@ function NewSessionChips({
     }
   }
 
-  const mode = PERMISSIONS.find(([m]) => m === draft.permission_mode)?.[1];
+  const permission = PERMISSIONS.find(([m]) => m === values.permission_mode)?.[1];
   return (
-    <div class="new-chips">
-      <div class="new-chips-row">
-        {chip(
-          'workspace',
-          <IconWorkspace />,
-          <>
-            {workspace ? (
-              <span class="new-chip-text">
-                <b>{workspaceName(workspace)}</b>
-                {worker && ` · ${worker}`}
-              </span>
-            ) : (
-              <span class="new-chip-text">{list?.length === 0 ? 'No workspace' : 'Workspace'}</span>
-            )}
-            <IconChevronUp />
-          </>,
-          // The chip shows the name only: the label names what it is, with the whole path.
-          workspace
-            ? `Workspace: ${workspaceName(workspace)} — ${[worker, homePath(workspace.path)].filter(Boolean).join(':')}`
-            : `Workspace: ${list?.length === 0 ? 'none' : 'loading'}`,
-        )}
-        {chip(
-          'folder',
-          <IconFolder />,
+    <div class="new-chips-row">
+      {room &&
+        chip(
+          'mode',
+          <IconRoom size={14} />,
           <span class="new-chip-text">
-            Folder <b>{draft.cwd.trim() || '.'}</b>
+            Mode: <b>{ROOM_MODE_LABELS[room.value]}</b>
           </span>,
         )}
-        {chip(
-          'permissions',
-          <IconShield size={14} />,
-          <span class="new-chip-text">
-            Permissions: <b>{draft.permission_mode ? mode : "worker's default"}</b>
-          </span>,
-        )}
-        {chip(
+      {chip(
+        'workspace',
+        <IconWorkspace />,
+        <>
+          {workspace ? (
+            <span class="new-chip-text">
+              <b>{workspaceName(workspace)}</b>
+              {worker && ` · ${worker}`}
+            </span>
+          ) : (
+            <span class="new-chip-text">{list?.length === 0 ? 'No workspace' : 'Workspace'}</span>
+          )}
+          <IconChevronUp />
+        </>,
+        // The chip shows the name only: the label names what it is, with the whole path.
+        workspace
+          ? `Workspace: ${workspaceName(workspace)} — ${[worker, homePath(workspace.path)].filter(Boolean).join(':')}`
+          : `Workspace: ${list?.length === 0 ? 'none' : 'loading'}`,
+      )}
+      {chip(
+        'folder',
+        <IconFolder />,
+        <span class="new-chip-text">
+          Folder <b>{values.cwd.trim() || '.'}</b>
+        </span>,
+      )}
+      {chip(
+        'permissions',
+        <IconShield size={14} />,
+        <span class="new-chip-text">
+          Permissions: <b>{values.permission_mode ? permission : "worker's default"}</b>
+        </span>,
+      )}
+      {withModel &&
+        chip(
           'model',
           <IconModel />,
           <span class="new-chip-text">
-            Model: <b>{chosenProvider ? chosenProvider.label : draft.model ? modelName(draft.model) : 'default'}</b>
+            Model: <b>{chosenProvider ? chosenProvider.label : values.model ? modelName(values.model) : 'default'}</b>
           </span>,
         )}
-      </div>
       {menu}
     </div>
   );

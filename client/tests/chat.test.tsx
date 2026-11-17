@@ -351,7 +351,7 @@ describe('permission mode', () => {
     vi.stubGlobal('confirm', confirm);
     try {
       let items = await menu();
-      expect(items.map((b) => b.textContent)).toEqual(['Schedules', 'Move to project…', 'Switch to Ask', 'Switch to Allow all']);
+      expect(items.map((b) => b.textContent)).toEqual(['Rename', 'Schedules', 'Move to project…', 'Switch to Ask', 'Switch to Allow all']);
       await act(async () => items.find((b) => b.textContent === 'Switch to Allow all')!.click());
       expect(confirm).toHaveBeenCalledWith(ALLOW_ALL_CONFIRM);
       expect(ALLOW_ALL_CONFIRM.includes('\n')).toBe(false);
@@ -366,7 +366,7 @@ describe('permission mode', () => {
       expect(api.patchSession).toHaveBeenCalledWith('s1', { permission_mode: 'allow_all' });
       expect($('.perm-allow-all')!.textContent).toBe('Allow all');
       items = await menu();
-      expect(items.map((b) => b.textContent)).toEqual(['Schedules', 'Move to project…', 'Switch to Ask', 'Switch to Auto']);
+      expect(items.map((b) => b.textContent)).toEqual(['Rename', 'Schedules', 'Move to project…', 'Switch to Ask', 'Switch to Auto']);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -677,6 +677,7 @@ describe('header', () => {
     await act(async () => $('.btn-more')!.click());
     // T50: archiving is on the list's rows, not in the header.
     expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual([
+      'Rename',
       'Schedules',
       'Move to project…',
       'Switch to Auto',
@@ -767,8 +768,9 @@ describe('header', () => {
     expect(names[0].style.color).not.toBe(names[1].style.color);
     expect([...root.querySelectorAll('.room-post-model')].map((m) => m.textContent)).toEqual(['Opus 5.5', 'Sonnet 5.5']);
     expect($('.room-post .text strong')!.textContent).toBe('fine');
-    // Nothing for its menu: no "More".
-    expect($('.btn-more')).toBeNull();
+    // Its menu has Rename only: no model or permission switch.
+    await act(async () => $('.btn-more')!.click());
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Rename']);
     render(null, root);
 
     // A phone's header says the same.
@@ -842,19 +844,76 @@ describe('header', () => {
     expect(app.chat('m1').isOpen).toBe(false);
   });
 
-  it('a room without a workspace has no "More" on a computer or a phone, unless a phone has Retry for it', async () => {
+  it('a room without a workspace has Rename in "More" on a computer and a phone, and Retry after it on a phone; an archived room has no button but that Retry', async () => {
     const { app } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]] });
     app.sessions.set('s1', { ...app.sessions.get('s1')!, workspace_id: undefined, worker_id: undefined });
+    const items = () => [...root.querySelectorAll('.menu-item')].map((b) => b.textContent);
     await mount(app);
-    expect($('.btn-more')).toBeNull();
+    await act(async () => $('.btn-more')!.click());
+    expect(items()).toEqual(['Rename']);
     render(null, root);
     await mount(app, true);
-    expect($('.btn-more')).toBeNull();
+    await act(async () => $('.btn-more')!.click());
+    expect(items()).toEqual(['Rename']);
     render(null, root);
     app.sessions.set('s1', { ...app.sessions.get('s1')!, state: 'error' });
     await mount(app, true);
     await act(async () => $('.btn-more')!.click());
-    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Retry']);
+    expect(items()).toEqual(['Rename', 'Retry']);
+    render(null, root);
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true, state: 'archived' });
+    await mount(app);
+    expect($('.btn-more')).toBeNull();
+  });
+
+  it('"Rename" in the "More" of a room asks for a title and renames it; a refusal goes to the chat\'s notice', async () => {
+    const { app, api } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]] });
+    api.patchSession.mockImplementation(async (_id: string, patch: SessionPatch) => ({ ...app.sessions.get('s1')!, title: patch.title ?? '' }) as never);
+    await mount(app);
+    const ask = vi.fn(() => ' Glaze review ' as string | null);
+    vi.stubGlobal('prompt', ask);
+    const rename = async () => {
+      await act(async () => $('.btn-more')!.click());
+      await act(async () => $('.btn-rename')!.click());
+    };
+    await rename();
+    expect(ask).toHaveBeenCalledWith('Rename the room', 'test 12');
+    expect(api.patchSession).toHaveBeenCalledWith('s1', { title: 'Glaze review' });
+    expect($('.chat-title')!.textContent).toBe('Glaze review');
+    api.patchSession.mockRejectedValueOnce(new Error('the title is taken'));
+    ask.mockReturnValue('Other');
+    await rename();
+    expect($('.notice')!.textContent).toBe('Not renamed: the title is taken');
+    vi.unstubAllGlobals();
+  });
+
+  it("a room's header shows the sum of its agents' costs as \"this room\", not an agent on a provider's; the phone's \"More\" too", async () => {
+    const { app, api } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]] });
+    const room = app.sessions.get('s1')!;
+    const member = (id: string, more: Partial<SessionInfo> = {}) =>
+      app.sessions.set(id, { ...room, id, title: id, slug: id, room_mode: undefined, room_id: 's1', ...more });
+    member('m1');
+    member('m2');
+    member('m3', { provider: { id: 'pr1', label: 'Qwen' } });
+    const spent = (id: string, usd: number) => [ev('event.usage', 1, (e) => ((e.session_id = id), (e.payload = { input_tokens: 1, output_tokens: 1, cost_usd: usd })))];
+    const own = (id: string) => (id === 'm1' ? spent(id, 0.3) : id === 'm2' ? spent(id, 0.2) : id === 'm3' ? spent(id, 5) : id === 's1' ? [HISTORY[0]] : []);
+    const page = (id: string) => {
+      const events = own(id);
+      return { events, invalid: [], maxSeq: events.length ? 1 : 0, minSeq: events.length ? 1 : 0, count: events.length };
+    };
+    api.events.mockImplementation(async (id: string) => page(id));
+    api.eventsBefore.mockImplementation(async (id: string) => page(id));
+    const waitCost = async () => {
+      for (let i = 0; i < 20 && !$('.chat-cost'); i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    };
+    await mount(app);
+    await waitCost();
+    expect($('.chat-cost')!.textContent).toBe('$0.50 this room');
+    render(null, root);
+    await mount(app, true);
+    await act(async () => void (await new Promise((r) => setTimeout(r, 50))));
+    await act(async () => $('.btn-more')!.click());
+    expect($('.menu-info')!.textContent).toContain('$0.50 this room');
   });
 
   it('pulses while a turn is on, no "Stop" when idle', async () => {

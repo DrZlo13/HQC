@@ -38,7 +38,7 @@ import { ROOM_MODE_LABELS, agentsLabel, formatWhen, homePath } from './labels';
 import { newSessionWhere } from './NewSession';
 import { MoveSession, confirmDeleteProject } from './ProjectSettings';
 import { RequestsLink } from './requests';
-import { LIST_MODES, bucketOf, groupSessions, moveTo, runningLabel, subLabel, type SessionGroup } from './sessions';
+import { LIST_MODES, bucketOf, groupSessions, moveTo, renameByPrompt, runningLabel, subLabel, type SessionGroup } from './sessions';
 
 /** "+ project": asks for the name, then opens the new project's settings — a new project
  *  has no workspaces yet, and that is the first thing to add. */
@@ -101,13 +101,6 @@ export function prefetchOn(load: () => void) {
 /** The rules screen of the session's folder (T48), if it has one. */
 function rulesHref(s: SessionInfo): string | undefined {
   return s.workspace_id && `#/p/${s.project_id}/rules/${s.workspace_id}?session=${encodeURIComponent(s.id)}`;
-}
-
-/** Renames a session by a prompt; a refusal goes to the list's notice. */
-function rename(app: AppState, s: SessionInfo): void {
-  const title = prompt('Rename the session', s.title)?.trim();
-  if (!title || title === s.title) return;
-  app.renameSession(s.id, title).catch((e: Error) => app.setListNotice(`Not renamed: ${e.message}`));
 }
 
 /** Adds the session to the user's favorites or takes it out; a refusal goes to the list's
@@ -619,7 +612,7 @@ function sessionMenu(app: AppState, s: SessionInfo, on: { onMove: () => void; on
       onSelect: () => toggleFavorite(app, s),
     },
     'sep',
-    { label: 'Rename', icon: <IconRename />, cls: 'btn-rename', onSelect: () => rename(app, s) },
+    { label: 'Rename', icon: <IconRename />, cls: 'btn-rename', onSelect: () => renameByPrompt(app, s, (m) => app.setListNotice(m)) },
     ...(s.room_mode ? [] : [{ label: 'Move to project…', icon: <IconMove />, cls: 'btn-move', onSelect: on.onMove }]),
     ...(rules ? [{ label: 'Folder rules', icon: <IconShield />, cls: 'btn-rules', href: rules }] : []),
     'sep',
@@ -802,10 +795,18 @@ type HoverHandlers = {
 };
 
 /** A session's state mark: a dot of its group (amber waits, the accent works, a ring is
- *  idle), `</>` while it is open in VS Code and not working there. `color`: the project's own,
- *  for a working dot in a list of several projects, where `--accent` is the last opened one's. */
-function StateMark({ s, color }: { s: SessionInfo; color?: string }) {
+ *  idle), `</>` while it is open in VS Code and not working there; a room's is its icon, in the
+ *  dot's colors, with `room` (`roomTip`) for its tooltip. `color`: the project's own, for a
+ *  working dot in a list of several projects, where `--accent` is the last opened one's. */
+function StateMark({ s, color, room }: { s: SessionInfo; color?: string; room?: string }) {
   const bucket = bucketOf(s);
+  if (s.room_mode) {
+    return (
+      <span class={`dot-vs mark-room mark-${bucket} state-${s.state}`} style={bucket === 'run' && color ? { color } : undefined} title={room}>
+        <IconRoom size={12} />
+      </span>
+    );
+  }
   if (s.state === 'locked_vscode' && bucket !== 'run') {
     return (
       <span class="dot-vs" aria-hidden="true">
@@ -873,7 +874,7 @@ export function SessionRow({
   /** A desktop row of the live list: it can be dragged onto a project of the bar
    *  (`SESSION_DRAG`), and this runs as the drag starts. */
   onDragStart?: () => void;
-  /** A room's row: the tooltip of its icon (`roomTip`). */
+  /** A room's row: the tooltip of its mark (`roomTip`). */
   room?: string;
   /** Loads the newest page of the chat before it is opened. */
   onPrefetch: () => void;
@@ -890,18 +891,13 @@ export function SessionRow({
   );
   const body = (
     <>
-      <StateMark s={s} color={project && colorHex(project.color)} />
+      <StateMark s={s} color={project && colorHex(project.color)} room={room} />
       <span class="session-main">
         <span class="session-top">
           <span class="session-title">{title}</span>
           {s.browser && (
             <span class="session-browser" title="The agent has your browser">
               <IconGlobe />
-            </span>
-          )}
-          {room && (
-            <span class="session-room" title={room}>
-              <IconRoom size={14} />
             </span>
           )}
           {draft && !current && <span class="session-draft">Draft</span>}

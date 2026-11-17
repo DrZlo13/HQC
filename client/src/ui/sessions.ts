@@ -33,6 +33,14 @@ export function moveTo(order: string[], id: string, to: number): string[] {
   return out;
 }
 
+/** Renames a session by a prompt: the list's menu and the chat's "⋯" both ask this way. A
+ *  refusal goes to `notice` (the list's, or the chat's own). */
+export function renameByPrompt(app: AppState, s: SessionInfo, notice: (message: string) => void): void {
+  const title = prompt(s.room_mode ? 'Rename the room' : 'Rename the session', s.title)?.trim();
+  if (!title || title === s.title) return;
+  app.renameSession(s.id, title).catch((e: Error) => notice(`Not renamed: ${e.message}`));
+}
+
 /** The session last open in each project, on this device: a convenience, so storage that
  *  fails or is empty only means the project opens without one. */
 const LAST_KEY = 'hqc.lastSession';

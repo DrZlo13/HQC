@@ -25,7 +25,7 @@ import { PermissionBlock } from './permission';
 import { MoveSession } from './ProjectSettings';
 import { WaitedRequests } from './requests';
 import { SchedulesPanel } from './Schedules';
-import { archivedLabel, atWorkAfterTurn, pausingAfterTurn } from './sessions';
+import { archivedLabel, atWorkAfterTurn, pausingAfterTurn, renameByPrompt } from './sessions';
 
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
 /** Blocks of the feed rendered on open; scrolling to the top adds `SHOWN` more. */
@@ -456,7 +456,16 @@ export function Chat({
   const usage = t.usageTotals();
   // A provider's model is what the provider names; the CLI prices it at a made-up rate.
   const model = info?.provider ? undefined : shownModel(info?.model, usage.model);
-  const cost = info?.provider ? undefined : usage.cost;
+  // A room has no spending of its own: the sum over its agents', each on the Claude Code price
+  // list (an agent on a provider has none, as a session on one shows none).
+  let cost = info?.provider ? undefined : usage.cost;
+  if (room) {
+    cost = undefined;
+    members.forEach((m, i) => {
+      const spent = m.provider ? undefined : memberChats[i].timeline.usageTotals().cost;
+      if (spent !== undefined) cost = (cost ?? 0) + spent;
+    });
+  }
   // Running, as in the list, while a background subagent or task works after the turn; a room,
   // as in the list, with its agents' state (and Stop stops them all).
   const shown = info?.room_mode ? app.shown(info).state : info && atWorkAfterTurn(info) ? 'running' : state;
@@ -588,7 +597,9 @@ export function Chat({
                 {cost !== undefined && (
                   <>
                     <span class="sep">/</span>
-                    <span class="chat-cost">{formatCost(cost)} this session</span>
+                    <span class="chat-cost">
+                      {formatCost(cost)} this {room ? 'room' : 'session'}
+                    </span>
                   </>
                 )}
               </>
@@ -655,6 +666,7 @@ export function Chat({
             cost={cost}
             loadLimits={() => app.api.workers().then((ws) => ws.find((w) => w.id === info.worker_id)?.limits ?? undefined)}
             onRetry={showRetry && phone ? () => void act(() => chat.retry(), 'Retry failed') : undefined}
+            onRename={() => renameByPrompt(app, info, setNotice)}
             onSchedules={() => setSchedules(true)}
             onMove={() => setMoving(true)}
             onPermissionMode={setMode}
@@ -995,7 +1007,7 @@ export function currentMode(info: SessionInfo): PermissionMode {
 
 type AgentPatch = Pick<SessionPatch, 'model' | 'provider_id'>;
 
-/** "More": schedules, the move to another project, the permission mode and the model; on
+/** "More": rename, schedules, the move to another project, the permission mode and the model; on
  *  a phone also the path, the model of the last turn and the cost. Archiving is on the
  *  list's rows, restore and delete on the archive's (T50). */
 function MoreMenu({
@@ -1005,6 +1017,7 @@ function MoreMenu({
   model,
   cost,
   onRetry,
+  onRename,
   onSchedules,
   onMove,
   onPermissionMode,
@@ -1020,6 +1033,8 @@ function MoreMenu({
   cost?: number;
   /** On a phone "Retry" lives here, not in the crowded header. */
   onRetry?: () => void;
+  /** "Rename": a prompt for the title, as in the list's menu. */
+  onRename: () => void;
   onSchedules: () => void;
   /** "Move to project…": the session continues in another folder and project. */
   onMove: () => void;
@@ -1051,8 +1066,8 @@ function MoreMenu({
     };
   }, [open]);
   const facts = phone && (path || model || cost !== undefined);
-  // A room's menu has only Retry and a phone's facts: without them, no button.
-  if (info.room_mode && !onRetry && !facts) return null;
+  // An archived room has only Retry and a phone's facts: without them, no button.
+  if (info.room_mode && info.archived && !onRetry && !facts) return null;
   const item = (cls: string, label: string, fn: () => void, title?: string) => (
     <button
       type="button"
@@ -1090,9 +1105,10 @@ function MoreMenu({
                 </div>
               )}
               {model && <div class="menu-info-row">{modelName(model)}</div>}
-              {cost !== undefined && <div class="menu-info-row">{formatCost(cost)} this session</div>}
+              {cost !== undefined && <div class="menu-info-row">{formatCost(cost)} this {info.room_mode ? 'room' : 'session'}</div>}
             </div>
           )}
+          {!info.archived && item('btn-rename', 'Rename', onRename)}
           {onRetry && item('btn-retry', 'Retry', onRetry)}
           {/* A room has no worker: a scheduled message would wait there for ever, and there is
               no folder to move. Nor has it a model, permission mode or browser of its own, or

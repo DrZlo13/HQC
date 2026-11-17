@@ -138,6 +138,26 @@ pub(crate) async fn target(
     Ok((t, a))
 }
 
+/// The agents of a room speak in the room (SPEC §7.1.1): what one sends or schedules another
+/// goes past the room, and its answer never reaches the room either. `t` — the target found
+/// for address `to`; the caller itself passes.
+pub(crate) fn not_of_my_room(
+    caller: &SessionRow,
+    t: &SessionRow,
+    to: &str,
+) -> Result<(), McpError> {
+    if caller.room_id.is_some() && t.room_id == caller.room_id && t.id != caller.id {
+        return Err(err(
+            error_code::INVALID_ARGS,
+            format!(
+                "{to} is another agent of your room: your final message is posted to the room, \
+                 and the other agents read it there; answer there, not in a message to them"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// The checks both tools make before anything is stored.
 async fn checked_target(
     app: &AppState,
@@ -155,17 +175,7 @@ async fn checked_target(
             "that is this session itself; send to another one",
         ));
     }
-    // The agents of a room speak in the room (SPEC §7.1.1): what one sends another goes past
-    // the room, and its answer never reaches the room either.
-    if caller.room_id.is_some() && t.room_id == caller.room_id {
-        return Err(err(
-            error_code::INVALID_ARGS,
-            format!(
-                "{to} is another agent of your room: your final message is posted to the room, \
-                 and the other agents read it there; answer there, not in a message to them"
-            ),
-        ));
-    }
+    not_of_my_room(caller, &t, &to)?;
     if t.locked_by == "vscode" {
         // No silent queue for a session driven from VS Code (SPEC §9.3).
         return Err(err(

@@ -1875,8 +1875,8 @@ async fn a_room_is_no_target_of_a_message() {
 }
 
 /// SPEC §7.1, §7.1.1: an agent of a room sends nothing to another agent of the same room with
-/// `hqc_send` or `hqc_ask`: the error says its final message is posted to the room, where the
-/// other agents read it.
+/// `hqc_send` or `hqc_ask`, nor schedules it a message with `hqc_schedule` (its own session it
+/// may): the error says its final message is posted to the room, where the other agents read it.
 #[tokio::test]
 async fn an_agent_of_a_room_messages_no_other_agent_of_it() {
     let hub = TestHub::start().await;
@@ -1907,6 +1907,33 @@ async fn an_agent_of_a_room_messages_no_other_agent_of_it() {
             "{r}"
         );
     }
+    // Nor schedules it a message; its own session it may still schedule.
+    for (target, refused) in [(addr(b), true), (addr(a), false)] {
+        let rid = Uuid::now_v7().to_string();
+        w.send(
+            "mcp.call",
+            json!({"request_id": rid, "session_token": token, "tool": "hqc_schedule",
+                   "args": {"session": target, "message": "What do you think?",
+                            "at": "2099-01-01T00:00:00Z"}}),
+        )
+        .await;
+        let r = w.expect("mcp.result").await;
+        if refused {
+            assert_eq!(r["payload"]["error"]["code"], "invalid_args", "{r}");
+            let message = r["payload"]["error"]["message"].as_str().unwrap();
+            assert!(
+                message.contains("your final message is posted to the room"),
+                "{r}"
+            );
+        } else {
+            assert!(r["payload"]["result"]["schedule_id"].is_string(), "{r}");
+        }
+    }
+    let (s, schedules) = hub.get("/api/schedules").await;
+    assert_eq!(s, 200, "{schedules}");
+    let all = schedules["schedules"].as_array().unwrap();
+    assert_eq!(all.len(), 1, "{schedules}");
+    assert_eq!(all[0]["session_id"], a["id"], "{schedules}");
     let to_b: Vec<Value> = hub
         .events(id(b))
         .await

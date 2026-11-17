@@ -1256,6 +1256,22 @@ pub async fn create_room(
     Json(b): Json<CreateRoomRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let project = project_for(&app, &user, project_id).await?;
+    let room = new_room(&app, user.id, &project, &b, None).await?;
+    let v = state::view(&app, user.id, room).await?;
+    Ok((StatusCode::CREATED, Json(json!(v))))
+}
+
+/// Creates a room of `owner` in their `project` with a session for each agent of `b`
+/// (`POST /api/projects/{id}/rooms` and `hqc_room`, SPEC §7.1.1): checked as the sessions are, the
+/// agents' providers on the workspace's worker too. `spawn`, from `hqc_room`, is the room's id
+/// and the session that made it, and its chain goes on the agents' sessions.
+pub async fn new_room(
+    app: &AppState,
+    owner: Uuid,
+    project: &db::ProjectRow,
+    b: &CreateRoomRequest,
+    spawn: Option<db::Spawn>,
+) -> ApiResult<SessionRow> {
     if b.agents.is_empty() {
         return Err(ApiError::BadRequest(
             "a room needs at least one agent".into(),
@@ -1276,7 +1292,7 @@ pub async fn create_room(
         // A provider's agent is named by the provider's label, as the client names its model.
         let label = match a.provider_id {
             Some(p) => match db::provider(&app.db, p).await? {
-                Some(p) if p.owner_id == user.id => p.label,
+                Some(p) if p.owner_id == owner => p.label,
                 _ => return Err(ApiError::BadRequest("unknown provider".into())),
             },
             None => model.unwrap_or("default").to_string(),
@@ -1326,26 +1342,25 @@ pub async fn create_room(
     // The room's agents work in one workspace and folder: checked before the room exists, and
     // every agent's session is created in the workspace found here. So is each agent's provider
     // on that workspace's worker, the first one's in `session_place`.
-    let (ws, worker, _) = session_place(&app, user.id, &project, &agents[0].0).await?;
+    let (ws, worker, _) = session_place(app, owner, project, &agents[0].0).await?;
     for (req, _) in &agents[1..] {
         if let Some(p) = req.provider_id {
-            crate::providers::check(&app, user.id, &worker, p).await?;
+            crate::providers::check(app, owner, &worker, p).await?;
         }
     }
-    let id = db::create_room(&app.db, project.id, user.id, title.as_deref(), b.mode).await?;
+    let id = db::create_room(&app.db, project.id, owner, title.as_deref(), b.mode, spawn).await?;
     let room = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
-    events::system(&app, &room, "session_created", "Room created").await?;
+    events::system(app, &room, "session_created", "Room created").await?;
     for (mut req, system_prompt) in agents {
         req.workspace_id = Some(ws.id);
         let member = db::Member {
             room_id: id,
             system_prompt: system_prompt.as_deref(),
+            chain_id: spawn.map(|s| s.chain_id),
         };
-        insert_session(&app, user.id, &project, &req, None, Some(member)).await?;
+        insert_session(app, owner, project, &req, None, Some(member)).await?;
     }
-    let room = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
-    let v = state::view(&app, user.id, room).await?;
-    Ok((StatusCode::CREATED, Json(json!(v))))
+    db::session(&app.db, id).await?.ok_or(ApiError::NotFound)
 }
 
 #[derive(Debug, Deserialize)]

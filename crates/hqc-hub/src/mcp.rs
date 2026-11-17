@@ -108,6 +108,10 @@ pub const REGISTRY: &[HubTool] = &[
         run: |app, caller, c| Box::pin(crate::spawn::spawn(app, caller, c)),
     },
     HubTool {
+        name: hqc_proto::mcp::ROOM,
+        run: |app, caller, c| Box::pin(crate::spawn::room(app, caller, c)),
+    },
+    HubTool {
         name: hqc_proto::mcp::SCHEDULE,
         run: |app, caller, c| Box::pin(crate::schedules::tool(app, caller, c)),
     },

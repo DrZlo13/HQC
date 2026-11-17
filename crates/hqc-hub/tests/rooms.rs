@@ -472,6 +472,17 @@ async fn in_a_conversation_a_post_wakes_the_next_agent_until_twenty_follow_the_o
     w.expect_silence(Duration::from_millis(200)).await;
     let events = hub.events(id(&room)).await;
     assert_eq!(posts(&events).len(), 22);
+    // Each post moves the chain of the owner's message on (the 21st and 22nd answer one input):
+    // past the chain limit the posts go on, the posts limit stops the room.
+    let hops: Vec<String> = sqlx::query_scalar(
+        "SELECT chain ->> 'hops' FROM events
+         WHERE session_id = $1::uuid AND type = 'peer.message' ORDER BY seq",
+    )
+    .bind(id(&room))
+    .fetch_all(&hub.app.db)
+    .await
+    .unwrap();
+    assert_eq!(hops.last().map(String::as_str), Some("21"), "{hops:?}");
     let stopped = lines(&events, "room_stopped");
     assert_eq!(stopped.len(), 1, "{events:?}");
     assert_eq!(
@@ -1838,8 +1849,9 @@ async fn a_conversation_input_takes_the_cap_of_the_posts_in_front_of_it() {
     hub.finish().await;
 }
 
+/// A room is no target of `hqc_schedule` (a send to it is a message in the room).
 #[tokio::test]
-async fn a_room_is_no_target_of_a_message() {
+async fn a_room_is_no_target_of_a_schedule() {
     let hub = TestHub::start().await;
     let (_, t) = hub.enroll("one").await;
     let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
@@ -1862,8 +1874,8 @@ async fn a_room_is_no_target_of_a_message() {
         let rid = Uuid::now_v7().to_string();
         w.send(
             "mcp.call",
-            json!({"request_id": rid, "session_token": token, "tool": "hqc_send",
-                   "args": {"text": "hi", "session": target}}),
+            json!({"request_id": rid, "session_token": token, "tool": "hqc_schedule",
+                   "args": {"message": "hi", "session": target, "at": "2099-01-01T00:00:00Z"}}),
         )
         .await;
         let r = w.expect("mcp.result").await;
@@ -2926,5 +2938,1013 @@ async fn a_room_agents_prompt_is_at_most_32_kib() {
         titled(&members, "sonnet")["agent"]["system_prompt"],
         "a\u{FFFD}b"
     );
+    hub.finish().await;
+}
+
+/// A session of the personal project started on worker `w`: it, and its session token.
+async fn caller(hub: &TestHub, w: &mut FakeWorker) -> (Value, String) {
+    let pid = hub.personal_project().await;
+    let (s, v) = hub
+        .post(
+            &format!("/api/projects/{pid}/sessions"),
+            json!({"title": "Caller", "model": "claude-haiku-5-5"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let f = ack_start(w, id(&v)).await;
+    (v, f["payload"]["session_token"].as_str().unwrap().into())
+}
+
+/// `hqc_room` with `request_id` `rid`: its `mcp.result` payload, and the `session.input`s that
+/// came with it, until `inputs` of them did (the starts acked).
+async fn room_call(
+    w: &mut FakeWorker,
+    token: &str,
+    args: Value,
+    rid: &str,
+    inputs: usize,
+) -> (Value, Vec<Value>) {
+    call(w, token, "hqc_room", args, rid, inputs).await
+}
+
+/// Tool `tool` called with `request_id` `rid`: as [`room_call`].
+async fn call(
+    w: &mut FakeWorker,
+    token: &str,
+    tool: &str,
+    args: Value,
+    rid: &str,
+    inputs: usize,
+) -> (Value, Vec<Value>) {
+    let (r, got, _) = call_in(w, token, tool, args, rid, inputs, None).await;
+    (r, got)
+}
+
+/// [`call`] from the turn on input `turn` (its `event_id`), with the `session.start`s that came
+/// too (acked).
+async fn call_in(
+    w: &mut FakeWorker,
+    token: &str,
+    tool: &str,
+    args: Value,
+    rid: &str,
+    inputs: usize,
+    turn: Option<&Value>,
+) -> (Value, Vec<Value>, Vec<Value>) {
+    let mut m = json!({"request_id": rid, "session_token": token, "tool": tool, "args": args});
+    if let Some(t) = turn {
+        m["turn_input"] = t.clone();
+    }
+    w.send("mcp.call", m).await;
+    let (mut result, mut got, mut starts) = (None, Vec::new(), Vec::new());
+    while result.is_none() || got.len() < inputs {
+        let f = w.recv().await;
+        match f["type"].as_str() {
+            Some("session.start") => {
+                w.reply(&f["id"], "ack", json!({})).await;
+                starts.push(f);
+            }
+            Some("session.input") => got.push(f),
+            Some("mcp.result") => result = Some(f["payload"].clone()),
+            _ => panic!("unexpected frame {f}"),
+        }
+    }
+    (result.unwrap(), got, starts)
+}
+
+/// The room at `address` and the agents of it, in the order they were created.
+async fn room_at(hub: &TestHub, address: &str) -> (Value, Vec<Value>) {
+    let pid = hub.personal_project().await;
+    let (s, list) = hub.get(&format!("/api/projects/{pid}/sessions")).await;
+    assert_eq!(s, 200, "{list}");
+    let all = list["sessions"].as_array().unwrap();
+    let room = all
+        .iter()
+        .find(|x| addr(x) == address)
+        .unwrap_or_else(|| panic!("no room {address} in {all:?}"))
+        .clone();
+    let members = all
+        .iter()
+        .filter(|x| x["room_id"] == room["id"])
+        .cloned()
+        .collect();
+    (room, members)
+}
+
+/// The `peer.message`s of session `s` from the caller.
+async fn from_caller(hub: &TestHub, s: &Value, caller: &Value) -> Vec<Value> {
+    hub.events(id(s))
+        .await
+        .into_iter()
+        .filter(|e| e["type"] == "peer.message" && e["payload"]["from_session_id"] == caller["id"])
+        .collect()
+}
+
+/// An agent creates a conversation: the room is its spawn, its agents run in `ask` on the models
+/// it named, and the first agent, only it, gets the message from the agent.
+#[tokio::test]
+async fn an_agent_creates_a_conversation_room() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (me, token) = caller(&hub, &mut w).await;
+    let (r, inputs) = room_call(
+        &mut w,
+        &token,
+        json!({"project": "personal", "title": "Naming", "agents": [
+            {"name": "Optimist", "model": "opus", "prompt": "Be hopeful."},
+            {"name": "Skeptic", "model": "sonnet"}
+        ], "message": "Name the project."}),
+        "room-1",
+        1,
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    let address = r["result"]["address"].as_str().unwrap();
+    assert_eq!(address, "personal/naming", "{r}");
+    let (room, members) = room_at(&hub, address).await;
+    assert_eq!(room["room_mode"], "conversation", "{room}");
+    assert_eq!(
+        room["spawned_by"],
+        json!({"session_id": me["id"], "address": addr(&me)}),
+        "{room}"
+    );
+    assert_eq!(members.len(), 2, "{members:?}");
+    let (a, b) = (titled(&members, "Optimist"), titled(&members, "Skeptic"));
+    assert_eq!(
+        (&a["agent"]["model"], &b["agent"]["model"]),
+        (&json!("opus"), &json!("sonnet"))
+    );
+    let modes: Vec<String> = sqlx::query_scalar(
+        "SELECT permission_mode FROM sessions WHERE room_id = $1::uuid ORDER BY title",
+    )
+    .bind(id(&room))
+    .fetch_all(&hub.app.db)
+    .await
+    .unwrap();
+    assert_eq!(modes, ["ask", "ask"]);
+    // Only the first agent is woken, with the caller's message.
+    assert_eq!(inputs.len(), 1, "{inputs:?}");
+    assert_eq!(inputs[0]["payload"]["session_id"], a["id"], "{inputs:?}");
+    let got = from_caller(&hub, a, &me).await;
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0]["payload"]["text"], "Name the project.", "{got:?}");
+    assert_eq!(got[0]["payload"]["from"], addr(&me), "{got:?}");
+    assert!(from_caller(&hub, b, &me).await.is_empty());
+    hub.finish().await;
+}
+
+/// The same call again answers the same room and stores nothing twice.
+#[tokio::test]
+async fn a_repeated_room_call_makes_no_second_room() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (me, token) = caller(&hub, &mut w).await;
+    let args = json!({"project": "personal", "agents": [{"model": "opus"}, {"model": "sonnet"}],
+                      "message": "Name the project."});
+    let (first, _) = room_call(&mut w, &token, args.clone(), "room-1", 1).await;
+    let address = first["result"]["address"].as_str().unwrap();
+    let rooms_before: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE NOT system")
+        .fetch_one(&hub.app.db)
+        .await
+        .unwrap();
+    let (again, inputs) = room_call(&mut w, &token, args, "room-1", 0).await;
+    assert_eq!(again["result"]["address"], address, "{again}");
+    assert!(inputs.is_empty(), "{inputs:?}");
+    w.expect_silence(Duration::from_millis(300)).await;
+    let rooms_after: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE NOT system")
+        .fetch_one(&hub.app.db)
+        .await
+        .unwrap();
+    assert_eq!(rooms_after, rooms_before);
+    let (room, members) = room_at(&hub, address).await;
+    assert_eq!(members.len(), 2, "{members:?}");
+    let mut got = 0;
+    for s in members.iter().chain([&room]) {
+        got += from_caller(&hub, s, &me).await.len();
+    }
+    // In the room, and in the first agent.
+    assert_eq!(got, 2);
+    hub.finish().await;
+}
+
+/// In a council every agent gets the caller's message.
+#[tokio::test]
+async fn an_agent_creates_a_council_room() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (me, token) = caller(&hub, &mut w).await;
+    let (r, inputs) = room_call(
+        &mut w,
+        &token,
+        json!({"project": "personal", "mode": "council", "agents": [
+            {"name": "A", "model": "opus"}, {"name": "B", "model": "sonnet"}
+        ], "message": "Which store?"}),
+        "room-1",
+        2,
+    )
+    .await;
+    let (room, members) = room_at(&hub, r["result"]["address"].as_str().unwrap()).await;
+    assert_eq!(room["room_mode"], "council", "{room}");
+    assert_eq!(inputs.len(), 2, "{inputs:?}");
+    for s in &members {
+        assert_eq!(of(&inputs, s)["payload"]["session_id"], s["id"]);
+        let got = from_caller(&hub, s, &me).await;
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0]["payload"]["text"], "Which store?", "{got:?}");
+    }
+    hub.finish().await;
+}
+
+/// An agent with a model and a provider is refused, and nothing is made.
+#[tokio::test]
+async fn a_room_agent_with_a_model_and_a_provider_is_refused() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (_, token) = caller(&hub, &mut w).await;
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE NOT system")
+        .fetch_one(&hub.app.db)
+        .await
+        .unwrap();
+    let (r, inputs) = room_call(
+        &mut w,
+        &token,
+        json!({"project": "personal", "agents": [
+            {"model": "opus"}, {"model": "sonnet", "provider": "qwen-local"}
+        ], "message": "Hi."}),
+        "room-1",
+        0,
+    )
+    .await;
+    assert_eq!(r["error"]["code"], "invalid_args", "{r}");
+    assert!(inputs.is_empty());
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE NOT system")
+        .fetch_one(&hub.app.db)
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+    hub.finish().await;
+}
+
+/// SPEC §20: the room's agents are the sessions `hqc_room` spawns, one each in the chain's limit,
+/// and the room is none: at one below the limit two agents are refused with nothing made, one
+/// passes.
+#[tokio::test]
+async fn the_agents_of_a_room_count_in_the_spawn_limits() {
+    let hub = TestHub::start_limited(hqc_hub::config::Limits {
+        spawns_per_chain: 3,
+        spawns_per_hour: 100,
+        ..Default::default()
+    })
+    .await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (me, token) = caller(&hub, &mut w).await;
+    // One human turn is one chain.
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{}/input", id(&me)),
+            json!({"text": "make a room"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let input = w.expect("session.input").await;
+    ack_input(&mut w, &input).await;
+    hub.wait_session(id(&me), "running", |v| v["state"] == "running")
+        .await;
+    for i in 0..2 {
+        let (r, _) = call(
+            &mut w,
+            &token,
+            "hqc_spawn",
+            json!({"project": "personal", "prompt": "go"}),
+            &format!("spawn-{i}"),
+            0,
+        )
+        .await;
+        assert!(r.get("error").is_none(), "{r}");
+    }
+    let count = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions WHERE NOT system")
+            .fetch_one(&hub.app.db)
+            .await
+            .unwrap()
+    };
+    let before = count().await;
+    let (r, _) = room_call(
+        &mut w,
+        &token,
+        json!({"project": "personal", "agents": [{"model": "opus"}, {"model": "sonnet"}],
+               "message": "Hi."}),
+        "room-2",
+        0,
+    )
+    .await;
+    assert_eq!(r["error"]["code"], "limit_exceeded", "{r}");
+    assert_eq!(count().await, before, "no room, no agent");
+    let (r, _) = room_call(
+        &mut w,
+        &token,
+        json!({"project": "personal", "agents": [{"model": "opus"}], "message": "Hi."}),
+        "room-1",
+        0,
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    // The room's agent is in the chain, the room is not.
+    let (room, members) = room_at(&hub, r["result"]["address"].as_str().unwrap()).await;
+    let chains: Vec<(bool, bool)> = sqlx::query_as(
+        "SELECT id = $1::uuid, spawn_chain_id IS NOT NULL FROM sessions
+         WHERE id = $1::uuid OR room_id = $1::uuid ORDER BY 1 DESC",
+    )
+    .bind(id(&room))
+    .fetch_all(&hub.app.db)
+    .await
+    .unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(chains, [(true, false), (false, true)]);
+    hub.finish().await;
+}
+
+/// SPEC 0.144: the caller's provider, which the workspace's machine does not allow, is not the
+/// agents': they run on the runtime's own endpoint; an agent that names a provider keeps it.
+#[tokio::test]
+async fn a_room_agent_inheriting_a_refused_provider_runs_without_it() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let mut w = FakeWorker::connect(&hub, &t).await.expect("worker connect");
+    w.hello_with(WS_PATH, hub.boot_id, json!({"providers": ["qwen-local"]}))
+        .await;
+    let pid = hub.personal_project().await;
+    let (s, v) = hub.add_workspace(&mut w, &pid, WS_PATH).await;
+    assert_eq!(s, 201, "{v}");
+    for (name, label, model) in [
+        ("qwen-local", "Qwen", "qwen3.8-27b"),
+        ("zai", "GLM", "glm-5"),
+    ] {
+        let (s, v) = hub
+            .post(
+                "/api/providers",
+                json!({"name": name, "label": label, "base_url": "http://192.168.1.229:8082",
+                       "model": model}),
+            )
+            .await;
+        assert_eq!(s, 201, "{v}");
+    }
+    let (me, token) = caller(&hub, &mut w).await;
+    sqlx::query(
+        "UPDATE sessions SET provider_id = (SELECT id FROM providers WHERE name = 'zai')
+         WHERE id = $1::uuid",
+    )
+    .bind(id(&me))
+    .execute(&hub.app.db)
+    .await
+    .unwrap();
+    let (r, _) = room_call(
+        &mut w,
+        &token,
+        json!({"project": "personal", "mode": "council", "agents": [
+            {"name": "Own", "provider": "qwen-local"}, {"name": "Inherits"}
+        ], "message": "Hi."}),
+        "room-1",
+        2,
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    let (_, members) = room_at(&hub, r["result"]["address"].as_str().unwrap()).await;
+    assert_eq!(
+        titled(&members, "Own")["agent"]["provider"]["label"],
+        "Qwen"
+    );
+    assert!(titled(&members, "Inherits")["agent"]
+        .get("provider")
+        .is_none());
+    hub.finish().await;
+}
+
+/// The agents `a` and `b` of a conversation answer in turn with `ib` (an input of `b` just woken
+/// by the post of `a` that followed the message that started the room): twenty posts wake the
+/// next agent, the 21st nobody; the room's `room_stopped` lines.
+async fn twenty_posts_then_stop(
+    hub: &TestHub,
+    w: &mut FakeWorker,
+    room: &Value,
+    a: &Value,
+    b: &Value,
+    ib: &Value,
+) -> Vec<Value> {
+    let (mut speaker, mut next, mut input) = (b, a, ib.clone());
+    for n in 2..=20 {
+        let woken = answer_inputs(w, speaker, &input, &format!("Tabs, {n}."), 1).await;
+        assert_eq!(woken[0]["payload"]["session_id"], next["id"], "post {n}");
+        (speaker, next, input) = (next, speaker, woken[0].clone());
+    }
+    assert!(answer(w, speaker, &input, "Tabs, 21.").await.is_empty());
+    w.expect_silence(Duration::from_millis(200)).await;
+    let events = hub.events(id(room)).await;
+    lines(&events, "room_stopped")
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
+/// SPEC §7.1.1: the creator's message is the room's first message, not an agent's post: the agents
+/// post twenty times after it before the room stops, and the second agent's input carries it under
+/// a line that names its sender.
+#[tokio::test]
+async fn the_creators_message_is_no_post() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (me, token) = caller(&hub, &mut w).await;
+    let (r, inputs) = room_call(
+        &mut w,
+        &token,
+        json!({"project": "personal", "title": "Debate", "agents": [
+            {"name": "A", "model": "opus"}, {"name": "B", "model": "sonnet"}
+        ], "message": "Tabs or spaces?"}),
+        "room-1",
+        1,
+    )
+    .await;
+    let (room, members) = room_at(&hub, r["result"]["address"].as_str().unwrap()).await;
+    let (a, b) = (titled(&members, "A"), titled(&members, "B"));
+    let ia = of(&inputs, a).clone();
+    ack_input(&mut w, &ia).await;
+    let creator = addr(&me);
+    let woken = answer_inputs(&mut w, a, &ia, "Tabs.", 1).await;
+    let ib = &woken[0];
+    assert_eq!(ib["payload"]["session_id"], b["id"]);
+    assert_eq!(
+        ib["payload"]["text"],
+        format!(
+            "[hqc room personal/debate | since your last turn]\n\
+             [hqc room personal/debate | message from {creator}]\n\
+             Tabs or spaces?\n\n---\n{}\n\nTabs.",
+            room_line("personal/debate", "personal/a")
+        )
+    );
+    let stopped = twenty_posts_then_stop(&hub, &mut w, &room, a, b, ib).await;
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert!(
+        stopped[0]["payload"]["text"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("since {creator}'s message")),
+        "{stopped:?}"
+    );
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: `hqc_send` from a session that is none of a conversation's agents writes in the
+/// room: only the first agent is woken, with the text from the sender; the posts limit counts
+/// from it.
+#[tokio::test]
+async fn an_outside_session_writes_in_a_conversation_room() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (me, token) = caller(&hub, &mut w).await;
+    let (room, members) = room(
+        &hub,
+        json!({"title": "Debate", "mode": "conversation",
+               "agents": [{"name": "A", "model": "opus"}, {"name": "B", "model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "A"), titled(&members, "B"));
+    let (r, inputs) = call(
+        &mut w,
+        &token,
+        "hqc_send",
+        json!({"text": "Tabs or spaces?", "session": "personal/debate"}),
+        "send-1",
+        1,
+    )
+    .await;
+    assert_eq!(r["result"]["to"], "personal/debate", "{r}");
+    assert_eq!(r["result"]["delivery"], "queued", "{r}");
+    assert_eq!(inputs.len(), 1, "{inputs:?}");
+    assert_eq!(inputs[0]["payload"]["session_id"], a["id"], "{inputs:?}");
+    let text = inputs[0]["payload"]["text"].as_str().unwrap();
+    assert!(text.contains(&format!("| from {} |", addr(&me))), "{text}");
+    assert!(inputs[0]["payload"]["text"]
+        .as_str()
+        .unwrap()
+        .ends_with("Tabs or spaces?"));
+    assert!(from_caller(&hub, b, &me).await.is_empty());
+    let ia = inputs[0].clone();
+    ack_input(&mut w, &ia).await;
+    let woken = answer_inputs(&mut w, a, &ia, "Tabs.", 1).await;
+    let stopped = twenty_posts_then_stop(&hub, &mut w, &room, a, b, &woken[0]).await;
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert!(
+        stopped[0]["payload"]["text"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("since {}'s message", addr(&me))),
+        "{stopped:?}"
+    );
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: in a council an outside session's message wakes every agent; a repeat of the
+/// call stores and wakes nothing twice.
+#[tokio::test]
+async fn an_outside_session_writes_in_a_council_room_once() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (me, token) = caller(&hub, &mut w).await;
+    let (room, members) = room(
+        &hub,
+        json!({"title": "Panel", "mode": "council",
+               "agents": [{"name": "A", "model": "opus"}, {"name": "B", "model": "sonnet"}]}),
+    )
+    .await;
+    let args = json!({"text": "Which store?", "session": "personal/panel"});
+    let (r, inputs) = call(&mut w, &token, "hqc_send", args.clone(), "send-1", 2).await;
+    assert_eq!(inputs.len(), 2, "{inputs:?}");
+    for s in &members {
+        let text = of(&inputs, s)["payload"]["text"].as_str().unwrap();
+        assert!(text.contains(&format!("| from {} |", addr(&me))), "{text}");
+        assert_eq!(from_caller(&hub, s, &me).await.len(), 1);
+    }
+    let (again, more) = call(&mut w, &token, "hqc_send", args, "send-1", 0).await;
+    assert_eq!(again["result"], r["result"], "{again}");
+    assert!(more.is_empty(), "{more:?}");
+    w.expect_silence(Duration::from_millis(300)).await;
+    assert_eq!(from_caller(&hub, &room, &me).await.len(), 1);
+    for s in &members {
+        assert_eq!(from_caller(&hub, s, &me).await.len(), 1);
+    }
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: an agent of a room may not send to its own room, and no session asks a room.
+#[tokio::test]
+async fn an_agent_does_not_send_to_its_room_and_no_one_asks_it() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (_, outside) = caller(&hub, &mut w).await;
+    let (room, members) = room(
+        &hub,
+        json!({"title": "Panel", "mode": "council",
+               "agents": [{"name": "A", "model": "opus"}, {"name": "B", "model": "sonnet"}]}),
+    )
+    .await;
+    say(&hub, &room, "Start.").await;
+    let (starts, _) = starts_and_inputs(&mut w, 2).await;
+    let token = of(&starts, titled(&members, "A"))["payload"]["session_token"]
+        .as_str()
+        .unwrap();
+    let before = hub.events(id(&room)).await.len();
+    let (r, _) = call(
+        &mut w,
+        token,
+        "hqc_send",
+        json!({"text": "Hi.", "session": "personal/panel"}),
+        "own-1",
+        0,
+    )
+    .await;
+    assert_eq!(r["error"]["code"], "invalid_args", "{r}");
+    assert!(r["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("your own room"));
+    for (tok, rid) in [(token, "ask-1"), (outside.as_str(), "ask-2")] {
+        let (r, _) = call(
+            &mut w,
+            tok,
+            "hqc_ask",
+            json!({"text": "Hi?", "session": "personal/panel"}),
+            rid,
+            0,
+        )
+        .await;
+        assert_eq!(r["error"]["code"], "invalid_args", "{r}");
+        assert!(r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("answers no ask"));
+    }
+    assert_eq!(hub.events(id(&room)).await.len(), before);
+    hub.finish().await;
+}
+
+/// A message's chain as the hub stored it: its hops and its id.
+async fn chain_of_event(hub: &TestHub, event_id: &Value) -> (String, String) {
+    sqlx::query_as(
+        "SELECT chain ->> 'hops', chain ->> 'chain_id' FROM events WHERE event_id = $1::uuid",
+    )
+    .bind(event_id.as_str().unwrap())
+    .fetch_one(&hub.app.db)
+    .await
+    .unwrap()
+}
+
+/// SPEC §7.1: only a person's turn starts a chain. A session that writes in a room and an agent
+/// that answers it by a send go round and round in one chain: the 21st message is refused.
+#[tokio::test]
+async fn a_loop_through_a_room_meets_the_chain_limit() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (x, tx) = caller(&hub, &mut w).await;
+    room(
+        &hub,
+        json!({"title": "Loop", "mode": "conversation", "agents": [{"name": "A", "model": "opus"}]}),
+    )
+    .await;
+    let (r, mut got, starts) = call_in(
+        &mut w,
+        &tx,
+        "hqc_send",
+        json!({"text": "Go.", "session": "personal/loop"}),
+        "step-1",
+        1,
+        None,
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    let ta = starts[0]["payload"]["session_token"].as_str().unwrap();
+    let mut ia = got.remove(0);
+    ack_input(&mut w, &ia).await;
+    let mut ix = Value::Null;
+    for step in 2..=21 {
+        let id = format!("step-{step}");
+        if step % 2 == 0 {
+            // The agent answers X by a send, from the turn on its input.
+            let (r, mut got, _) = call_in(
+                &mut w,
+                ta,
+                "hqc_send",
+                json!({"text": "Back.", "session": addr(&x)}),
+                &id,
+                1,
+                Some(&ia["payload"]["event_id"]),
+            )
+            .await;
+            assert!(r.get("error").is_none(), "step {step}: {r}");
+            ix = got.remove(0);
+            ack_input(&mut w, &ix).await;
+        } else {
+            // X writes in the room again, from the turn on that message.
+            let wanted = if step == 21 { 0 } else { 1 };
+            let (r, mut got, _) = call_in(
+                &mut w,
+                &tx,
+                "hqc_send",
+                json!({"text": "Again.", "session": "personal/loop"}),
+                &id,
+                wanted,
+                Some(&ix["payload"]["event_id"]),
+            )
+            .await;
+            if step == 21 {
+                assert_eq!(r["error"]["code"], "limit_exceeded", "{r}");
+                assert!(
+                    r["error"]["message"].as_str().unwrap().contains("20"),
+                    "{r}"
+                );
+                break;
+            }
+            assert!(r.get("error").is_none(), "step {step}: {r}");
+            ia = got.remove(0);
+            ack_input(&mut w, &ia).await;
+        }
+    }
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: an agent's post carries the chain its own send would, and the input made from it
+/// goes on in it; past the chain limit the agent's sends are refused.
+#[tokio::test]
+async fn a_post_carries_the_chain_on() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (x, tx) = caller(&hub, &mut w).await;
+    let (room, members) = room(
+        &hub,
+        json!({"title": "Chain", "mode": "conversation",
+               "agents": [{"name": "A", "model": "opus"}, {"name": "B", "model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "A"), titled(&members, "B"));
+    let (_, mut got, _) = call_in(
+        &mut w,
+        &tx,
+        "hqc_send",
+        json!({"text": "Go.", "session": "personal/chain"}),
+        "step-1",
+        1,
+        None,
+    )
+    .await;
+    let ia = got.remove(0);
+    let sent: Vec<Value> = hub
+        .events(id(&room))
+        .await
+        .into_iter()
+        .filter(|e| e["type"] == "peer.message")
+        .collect();
+    let (hops, chain) = chain_of_event(&hub, &sent[0]["event_id"]).await;
+    assert_eq!(hops, "1");
+    assert_eq!(
+        chain_of_event(&hub, &ia["payload"]["event_id"]).await,
+        (hops, chain.clone())
+    );
+    // A posts; B is woken in the chain, one message on.
+    ack_input(&mut w, &ia).await;
+    let (mut ib, mut tb) = (None, None);
+    let mut frames = answer(&mut w, a, &ia, "Pass it on.").await;
+    while ib.is_none() || tb.is_none() {
+        for f in frames.drain(..) {
+            match f["type"].as_str() {
+                Some("session.start") => {
+                    tb = Some(f["payload"]["session_token"].as_str().unwrap().to_string());
+                    w.reply(&f["id"], "ack", json!({})).await;
+                }
+                Some("session.input") => ib = Some(f),
+                _ => panic!("unexpected frame {f}"),
+            }
+        }
+        if ib.is_none() || tb.is_none() {
+            frames.push(w.recv().await);
+        }
+    }
+    let (ib, tb) = (ib.unwrap(), tb.unwrap());
+    assert_eq!(ib["payload"]["session_id"], b["id"]);
+    let post = posts(&hub.events(id(&room)).await)
+        .into_iter()
+        .find(|e| e["payload"]["from_session_id"] == a["id"])
+        .unwrap()
+        .clone();
+    assert_eq!(
+        chain_of_event(&hub, &post["event_id"]).await,
+        ("2".to_string(), chain.clone())
+    );
+    assert_eq!(
+        chain_of_event(&hub, &ib["payload"]["event_id"]).await,
+        ("2".to_string(), chain.clone())
+    );
+    // B sends to X from its turn: the chain goes on, and at the limit the send is refused.
+    ack_input(&mut w, &ib).await;
+    let (r, mut got, _) = call_in(
+        &mut w,
+        &tb,
+        "hqc_send",
+        json!({"text": "Hello X.", "session": addr(&x)}),
+        "b-1",
+        1,
+        Some(&ib["payload"]["event_id"]),
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    assert_eq!(
+        chain_of_event(&hub, &got.remove(0)["payload"]["event_id"]).await,
+        ("3".to_string(), chain)
+    );
+    sqlx::query(
+        "UPDATE events SET chain = jsonb_set(chain, '{hops}', '20') WHERE event_id = $1::uuid",
+    )
+    .bind(ib["payload"]["event_id"].as_str().unwrap())
+    .execute(&hub.app.db)
+    .await
+    .unwrap();
+    let (r, _, _) = call_in(
+        &mut w,
+        &tb,
+        "hqc_send",
+        json!({"text": "Hello again.", "session": addr(&x)}),
+        "b-2",
+        0,
+        Some(&ib["payload"]["event_id"]),
+    )
+    .await;
+    assert_eq!(r["error"]["code"], "limit_exceeded", "{r}");
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: a message into a room shows as delivered to its sender, and the room's agent
+/// above the sender's mode runs the input capped by it.
+#[tokio::test]
+async fn a_message_into_a_room_is_delivered_and_capped_by_its_sender() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (x, tx) = caller(&hub, &mut w).await;
+    let (room, members) = room(
+        &hub,
+        json!({"title": "Auto", "mode": "council", "permission_mode": "auto",
+               "agents": [{"name": "A", "model": "opus"}]}),
+    )
+    .await;
+    let a = &members[0];
+    let (r, inputs) = call(
+        &mut w,
+        &tx,
+        "hqc_send",
+        json!({"text": "Do it.", "session": "personal/auto"}),
+        "send-1",
+        1,
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    assert_eq!(inputs.len(), 1);
+    let (cap, by): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT chain ->> 'permission_cap', chain ->> 'capped_by' FROM events
+         WHERE event_id = $1::uuid",
+    )
+    .bind(inputs[0]["payload"]["event_id"].as_str().unwrap())
+    .fetch_one(&hub.app.db)
+    .await
+    .unwrap();
+    assert_eq!((cap.as_deref(), by), (Some("ask"), Some(addr(&x))), "{a}");
+    let msg = hub
+        .events(id(&room))
+        .await
+        .into_iter()
+        .find(|e| e["type"] == "peer.message")
+        .unwrap();
+    assert!(msg["delivered_at"].is_string(), "{msg}");
+    assert!(msg.get("delivery").is_none(), "{msg}");
+    hub.finish().await;
+}
+
+/// An agent's own room is refused by its id too, and an archived room is no target.
+#[tokio::test]
+async fn an_own_room_is_refused_by_id_and_an_archived_room_is_not_found() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (_, outside) = caller(&hub, &mut w).await;
+    let (room, members) = room(
+        &hub,
+        json!({"title": "Panel", "mode": "council", "agents": [{"name": "A", "model": "opus"}]}),
+    )
+    .await;
+    say(&hub, &room, "Start.").await;
+    let (starts, _) = starts_and_inputs(&mut w, 1).await;
+    let token = of(&starts, &members[0])["payload"]["session_token"]
+        .as_str()
+        .unwrap();
+    let (r, _) = call(
+        &mut w,
+        token,
+        "hqc_send",
+        json!({"text": "Hi.", "session": id(&room)}),
+        "own-1",
+        0,
+    )
+    .await;
+    assert_eq!(r["error"]["code"], "invalid_args", "{r}");
+    let (s, v) = hub
+        .post(&format!("/api/sessions/{}/archive", id(&room)), json!({}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (r, _) = call(
+        &mut w,
+        &outside,
+        "hqc_send",
+        json!({"text": "Hi.", "session": "personal/panel"}),
+        "arch-1",
+        0,
+    )
+    .await;
+    assert_eq!(r["error"]["code"], "not_found", "{r}");
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: the owner's message that joins the speaker's turn is a person writing: the post
+/// that ends the turn goes on from the chain that message started, so the next agent's send is no
+/// longer refused for the hops before it.
+#[tokio::test]
+async fn the_owners_message_joining_a_turn_restarts_the_chain() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (x, tx) = caller(&hub, &mut w).await;
+    let (room, members) = room(
+        &hub,
+        json!({"title": "Restart", "mode": "conversation",
+               "agents": [{"name": "A", "model": "opus"}, {"name": "B", "model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "A"), titled(&members, "B"));
+    let (_, mut got, starts) = call_in(
+        &mut w,
+        &tx,
+        "hqc_send",
+        json!({"text": "Go.", "session": "personal/restart"}),
+        "step-1",
+        1,
+        None,
+    )
+    .await;
+    let ta = starts[0]["payload"]["session_token"].as_str().unwrap();
+    let ia = got.remove(0);
+    ack_input(&mut w, &ia).await;
+    let woken = answer_inputs(&mut w, a, &ia, "Pass it on.", 1).await;
+    let ib = woken[0].clone();
+    assert_eq!(ib["payload"]["session_id"], b["id"]);
+    ack_input(&mut w, &ib).await;
+    // The chain has gone far; then the owner writes during B's answer, and the message joins.
+    sqlx::query(
+        "UPDATE events SET chain = jsonb_set(chain, '{hops}', '20') WHERE event_id = $1::uuid",
+    )
+    .bind(ib["payload"]["event_id"].as_str().unwrap())
+    .execute(&hub.app.db)
+    .await
+    .unwrap();
+    say(&hub, &room, "Change of plan.").await;
+    let joined = w.expect("session.input").await;
+    assert_eq!(joined["payload"]["session_id"], b["id"]);
+    w.reply(
+        &joined["id"],
+        "ack",
+        json!({"event_id": joined["payload"]["event_id"], "joined": true}),
+    )
+    .await;
+    let woken = answer_inputs(&mut w, b, &ib, "Done.", 1).await;
+    let ia2 = woken[0].clone();
+    assert_eq!(ia2["payload"]["session_id"], a["id"]);
+    assert_eq!(
+        chain_of_event(&hub, &ia2["payload"]["event_id"]).await.0,
+        "1"
+    );
+    let (r, _, _) = call_in(
+        &mut w,
+        ta,
+        "hqc_send",
+        json!({"text": "Hello X.", "session": addr(&x)}),
+        "a-1",
+        1,
+        Some(&ia2["payload"]["event_id"]),
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    hub.finish().await;
+}
+
+/// SPEC §20: a post counts once in the messages of its chain, not again as the input made from it
+/// for the next agent: after eight posts a limit of nine takes one send of an agent and refuses
+/// the next, so the posts count, and once each.
+#[tokio::test]
+async fn a_post_counts_once_in_the_messages_of_a_chain() {
+    let hub = TestHub::start_limited(hqc_hub::config::Limits {
+        peer_messages_per_chain: 9,
+        ..Default::default()
+    })
+    .await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (x, _) = caller(&hub, &mut w).await;
+    let (room, members) = room(
+        &hub,
+        json!({"title": "Count", "mode": "conversation",
+               "agents": [{"name": "A", "model": "opus"}, {"name": "B", "model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "A"), titled(&members, "B"));
+    say(&hub, &room, "Go.").await;
+    let (starts, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ta = of(&starts, a)["payload"]["session_token"].as_str().unwrap();
+    let ia = of(&inputs, a).clone();
+    ack_input(&mut w, &ia).await;
+    let (mut speaker, mut input) = (a, ia);
+    for n in 1..=8 {
+        let woken = answer_inputs(&mut w, speaker, &input, &format!("Post {n}."), 1).await;
+        speaker = if speaker["id"] == a["id"] { b } else { a };
+        input = woken[0].clone();
+    }
+    assert_eq!(speaker["id"], a["id"]);
+    let (r, _, _) = call_in(
+        &mut w,
+        ta,
+        "hqc_send",
+        json!({"text": "Hello X.", "session": addr(&x)}),
+        "a-1",
+        1,
+        Some(&input["payload"]["event_id"]),
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    let (r, _, _) = call_in(
+        &mut w,
+        ta,
+        "hqc_send",
+        json!({"text": "Hello again.", "session": addr(&x)}),
+        "a-2",
+        0,
+        Some(&input["payload"]["event_id"]),
+    )
+    .await;
+    assert_eq!(r["error"]["code"], "limit_exceeded", "{r}");
     hub.finish().await;
 }

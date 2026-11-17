@@ -1619,11 +1619,13 @@ pub struct Spawn {
 }
 
 /// What an agent of a room records on its session (SPEC §7.1.1): the room, which is also its
-/// `spawned_by`, and the system prompt its runtime gets.
+/// `spawned_by`, the system prompt its runtime gets and, when `hqc_room` made it, the chain of
+/// the call: the room's agents are the sessions that call spawns.
 #[derive(Debug, Clone, Copy)]
 pub struct Member<'a> {
     pub room_id: Uuid,
     pub system_prompt: Option<&'a str>,
+    pub chain_id: Option<Uuid>,
 }
 
 /// Creates the session with a slug unique in the project (SPEC §3 Session) and a
@@ -1682,7 +1684,11 @@ pub async fn create_spawned_session(
         .bind(Uuid::new_v4().to_string())
         .bind(source.as_str())
         .bind(spawn.map(|s| s.by).or(member.map(|m| m.room_id)))
-        .bind(spawn.map(|s| s.chain_id))
+        .bind(
+            spawn
+                .map(|s| s.chain_id)
+                .or(member.and_then(|m| m.chain_id)),
+        )
         .bind(n.permission_mode.map(PermissionMode::as_str))
         .bind(member.and_then(|m| m.system_prompt))
         .bind(member.map(|m| m.room_id))
@@ -1697,13 +1703,15 @@ pub async fn create_spawned_session(
 
 /// Creates a room (SPEC §7.1.1): a session with no workspace, no worker and no agent
 /// (`runtime: none`), titled `title`, or "Room N" with N and the slug `room-N` as for "Session
-/// N".
+/// N". `spawn`, from `hqc_room`, gives the room's id and records the session that made it
+/// (`spawned_by`); the room has no chain: its agents are what the call spawns.
 pub async fn create_room(
     db: &PgPool,
     project_id: Uuid,
     owner_id: Uuid,
     title: Option<&str>,
     mode: RoomMode,
+    spawn: Option<Spawn>,
 ) -> sqlx::Result<Uuid> {
     let (title, source, base) = match title {
         Some(t) => (t.to_string(), TitleSource::User, slugify(t)),
@@ -1722,11 +1730,11 @@ pub async fn create_room(
         } else {
             format!("{base}-{i}")
         };
-        let id = new_id();
+        let id = spawn.map_or_else(new_id, |s| s.id);
         let r = sqlx::query(
             "INSERT INTO sessions (id, project_id, owner_id, title, slug, runtime, title_source,
-                room_mode)
-             VALUES ($1, $2, $3, $4, $5, 'none', $6, $7)
+                room_mode, spawned_by)
+             VALUES ($1, $2, $3, $4, $5, 'none', $6, $7, $8)
              ON CONFLICT (project_id, slug) DO NOTHING",
         )
         .bind(id)
@@ -1736,6 +1744,7 @@ pub async fn create_room(
         .bind(&slug)
         .bind(source.as_str())
         .bind(mode.as_str())
+        .bind(spawn.map(|s| s.by))
         .execute(db)
         .await?;
         if r.rows_affected() == 1 {

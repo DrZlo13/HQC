@@ -6,7 +6,7 @@
 //! `user.message` when it is delivered into the running turn (SPEC §4, §17.2); the typed
 //! [`EventKind`] drives only the hub's own logic (open requests, turn bookkeeping, push).
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use hqc_proto::{
     event::{Event, EventKind, SessionState},
     frame::Ack,
@@ -339,9 +339,25 @@ pub async fn store_peer_message(
     s: &SessionRow,
     event_id: Uuid,
     author: Value,
+    payload: Value,
+    chain: Value,
+    delivery: Option<&str>,
+) -> anyhow::Result<EventRow> {
+    store_peer_message_at(app, s, event_id, author, payload, chain, delivery, None).await
+}
+
+/// [`store_peer_message`] with `delivered_at` set: a message the session took on arrival (a
+/// room, which has no delivery) shows as delivered to its sender.
+#[allow(clippy::too_many_arguments)]
+pub async fn store_peer_message_at(
+    app: &AppState,
+    s: &SessionRow,
+    event_id: Uuid,
+    author: Value,
     mut payload: Value,
     chain: Value,
     delivery: Option<&str>,
+    delivered_at: Option<DateTime<Utc>>,
 ) -> anyhow::Result<EventRow> {
     hqc_proto::replace_nul_json(&mut payload);
     if app.text_open(s.id) {
@@ -359,7 +375,7 @@ pub async fn store_peer_message(
         chain: Some(chain),
         client_op_id: None,
         delivery: delivery.map(str::to_string),
-        delivered_at: None,
+        delivered_at,
     };
     match db::insert_event(&app.db, &new).await? {
         Inserted::New(row) => {

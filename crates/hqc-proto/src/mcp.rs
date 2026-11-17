@@ -136,8 +136,8 @@ pub const TOOLS: &[Tool] = &[
             message, its files with the reply's files; `delivery: with_reply`). `session` may \
             be a room too (a session with several agents): the message goes to its agents, \
             and their answers stay in the room; when the room's discussion ends, the room \
-            sends you how it ended and what was said there since its previous notice to you \
-            or your first message there, which starts a turn here, so do not poll the room.",
+            sends you how it ended and its last two entries (read the rest with hqc_read), \
+            which starts a turn here, so do not poll the room.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -281,8 +281,8 @@ pub const TOOLS: &[Tool] = &[
             answer in turn, in a `council` every agent gets it and answers it on its own. \
             Returns the room's address at once and does not wait for the agents: when their \
             discussion ends (every agent passed, every agent of a `council` answered, the \
-            posts limit, a stop), the room sends this session how it ended and what was \
-            said there since its previous notice or this message, which starts a turn here, \
+            posts limit, a stop), the room sends this session how it ended and its last two \
+            entries (read the rest with hqc_read), which starts a turn here, \
             so do not poll the room; write to it again with hqc_send. The agents run \
             in a workspace of `project` (the project's default workspace when `workspace` is \
             absent) on that workspace's machine, in the ask mode, each with your model, or \

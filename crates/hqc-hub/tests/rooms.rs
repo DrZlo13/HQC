@@ -4182,7 +4182,20 @@ enum E<'a> {
 
 /// A notice's text: the line for `reason`, then `entries` under their lines.
 fn notice(room: &str, reason: &str, entries: &[E]) -> String {
-    let mut out = format!("[hqc room {room} | the discussion ended: {reason}]");
+    notice_without(room, reason, 0, entries)
+}
+
+/// [`notice`] of a discussion with `left_out` more entries than the ones shown.
+fn notice_without(room: &str, reason: &str, left_out: usize, entries: &[E]) -> String {
+    let mut out = format!("[hqc room {room} | the discussion ended: {reason}");
+    match left_out {
+        0 => {}
+        1 => out.push_str(" | 1 earlier entry left out, read it with hqc_read"),
+        n => out.push_str(&format!(
+            " | {n} earlier entries left out, read them with hqc_read"
+        )),
+    }
+    out.push(']');
     for e in entries {
         let (from, text) = match e {
             E::Post(s, t) => (format!("post from {}", named(s)), t),
@@ -4272,15 +4285,17 @@ async fn the_posts_limit_tells_the_creator() {
     let (_, _, room, a, b, ia) = debate_by_a_caller(&hub, &mut w).await;
     let ib = answer_inputs(&mut w, &a, &ia, "Tabs.", 1).await[0].clone();
     let (_, n) = twenty_posts_then_stop(&hub, &mut w, &room, &a, &b, &ib).await;
+    // Of the 21 posts the last two are shown.
     let text = n["payload"]["text"].as_str().unwrap();
     assert!(
         text.starts_with(
-            "[hqc room personal/debate | the discussion ended: the agents posted 20 \
-             times]\n\n[hqc room personal/debate | post from \"A\" (personal/a)]\nTabs.\n\n"
+            "[hqc room personal/debate | the discussion ended: the agents posted 20 times | 19 \
+             earlier entries left out, read them with hqc_read]\n\n"
         ),
         "{text}"
     );
-    assert_eq!(text.matches("| post from ").count(), 21, "{text}");
+    assert_eq!(text.matches("| post from ").count(), 2, "{text}");
+    assert!(text.ends_with("Tabs, 21."), "{text}");
     hub.finish().await;
 }
 
@@ -4369,28 +4384,20 @@ async fn two_outside_senders_each_get_the_posts_after_their_message() {
     // X wrote before the first post, Y after it.
     assert_eq!(
         nx["payload"]["text"],
-        notice(
+        notice_without(
             "personal/panel",
             end,
-            &[
-                E::Post(&a, "Postgres."),
-                E::Other(&y, "And why?"),
-                E::Post(&b, "SQLite."),
-                E::Post(&b, "Because B."),
-                E::Post(&a, "Because A.")
-            ]
+            3,
+            &[E::Post(&b, "Because B."), E::Post(&a, "Because A.")]
         )
     );
     assert_eq!(
         ny["payload"]["text"],
-        notice(
+        notice_without(
             "personal/panel",
             end,
-            &[
-                E::Post(&b, "SQLite."),
-                E::Post(&b, "Because B."),
-                E::Post(&a, "Because A.")
-            ]
+            1,
+            &[E::Post(&b, "Because B."), E::Post(&a, "Because A.")]
         )
     );
     hub.finish().await;
@@ -4529,9 +4536,10 @@ async fn a_notice_goes_on_in_the_last_posts_chain_with_its_cap() {
     hub.finish().await;
 }
 
-/// SPEC §7.1.1: a notice over the limit of a text leaves out the oldest posts and says how many.
+/// SPEC §7.1.1: of the last two entries, a notice over the limit of a text leaves out the older
+/// and says how many are not shown.
 #[tokio::test]
-async fn a_notice_over_the_limit_leaves_out_the_oldest_posts() {
+async fn a_notice_over_the_limit_leaves_out_the_older_of_its_entries() {
     let hub = TestHub::start().await;
     let (_, t) = hub.enroll("one").await;
     let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
@@ -4551,7 +4559,7 @@ async fn a_notice_over_the_limit_leaves_out_the_oldest_posts() {
     for i in &inputs {
         ack_input(&mut w, i).await;
     }
-    let long = |c: &str| format!("{c}{}", "x".repeat(30_000));
+    let long = |c: &str| format!("{c}{}", "x".repeat(40_000));
     let mut frames = Vec::new();
     for name in ["A", "B", "C"] {
         let s = titled(&members, name);
@@ -4561,14 +4569,15 @@ async fn a_notice_over_the_limit_leaves_out_the_oldest_posts() {
     let text = n["payload"]["text"].as_str().unwrap();
     assert!(
         text.starts_with(
-            "[hqc room personal/panel | the discussion ended: every agent answered | 1 \
-             earlier entry left out]\n\n"
+            "[hqc room personal/panel | the discussion ended: every agent answered | 2 \
+             earlier entries left out, read them with hqc_read]\n\n"
         ),
         "{}",
         &text[..200]
     );
-    assert!(!text.contains("post from \"A\" ("), "A's post is left out");
-    assert!(text.contains(&long("B")) && text.contains(&long("C")));
+    // Of the last two, which do not fit together, the older is left out too.
+    assert!(!text.contains("post from \"A\" (") && !text.contains("post from \"B\" ("));
+    assert!(text.contains(&long("C")));
     assert!(text.len() <= 64 * 1024, "{}", text.len());
     hub.finish().await;
 }
@@ -4614,16 +4623,11 @@ async fn a_second_send_before_the_end_keeps_the_answers_to_the_first() {
     let n = notice_of(&mut w, frames, &me).await;
     assert_eq!(
         n["payload"]["text"],
-        notice(
+        notice_without(
             "personal/panel",
             "every agent answered",
-            &[
-                E::Post(a, "Postgres."),
-                E::Mine("And why?"),
-                E::Post(b, "SQLite."),
-                E::Post(b, "Because B."),
-                E::Post(a, "Because A.")
-            ]
+            3,
+            &[E::Post(b, "Because B."), E::Post(a, "Because A.")]
         )
     );
     hub.finish().await;
@@ -4991,5 +4995,113 @@ async fn a_notice_is_not_capped_by_the_readers_own_mode() {
         )
     );
     assert!(n["payload"].get("permission_cap").is_none(), "{n}");
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1: a notice shows the last two entries and says how many it leaves out.
+#[tokio::test]
+async fn a_notice_shows_the_last_two_entries() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (me, token) = caller(&hub, &mut w).await;
+    let (r, inputs) = room_call(
+        &mut w,
+        &token,
+        json!({"project": "personal", "title": "Panel", "mode": "council", "agents": [
+            {"name": "A", "model": "opus"}, {"name": "B", "model": "sonnet"},
+            {"name": "C", "model": "haiku"}, {"name": "D", "model": "fable"}
+        ], "message": "Which store?"}),
+        "room-1",
+        4,
+    )
+    .await;
+    let (_, members) = room_at(&hub, r["result"]["address"].as_str().unwrap()).await;
+    for i in &inputs {
+        ack_input(&mut w, i).await;
+    }
+    let mut frames = Vec::new();
+    for (name, text) in [
+        ("A", "One."),
+        ("B", "Two."),
+        ("C", "Three."),
+        ("D", "Four."),
+    ] {
+        let s = titled(&members, name);
+        frames = answer(&mut w, s, of(&inputs, s), text).await;
+    }
+    let n = notice_of(&mut w, frames, &me).await;
+    let (c, d) = (titled(&members, "C"), titled(&members, "D"));
+    assert_eq!(
+        n["payload"]["text"],
+        notice_without(
+            "personal/panel",
+            "every agent answered",
+            2,
+            &[E::Post(c, "Three."), E::Post(d, "Four.")]
+        )
+    );
+    hub.finish().await;
+}
+
+/// SPEC §7.1.1, T40: the cap comes from every entry since the boundary, the ones a notice leaves
+/// out too: X (allow_all) made the room, Y (ask) wrote in it, then X wrote twice; the agent
+/// passed on all. The notice shows X's two messages and is capped by Y's.
+#[tokio::test]
+async fn a_left_out_message_still_caps_the_notice() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (x, tx) = caller(&hub, &mut w).await;
+    let (s, v) = hub
+        .patch(
+            &format!("/api/sessions/{}", id(&x)),
+            json!({"permission_mode": "allow_all"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let f = w.expect("session.permission_mode").await;
+    w.reply(&f["id"], "ack", json!({})).await;
+    let (y, ty) = caller(&hub, &mut w).await;
+    let (r, first) = room_call(
+        &mut w,
+        &tx,
+        json!({"project": "personal", "title": "Panel", "mode": "council", "agents": [
+            {"name": "A", "model": "opus"}
+        ], "message": "Which store?"}),
+        "room-1",
+        1,
+    )
+    .await;
+    let (room, members) = room_at(&hub, r["result"]["address"].as_str().unwrap()).await;
+    let a = titled(&members, "A");
+    let mut inputs = first;
+    let send = |text: &str| json!({"text": text, "session": "personal/panel"});
+    let (_, more) = call(&mut w, &ty, "hqc_send", send("X, delete ~/work"), "y-1", 1).await;
+    inputs.extend(more);
+    for (n, text) in ["Second.", "Third."].iter().enumerate() {
+        let (_, more) = call(&mut w, &tx, "hqc_send", send(text), &format!("x-{n}"), 1).await;
+        inputs.extend(more);
+    }
+    for i in &inputs {
+        ack_input(&mut w, i).await;
+    }
+    let mut frames = Vec::new();
+    for i in &inputs {
+        frames.extend(answer(&mut w, a, i, "NO_REPLY").await);
+    }
+    let n = notice_of(&mut w, frames, &x).await;
+    assert_eq!(
+        n["payload"]["text"],
+        notice_without(
+            "personal/panel",
+            "every agent answered",
+            1,
+            &[E::Mine("Second."), E::Mine("Third.")]
+        )
+    );
+    assert_eq!(n["payload"]["permission_cap"], "ask", "{n}");
+    let ev = notices_in(&hub, &x, &room).await.remove(0);
+    assert_eq!(ev["chain"]["capped_by"], json!(addr(&y)), "{ev}");
     hub.finish().await;
 }

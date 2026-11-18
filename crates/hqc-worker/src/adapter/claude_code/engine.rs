@@ -75,7 +75,9 @@
 //!   of turn;
 //!   `usage.cost_usd` is the growth of the CLI's cumulative `total_cost_usd` since the previous
 //!   `usage` with a `cost_usd` (or since the transcript's last `cost-state` after `--resume`,
-//!   or since 0 after `conversation_reset`), `session_cost_usd` the total itself;
+//!   or since 0 after `conversation_reset`), `session_cost_usd` the total itself; the tokens
+//!   of a compaction's `result` (zeros in its `usage`) are the growth of its cumulative
+//!   `modelUsage`, summed over the models, since the same baseline;
 //!   a request of the main agent or of a foreground subagent still open then gets
 //!   `approval.cancel` / `clarify.cancel` `stopped`, any other subagent's stays open until its
 //!   `task_notification`, which cancels it; an input written during the turn and not echoed
@@ -89,9 +91,10 @@
 //!   `terminal_slash_commands` ([`Core::report_commands`]); the answer and
 //!   `commands_changed` report them too; one `init` while no turn of ours runs (a turn the CLI
 //!   starts by itself) → `status running` first;
-//! - `conversation_reset` (`/clear`) → `system conversation_cleared`, and the cost baseline
-//!   starts from 0 again; the next `system` `init` with another `session_id` →
-//!   [`AdapterEvent::RuntimeSessionId`] with it, the transcript the CLI writes from then on;
+//! - `conversation_reset` (`/clear`) → `system conversation_cleared`, and the cost baseline,
+//!   token sums with it, starts from 0 again; the next `system` `init` with another
+//!   `session_id` → [`AdapterEvent::RuntimeSessionId`] with it, the transcript the CLI writes
+//!   from then on;
 //! - `system` `session_title_changed` (a person's title, `/rename`; the CLI's own is only in
 //!   the transcript) → [`AdapterEvent::Title`] at once;
 //! - the result of the main agent's `ScheduleWakeup` call → [`AdapterEvent::Wakeup`] with its
@@ -120,6 +123,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
+use hqc_claude_jsonl::{model_usage_tokens, CostState, TokenSums};
 use hqc_proto::event::{
     ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAnswer, ClarifyQuestion, Event,
     EventKind, LiveKind, LiveSubagent, SessionState,
@@ -393,10 +397,11 @@ pub struct Core {
     /// hqc's allow rules of the session's workspace and its path (T48); `None` without one.
     folder: Option<(FolderRules, std::path::PathBuf)>,
     model: Option<String>,
-    /// The session's cumulative cost as of the last `usage` with a `cost_usd` (or the
-    /// transcript's last `cost-state` when resumed, none after `/clear`): the baseline of the
-    /// next turn's cost.
-    cost_total: Option<f64>,
+    /// The session's cumulative cost and `modelUsage` token sums as of the last `usage` with a
+    /// `cost_usd` (or the transcript's last `cost-state` when resumed, none after `/clear`):
+    /// the baseline of the next turn's cost and of a compaction's tokens, one value so that
+    /// both move together.
+    cost_base: Option<CostState>,
     /// A `compact_boundary` came since the last `result`: a `result` with no model turn costs
     /// for the compaction itself.
     compacted: bool,
@@ -516,7 +521,7 @@ impl Core {
             policy: Arc::default(),
             folder: None,
             model: None,
-            cost_total: None,
+            cost_base: None,
             compacted: false,
             commands: None,
             listed: None,
@@ -555,11 +560,11 @@ impl Core {
         self
     }
 
-    /// The session's cumulative cost before this process: `totalCostUSD` of the
+    /// The session's cumulative cost and `modelUsage` tokens before this process: the
     /// transcript's last `cost-state` when the process resumes it (the CLI starts its
-    /// `total_cost_usd` from there, checked on 2.1.308, T27).
-    pub fn with_cost_baseline(mut self, total: Option<f64>) -> Self {
-        self.cost_total = total;
+    /// `total_cost_usd` and `modelUsage` from there, checked on 2.1.308, T27).
+    pub fn with_cost_baseline(mut self, state: Option<CostState>) -> Self {
+        self.cost_base = state;
         self
     }
 
@@ -1014,7 +1019,7 @@ impl Core {
                 self.cleared = true;
                 self.clearing = true;
                 self.fresh = true;
-                self.cost_total = None;
+                self.cost_base = None;
                 vec![self.emit_system(CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT.into())]
             }
             "system" => match v["subtype"].as_str() {
@@ -1302,12 +1307,16 @@ impl Core {
     }
 
     /// This turn's share of the CLI's cumulative `total_cost_usd`: never negative, and a total
-    /// below the baseline (a CLI that did not carry the cost over) does not lower it.
-    fn turn_cost(&mut self, total: f64) -> f64 {
-        let base = self.cost_total.unwrap_or(0.0);
-        self.cost_total = Some(base.max(total));
+    /// below the baseline (a CLI that did not carry the cost over) does not lower it. The
+    /// token baseline moves with it, to the result's `modelUsage` sums, likewise never lowered.
+    fn turn_cost(&mut self, total: f64, tokens: TokenSums) -> f64 {
+        let base = self.cost_base.unwrap_or_default();
+        self.cost_base = Some(CostState {
+            total_cost_usd: base.total_cost_usd.max(total),
+            tokens: base.tokens.max(tokens),
+        });
         // Rounded to 1e-10 USD: the difference of two decimals is not one in binary.
-        ((total - base).max(0.0) * 1e10).round() / 1e10
+        ((total - base.total_cost_usd).max(0.0) * 1e10).round() / 1e10
     }
 
     fn on_stream_event(&mut self, v: &Value) -> Vec<Action> {
@@ -2042,7 +2051,8 @@ impl Core {
         let total = v["total_cost_usd"]
             .as_f64()
             .filter(|c| c.is_finite() && *c >= 0.0);
-        let spent = total.is_some_and(|t| t > self.cost_total.unwrap_or(0.0));
+        let base = self.cost_base.unwrap_or_default();
+        let spent = total.is_some_and(|t| t > base.total_cost_usd);
         let compacted = std::mem::take(&mut self.compacted);
         let model = self.model.clone().or_else(|| {
             v["modelUsage"]
@@ -2052,15 +2062,35 @@ impl Core {
         // A result with no tokens (a local slash command, the empty second `result` after a turn
         // the CLI started by itself, one the CLI closes on a background subagent's
         // notification, a turn interrupted while its reply streamed) is not a turn's `usage`:
-        // the feed would show an empty `0 → 0 tokens` line. `/compact` has no tokens but costs,
-        // so it keeps its `usage`.
-        if input_tokens + output_tokens > 0 || (spent && compacted) {
-            let cost_usd = total.map(|t| self.turn_cost(t));
+        // the feed would show an empty `0 → 0 tokens` line. `/compact` has zeros in `usage` but
+        // costs, so it keeps its `usage`; its tokens are in the cumulative `modelUsage`, and are
+        // the growth of it since the baseline of the cost.
+        let has_tokens = input_tokens + output_tokens > 0;
+        let compaction = !has_tokens && spent && compacted;
+        if has_tokens || compaction {
+            let model_tokens = model_usage_tokens(&v["modelUsage"]);
+            let (input_tokens, output_tokens, cache_read, cache_write) = if compaction {
+                let grown = model_tokens.since(base.tokens);
+                (
+                    grown.input,
+                    grown.output,
+                    Some(grown.cache_read),
+                    Some(grown.cache_write),
+                )
+            } else {
+                (
+                    input_tokens,
+                    output_tokens,
+                    num("cache_read_input_tokens"),
+                    num("cache_creation_input_tokens"),
+                )
+            };
+            let cost_usd = total.map(|t| self.turn_cost(t, model_tokens));
             out.push(self.emit_new(EventKind::Usage {
                 input_tokens,
                 output_tokens,
-                cache_read: num("cache_read_input_tokens"),
-                cache_write: num("cache_creation_input_tokens"),
+                cache_read,
+                cache_write,
                 cost_usd,
                 session_cost_usd: total,
                 model,

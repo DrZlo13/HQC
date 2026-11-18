@@ -244,19 +244,82 @@ pub fn last_ai_title(s: &str) -> Option<String> {
         })
 }
 
-/// `totalCostUSD` of the last `cost-state` record of a transcript: the session's cumulative
-/// cost the CLI writes when its process ends and starts from again on `--resume` (checked on
-/// 2.1.308, T27; SPEC §8.1). Cheap like [`last_ai_title`].
-pub fn last_cost_total(s: &str) -> Option<f64> {
+/// Token counts summed over the models of a `modelUsage` object.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenSums {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+impl TokenSums {
+    /// The growth since `base`, per count; never negative.
+    pub fn since(self, base: TokenSums) -> TokenSums {
+        TokenSums {
+            input: self.input.saturating_sub(base.input),
+            output: self.output.saturating_sub(base.output),
+            cache_read: self.cache_read.saturating_sub(base.cache_read),
+            cache_write: self.cache_write.saturating_sub(base.cache_write),
+        }
+    }
+
+    /// The larger of each count of the two.
+    pub fn max(self, other: TokenSums) -> TokenSums {
+        TokenSums {
+            input: self.input.max(other.input),
+            output: self.output.max(other.output),
+            cache_read: self.cache_read.max(other.cache_read),
+            cache_write: self.cache_write.max(other.cache_write),
+        }
+    }
+}
+
+/// The `inputTokens`, `outputTokens`, `cacheReadInputTokens` and `cacheCreationInputTokens`
+/// of a `modelUsage` object (a stream-json `result`'s or a `cost-state`'s: one entry per
+/// model, cumulative over the CLI session) summed over its models. A missing or malformed
+/// object and missing counts are zeros.
+pub fn model_usage_tokens(model_usage: &serde_json::Value) -> TokenSums {
+    let mut sums = TokenSums::default();
+    for m in model_usage.as_object().into_iter().flat_map(|o| o.values()) {
+        let n = |k: &str| m[k].as_u64().unwrap_or(0);
+        sums.input = sums.input.saturating_add(n("inputTokens"));
+        sums.output = sums.output.saturating_add(n("outputTokens"));
+        sums.cache_read = sums.cache_read.saturating_add(n("cacheReadInputTokens"));
+        sums.cache_write = sums
+            .cache_write
+            .saturating_add(n("cacheCreationInputTokens"));
+    }
+    sums
+}
+
+/// The cumulative cost state a CLI process starts from: see [`last_cost_state`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CostState {
+    pub total_cost_usd: f64,
+    pub tokens: TokenSums,
+}
+
+/// `totalCostUSD` and the summed `modelUsage` of the last `cost-state` record of a
+/// transcript: the session's cumulative cost and tokens the CLI writes when its process ends
+/// and starts from again on `--resume` (checked on 2.1.308, T27; SPEC §8.1). A record with a
+/// bad `totalCostUSD` is skipped. Cheap like [`last_ai_title`].
+pub fn last_cost_state(s: &str) -> Option<CostState> {
     s.lines()
         .rev()
         .filter(|l| l.contains("\"cost-state\""))
         .find_map(|l| {
             let v: serde_json::Value = serde_json::from_str(l).ok()?;
-            (v["type"] == "cost-state")
-                .then(|| v["totalCostUSD"].as_f64())
-                .flatten()
-                .filter(|c| c.is_finite() && *c >= 0.0)
+            if v["type"] != "cost-state" {
+                return None;
+            }
+            let total_cost_usd = v["totalCostUSD"]
+                .as_f64()
+                .filter(|c| c.is_finite() && *c >= 0.0)?;
+            Some(CostState {
+                total_cost_usd,
+                tokens: model_usage_tokens(&v["modelUsage"]),
+            })
         })
 }
 
@@ -400,17 +463,39 @@ mod tests {
     /// T27: the baseline of a resumed process is the last `cost-state`; the transcript before
     /// the resume (up to the first `cost-state`) has the first process's total.
     #[test]
-    fn last_cost_total_from_fixture() {
+    fn last_cost_state_from_fixture() {
+        let state = |total_cost_usd, input, output, cache_read, cache_write| {
+            Some(CostState {
+                total_cost_usd,
+                tokens: TokenSums {
+                    input,
+                    output,
+                    cache_read,
+                    cache_write,
+                },
+            })
+        };
         let full = include_str!("../fixtures/cost-resume-2.1.308.jsonl");
-        assert_eq!(last_cost_total(full), Some(0.0043361));
+        let last = state(0.0043361, 6, 90, 51870, 18859);
+        assert_eq!(last_cost_state(full), last);
         let cut = full.find("\"cost-state\"").unwrap();
         let before_resume = &full[..full[cut..].find('\n').unwrap() + cut];
-        assert_eq!(last_cost_total(before_resume), Some(0.00398629));
-        assert_eq!(last_cost_total(FIXTURE), Some(0.00393462));
+        assert_eq!(
+            last_cost_state(before_resume),
+            state(0.00398629, 4, 85, 27739, 18330)
+        );
+        assert_eq!(
+            last_cost_state(FIXTURE),
+            state(0.00393462, 1199, 120, 60832, 15732)
+        );
         let first_turn = &full[..full.find("\"cost-state\"").unwrap()];
-        assert_eq!(last_cost_total(first_turn), None, "process still running");
+        assert_eq!(last_cost_state(first_turn), None, "process still running");
         let broken = format!("{full}{}\n", r#"{"type":"cost-state","totalCostUSD":"x"}"#);
-        assert_eq!(last_cost_total(&broken), Some(0.0043361));
+        assert_eq!(last_cost_state(&broken), last);
+        let no_usage = r#"{"type":"cost-state","totalCostUSD":1.5}"#;
+        assert_eq!(last_cost_state(no_usage), state(1.5, 0, 0, 0, 0));
+        let two_models = r#"{"type":"cost-state","totalCostUSD":2.5,"modelUsage":{"claude-opus-5-5":{"inputTokens":10,"outputTokens":20,"cacheReadInputTokens":300,"cacheCreationInputTokens":40,"costUSD":2.0},"claude-haiku-5-5":{"inputTokens":1,"outputTokens":2,"cacheReadInputTokens":3,"cacheCreationInputTokens":4,"costUSD":0.5}}}"#;
+        assert_eq!(last_cost_state(two_models), state(2.5, 11, 22, 303, 44));
     }
 
     /// T0 fixtures: (transcript, stream-json stdout) of the same run.

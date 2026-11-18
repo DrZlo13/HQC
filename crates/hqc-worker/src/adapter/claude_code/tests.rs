@@ -3838,7 +3838,7 @@ fn a_result_with_no_model_turn_and_no_tokens_has_no_usage() {
 #[test]
 fn a_result_with_no_model_turn_leaves_the_background_cost_to_the_next_turn() {
     let sid = Uuid::now_v7();
-    let mut core = Core::new(sid, false).with_cost_baseline(Some(1.0));
+    let mut core = Core::new(sid, false).with_cost_baseline(Some(cost_state(1.0, 0, 0)));
     started(&mut core, sid);
     let usage = usages(core.on_line(
         r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_ms":3,"result":"","total_cost_usd":2.5,"usage":{"input_tokens":0,"output_tokens":0}}"#,
@@ -3853,17 +3853,31 @@ fn a_result_with_no_model_turn_leaves_the_background_cost_to_the_next_turn() {
 
 /// `/compact` (fixture `stream-resume-compact`, 2.1.308): `num_turns: 0` and no tokens, but the
 /// session's total grew from the transcript's last `cost-state` (0.0032966), so it keeps its
-/// `usage` with what the compaction cost, and the next turn's cost does not include it.
+/// `usage` with what the compaction cost, and the next turn's cost does not include it. Its
+/// tokens are the growth of `modelUsage` over that `cost-state`'s (2037 - 4 in, 564 - 10 out,
+/// cache 45717 - 29440 read and 20902 - 14984 written), not the cumulative numbers.
 #[test]
 fn compact_keeps_its_usage() {
     let fx = fixture!("resume-compact", "2.1.308");
     let sid = Uuid::now_v7();
-    let mut core = Core::new(sid, false).with_cost_baseline(Some(0.0032966));
+    let before_compact = &fx.transcript[..fx.transcript.find("\"compact_boundary\"").unwrap()];
+    let baseline = hqc_claude_jsonl::last_cost_state(before_compact);
+    assert!(
+        baseline.is_some_and(|b| (b.total_cost_usd - 0.0032966).abs() < 1e-12),
+        "{baseline:?}"
+    );
+    let mut core = Core::new(sid, false).with_cost_baseline(baseline);
     started(&mut core, sid);
-    let (costs, _) = costs_and_commands(&play(&mut core, fx.stream));
+    let actions = play(&mut core, fx.stream);
+    let (costs, _) = costs_and_commands(&actions);
     assert_eq!(costs.len(), 1, "{costs:?}");
     assert!((costs[0].0 - 0.00138282).abs() < 1e-9, "{costs:?}");
     assert_eq!(costs[0].1, 0.00467942);
+    let tokens: Vec<_> = usage_tokens(actions)
+        .into_iter()
+        .map(|(i, o, r, w, _)| (i, o, r, w))
+        .collect();
+    assert_eq!(tokens, vec![(2033, 554, Some(16277), Some(5918))]);
     // The compaction counts for its own `result` only: a later one with no model turn whose
     // total grew gets the total-only `usage`, with no `cost_usd`.
     started(&mut core, sid);
@@ -3871,6 +3885,150 @@ fn compact_keeps_its_usage() {
         r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_ms":3,"result":"","total_cost_usd":0.01,"usage":{"input_tokens":0,"output_tokens":0}}"#,
     ));
     assert_eq!(usage, vec![(0, 0, None, Some(0.01))]);
+}
+
+/// A cost baseline with `input` and `output` tokens of one model.
+fn cost_state(total_cost_usd: f64, input: u64, output: u64) -> hqc_claude_jsonl::CostState {
+    hqc_claude_jsonl::CostState {
+        total_cost_usd,
+        tokens: hqc_claude_jsonl::TokenSums {
+            input,
+            output,
+            ..Default::default()
+        },
+    }
+}
+
+/// The `usage` events among `actions`: input, output, `cache_read`, `cache_write`, `cost_usd`.
+#[allow(clippy::type_complexity)]
+fn usage_tokens(actions: Vec<Action>) -> Vec<(u64, u64, Option<u64>, Option<u64>, Option<f64>)> {
+    events(&emitted(actions))
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read,
+                cache_write,
+                cost_usd,
+                ..
+            } => Some((
+                input_tokens,
+                output_tokens,
+                cache_read,
+                cache_write,
+                cost_usd,
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A `result` of a compaction (CLI 2.1.312, live): zeros in `usage`, the cumulative `modelUsage`
+/// and total cost grown.
+fn compaction_result(total: f64, input: u64, output: u64) -> String {
+    format!(
+        r#"{{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_ms":9,"result":"","total_cost_usd":{total},"usage":{{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"modelUsage":{{"claude-haiku-5-5":{{"inputTokens":{input},"outputTokens":{output},"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":{total}}}}}}}"#
+    )
+}
+
+const COMPACT_BOUNDARY: &str = r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":17040,"post_tokens":9743},"uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e20"}"#;
+
+/// The tokens of a `/compact` are not in its `result.usage` (zeros) but in the growth of the
+/// cumulative `modelUsage` (CLI 2.1.312, live on haiku): after a turn that had 16961 in and 79
+/// out, the compaction's `result` has 35298 and 1675, so the line reads 18337 in, 1596 out.
+#[test]
+fn a_compactions_usage_carries_the_growth_of_model_usage() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let turn = usage_tokens(core.on_line(
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"duration_ms":900,"result":"ok","total_cost_usd":0.0017356,"usage":{"input_tokens":16961,"output_tokens":79},"modelUsage":{"claude-haiku-5-5":{"inputTokens":16961,"outputTokens":79,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0.0017356}}}"#,
+    ));
+    assert_eq!(turn, vec![(16961, 79, None, None, Some(0.0017356))]);
+    started(&mut core, sid);
+    core.on_line(COMPACT_BOUNDARY);
+    let compaction = usage_tokens(core.on_line(&compaction_result(0.0043673, 35298, 1675)));
+    assert_eq!(
+        compaction,
+        vec![(18337, 1596, Some(0), Some(0), Some(0.0026317))]
+    );
+}
+
+/// After `--resume` the baseline of the compaction's tokens is the transcript's last
+/// `cost-state`, not zero: the cumulative numbers are not the compaction's.
+#[test]
+fn a_resumed_compactions_tokens_start_from_the_last_cost_state() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false).with_cost_baseline(Some(cost_state(0.0017356, 16961, 79)));
+    started(&mut core, sid);
+    core.on_line(COMPACT_BOUNDARY);
+    let compaction = usage_tokens(core.on_line(&compaction_result(0.0043673, 35298, 1675)));
+    assert_eq!(
+        compaction,
+        vec![(18337, 1596, Some(0), Some(0), Some(0.0026317))]
+    );
+}
+
+/// A compaction's tokens are summed over every model of `modelUsage` (a subagent on another
+/// model, or the main agent's model switched during the session), and, like its cost, carry
+/// what background work spent after the last line with a cost: the total-only `usage` between
+/// them moves no baseline.
+#[test]
+fn a_compactions_tokens_sum_the_models_and_carry_the_background_spending() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"duration_ms":900,"result":"ok","total_cost_usd":0.0017356,"usage":{"input_tokens":16961,"output_tokens":79},"modelUsage":{"claude-haiku-5-5":{"inputTokens":16961,"outputTokens":79,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0.0017356}}}"#,
+    );
+    // A background subagent on another model spent between the turn and the compaction.
+    started(&mut core, sid);
+    let background = usage_tokens(core.on_line(
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_ms":3,"result":"","total_cost_usd":0.0027356,"usage":{"input_tokens":0,"output_tokens":0},"modelUsage":{"claude-haiku-5-5":{"inputTokens":16961,"outputTokens":79,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0.0017356},"claude-opus-5-5":{"inputTokens":100,"outputTokens":50,"cacheReadInputTokens":1000,"cacheCreationInputTokens":200,"costUSD":0.001}}}"#,
+    ));
+    assert_eq!(background, vec![(0, 0, None, None, None)]);
+    started(&mut core, sid);
+    core.on_line(COMPACT_BOUNDARY);
+    let compaction = usage_tokens(core.on_line(
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_ms":9,"result":"","total_cost_usd":0.0053673,"usage":{"input_tokens":0,"output_tokens":0},"modelUsage":{"claude-haiku-5-5":{"inputTokens":35298,"outputTokens":1675,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0.0043673},"claude-opus-5-5":{"inputTokens":100,"outputTokens":50,"cacheReadInputTokens":1000,"cacheCreationInputTokens":200,"costUSD":0.001}}}"#,
+    ));
+    assert_eq!(
+        compaction,
+        vec![(18437, 1646, Some(1000), Some(200), Some(0.0036317))]
+    );
+}
+
+/// `/clear` starts the CLI's `modelUsage` from 0 together with its cost (2.1.312): a compaction
+/// after it counts its tokens from the new conversation's sums, not from the larger ones the
+/// conversation before the reset left.
+#[test]
+fn a_compaction_after_clear_counts_its_tokens_from_the_new_conversation() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"duration_ms":900,"result":"ok","total_cost_usd":0.0017356,"usage":{"input_tokens":16961,"output_tokens":79},"modelUsage":{"claude-haiku-5-5":{"inputTokens":16961,"outputTokens":79,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0.0017356}}}"#,
+    );
+    written(&mut core, sid, "/clear");
+    core.on_line(
+        &json!({"type": "conversation_reset", "trigger": "clear", "session_id": "s"}).to_string(),
+    );
+    core.on_line(
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"duration_ms":4,"result":"","local_command":"clear","total_cost_usd":0.0,"usage":{"input_tokens":0,"output_tokens":0}}"#,
+    );
+    started(&mut core, sid);
+    let turn = usage_tokens(core.on_line(
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"duration_ms":700,"result":"ok","total_cost_usd":0.000525,"usage":{"input_tokens":5000,"output_tokens":50},"modelUsage":{"claude-haiku-5-5":{"inputTokens":5000,"outputTokens":50,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0.000525}}}"#,
+    ));
+    assert_eq!(turn, vec![(5000, 50, None, None, Some(0.000525))]);
+    started(&mut core, sid);
+    core.on_line(COMPACT_BOUNDARY);
+    let compaction = usage_tokens(core.on_line(&compaction_result(0.00195, 15000, 900)));
+    assert_eq!(
+        compaction,
+        vec![(10000, 850, Some(0), Some(0), Some(0.001425))]
+    );
 }
 
 /// A subagent that ends asks nothing any more: its request still open when its
@@ -4050,15 +4208,15 @@ fn output_tokens_count_while_the_response_is_written() {
 #[test]
 fn resumed_turn_cost_starts_from_the_last_cost_state() {
     let fx = fixture!("cost-resume", "2.1.308");
-    let baseline = hqc_claude_jsonl::last_cost_total(before_resume(fx.transcript));
-    assert_eq!(baseline, Some(0.00398629));
+    let baseline = hqc_claude_jsonl::last_cost_state(before_resume(fx.transcript));
+    assert_eq!(baseline.map(|b| b.total_cost_usd), Some(0.00398629));
     let mut core = Core::new(Uuid::now_v7(), false).with_cost_baseline(baseline);
     let (costs, _) = costs_and_commands(&play(&mut core, fx.stream));
     assert_eq!(costs, [(0.00034981, 0.0043361)]);
 
     // A total below the baseline (a CLI that did not carry the cost over) is not negative,
     // and the next turn is counted from the higher of the two.
-    let mut core = Core::new(Uuid::now_v7(), false).with_cost_baseline(Some(1.0));
+    let mut core = Core::new(Uuid::now_v7(), false).with_cost_baseline(Some(cost_state(1.0, 0, 0)));
     let (costs, _) = costs_and_commands(&play(&mut core, fx.stream));
     assert_eq!(costs, [(0.0, 0.0043361)]);
     let result = fx

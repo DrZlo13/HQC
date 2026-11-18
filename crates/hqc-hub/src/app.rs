@@ -118,8 +118,10 @@ pub enum Notice {
         at: u64,
         event: Value,
     },
-    /// A `subagents.live` ([`AppState::live_agents`]).
-    LiveAgents { session_id: Uuid, event: Value },
+    /// A transport-only event of the session, sent to its subscribers as it is: a
+    /// `subagents.live` ([`AppState::live_agents`]) or a `schedules.live`
+    /// ([`crate::schedules::changed`]).
+    Live { session_id: Uuid, event: Value },
     /// `delivery` of an input changed (SPEC §3 Event).
     Delivery {
         session_id: Uuid,
@@ -257,21 +259,58 @@ impl AppState {
         } else {
             lists.insert(session_id, (event.clone(), Instant::now()));
         }
-        self.notify(Notice::LiveAgents { session_id, event });
+        self.notify(Notice::Live { session_id, event });
     }
 
-    /// The session's agent runs no subagent and no background task any more, though no empty
-    /// list from the worker may say so (SPEC §4): its worker restarted, its `session.state`
-    /// counts neither subagents nor background tasks, or it was deleted. A kept list is dropped
-    /// and the session's subscribers get an empty `subagents.live`, as from the worker.
+    /// The session's agent runs nothing any more, though no empty list from the worker may say
+    /// so (SPEC §4): its worker restarted, its `session.state` says it stopped, or it was
+    /// deleted. A kept list is dropped and the session's subscribers get an empty
+    /// `subagents.live`, as from the worker.
     pub fn drop_live_agents(&self, session_id: Uuid) {
         let mut lists = self.live_agents.lock().unwrap();
         if lists.remove(&session_id).is_some() {
-            self.notify(Notice::LiveAgents {
+            self.notify(Notice::Live {
                 session_id,
                 event: no_live_agents(session_id),
             });
         }
+    }
+
+    /// The session's agent is alive and runs no subagent and no background task (its
+    /// `session.state` counts neither, SPEC §4): what its worker lists beside them stays
+    /// until the worker says otherwise, that is the wakeups and the cron jobs the agent
+    /// armed, which wait for their time while it is idle; the rest of the kept list goes, as
+    /// in [`AppState::drop_live_agents`], with the rows that stay counted to now.
+    pub fn drop_ended_live_agents(&self, session_id: Uuid) {
+        let mut lists = self.live_agents.lock().unwrap();
+        let Some((event, at)) = lists.get(&session_id) else {
+            return;
+        };
+        let mut event = aged(event.clone(), at.elapsed());
+        let Some(agents) = event
+            .get_mut("payload")
+            .and_then(|p| p.get_mut("agents"))
+            .and_then(Value::as_array_mut)
+        else {
+            return;
+        };
+        let before = agents.len();
+        agents.retain(|a| {
+            matches!(
+                a.get("kind").and_then(Value::as_str),
+                Some("wakeup" | "cron")
+            )
+        });
+        if agents.len() == before {
+            return;
+        }
+        if agents.is_empty() {
+            lists.remove(&session_id);
+            event = no_live_agents(session_id);
+        } else {
+            lists.insert(session_id, (event.clone(), Instant::now()));
+        }
+        self.notify(Notice::Live { session_id, event });
     }
 
     /// The session's latest `subagents.live`, unless it was empty, its run times counted now.
@@ -363,19 +402,29 @@ impl AppState {
     }
 }
 
-/// An empty `subagents.live` of the session, as its worker sends one when the agent stops.
-pub fn no_live_agents(session_id: Uuid) -> Value {
+/// A transport-only event of the session, `kind` its type, as the hub makes it.
+pub fn transport_event(session_id: Uuid, kind: &str, payload: Value) -> Value {
     serde_json::json!({
         "session_id": session_id,
         "event_id": crate::db::new_id(),
         "ts": chrono::Utc::now(),
         "author": {"kind": "agent", "id": session_id},
-        "type": "subagents.live",
-        "payload": {"agents": []},
+        "type": kind,
+        "payload": payload,
     })
 }
 
-/// `event`, a `subagents.live`, with `age` added to the `duration_ms` of each subagent.
+/// An empty `subagents.live` of the session, as its worker sends one when the agent stops.
+pub fn no_live_agents(session_id: Uuid) -> Value {
+    transport_event(
+        session_id,
+        "subagents.live",
+        serde_json::json!({"agents": []}),
+    )
+}
+
+/// `event`, a `subagents.live`, with `age` added to the `duration_ms` of each subagent and
+/// taken off the `due_in_ms` of each timer.
 fn aged(mut event: Value, age: std::time::Duration) -> Value {
     let age = u64::try_from(age.as_millis()).unwrap_or(u64::MAX);
     let agents = event
@@ -385,6 +434,9 @@ fn aged(mut event: Value, age: std::time::Duration) -> Value {
     for a in agents.into_iter().flatten() {
         if let Some(d) = a.get("duration_ms").and_then(Value::as_u64) {
             a["duration_ms"] = d.saturating_add(age).into();
+        }
+        if let Some(d) = a.get("due_in_ms").and_then(Value::as_u64) {
+            a["due_in_ms"] = d.saturating_sub(age).into();
         }
     }
     event
@@ -428,16 +480,23 @@ mod tests {
     use serde_json::json;
 
     /// The copy a subscription gets counts the time since the list came; a run time at the
-    /// top of the range stays there.
+    /// top of the range stays there, and a timer that came due stays at 0.
     #[test]
     fn a_kept_list_ages() {
         let event = json!({"type": "subagents.live", "payload": {"agents": [
             {"task_id": "a", "description": "A", "duration_ms": 120_000},
             {"task_id": "b", "description": "B", "duration_ms": u64::MAX},
+            {"task_id": "w", "description": "W", "duration_ms": 30_000, "kind": "wakeup",
+             "due_in_ms": 500_000},
+            {"task_id": "c", "description": "C", "duration_ms": 30_000, "kind": "cron",
+             "due_in_ms": 100_000},
         ]}});
         let got = aged(event, std::time::Duration::from_secs(480));
         assert_eq!(got["payload"]["agents"][0]["duration_ms"], 600_000);
         assert_eq!(got["payload"]["agents"][1]["duration_ms"], u64::MAX);
         assert_eq!(got["payload"]["agents"][0]["description"], "A");
+        assert!(got["payload"]["agents"][0].get("due_in_ms").is_none());
+        assert_eq!(got["payload"]["agents"][2]["due_in_ms"], 20_000);
+        assert_eq!(got["payload"]["agents"][3]["due_in_ms"], 0);
     }
 }

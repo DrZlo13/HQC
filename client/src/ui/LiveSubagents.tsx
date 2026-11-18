@@ -1,33 +1,70 @@
-// The subagents and the background commands the agent runs now (`subagents.live`, SPEC §6),
-// pinned above the input while the feed scrolls: one line each, "Agent:" or "Command:" (when
-// the worker says which), its task and what it does now, then its tokens, tool calls and run
-// time, which ticks here between the lists the hub sends; a command has only its description
-// and run time. A `stoppable` line ends with a stop button.
+// The subagents, the background commands and the timers of the session (`subagents.live` and
+// `schedules.live`, SPEC §6), pinned above the input while the feed scrolls: one line each,
+// led by "Agent:", "Command:" (when the worker says which), "Monitor:", "Wakeup:", "Cron:" or
+// "Scheduled:". A subagent has its task and what it does now, then its tokens, tool calls and
+// run time, which ticks here between the lists the hub sends; a command or a watcher has only
+// its description and run time. A timer, a wakeup or a cron job of the agent and a message
+// scheduled by the hub, has "in 12m 34s" instead, counting down to "due"; a scheduled message
+// opens the schedules of the chat. A `stoppable` line ends with a stop button.
 
 import { useState } from 'preact/hooks';
-import type { LiveSubagent } from '../proto';
+import type { LiveKind, LiveSchedule, LiveSubagent } from '../proto';
 import { useNow } from './hooks';
 import { IconStop } from './icons';
 import { count } from './labels';
 
-/** `agents`: the latest list, which came at `receivedAt` (`Date.now()`); `now`: the clock
- *  (tests). Nothing for an empty list. A `stoppable` row (a subagent's or a command's) gets a
- *  stop button, which calls `onStop` with its `task_id` and stays disabled until that settles;
- *  the row goes when the task ends. */
+const PREFIX: Record<LiveKind, string> = {
+  agent: 'Agent: ',
+  command: 'Command: ',
+  monitor: 'Monitor: ',
+  wakeup: 'Wakeup: ',
+  cron: 'Cron: ',
+};
+
+/** What the line says: the word before, the task, what follows it (the task's activity, or a
+ *  cron job's schedule), what stands on the right, and whether the dot stays still (a timer
+ *  waits, it does not run). */
+interface Row {
+  key: string;
+  prefix: string;
+  task: string;
+  after: string;
+  right: string;
+  timer: boolean;
+  open?: () => void;
+  /** The `task_id` its stop button stops: a `stoppable` row's. */
+  stop?: string;
+}
+
+/** `agents`: the latest list, which came at `receivedAt` (`Date.now()`); `schedules`: the
+ *  latest `schedules.live`, which came at `schedulesAt`; `onSchedules` opens the schedules;
+ *  `now`: the clock (tests). Nothing when both lists are empty. A `stoppable` row (a
+ *  subagent's, a command's or a Monitor's) gets a stop button, which calls `onStop` with its
+ *  `task_id` and stays disabled until that settles; the row goes when the task ends. */
 export function LiveSubagents({
   agents,
   receivedAt,
+  schedules,
+  schedulesAt,
+  onSchedules,
   now,
   onStop,
 }: {
   agents: LiveSubagent[];
   receivedAt: number;
+  schedules: LiveSchedule[];
+  schedulesAt: number;
+  onSchedules: () => void;
   now?: () => number;
   onStop?: (taskId: string) => Promise<void>;
 }) {
-  const t = useNow(1000, agents.length > 0, now);
+  const t = useNow(1000, agents.length + schedules.length > 0, now);
+  const rows: Row[] = [
+    ...agents.map((a) => agentRow(a, t - receivedAt)),
+    ...schedules.map((s) => scheduleRow(s, t - schedulesAt, onSchedules)),
+  ];
   const [stopping, setStopping] = useState<ReadonlySet<string>>(new Set());
-  if (!agents.length) return null;
+  if (!rows.length) return null;
   const stop = (id: string) => {
     setStopping((s) => new Set(s).add(id));
     void onStop!(id).finally(() =>
@@ -39,28 +76,30 @@ export function LiveSubagents({
     );
   };
   return (
-    <section class="live-agents" aria-label="Running subagents and commands">
+    <section class="live-agents" aria-label="Running subagents and commands, and timers">
       <ul class="live-agents-list">
-        {agents.map((a) => (
-          <li key={a.task_id} class="live-agents-row">
-            <span class="pulse-dot live-agents-dot" aria-hidden="true" />
-            <span class="live-agents-what">
-              {a.kind && <span class="live-agents-kind">{a.kind === 'agent' ? 'Agent: ' : 'Command: '}</span>}
-              <span class="live-agents-task" id={`live-task-${a.task_id}`}>
-                {a.description}
+        {rows.map((r) => (
+          <li key={r.key} class="live-agents-row">
+            <span class={`pulse-dot live-agents-dot ${r.timer ? 'live-agents-dot-still' : ''}`} aria-hidden="true" />
+            {r.open ? (
+              <button type="button" class="live-agents-what live-agents-open" title="Open the schedules" onClick={r.open}>
+                <RowText row={r} />
+              </button>
+            ) : (
+              <span class="live-agents-what">
+                <RowText row={r} />
               </span>
-              {a.activity ? `: ${a.activity}` : ''}
-            </span>
-            <span class="live-agents-stats">{stats(a, a.duration_ms + Math.max(0, t - receivedAt))}</span>
-            {a.stoppable && onStop && (
+            )}
+            <span class="live-agents-stats">{r.right}</span>
+            {r.stop && onStop && (
               <button
                 type="button"
                 class="icon-btn live-agents-stop"
                 aria-label="Stop this task"
-                aria-describedby={`live-task-${a.task_id}`}
+                aria-describedby={`live-task-${r.key}`}
                 title="Stop this task"
-                disabled={stopping.has(a.task_id)}
-                onClick={() => stop(a.task_id)}
+                disabled={stopping.has(r.stop)}
+                onClick={() => stop(r.stop!)}
               >
                 <IconStop size={10} />
               </button>
@@ -70,6 +109,52 @@ export function LiveSubagents({
       </ul>
     </section>
   );
+}
+
+function RowText({ row }: { row: Row }) {
+  return (
+    <>
+      {row.prefix && <span class="live-agents-kind">{row.prefix}</span>}
+      <span class="live-agents-task" id={`live-task-${row.key}`}>
+        {row.task}
+      </span>
+      {row.after}
+    </>
+  );
+}
+
+/** `age`: how long the list has been here. */
+function agentRow(a: LiveSubagent, age: number): Row {
+  const waits = a.kind === 'wakeup' || a.kind === 'cron';
+  return {
+    key: a.task_id,
+    prefix: a.kind ? PREFIX[a.kind] : '',
+    task: a.description,
+    // A cron job's schedule is a part of what it is, not what it does now.
+    after: a.activity ? `${a.kind === 'cron' ? ' · ' : ': '}${a.activity}` : '',
+    right: waits ? countdown(a.due_in_ms, age) : stats(a, a.duration_ms + Math.max(0, age)),
+    timer: waits,
+    stop: a.stoppable ? a.task_id : undefined,
+  };
+}
+
+function scheduleRow(s: LiveSchedule, age: number, open: () => void): Row {
+  return {
+    key: s.schedule_id,
+    prefix: 'Scheduled: ',
+    task: s.message,
+    after: '',
+    right: countdown(s.due_in_ms, age),
+    timer: true,
+    open,
+  };
+}
+
+/** `in 12m 34s` until the fire, `due` once it is; nothing when its time is not known. */
+function countdown(dueInMs: number | undefined, age: number): string {
+  if (dueInMs === undefined) return '';
+  const left = dueInMs - Math.max(0, age);
+  return left > 0 ? `in ${elapsed(left)}` : 'due';
 }
 
 /** `155.3k tokens · 188 tools · 4m 13s`; what the subagent has not reported yet is left out.

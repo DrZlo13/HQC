@@ -109,8 +109,9 @@ const agentText = (seq: number, text: string, final: boolean) =>
   });
 
 describe("every example event renders", () => {
-  // Transport only: the stream text, the subagents above the input (chat.test.tsx), and the
-  // token rate, which reaches the client as the session's `output_per_s`.
+  // Transport only: the stream text, the subagents and the schedules above the input
+  // (chat.test.tsx), and the token rate, which reaches the client as the session's
+  // `output_per_s`.
   const names = readdirSync(WIRE)
     .filter(
       (f) =>
@@ -118,7 +119,8 @@ describe("every example event renders", () => {
         f !== "event.agent.delta.json" &&
         f !== "event.agent.delta.reset.json" &&
         f !== "event.subagents.live.json" &&
-        f !== "event.tokens.rate.json",
+        f !== "event.tokens.rate.json" &&
+        f !== "event.schedules.live.json",
     )
     .map((f) => f.replace(/\.json$/, ""));
   for (const [i, name] of names.entries()) {

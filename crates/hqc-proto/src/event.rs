@@ -180,7 +180,10 @@ pub struct SecretAsk {
 
 /// One subagent of `subagents.live` (SPEC §4, since 0.101), or (since 0.127) one background
 /// shell command of the agent, with only `task_id`, `description`, `duration_ms`, `call_id`,
-/// `kind` and `stoppable`.
+/// `kind` and `stoppable`; since 0.169 also a Monitor watcher (as a command), the wakeup the
+/// agent armed (`task_id` and `call_id` of its call, `description` its reason, `due_in_ms`) or a
+/// cron job of the agent (`task_id` its job id, `description` its prompt, `activity` its
+/// schedule in words, `call_id` of its `CronCreate`, `due_in_ms`), neither `stoppable`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveSubagent {
     pub task_id: String,
@@ -200,13 +203,37 @@ pub struct LiveSubagent {
     /// `task_started`; since SPEC 0.135); absent before that comes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
-    /// A subagent or a background command (since SPEC 0.141); absent from an older worker.
+    /// A subagent or a background command (since SPEC 0.141), a Monitor watcher, a wakeup or a
+    /// cron job (since SPEC 0.169); absent from an older worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<LiveKind>,
-    /// The runtime stops it alone on `session.stop_task` (since SPEC 0.161): a subagent's row
-    /// and a command's; absent — false, every row of an older worker.
+    /// The runtime stops it alone on `session.stop_task` (since SPEC 0.161): a subagent's row,
+    /// a command's and (since SPEC 0.169) a Monitor's; absent — false, every row of an older
+    /// worker.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stoppable: bool,
+    /// Milliseconds until a wakeup or a cron job fires when the list was sent, by the worker's
+    /// clock, 0 once due (since SPEC 0.169); only on those rows, and on a cron job only while
+    /// its next fire is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_in_ms: Option<u64>,
+}
+
+/// One schedule of `schedules.live` (SPEC §4, since 0.169): an enabled schedule of the session
+/// with a next run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveSchedule {
+    pub schedule_id: Uuid,
+    pub message: String,
+    /// Milliseconds until its next run when the list was sent, by the hub's clock, 0 when due.
+    pub due_in_ms: u64,
+    /// The pattern of a recurring schedule; absent for a one-off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
+    /// The time of a one-off; absent for a recurring one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<DateTime<Utc>>,
+    pub timezone: String,
 }
 
 /// What a row of `subagents.live` is.
@@ -215,6 +242,12 @@ pub struct LiveSubagent {
 pub enum LiveKind {
     Agent,
     Command,
+    /// A Monitor watcher of the agent (since SPEC 0.169).
+    Monitor,
+    /// The wakeup the agent armed with `ScheduleWakeup` (since SPEC 0.169).
+    Wakeup,
+    /// A job of the agent's `CronCreate` (since SPEC 0.169).
+    Cron,
     #[serde(other)]
     Unknown,
 }
@@ -259,8 +292,9 @@ pub enum EventKind {
         reset: bool,
     },
     /// The subagents the agent runs now, the whole list in the order they started, then (since
-    /// SPEC 0.127) its background shell commands; empty: none (since SPEC 0.101). Transport
-    /// only, never stored (SPEC §4, §5.2).
+    /// SPEC 0.127) its background shell commands, and (since SPEC 0.169) its Monitor watchers,
+    /// its wakeup and its cron jobs; empty: none (since SPEC 0.101). Transport only, never
+    /// stored (SPEC §4, §5.2).
     #[serde(rename = "subagents.live")]
     SubagentsLive { agents: Vec<LiveSubagent> },
     /// The output tokens per second the agent and its subagents spent over the last 20 s
@@ -269,6 +303,11 @@ pub enum EventKind {
     /// never stored (SPEC §4, §5.2).
     #[serde(rename = "tokens.rate")]
     TokensRate { output_per_s: u32 },
+    /// The session's enabled schedules (SPEC §16) with a next run, the next one first; empty:
+    /// none (since SPEC 0.169). Written by the hub only, transport only, never stored (SPEC
+    /// §4, §5.2).
+    #[serde(rename = "schedules.live")]
+    SchedulesLive { schedules: Vec<LiveSchedule> },
     #[serde(rename = "agent.message")]
     AgentMessage {
         text: String,
@@ -458,6 +497,7 @@ impl EventKind {
         "agent.delta",
         "subagents.live",
         "tokens.rate",
+        "schedules.live",
         "agent.message",
         "agent.thinking",
         "tool.call",
@@ -582,6 +622,7 @@ mod tests {
         "agent.delta",
         "subagents.live",
         "tokens.rate",
+        "schedules.live",
         "agent.message",
         "agent.thinking",
         "tool.call",
@@ -616,6 +657,10 @@ mod tests {
         (
             "tokens.rate",
             include_str!("../examples/wire/event.tokens.rate.json"),
+        ),
+        (
+            "schedules.live",
+            include_str!("../examples/wire/event.schedules.live.json"),
         ),
         (
             "agent.message",
@@ -679,6 +724,7 @@ mod tests {
             EventKind::AgentDelta { .. } => "agent.delta",
             EventKind::SubagentsLive { .. } => "subagents.live",
             EventKind::TokensRate { .. } => "tokens.rate",
+            EventKind::SchedulesLive { .. } => "schedules.live",
             EventKind::AgentMessage { .. } => "agent.message",
             EventKind::AgentThinking { .. } => "agent.thinking",
             EventKind::ToolCall { .. } => "tool.call",
@@ -912,6 +958,15 @@ mod tests {
             (Delivery::Failed, "failed"),
         ] {
             assert_eq!(serde_json::to_value(d).unwrap(), n);
+        }
+        for (k, n) in [
+            (LiveKind::Agent, "agent"),
+            (LiveKind::Command, "command"),
+            (LiveKind::Monitor, "monitor"),
+            (LiveKind::Wakeup, "wakeup"),
+            (LiveKind::Cron, "cron"),
+        ] {
+            assert_eq!(serde_json::to_value(k).unwrap(), n);
         }
     }
 

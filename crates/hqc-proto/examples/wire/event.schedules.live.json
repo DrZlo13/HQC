@@ -1,0 +1,25 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000123",
+  "ts": "2026-10-22T10:00:00Z",
+  "author": { "kind": "agent", "id": "0199f3a2-7c10-7000-8000-000000000001" },
+  "type": "schedules.live",
+  "payload": {
+    "schedules": [
+      {
+        "schedule_id": "0199f3a2-7c10-7000-8000-000000000201",
+        "message": "Check the nightly build and report failures",
+        "due_in_ms": 754000,
+        "at": "2026-10-22T10:12:34Z",
+        "timezone": "Europe/Moscow"
+      },
+      {
+        "schedule_id": "0199f3a2-7c10-7000-8000-000000000202",
+        "message": "Summarize yesterday's commits",
+        "due_in_ms": 82800000,
+        "cron": "0 9 * * *",
+        "timezone": "Europe/Moscow"
+      }
+    ]
+  }
+}

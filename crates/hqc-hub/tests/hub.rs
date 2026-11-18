@@ -2531,8 +2531,9 @@ async fn a_worker_restart_drops_the_kept_subagents() {
 /// SPEC §4: the empty list goes directly and is lost with a broken link, and a worker that
 /// reconnects without a restart repeats only a list that is not empty. A `session.state` that
 /// counts no subagent but a background task keeps the list, which holds the agent's background
-/// commands; one that counts neither drops the kept list, and so does deleting the session; the
-/// subscribers get an empty list, a new subscriber none.
+/// commands; one that counts neither drops the kept list but its wakeups and cron jobs, one that
+/// says the agent stopped drops all, and so does deleting the session; the subscribers get an
+/// empty list, a new subscriber none.
 #[tokio::test]
 async fn a_count_of_none_drops_the_kept_subagents() {
     let hub = TestHub::start().await;
@@ -2586,12 +2587,75 @@ async fn a_count_of_none_drops_the_kept_subagents() {
     .await;
     w.expect("ack").await;
     assert_eq!(next_live(&mut c).await["payload"]["agents"], json!([]));
+
+    // The wakeups and cron jobs the agent armed wait while it is idle: they stay, the rest of
+    // the list goes, and the subscribers get the timers only.
+    let timers = json!([
+        {"task_id": "a1", "description": "Fix the build", "duration_ms": 1000},
+        {"task_id": "w1", "description": "Check again", "duration_ms": 1000, "kind": "wakeup",
+         "due_in_ms": 60_000},
+        {"task_id": "c1", "description": "Poll CI", "activity": "Every 5 minutes",
+         "duration_ms": 1000, "kind": "cron", "due_in_ms": 90_000},
+    ]);
+    w.event(agent_event(
+        &sid,
+        "subagents.live",
+        json!({ "agents": timers }),
+    ))
+    .await;
+    next_live(&mut c).await;
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "running", "locked_by": "hqc", "subagents": 0}),
+    )
+    .await;
+    w.expect("ack").await;
+    let left = next_live(&mut c).await;
+    let ids: Vec<&Value> = left["payload"]["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| &a["task_id"])
+        .collect();
+    assert_eq!(ids, ["w1", "c1"], "{left}");
+    let mut late = FakeClient::connect(&hub).await;
+    let backlog = late.subscribe(&sid, 0).await;
+    let kept = backlog
+        .iter()
+        .find(|e| e["type"] == "subagents.live")
+        .unwrap();
+    assert_eq!(
+        kept["payload"]["agents"].as_array().unwrap().len(),
+        2,
+        "{backlog:?}"
+    );
+    assert!(kept["payload"]["agents"][0]["due_in_ms"].as_u64() <= Some(60_000));
+    // The empty list from the worker ends the timers too.
+    w.event(agent_event(&sid, "subagents.live", json!({ "agents": [] })))
+        .await;
+    assert_eq!(next_live(&mut c).await["payload"]["agents"], json!([]));
     let mut fresh = FakeClient::connect(&hub).await;
     let backlog = fresh.subscribe(&sid, 0).await;
     assert!(
         backlog.iter().all(|e| e["type"] != "subagents.live"),
         "{backlog:?}"
     );
+    // A stopped agent's timers died with its process: its `session.state` drops them, its
+    // empty list may have been lost with the link.
+    w.event(agent_event(
+        &sid,
+        "subagents.live",
+        json!({ "agents": timers }),
+    ))
+    .await;
+    next_live(&mut c).await;
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "stopped", "locked_by": "none"}),
+    )
+    .await;
+    w.expect("ack").await;
+    assert_eq!(next_live(&mut c).await["payload"]["agents"], json!([]));
 
     w.event(live()).await;
     assert_eq!(

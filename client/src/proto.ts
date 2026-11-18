@@ -96,7 +96,7 @@ export interface Chain {
 export interface EventBase {
   session_id: Uuid;
   event_id: Uuid;
-  /** Assigned by the hub; absent only on `agent.delta` and `subagents.live` (SPEC §5.2, §6). */
+  /** Assigned by the hub; absent only on `agent.delta`, `subagents.live` and `schedules.live` (SPEC §5.2, §6). */
   seq?: number;
   ts: string;
   author: Author;
@@ -145,18 +145,40 @@ export interface LiveSubagent {
   /** `call_id` of the `tool.call` that started it (since 0.135); absent before the runtime
    *  names it. */
   call_id?: string;
-  /** A subagent or a background command (since 0.141); absent from an older worker. */
+  /** A subagent or a background command (since 0.141), a Monitor watcher, a wakeup or a cron
+   *  job (since 0.169); absent from an older worker. */
   kind?: LiveKind;
-  /** Since 0.161: it can be stopped alone (`POST .../tasks/{task_id}/stop`), a subagent's row
-   *  and a command's; absent from an older worker. */
+  /** Since 0.161: it can be stopped alone (`POST .../tasks/{task_id}/stop`), a subagent's row,
+   *  a command's and (since 0.169) a Monitor's; absent from an older worker. */
   stoppable?: boolean;
+  /** On a `wakeup` or `cron` row (since 0.169): milliseconds until it fires when the list was
+   *  sent, 0 once due; absent on a cron job whose next fire is not known. */
+  due_in_ms?: number;
 }
-export const LIVE_KINDS = ['agent', 'command'] as const;
+/** `monitor` (a watcher, a command to the client), `wakeup` and `cron` (what the agent armed)
+ *  since 0.169. */
+export const LIVE_KINDS = ['agent', 'command', 'monitor', 'wakeup', 'cron'] as const;
 export type LiveKind = (typeof LIVE_KINDS)[number];
 /** The whole list: the subagents in the order they started, then (since 0.127) the agent's
- *  background commands; empty: none. Transport only. */
+ *  background commands, and (since 0.169) its watchers, wakeup and cron jobs; empty: none.
+ *  Transport only. */
 export interface SubagentsLive {
   agents: LiveSubagent[];
+}
+/** One enabled schedule of the session (SPEC §16) with a next run (since 0.169). */
+export interface LiveSchedule {
+  schedule_id: Uuid;
+  message: string;
+  /** Milliseconds until its next run when the list was sent, 0 when due. */
+  due_in_ms: number;
+  /** The pattern of a recurring schedule, or the time of a one-off. */
+  cron?: string;
+  at?: string;
+  timezone: string;
+}
+/** The session's schedules, the next one first; empty: none. Transport only. */
+export interface SchedulesLive {
+  schedules: LiveSchedule[];
 }
 /** Output tokens per second of the agent and its subagents. Transport only: the hub keeps it
  *  as the session's `output_per_s`. */
@@ -305,6 +327,7 @@ export interface PayloadByType {
   'agent.delta': AgentDelta;
   'subagents.live': SubagentsLive;
   'tokens.rate': TokensRate;
+  'schedules.live': SchedulesLive;
   'agent.message': AgentMessage;
   'agent.thinking': AgentThinking;
   'tool.call': ToolCall;
@@ -443,10 +466,24 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
         call_id: optStr(a, 'call_id'),
         kind: oneOf(a, 'kind', LIVE_KINDS),
         stoppable: optBool(a, 'stoppable'),
+        due_in_ms: optNum(a, 'due_in_ms'),
       };
     }),
   }),
   'tokens.rate': (p) => ({ output_per_s: num(p, 'output_per_s') }),
+  'schedules.live': (p) => ({
+    schedules: arr(p, 'schedules').map((v, i) => {
+      const s = obj(v, `schedules[${i}]`);
+      return {
+        schedule_id: str(s, 'schedule_id'),
+        message: str(s, 'message'),
+        due_in_ms: num(s, 'due_in_ms'),
+        cron: optStr(s, 'cron'),
+        at: optStr(s, 'at'),
+        timezone: str(s, 'timezone'),
+      };
+    }),
+  }),
   'agent.message': (p) => ({
     text: str(p, 'text'),
     final: bool(p, 'final'),

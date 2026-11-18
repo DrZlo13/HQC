@@ -101,3 +101,19 @@ it('lists the session schedules, pauses, resumes and deletes them', async () => 
   button('Close')!.click();
   expect(onClose).toHaveBeenCalled();
 });
+
+describe('schedules.live (SPEC 0.169)', () => {
+  it('is kept by the timeline with its time, and gone when the socket drops', () => {
+    const t = new Timeline();
+    t.apply(parseEvent(load('event.schedules.live.json')));
+    expect(t.liveSchedules.map((s) => s.message)).toEqual([
+      'Check the nightly build and report failures',
+      "Summarize yesterday's commits",
+    ]);
+    expect(t.liveSchedulesAt).toBeGreaterThan(0);
+    // Not a stored event: it takes no place in the feed.
+    expect(t.events()).toEqual([]);
+    t.reset();
+    expect(t.liveSchedules).toEqual([]);
+  });
+});

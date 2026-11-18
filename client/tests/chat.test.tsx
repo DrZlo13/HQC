@@ -24,6 +24,7 @@ import {
 import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, modelName, shownModel } from '../src/ui/labels';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
 import { Chat, withQuote } from '../src/ui/Chat';
+import { LiveSubagents } from '../src/ui/LiveSubagents';
 import { WEB_SEARCHES, storedWebSearch } from '../src/websearch';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
@@ -94,6 +95,8 @@ function setup(
       return { events: found, invalid: [], maxSeq: Math.max(0, ...seqs), minSeq: seqs[0], count: found.length };
     }),
     readCursor: vi.fn(async () => {}),
+    // GET /api/schedules?session_id=
+    schedules: vi.fn(async () => []),
     approve: vi.fn(async () => {}),
     takeover: vi.fn(async () => ({})),
     // PATCH /api/sessions/{id}: the hub stores the mode, the worker confirms it at once; the
@@ -931,7 +934,7 @@ describe('live subagents', () => {
     const { app } = setup('running', { subagents: 2 });
     await mount(app);
     expect($('.live-agents')).toBeNull();
-    await act(async () => subscriber!.onEvent(live()));
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = e.payload.agents.slice(0, 2)))));
     expect(rows()).toEqual([
       [
         'Agent: Fix schematic power nets in import: Running Verify the final sample runs are byte-identical',
@@ -1012,6 +1015,79 @@ describe('live subagents', () => {
     const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ sent: true })));
     await new Api('', fetchImpl as never).stopTask('s1', 'a52af2b436ded4cea');
     expect(fetchImpl).toHaveBeenCalledWith('/api/sessions/s1/tasks/a52af2b436ded4cea/stop', expect.objectContaining({ method: 'POST' }));
+  });
+
+  const schedulesLive = (patch: (e: any) => void = () => {}) =>
+    ev('event.schedules.live', 0, (e) => {
+      delete e.seq;
+      patch(e);
+    });
+
+  it('shows the Monitor, Wakeup and Cron rows of the agent, the timers with a countdown and a still dot', async () => {
+    // No subagent and no background task: the agent is idle, its timers wait.
+    const { app } = setup('idle', { subagents: 0, background_tasks: 0 });
+    await mount(app);
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = e.payload.agents.slice(2)))));
+    const got = rows();
+    expect(got.map((r) => r[0])).toEqual([
+      "Monitor: Watch the run's log",
+      'Wakeup: Check the build again',
+      'Cron: Pull the CI status and report failures · Every 5 minutes',
+    ]);
+    // The watcher is a command: its run time; the timers count down to their fire.
+    expect(got[0][1]).toMatch(/^1m \ds$/);
+    expect(got[1][1]).toMatch(/^in 4m \d+s$/);
+    expect(got[2][1]).toMatch(/^in 4\ds$/);
+    const dots = [...root.querySelectorAll('.live-agents-dot')].map((d) => d.classList.contains('live-agents-dot-still'));
+    expect(dots).toEqual([false, true, true]);
+    // The watcher is a task the CLI stops alone; a timer is none.
+    const stops = [...root.querySelectorAll('.live-agents-row')].map((r) => r.querySelector('.live-agents-stop') !== null);
+    expect(stops).toEqual([true, false, false]);
+  });
+
+  it('shows the block for the session\'s schedules alone: "Scheduled:", the message, the countdown; a click opens the schedules', async () => {
+    const { api, app } = setup('idle', { subagents: 0, background_tasks: 0 });
+    await mount(app);
+    expect($('.live-agents')).toBeNull();
+    await act(async () => subscriber!.onEvent(schedulesLive()));
+    expect(rows().map((r) => r[0])).toEqual([
+      'Scheduled: Check the nightly build and report failures',
+      "Scheduled: Summarize yesterday's commits",
+    ]);
+    expect(rows()[0][1]).toMatch(/^in 1[12]m \d+s$/);
+    expect(rows()[1][1]).toMatch(/^in 22h \d+m \d+s$/);
+    expect($('.live-agents-dot')!.classList.contains('live-agents-dot-still')).toBe(true);
+    expect($('.schedules')).toBeNull();
+    await act(async () => $('.live-agents-open')!.click());
+    expect($('.schedules')).not.toBeNull();
+    expect(api.schedules).toHaveBeenCalledWith('s1');
+    // The list emptied: the block goes.
+    await act(async () => subscriber!.onEvent(schedulesLive((e) => (e.payload.schedules = []))));
+    expect($('.live-agents')).toBeNull();
+  });
+
+  it('counts a timer down from the time its list came, "due" at 0, and the running rows up', async () => {
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    const agents = [
+      { task_id: 'w', description: 'Check', duration_ms: 1000, kind: 'wakeup' as const, due_in_ms: 270_000 },
+      { task_id: 'c', description: 'Poll', activity: 'Every 5 minutes', duration_ms: 1000, kind: 'cron' as const },
+      { task_id: 'a', description: 'Fix', duration_ms: 1000, kind: 'agent' as const },
+    ];
+    const schedules = [{ schedule_id: 's', message: 'Ping', due_in_ms: 41_000, timezone: 'UTC' }];
+    const at = async (ms: number) => {
+      await act(async () =>
+        render(
+          <LiveSubagents agents={agents} receivedAt={1000} schedules={schedules} schedulesAt={1000} onSchedules={() => {}} now={() => 1000 + ms} />,
+          root,
+        ),
+      );
+      return rows().map((r) => r[1]);
+    };
+    // A cron job whose next fire is not known has no countdown.
+    expect(await at(0)).toEqual(['in 4m 30s', '', '1s', 'in 41s']);
+    expect(await at(41_000)).toEqual(['in 3m 49s', '', '42s', 'due']);
+    expect(await at(300_000)).toEqual(['due', '', '5m 1s', 'due']);
   });
 });
 

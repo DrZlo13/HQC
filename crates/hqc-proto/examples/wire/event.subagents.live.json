@@ -22,6 +22,30 @@
         "duration_ms": 1200,
         "kind": "agent",
         "stoppable": true
+      },
+      {
+        "task_id": "bwatch1",
+        "description": "Watch the run's log",
+        "duration_ms": 61000,
+        "kind": "monitor",
+        "stoppable": true
+      },
+      {
+        "task_id": "toolu_01Wake",
+        "description": "Check the build again",
+        "duration_ms": 30000,
+        "call_id": "toolu_01Wake",
+        "kind": "wakeup",
+        "due_in_ms": 270000
+      },
+      {
+        "task_id": "1a2b3c4d",
+        "description": "Pull the CI status and report failures",
+        "activity": "Every 5 minutes",
+        "duration_ms": 600000,
+        "call_id": "toolu_01Cron",
+        "kind": "cron",
+        "due_in_ms": 41000
       }
     ]
   }

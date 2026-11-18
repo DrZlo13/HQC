@@ -701,8 +701,19 @@ export function Chat({
         </div>
       )}
       {/* The list also holds the agent's background commands, which only background_tasks counts. */}
-      {((info?.subagents ?? 0) > 0 || (info?.background_tasks ?? 0) > 0) && (
-        <LiveSubagents agents={t.liveAgents} receivedAt={t.liveAgentsAt} onStop={stopTask} />
+      {/* The wakeups and cron jobs of the agent and the session's schedules wait while it is idle. */}
+      {((info?.subagents ?? 0) > 0 ||
+        (info?.background_tasks ?? 0) > 0 ||
+        t.liveAgents.some((a) => a.kind === 'wakeup' || a.kind === 'cron') ||
+        t.liveSchedules.length > 0) && (
+        <LiveSubagents
+          agents={t.liveAgents}
+          receivedAt={t.liveAgentsAt}
+          schedules={t.liveSchedules}
+          schedulesAt={t.liveSchedulesAt}
+          onSchedules={() => setSchedules(true)}
+          onStop={stopTask}
+        />
       )}
       {locked && (
         <div class="composer-wrap">

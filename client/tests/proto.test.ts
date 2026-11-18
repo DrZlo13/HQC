@@ -72,6 +72,24 @@ describe('examples/wire', () => {
     expect(plain.type === 'agent.message' && plain.payload.interrupted).toBeUndefined();
   });
 
+  it('reads the timers of subagents.live and schedules.live (SPEC 0.169)', () => {
+    const live = parseEvent(load('event.subagents.live.json'));
+    if (live.type !== 'subagents.live') throw new Error('type');
+    expect(live.payload.agents.map((a) => [a.kind, a.due_in_ms])).toEqual([
+      ['agent', undefined],
+      ['agent', undefined],
+      ['monitor', undefined],
+      ['wakeup', 270000],
+      ['cron', 41000],
+    ]);
+    const sch = parseEvent(load('event.schedules.live.json'));
+    if (sch.type !== 'schedules.live') throw new Error('type');
+    expect(sch.payload.schedules).toEqual([
+      expect.objectContaining({ due_in_ms: 754000, at: '2026-10-22T10:12:34Z', cron: undefined, timezone: 'Europe/Moscow' }),
+      expect.objectContaining({ due_in_ms: 82800000, cron: '0 9 * * *', at: undefined }),
+    ]);
+  });
+
   it('reads the text answer of approval.response (T26)', () => {
     const ev = parseEvent(load('event.approval.response.message.json'));
     expect(ev.type === 'approval.response' && ev.payload.message).toBe('Leave the root alone, look only at ~/work/hqc');

@@ -56,7 +56,7 @@ pub enum Ingested {
 }
 
 /// Event types only the hub writes (SPEC §4): input of users, answers to requests and
-/// messages between sessions. A worker sending one is refused.
+/// messages between sessions, and `schedules.live`. A worker sending one is refused.
 fn hub_only(kind: &EventKind) -> bool {
     matches!(
         kind,
@@ -64,6 +64,7 @@ fn hub_only(kind: &EventKind) -> bool {
             | EventKind::ApprovalResponse { .. }
             | EventKind::ClarifyResponse { .. }
             | EventKind::PeerMessage { .. }
+            | EventKind::SchedulesLive { .. }
     )
 }
 

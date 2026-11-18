@@ -2131,7 +2131,10 @@ impl Core {
         //   the final answer, or before an interrupt; 2.1.312);
         // - `cancelled`: not taken, `dropped`;
         // - no line (an older CLI): carried if written during the turn, else taken.
-        let (mut carried, mut dropped) = (Vec::new(), Vec::new());
+        // A taken one goes before the events of this `result` (the final message, usage,
+        // `status idle`; SPEC §5.2): the hub opens a turn on an `ack`, and one after the
+        // `status idle` would leave the session running after its turn.
+        let (mut carried, mut dropped, mut taken) = (Vec::new(), Vec::new(), Vec::new());
         for mut w in std::mem::take(&mut self.awaiting_echo) {
             let carry = match w.state.as_deref() {
                 Some("cancelled") => {
@@ -2150,11 +2153,12 @@ impl Core {
                 self.awaiting_echo.push_back(w);
             } else {
                 tracing::info!(session_id = %self.session_id, event_id = %w.event_id, "input taken without an echo (local command)");
-                out.push(Action::Emit(AdapterEvent::InputAccepted {
+                taken.push(Action::Emit(AdapterEvent::InputAccepted {
                     event_id: w.event_id,
                 }));
             }
         }
+        out.splice(0..0, taken);
         tracing::info!(
             session_id = %self.session_id,
             subtype,

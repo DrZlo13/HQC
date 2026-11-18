@@ -200,6 +200,62 @@ async fn hub_runs_a_claude_code_turn_with_an_approval() {
     w.stop().await;
 }
 
+/// SPEC §5.2: a local slash command (`/name x`, a `result` and no echo) is taken at its turn's
+/// end; its `ack` reaches the hub before that turn's `status idle`, else the hub would open a
+/// turn on it after that turn ended. Several sessions: the connection sends the outbox and its
+/// direct frames in an order of its own.
+#[tokio::test]
+async fn a_local_commands_ack_goes_before_its_status() {
+    let env = Env::new();
+    let stream = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_ms":15,"result":"Session renamed to: x","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#;
+    let claude = ScriptedClaude::new(stream);
+    let factory = ClaudeCodeAdapters::new(
+        ClaudeOptions {
+            config_dir: Some(env.dir.path().join("claude-config")),
+            ..ClaudeOptions::default()
+        },
+        Arc::new(claude.clone()),
+    );
+    let mut hub = FakeHub::start().await;
+    let w = start_worker_factory(&env, env.config(&hub.url()), Arc::new(factory));
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let mut seq = 0;
+    for round in 0..6 {
+        let sid = Uuid::now_v7();
+        let id = c.frame("session.start", env.start_payload(sid)).await;
+        loop {
+            let f = c.recv().await;
+            if f["type"] == "ack" && f["id"] == id.as_str() {
+                break;
+            }
+        }
+        let input_id = Uuid::now_v7();
+        let input = c
+            .frame(
+                "session.input",
+                json!({"session_id": sid, "event_id": input_id, "text": "/name x",
+                       "artifact_ids": [], "peer_prefix": []}),
+            )
+            .await;
+        let mut acked = false;
+        loop {
+            let f = c.recv().await;
+            if f["type"] == "ack" && f["id"] == input.as_str() {
+                acked = true;
+            } else if f["type"] == "event" {
+                seq += 1;
+                c.ack_event(&f, seq).await;
+                if f["payload"]["event"]["type"] == "status" {
+                    assert!(acked, "round {round}: the status before the input's ack");
+                    break;
+                }
+            }
+        }
+    }
+    w.stop().await;
+}
+
 /// T26: "Reply with text instead". The hub's `approval.response` with the deny option
 /// and `message` reaches Claude Code as `control_response` `deny` whose `message` carries the
 /// user's text (the model gets it as the tool result, SPEC §10.1).

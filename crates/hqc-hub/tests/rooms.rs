@@ -5105,3 +5105,133 @@ async fn a_left_out_message_still_caps_the_notice() {
     assert_eq!(ev["chain"]["capped_by"], json!(addr(&y)), "{ev}");
     hub.finish().await;
 }
+
+/// The texts of the events in a `hqc_read` answer `r`, with their types.
+fn read_texts(r: &Value) -> Vec<(String, String)> {
+    r["result"]["events"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{r}"))
+        .iter()
+        .filter_map(|e| {
+            Some((
+                e["type"].as_str()?.to_string(),
+                e["payload"]["text"].as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// SPEC §7, §7.1.1: `hqc_read` reads a room for an outside session: the owner's message and the
+/// agents' posts, the room's address; an agent of the room reads neither it nor another agent of
+/// it, but its own session; and the entries a notice left out are reached by paging back from a
+/// `seq`.
+#[tokio::test]
+async fn hqc_read_reads_a_room_and_the_entries_its_notice_left_out() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (_, token) = caller(&hub, &mut w).await;
+
+    // A council the owner wrote in, both agents posted.
+    let (council, members) = room(
+        &hub,
+        json!({"title": "Panel", "mode": "council",
+               "agents": [{"name": "A", "model": "opus"}, {"name": "B", "model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "A"), titled(&members, "B"));
+    say(&hub, &council, "Which store?").await;
+    let (starts, inputs) = starts_and_inputs(&mut w, 2).await;
+    for i in &inputs {
+        ack_input(&mut w, i).await;
+    }
+    assert!(answer(&mut w, a, of(&inputs, a), "Postgres.")
+        .await
+        .is_empty());
+    assert!(answer(&mut w, b, of(&inputs, b), "SQLite.")
+        .await
+        .is_empty());
+    let want = [
+        ("user.message", "Which store?"),
+        ("peer.message", "Postgres."),
+        ("peer.message", "SQLite."),
+    ];
+    let args = json!({"session": addr(&council)});
+    let (r, _) = call(&mut w, &token, "hqc_read", args.clone(), "read-1", 0).await;
+    assert!(r.get("error").is_none(), "{r}");
+    assert_eq!(r["result"]["address"], addr(&council).as_str(), "{r}");
+    let got = read_texts(&r);
+    for (kind, text) in want {
+        assert!(
+            got.contains(&(kind.to_string(), text.to_string())),
+            "{kind} {text} not in {got:?}"
+        );
+    }
+    // An agent of the room reads neither the room nor another agent of it, whose answers it would
+    // see before its own; its own session it reads.
+    let agent = of(&starts, a)["payload"]["session_token"].as_str().unwrap();
+    for (n, other) in [addr(&council), addr(b)].into_iter().enumerate() {
+        let args = json!({"session": other});
+        let (r, _) = call(&mut w, agent, "hqc_read", args, &format!("read-2-{n}"), 0).await;
+        assert_eq!(r["error"]["code"], "invalid_args", "{r}");
+    }
+    let args = json!({"session": addr(a)});
+    let (r, _) = call(&mut w, agent, "hqc_read", args, "read-2-own", 0).await;
+    assert!(r.get("error").is_none(), "{r}");
+    assert_eq!(r["result"]["address"], addr(a).as_str(), "{r}");
+
+    // A notice that leaves out two of four posts; the room's seqs page back to them.
+    let (me, mine) = caller(&hub, &mut w).await;
+    let (r, inputs) = room_call(
+        &mut w,
+        &mine,
+        json!({"project": "personal", "title": "Quartet", "mode": "council", "agents": [
+            {"name": "C", "model": "opus"}, {"name": "D", "model": "sonnet"},
+            {"name": "E", "model": "haiku"}, {"name": "F", "model": "fable"}
+        ], "message": "Which store?"}),
+        "room-1",
+        4,
+    )
+    .await;
+    let (quartet, members) = room_at(&hub, r["result"]["address"].as_str().unwrap()).await;
+    for i in &inputs {
+        ack_input(&mut w, i).await;
+    }
+    let mut frames = Vec::new();
+    for (name, text) in [
+        ("C", "One."),
+        ("D", "Two."),
+        ("E", "Three."),
+        ("F", "Four."),
+    ] {
+        let s = titled(&members, name);
+        frames = answer(&mut w, s, of(&inputs, s), text).await;
+    }
+    let n = notice_of(&mut w, frames, &me).await;
+    let shown = n["payload"]["text"].as_str().unwrap();
+    assert!(
+        shown.contains("2 earlier entries left out, read them with hqc_read]")
+            && !shown.contains("One.")
+            && !shown.contains("Two."),
+        "{shown}"
+    );
+    let third = hub
+        .events(id(&quartet))
+        .await
+        .into_iter()
+        .find(|e| e["payload"]["text"] == "Three.")
+        .unwrap()["seq"]
+        .clone();
+    let args = json!({"session": addr(&quartet), "before_seq": third});
+    let (r, _) = call(&mut w, &mine, "hqc_read", args, "read-3", 0).await;
+    assert!(r.get("error").is_none(), "{r}");
+    let got = read_texts(&r);
+    for text in ["One.", "Two."] {
+        assert!(
+            got.contains(&("peer.message".to_string(), text.to_string())),
+            "{text} not in {got:?}"
+        );
+    }
+    assert!(!got.iter().any(|(_, t)| t == "Three."), "{got:?}");
+    hub.finish().await;
+}

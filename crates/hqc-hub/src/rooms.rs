@@ -1163,14 +1163,14 @@ async fn council_ended(app: &AppState, room: &SessionRow) -> anyhow::Result<()> 
 /// A round of room `room` ended for `reason`: every session that is none of its agents and wrote
 /// in it, the first message of the session that made it with `hqc_room` or an `hqc_send` into it,
 /// gets a `peer.message` from the room with how it ended and the last two entries that came in
-/// the room since its previous notice or its first message (SPEC §7.1.1), as a send of the room wakes it (`delivery:
-/// pending`; [`notify`]). The owner, a person who reads the feed, gets none, nor a session that
-/// is archived or gone. The notice is stored under the room's [`lock`], which the caller holds,
-/// with the end that caused it, so one end tells a session once. Its chain is the last post's
-/// moved on ([`peers::moved_on`]), else that of the session's message, and holds whatever the
-/// limits; it is capped by every entry since the boundary, the left-out ones too, as an agent's
-/// input is by the posts in front of it ([`entries_cap`]). The
-/// reason is cleaned like a name ([`clean_name`]).
+/// the room since its previous notice or its first message (SPEC §7.1.1), as a send of the room
+/// wakes it (`delivery: pending`; [`notify`]). The owner, a person who reads the feed, gets none,
+/// nor a session that is archived or gone. The notice is stored under the room's [`lock`], which
+/// the caller holds, with the end that caused it, so one end tells a session once. Its chain is
+/// the last post's moved on ([`peers::moved_on`]), else that of the session's message, and holds
+/// whatever the limits; it is capped by every entry since the boundary, the left-out ones too, as
+/// an agent's input is by the posts in front of it ([`entries_cap`]). The reason is cleaned like
+/// a name ([`clean_name`]).
 pub async fn round_ended(app: &AppState, room: &SessionRow, reason: &str) -> anyhow::Result<()> {
     let senders: Vec<Uuid> = sqlx::query_scalar(&format!(
         "SELECT sender FROM (
@@ -1206,8 +1206,7 @@ pub async fn round_ended(app: &AppState, room: &SessionRow, reason: &str) -> any
 /// previous notice (`notice_seq`), or, never told, after its first message there (that message
 /// itself left out), of which the notice shows the last two, oldest first, as an agent's block
 /// has it ([`room_block`]), its own messages under "message from you" ([`notice_text`]). Due
-/// when anything came since; a session never told gets the reason
-/// alone when nothing did.
+/// when anything came since; a session never told gets the reason alone when nothing did.
 async fn notify(
     app: &AppState,
     room: &SessionRow,

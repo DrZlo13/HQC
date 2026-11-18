@@ -232,7 +232,8 @@ pub const TOOLS: &[Tool] = &[
             the events as the hqc chat shows them: the messages of users and agents, messages \
             between sessions, a room's posts, tool calls with their output, and hqc's own \
             lines. Without `before_seq` and `after_seq` you get the last events, oldest first. \
-            A page is at most 100 events and 64 KiB; when the page leaves out older events the \
+            A page is at most 100 events and 64 KiB (one event is returned even when it alone \
+            is larger); when the page leaves out older events the \
             answer has `earlier`, pass it as `before_seq` for the page before; when it leaves \
             out newer ones it has `later`, pass it as `after_seq` for the page after. Each \
             event has its `seq`. To find where to read, use hqc_search_history, whose hits \

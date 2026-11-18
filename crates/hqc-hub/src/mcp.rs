@@ -468,7 +468,7 @@ async fn read(app: &AppState, caller: &SessionRow, v: Value) -> ToolResult {
             "before_seq and after_seq cannot be given together",
         ));
     }
-    let (s, address) = crate::peers::reader(app, caller, &a.session).await?;
+    let (s, address) = crate::peers::readable(app, caller, &a.session).await?;
     let forward = a.after_seq.is_some();
     let rows = match a.after_seq {
         Some(n) => db::events_after(&app.db, s.id, n, READ_EVENTS).await,

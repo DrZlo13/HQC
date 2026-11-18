@@ -5225,6 +5225,11 @@ async fn hqc_read_reads_a_room_and_the_entries_its_notice_left_out() {
         let args = json!({"session": other});
         let (r, _) = call(&mut w, agent, "hqc_read", args, &format!("read-2-{n}"), 0).await;
         assert_eq!(r["error"]["code"], "invalid_args", "{r}");
+        // Nor a subagent of them: refused before the worker is asked (`call` takes no
+        // `session.subagent_history`).
+        let args = json!({"session": other, "subagent": "a52af2b436ded4cea"});
+        let (r, _) = call(&mut w, agent, "hqc_read", args, &format!("read-3-{n}"), 0).await;
+        assert_eq!(r["error"]["code"], "invalid_args", "{r}");
     }
     let args = json!({"session": addr(a)});
     let (r, _) = call(&mut w, agent, "hqc_read", args, "read-2-own", 0).await;

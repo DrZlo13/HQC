@@ -525,7 +525,8 @@ async fn read(app: &AppState, caller: &SessionRow, v: Value) -> Result<Answer, M
             ),
         ));
     }
-    // Off the connection's loop: the worker answers on the connection the call came by.
+    // Off the connection's loop: the worker may answer on the connection the call came by, and
+    // a slow one would hold it for up to 10 s.
     let app = app.clone();
     Ok(Answer::Wait(Box::pin(async move {
         let asked = crate::api::ask_worker(&app, worker, |request_id| {
@@ -542,13 +543,15 @@ async fn read(app: &AppState, caller: &SessionRow, v: Value) -> Result<Answer, M
             Ok(ResultBody::SubagentHistory(w)) => w,
             Ok(other) => return Err(internal(format!("subagent_history answered {other:?}"))),
             Err(ApiError::Invalid(_, m)) => {
+                // The worker's words are for the hub (`unknown_session`), not for the agent.
+                tracing::info!(%worker, session_id = %s.id, "subagent_history refused: {m}");
                 return Err(err(
                     error_code::UNAVAILABLE,
                     format!(
                         "{address} is not running now; a subagent is read from its worker \
-                         while the session runs ({m})"
+                         while the session runs"
                     ),
-                ))
+                ));
             }
             Err(ApiError::Conflict(_, m) | ApiError::Limited(_, m)) => {
                 return Err(err(error_code::UNAVAILABLE, m))

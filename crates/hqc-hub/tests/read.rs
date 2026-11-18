@@ -593,13 +593,10 @@ async fn a_subagent_read_that_cannot_be_asked_is_refused() {
         .await;
     let r = rig.w.expect("mcp.result").await["payload"].clone();
     assert_eq!(r["error"]["code"], "unavailable", "{r}");
-    assert!(
-        r["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("is not running now"),
-        "{r}"
-    );
+    let message = r["error"]["message"].as_str().unwrap();
+    assert!(message.contains("is not running now"), "{r}");
+    // The worker's words are for the hub, not for the agent.
+    assert!(!message.contains("session is not loaded"), "{r}");
 
     // An idle-stopped session is still in the worker's list, but runs nothing to read.
     let stopped = session(&rig.hub.app.db, rig.owner, rig.project, "asleep", "Asleep").await;

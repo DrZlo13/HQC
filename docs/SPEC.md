@@ -2743,19 +2743,21 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   the owner's project (else `not_found`); a refused query is `invalid_args`. No side effects,
   so a repeated call simply runs again.
 - `hqc_read(session, before_seq?, after_seq?)` — one session read from the hub in full, page by
-  page, where `hqc_search_history` only finds. `session` is an address or an id of a session
-  of the calling session's owner: an archived one, the calling one itself and a room are read
-  too; another owner's session, a service session and a deleted one are `not_found`. The
-  events are those of `GET /api/sessions/{id}/events` (the client's shape: user and agent
-  messages, messages between sessions, a room's posts, tool calls and output, hqc's lines). Without a cursor the answer is the last events; `before_seq: N` the last events
-  with `seq < N`; `after_seq: N` the first events with `seq > N`; both together are
-  `invalid_args`. A page is at most 100 events and 64 KiB of serialized `events`; over the
-  budget the events at the far end of the page are left out (the oldest, for `after_seq` the
-  newest), but one event is always returned, however large. The result is `{address, title,
-  events (oldest first), last_seq, earlier?, later?}`: `earlier` (the `seq` of the first event
-  returned, to pass as `before_seq`) only when older events exist, `later` (the last one's, to
-  pass as `after_seq`) only when newer ones do. No side effects: no read cursor moves, nothing
-  is written.
+  page, where `hqc_search_history` only finds. `session` is an address or an id of a session of the
+  calling session's owner: an archived one, the calling one itself and a room are read too; another
+  owner's session, a service session and a deleted one are `not_found`. The events are those of
+  `GET /api/sessions/{id}/events` (the client's shape: user and agent messages, messages between
+  sessions, a room's posts, tool calls and output, hqc's lines). Without a cursor the answer is the
+  last events; `before_seq: N` the last events with `seq < N`; `after_seq: N` the first events with
+  `seq > N`; both together are `invalid_args`. A page is at most 100 events and 64 KiB of
+  serialized `events`; over the budget the events at the far end of the page are left out (the
+  oldest, for `after_seq` the newest), but one event is always returned, however large. The result
+  is `{address, title, events (oldest first), last_seq, earlier?, later?}`: `earlier` (the `seq` of
+  the first event returned, to pass as `before_seq`) only when older events exist, `later` (the
+  last one's, to pass as `after_seq`) only when newer ones do. No side effects: no read cursor
+  moves, nothing is written. An agent of a room cannot read its room or another agent of it
+  (`invalid_args`): what is said there comes to it with its input from the room, and in a `council`
+  it does not see the others' answers to the message it answers. Its own session it reads.
 - `hqc_schedule(session, at|cron, message)` — the hub's cron (§16). Since 0.38 (T35):
   `hqc_schedule(session, message, at?, cron?, timezone?, catch_up?)`; `session` — an address or
   an id of the owner's session (the calling one too), by the target rules of §7.1 except that a
@@ -3339,37 +3341,37 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   that agents in the same mode join (a known limitation).
   Kept in the input's chain, the cap holds the turn on it, and what that turn sends and posts
   carries it on, so an agent's text does not reach a higher mode one post later.
-- A room's notice: when a round of the room ends, the room tells every session that wrote in it
-  and is none of its agents (`hqc_room`'s first message, an `hqc_send` into the room) how it
-  ended (user decision, 2026-11-17: before it, the session that made the room polled it until it
-  was quiet). A round ends in a `conversation` when every agent but the last message's author
-  passed ("every agent but <name> passed"), at the posts limit ("the agents posted 20 times"), on
-  any other `room_stopped` (its text) and on the room's Stop ("stopped by the owner", after the
-  agents are stopped); in a `council` when no agent has a turn open or an input from the room
-  pending ("every agent answered"). The reason is cleaned as a name is (§7.1.1 above), its
-  agents' titles in it too, and names them unquoted (an empty one by its address). The notice is a `peer.message` into that session from the room
-  (`from_session_id` the room, `from` its address, author the room, `delivery: pending`, so it
-  starts a turn there as a send does, with the send's header), with `notice_seq`, the room's
-  last `seq` when the round ended, and no `room`: the line `[hqc room <room> | the discussion
-  ended: <reason>]`, then, oldest first, the last two entries of the room after the session's
-  previous notice from it, or, never told, after its first message there (user decision,
-  2026-11-18: the whole discussion is not worth carrying, the session reads the rest itself if it
-  needs it): a post under `[hqc room <room> | post from "<name>" (<address>)]`, the owner's
-  message under `[hqc room <room> | message from your owner]`, another session's under `[hqc room
-  <room> | message from "<title>" (<address>)]`, its own under `[hqc room <room> | message from
-  you]`, as in an agent's input. When more came, the first line ends `| N earlier entries left
-  out, read them with hqc_read`; over 64 KiB (`MAX_ARGS`) the older of the two is left out too,
-  and the newest alone over it is cut. A session never told is told at the first round end
-  after its message, with the reason alone when nothing came after it; one with nothing in the
-  room since its previous notice is not told again; it is told of every later round with
-  something in it, the owner's too; neither is the owner told, who reads the feed, nor an archived or deleted session. The
-  notice continues the chain
-  of the last post since that boundary, else of the session's message, moved on, whatever the
-  chain's limits (as a post is stored), so a loop of notices and sends ends at the limits on the
-  session's own sends; its cap is the lowest kept with the posts and other sessions' messages
-  since that boundary, shown or left out (the turn can read the left-out ones), and with its own
-  messages capped by another session, where below the session's mode (T40). It is stored under the room's lock with the end that caused it, once
-  per session and end (its `event_id` derived from the room and `notice_seq`).
+- A room's notice: when a round of the room ends, the room tells every session that wrote in it and
+  is none of its agents (`hqc_room`'s first message, an `hqc_send` into the room) how it ended
+  (user decision, 2026-11-17: before it, the session that made the room polled it until it was
+  quiet). A round ends in a `conversation` when every agent but the last message's author passed
+  ("every agent but <name> passed"), at the posts limit ("the agents posted 20 times"), on any
+  other `room_stopped` (its text) and on the room's Stop ("stopped by the owner", after the agents
+  are stopped); in a `council` when no agent has a turn open or an input from the room pending
+  ("every agent answered"). The reason is cleaned as a name is (§7.1.1 above), its agents' titles
+  in it too, and names them unquoted (an empty one by its address). The notice is a `peer.message`
+  into that session from the room (`from_session_id` the room, `from` its address, author the room,
+  `delivery: pending`, so it starts a turn there as a send does, with the send's header), with
+  `notice_seq`, the room's last `seq` when the round ended, and no `room`: the line `[hqc room
+  <room> | the discussion ended: <reason>]`, then, oldest first, the last two entries of the room
+  after the session's previous notice from it, or, never told, after its first message there (user
+  decision, 2026-11-18: the whole discussion is not worth carrying, the session reads the rest
+  itself if it needs it): a post under `[hqc room <room> | post from "<name>" (<address>)]`, the
+  owner's message under `[hqc room <room> | message from your owner]`, another session's under
+  `[hqc room <room> | message from "<title>" (<address>)]`, its own under `[hqc room <room> |
+  message from you]`, as in an agent's input. When more came, the first line ends `| N earlier
+  entries left out, read them with hqc_read`; over 64 KiB (`MAX_ARGS`) the older of the two is left
+  out too, and the newest alone over it is cut. A session never told is told at the first round end
+  after its message, with the reason alone when nothing came after it; one with nothing in the room
+  since its previous notice is not told again; it is told of every later round with something in
+  it, the owner's too; neither is the owner told, who reads the feed, nor an archived or deleted
+  session. The notice continues the chain of the last post since that boundary, else of the
+  session's message, moved on, whatever the chain's limits (as a post is stored), so a loop of
+  notices and sends ends at the limits on the session's own sends; its cap is the lowest kept with
+  the posts and other sessions' messages since that boundary, shown or left out (the turn can read
+  the left-out ones), and with its own messages capped by another session, where below the
+  session's mode (T40). It is stored under the room's lock with the end that caused it, once per
+  session and end (its `event_id` derived from the room and `notice_seq`).
 
 ### 7.2 Requirements for the hqc MCP server
 - A stdio process `hqc-worker mcp [--socket <path>]` that the runtime starts itself: Claude
@@ -6179,96 +6181,96 @@ without a hub each of these would have to be done peer-to-peer.
 ## 23. Change history
 
 ### 0.171 → 0.172 (the agents' room)
-§7.1.1 (new), §3, §4, §6, §7, §7.1, §15, §16, §17.2: the owner could talk to one agent per
-chat, and several agents talked to each other only when one called `hqc_send`. A room is a chat
-with several agents,
-each a session of its own with its own model and system prompt: `POST
-/api/projects/{id}/rooms` makes the room, a session with no worker and no agent (`room_mode`),
-and its agents' sessions (`room_id`, `spawned_by` the room, titled by an agent's `name` when
-given; their agents start with the room's first message). The owner's message in the room goes
-to its agents as a `peer.message` from the room (`room {session_id, seq}`) without a peer
-header, with the hub's line in front naming the room, the sender (an agent by its name in the
-room in double quotes next to the address stored with the input, the name stripped of `|`,
-`[`, `]`, `"` and control characters) and the agent's own name; `[hqc room` in the text escaped as `[hqc-room-text`); the
-final message of an agent's turn that took such an input, as the turn's own or one that
-joined it, is the agent's post in the room, and one that is exactly `NO_REPLY` its pass
-(`system room_passed`, a quiet line); a post wakes nobody by itself. In `council` the owner's
-message wakes every agent. In `conversation` the agents speak one at a time in the room's
-order: the owner's message wakes the speaker, else the first agent; the end of the speaker's
-turn (`status idle` or `error`, a lost turn), with none of its inputs from the room still
-pending, moves the circle on: its latest post since it became the speaker wakes the next agent,
-until 20 posts follow the owner's last message (`system room_stopped`), else its pass hands the
-last post or owner's message on to the next agent until every agent but its author passed,
-else the room stops (`room_stopped`, the turn ended without a post or was lost); an ack for its
-input that opens no turn and comes after the turn ended (`joined`, or a plain one sent again
-after the outbox) decides then; a post of another agent wakes nobody; a post of a turn the CLI
-started itself, on an input already answered, is an aside (`aside: true`), which neither wakes
-the next agent nor opens again a round every agent passed, and such a turn's pass or runtime's
-reply writes nothing; the speaker's runtime's own reply stops the room. A runtime's own reply is no
-post (in a `council` a `room_stopped` line too). Each agent's input carries the other agents' posts
-since its previous one, in `conversation` the owner's messages too, each under the hub's line `[hqc
-room <room> | post from "<its agent's name>" (<its address>)]` or `[hqc room <room> | message from
-your owner]` after the line `[hqc room <room> | since your last turn]`, and their files. An input
-from the room that fails delivery is a `room_stopped` line in the room; `POST /stop` of a room stops
-its agents and leaves their inputs as they are, and a turn on a message from before its "Stopped"
-posts nothing unless a later one joined it. The hub decides and stores what a room
-does under one lock per room. A room is no
-target of `hqc_ask` (`invalid_args`), of `hqc_rename` with `session` or of a schedule
-(`not_found`), and takes no model, permission mode, browser or pause (`409 room`); an agent of
-a room sends or schedules nothing to another agent of it (`invalid_args`), and the room line tells it that the
-other agents read its final message in the room. The
-session object has `room_mode?` and `room_id?`; `system_prompt` of an agent is written on
+§7.1.1 (new), §3, §4, §6, §7, §7.1, §15, §16, §17.2: the owner could talk to one agent per chat,
+and several agents talked to each other only when one called `hqc_send`. A room is a chat with
+several agents, each a session of its own with its own model and system prompt: `POST
+/api/projects/{id}/rooms` makes the room, a session with no worker and no agent (`room_mode`), and
+its agents' sessions (`room_id`, `spawned_by` the room, titled by an agent's `name` when given;
+their agents start with the room's first message). The owner's message in the room goes to its
+agents as a `peer.message` from the room (`room {session_id, seq}`) without a peer header, with the
+hub's line in front naming the room, the sender (an agent by its name in the room in double quotes
+next to the address stored with the input, the name stripped of `|`, `[`, `]`, `"` and control
+characters) and the agent's own name; `[hqc room` in the text escaped as `[hqc-room-text`); the
+final message of an agent's turn that took such an input, as the turn's own or one that joined it,
+is the agent's post in the room, and one that is exactly `NO_REPLY` its pass (`system room_passed`,
+a quiet line); a post wakes nobody by itself. In `council` the owner's message wakes every agent.
+In `conversation` the agents speak one at a time in the room's order: the owner's message wakes the
+speaker, else the first agent; the end of the speaker's turn (`status idle` or `error`, a lost
+turn), with none of its inputs from the room still pending, moves the circle on: its latest post
+since it became the speaker wakes the next agent, until 20 posts follow the owner's last message
+(`system room_stopped`), else its pass hands the last post or owner's message on to the next agent
+until every agent but its author passed, else the room stops (`room_stopped`, the turn ended
+without a post or was lost); an ack for its input that opens no turn and comes after the turn ended
+(`joined`, or a plain one sent again after the outbox) decides then; a post of another agent wakes
+nobody; a post of a turn the CLI started itself, on an input already answered, is an aside (`aside:
+true`), which neither wakes the next agent nor opens again a round every agent passed, and such a
+turn's pass or runtime's reply writes nothing; the speaker's runtime's own reply stops the room.
+A runtime's own reply is no post (in a `council` a `room_stopped` line too). Each agent's input
+carries the other agents' posts since its previous one, in `conversation` the owner's messages too,
+each under the hub's line `[hqc room <room> | post from "<its agent's name>" (<its address>)]` or
+`[hqc room <room> | message from your owner]` after the line `[hqc room <room> | since your last
+turn]`, and their files. An input from the room that fails delivery is a `room_stopped` line in the
+room; `POST /stop` of a room stops its agents and leaves their inputs as they are, and a turn on a
+message from before its "Stopped" posts nothing unless a later one joined it. The hub decides and
+stores what a room does under one lock per room. A room is no target of `hqc_ask` (`invalid_args`),
+of `hqc_rename` with `session` or of a schedule (`not_found`), and takes no model, permission mode,
+browser or pause (`409 room`); an agent of a room sends or schedules nothing to another agent of it
+(`invalid_args`), and the room line tells it that the other agents read its final message in the
+room. The session object has `room_mode?` and `room_id?`; `system_prompt` of an agent is written on
 creation for the first time, at most 32 KiB (`400`), a NUL in it replaced. A room's input that
-reaches a running turn joins it (`joined`, §4, §17.2); an agent's final message pushes nothing, its post in the room does, named by its agent, and so does a non-member's message there, named by its sender (§16). The client
-lists only the room, with its agents' state on the room's icon in place of the state dot, names
-the agents in the room's header with Stop and the sum of their costs ("$X this room"), shows a
-line per agent at work at the bottom of the room's feed and a post under its agent's title, has
-no Restart, Pause or Move for a room, and opens "New room" as a window like a new session's: chips over
-the input for each agent (its name, model and prompt), the mode, the workspace, the folder and
-the permissions, the first message creating the room. §6: the chat header's "⋯" starts with
-Rename, for a room and an agent too. §7, §20: `hqc_room` makes a room as `hqc_spawn` makes a
-session, each agent counted as a spawned session, its first message a `peer.message` from the
-caller that counts as the owner's message does; `hqc_send` to a room from a session that is not one
-of its agents posts into it the same way (an agent of the room sends nothing to its own room),
-under the line `[hqc room <room> | message from "<its title>" (<its address>)]` in front of a later input. Only
-a person's message starts a chain in a room, the owner's message joining a running turn too; an
-input made from a non-member's message or a post continues its chain, a post is stored whatever
-its `hops` (only the posts limit stops a conversation), and it counts once in the chain's
-messages, the inputs made from it not counted (§7.1.1). When a round ends, the room sends every
-session that wrote in it and is none of its agents how it ended and the room's last two entries
-since its previous notice or its first message there (the rest is read with `hqc_read`), under
-the lowest cap of everything said there since then (a room's notice, `notice_seq`, §4, §7.1.1); the descriptions of `hqc_room` and `hqc_send` say
-so. The agents see each other by their names in the room, quoted, next to their addresses, a
-name stripped of `|`, `[`, `]`, `"` and control characters, and each is told its own name. An
-agent's session keeps its name in the room (`hqc_rename` without `session` from it is
-`invalid_args`, and the room line says so, §7); a post carries the files its turn attached
-since the input or the agent's previous final message, whichever came later, so a second post
-on one input repeats none of the first's, and in `conversation` they go on with it; a post keeps
-its agent's cap (T39), decided when it is stored, and an input made from it carries that cap
-where it is below the receiving agent's mode, the owner's message none; the posts in front of an
-agent's input cap it the same way, the cap kept in the input's chain when it is
-stored, so what its turn sends and posts carries it (T40); an archived room is unarchived
-although it has no workspace, and its agents' posts wake nobody while it is archived; deleting a
-room deletes its agents' sessions; search leaves out an agent's inputs from the room and finds
-the rest of its session by its address (§15); an input whose room the hub does not find keeps
-the send's header; a repeated
-`client_op_id` hands the owner's message again to the agents it did not reach. §4 adds
-`room_passed` (`from_session_id`, `event.system.room_passed.json`) and the other `room_stopped`
-lines. §3 Event, §16 and §17.2 name the room's input next to a person's message for
-`joined` and pushes; §7.1.1 says that a turn the CLI starts by itself after a background task
-posts too, that agents take `provider_id`, and what the client shows of the agents: their open
-requests in the room's feed, their rate and count on the project bar. Hub migration
-`0051_rooms` adds both columns.
+reaches a running turn joins it (`joined`, §4, §17.2); an agent's final message pushes nothing, its
+post in the room does, named by its agent, and so does a non-member's message there, named by its
+sender (§16). The client lists only the room, with its agents' state on the room's icon in place of
+the state dot, names the agents in the room's header with Stop and the sum of their costs ("$X this
+room"), shows a line per agent at work at the bottom of the room's feed and a post under its
+agent's title, has no Restart, Pause or Move for a room, and opens "New room" as a window like a new
+session's: chips over the input for each agent (its name, model and prompt), the mode, the
+workspace, the folder and the permissions, the first message creating the room. §6: the chat
+header's "⋯" starts with Rename, for a room and an agent too. §7, §20: `hqc_room` makes a room as
+`hqc_spawn` makes a session, each agent counted as a spawned session, its first message a
+`peer.message` from the caller that counts as the owner's message does; `hqc_send` to a room from a
+session that is not one of its agents posts into it the same way (an agent of the room sends
+nothing to its own room), under the line `[hqc room <room> | message from "<its title>" (<its
+address>)]` in front of a later input. Only a person's message starts a chain in a room, the
+owner's message joining a running turn too; an input made from a non-member's message or a post
+continues its chain, a post is stored whatever its `hops` (only the posts limit stops a
+conversation), and it counts once in the chain's messages, the inputs made from it not counted
+(§7.1.1). When a round ends, the room sends every session that wrote in it and is none of its
+agents how it ended and the room's last two entries since its previous notice or its first message
+there (the rest is read with `hqc_read`), under the lowest cap of everything said there since then
+(a room's notice, `notice_seq`, §4, §7.1.1); the descriptions of `hqc_room` and `hqc_send` say so.
+The agents see each other by their names in the room, quoted, next to their addresses, a name
+stripped of `|`, `[`, `]`, `"` and control characters, and each is told its own name. An agent's
+session keeps its name in the room (`hqc_rename` without `session` from it is `invalid_args`, and
+the room line says so, §7); a post carries the files its turn attached since the input or the
+agent's previous final message, whichever came later, so a second post on one input repeats none of
+the first's, and in `conversation` they go on with it; a post keeps its agent's cap (T39), decided
+when it is stored, and an input made from it carries that cap where it is below the receiving
+agent's mode, the owner's message none; the posts in front of an agent's input cap it the same way,
+the cap kept in the input's chain when it is stored, so what its turn sends and posts carries it
+(T40); an archived room is unarchived although it has no workspace, and its agents' posts wake
+nobody while it is archived; deleting a room deletes its agents' sessions; search leaves out an
+agent's inputs from the room and finds the rest of its session by its address (§15); an input whose
+room the hub does not find keeps the send's header; a repeated `client_op_id` hands the owner's
+message again to the agents it did not reach. §4 adds `room_passed` (`from_session_id`,
+`event.system.room_passed.json`) and the other `room_stopped` lines. §3 Event, §16 and §17.2 name
+the room's input next to a person's message for `joined` and pushes; §7.1.1 says that a turn the
+CLI starts by itself after a background task posts too, that agents take `provider_id`, and what
+the client shows of the agents: their open requests in the room's feed, their rate and count on the
+project bar. Hub migration `0051_rooms` adds both columns.
 
 §7, `hqc_read` (owner's request, 2026-11-18: "make it possible to read a room and a session in
-full, from the hub, not only from the same machine"): an agent could find history with `hqc_search_history`
-(snippets of 160 characters) or read a Claude Code transcript on its own machine; a session of
-another machine had no way to be read, and a room has no transcript at all. `hqc_read(session,
-before_seq?, after_seq?)` returns the events of one session of the caller's owner (archived ones,
-rooms and the caller itself too) as `GET /api/sessions/{id}/events` does, at most 100 events and
-64 KiB a page, with `earlier` and `later` to page on; no side effects; a room's notice points at it
-for the entries it leaves out. `hqc_send` and the other tools keep refusing an archived session
-and, but for a send, a room (`peers::target`); the reader's lookup is `peers::reader`.
+full, from the hub, not only from the same machine"): an agent could find history with
+`hqc_search_history` (snippets of 160 characters) or read a Claude Code transcript on its own
+machine; a session of another machine had no way to be read, and a room has no transcript at all.
+`hqc_read(session, before_seq?, after_seq?)` returns the events of one session of the caller's
+owner (archived ones, rooms and the caller itself too) as `GET /api/sessions/{id}/events` does, at
+most 100 events and 64 KiB a page, with `earlier` and `later` to page on; no side effects; a room's
+notice points at it for the entries it leaves out. An agent of a room cannot read its room or
+another agent of it (`invalid_args`): it gets what is said there with its input, and in a `council`
+it does not see the others' answers to the message it answers. `hqc_send` and the other tools keep
+refusing an archived session and, but for a send, a room (`peers::target`); `hqc_read`'s lookup is
+`peers::readable`.
 
 ### 0.170 → 0.171 (an input's ack keeps its place)
 §5.2, §8.1: the worker sends an input's `ack` past its outbox, and its connection picked between

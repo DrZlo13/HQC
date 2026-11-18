@@ -56,6 +56,10 @@ pub struct Message {
     /// The summary that replaces the history after `/compact`.
     #[serde(default)]
     pub is_compact_summary: bool,
+    /// An assistant record the CLI wrote itself for a failed API call (`<synthetic>`, with
+    /// `error`), not for anything else it writes as a reply.
+    #[serde(default)]
+    pub is_api_error_message: bool,
     /// Who wrote a `user` record that no person typed: `{"kind": "task-notification",
     /// "producer": "session-task", ...}` for a finished background task (2.1.312).
     #[serde(default)]

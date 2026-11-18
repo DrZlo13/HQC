@@ -3576,7 +3576,7 @@ async fn model_is_started_and_switched() {
     w.stop().await;
 }
 
-// SPEC §8.1, 0.150: a tool result's whole text and images are uploaded for its session before
+// SPEC §8.1, 0.174: a tool result's whole text and images are uploaded for its session before
 // the event goes, which names them, and the adapter's next event comes after it; a refused
 // upload leaves its field out and the event goes as it was.
 #[tokio::test]

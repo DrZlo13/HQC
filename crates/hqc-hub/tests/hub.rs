@@ -703,7 +703,7 @@ async fn clarify_answer_and_cancel_after_stop() {
     hub.finish().await;
 }
 
-/// SPEC 0.150: `auto_approve` leaves a request only a person may answer (`human_only`) open
+/// SPEC 0.174: `auto_approve` leaves a request only a person may answer (`human_only`) open
 /// for the owner, and answers an ordinary one as before.
 #[tokio::test]
 async fn auto_approve_leaves_a_request_only_a_person_may_answer() {
@@ -761,7 +761,7 @@ async fn auto_approve_leaves_a_request_only_a_person_may_answer() {
     hub.finish().await;
 }
 
-/// SPEC 0.150: an MCP server's request takes `action`: `decline` with no answers, `accept`
+/// SPEC 0.174: an MCP server's request takes `action`: `decline` with no answers, `accept`
 /// with none (a link's Done) or with answers; the frame and the event carry it. The agent's own
 /// question takes none.
 #[tokio::test]
@@ -826,7 +826,7 @@ async fn an_mcp_servers_request_is_declined_or_done() {
     hub.finish().await;
 }
 
-/// SPEC 0.150: an MCP server runs with the worker owner's credentials, so only the worker owner
+/// SPEC 0.174: an MCP server runs with the worker owner's credentials, so only the worker owner
 /// answers its request: anyone else with `write` gets `403` and the request stays open; the
 /// owner's answer goes through. (Over HTTP another user does not see the session at all, `404`:
 /// there are no grants yet, SPEC §11.)

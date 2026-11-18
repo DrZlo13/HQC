@@ -120,7 +120,7 @@ refused a model switch and kept `model`, which the hub makes the session's.
 do not show. `worker.worker.limits.json` carries the `status`, `rate_limit_type` and `resets_at`
 of the limit nearest.
 
-SPEC 0.150: `event.approval.request.human_only.json` — a request only a person may answer
+SPEC 0.174: `event.approval.request.human_only.json` — a request only a person may answer
 (`human_only`, options `once` / `deny`), with the runtime's `reason` and `display_name`;
 `event.clarify.request.elicitation.json` — an MCP server's form (`server`, `message`, a choice,
 free text, Yes/No), `event.clarify.request.elicitation_url.json` — its link (`url`, no

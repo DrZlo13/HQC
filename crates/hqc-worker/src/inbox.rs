@@ -133,12 +133,14 @@ impl ArtifactClient {
         use tokio::io::AsyncReadExt;
         let body = tokio::fs::File::from_std(file).take(size);
         let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(body));
-        self.put(session_id, body, size, name, kind, None).await
+        self.put(session_id, body, size, name, kind, None, None)
+            .await
     }
 
     /// `data` to `PUT /worker/artifacts` for `session_id` with `Content-Type: mime` (a tool
     /// result's whole text or image, SPEC §8.1); the artifact's id. Over
-    /// [`Self::max_artifact`] it is refused without a request.
+    /// [`Self::max_artifact`] it is refused without a request; the whole request may take 30 s,
+    /// since the session waits for it.
     pub async fn upload_bytes(
         &self,
         session_id: Uuid,
@@ -156,10 +158,19 @@ impl ArtifactClient {
                 format!("{name} is {size} bytes, more than {}", self.max_artifact),
             ));
         }
-        self.put(session_id, data.into(), size, name, Some(kind), Some(mime))
-            .await
+        self.put(
+            session_id,
+            data.into(),
+            size,
+            name,
+            Some(kind),
+            Some(mime),
+            Some(Duration::from_secs(30)),
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn put(
         &self,
         session_id: Uuid,
@@ -168,6 +179,7 @@ impl ArtifactClient {
         name: &str,
         kind: Option<ArtifactKind>,
         mime: Option<&str>,
+        timeout: Option<Duration>,
     ) -> Result<Uuid, hqc_proto::frame::McpError> {
         use hqc_proto::frame::McpError;
         use hqc_proto::mcp::error_code;
@@ -181,6 +193,9 @@ impl ArtifactClient {
             .body(body);
         if let Some(m) = mime {
             req = req.header(reqwest::header::CONTENT_TYPE, m);
+        }
+        if let Some(t) = timeout {
+            req = req.timeout(t);
         }
         if let Some(k) = kind {
             if let Some(k) = serde_json::to_value(k)

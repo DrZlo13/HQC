@@ -707,7 +707,7 @@ describe('rendering attachments', () => {
     expect(el.querySelector('.msg-pending .attachment-chip')!.textContent).toBe('b.txt 2.0 KB');
   });
 
-  it("a tool result's images are thumbnails in its row that open in the viewer (SPEC 0.150)", async () => {
+  it("a tool result's images are thumbnails in its row that open in the viewer (SPEC 0.174)", async () => {
     const store = new ArtifactStore(fakeSource([meta('shot', 'image', 'image.png')]) as never);
     const viewArtifact = vi.fn();
     const { el } = chatWith(

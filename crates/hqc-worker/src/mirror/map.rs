@@ -751,7 +751,7 @@ mod tests {
                 0
             )
         );
-        // The CLI's "(no content)" for a reply without text is no message (SPEC §9.1, 0.150).
+        // The CLI's "(no content)" for a reply without text is no message (SPEC §9.1, 0.174).
         let empty = line.replace(
             "There's an issue with the selected model (claude-bogus-model-9-9). It may not exist or you may not have access to it.",
             "(no content)",
@@ -996,6 +996,8 @@ mod tests {
                 options: Some(vec!["Feed".into(), "Search".into(), "Settings".into()]),
                 option_descriptions: Some(vec!["The chat feed".into(), "".into(), "".into()]),
                 multi: Some(true),
+                required: false,
+                input: None,
             }
         );
         assert_eq!(

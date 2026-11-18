@@ -541,7 +541,7 @@ pub enum HubFrame {
         session_id: Uuid,
         request_id: String,
         answers: BTreeMap<String, ClarifyAnswer>,
-        /// The person's choice on an MCP server's request (since SPEC 0.150).
+        /// The person's choice on an MCP server's request (since SPEC 0.174).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         action: Option<ClarifyAction>,
     },

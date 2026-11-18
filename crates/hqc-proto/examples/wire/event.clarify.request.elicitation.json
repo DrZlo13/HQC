@@ -18,11 +18,13 @@
         "options": [
           "eu-west",
           "us-east"
-        ]
+        ],
+        "required": true
       },
       {
         "id": "2",
-        "text": "Replicas"
+        "text": "Replicas",
+        "input": "integer"
       },
       {
         "id": "3",

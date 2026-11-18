@@ -1098,8 +1098,9 @@ function withLinks(text: string): ComponentChildren {
     if (!href) continue;
     out.push(
       text.slice(last, m.index),
+      // Labelled with the address it opens: a look-alike host shows in its punycode form.
       <a key={m.index} href={href} target="_blank" rel="noopener noreferrer">
-        {url}
+        {href}
       </a>,
     );
     last = m.index + url.length;
@@ -1233,7 +1234,7 @@ interface OtherAnswer {
  *  option's description under its label, checkboxes for a multi question, and "Other" whose
  *  text is the answer (with multi, beside the checked labels). An MCP server's request
  *  (`server`) is headed by the server, has its text above the questions, its link with Done in
- *  place of questions, no "Other", and Decline. */
+ *  place of questions, no "Other", its required fields marked, and Decline. */
 export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.request'>; actions: ChatActions }) {
   const p = event.payload;
   const fate = actions.timeline.requestFate(p.request_id);
@@ -1298,6 +1299,18 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
     const v = toSend[q.id];
     return Array.isArray(v) ? v.length > 0 : v !== undefined && v.trim() !== '';
   });
+  // An MCP server's form waits for what its schema says, which a server on the MCP SDK checks
+  // the answer against: every required field answered, an integer or a number that reads as one
+  // to the worker too (a safe integer; a decimal number, not `0x10`).
+  const fits = p.questions.every((q) => {
+    const v = toSend[q.id];
+    const t = (Array.isArray(v) ? v.join(', ') : (v ?? '')).trim();
+    if (t === '') return !q.required;
+    if (q.input === 'integer') return /^-?\d+$/.test(t) && Number.isSafeInteger(Number(t));
+    if (q.input === 'number') return /^-?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t) && Number.isFinite(Number(t));
+    return true;
+  });
+  const ready = p.server === undefined ? complete : fits;
   // What a question shows: the options picked and Other; once answered, what was sent, an
   // answer that is not an option being the text of Other.
   const shown = (q: ClarifyQuestion): { picked: string[]; other: OtherAnswer } => {
@@ -1320,8 +1333,7 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
         if (later) {
           const text = earlierAnswer(p.questions, collect());
           if (complete && text !== undefined) actions.send!(text);
-        } else if (open && (complete || p.server !== undefined)) {
-          // An MCP server's form may have optional fields: the server checks it, not the card.
+        } else if (open && ready) {
           run(() => (p.server === undefined ? actions.answer(p.request_id, toSend) : actions.answer(p.request_id, toSend, 'accept')));
         }
       }}
@@ -1351,7 +1363,9 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
         return (
           <fieldset key={q.id} class="question" disabled={!open || busy}>
             <legend>
-              {q.header && <span class="question-header">{q.header}</span>}
+              {(q.header || q.required) && (
+                <span class="question-header">{[q.header, q.required && 'required'].filter(Boolean).join(' · ')}</span>
+              )}
               <span class="question-text">{q.text}</span>
             </legend>
             {q.options?.map((o, i) => {
@@ -1405,7 +1419,7 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
           <button
             type="submit"
             class="btn btn-primary"
-            disabled={busy || (later && earlierAnswer(p.questions, collect()) === undefined) || (p.server === undefined && !complete)}
+            disabled={busy || (later && earlierAnswer(p.questions, collect()) === undefined) || !ready}
           >
             {p.url ? 'Done' : 'Answer'}
           </button>

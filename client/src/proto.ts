@@ -40,7 +40,7 @@ export type PolicyHint = (typeof POLICY_HINTS)[number] | Unknown;
 export const CANCEL_REASONS = ['timeout', 'stopped', 'worker_restart', 'archived', 'withdrawn'] as const;
 export type CancelReason = (typeof CANCEL_REASONS)[number] | Unknown;
 
-/** What the person did with an MCP server's request (`clarify.response.action`, since 0.150). */
+/** What the person did with an MCP server's request (`clarify.response.action`, since 0.174). */
 export const CLARIFY_ACTIONS = ['accept', 'decline'] as const;
 export type ClarifyAction = (typeof CLARIFY_ACTIONS)[number] | Unknown;
 
@@ -235,9 +235,9 @@ export interface ToolResult {
   error: boolean;
   error_text?: string;
   duration_ms?: number;
-  /** A diff, or the whole text of a result longer than `result_preview` (since SPEC 0.150). */
+  /** A diff, or the whole text of a result longer than `result_preview` (since SPEC 0.174). */
   artifact_id?: Uuid;
-  /** The result's images, in order (since SPEC 0.150); empty when none. */
+  /** The result's images, in order (since SPEC 0.174); empty when none. */
   artifact_ids: Uuid[];
 }
 export interface ApprovalOption {
@@ -257,11 +257,11 @@ export interface ApprovalRequest {
   rule_suggestions?: RuleSuggestion[];
   /** The hub's card of an agent's `hqc_secret` (SPEC 0.147): what it asks for. */
   secret?: SecretAsked;
-  /** Why the runtime asks (since 0.150). */
+  /** Why the runtime asks (since 0.174). */
   reason?: string;
-  /** The runtime's name of the tool (since 0.150). */
+  /** The runtime's name of the tool (since 0.174). */
   display_name?: string;
-  /** Only a person may answer it: no rule, no `auto_approve` (since 0.150). Absent = false. */
+  /** Only a person may answer it: no rule, no `auto_approve` (since 0.174). Absent = false. */
   human_only?: boolean;
 }
 /** The secret an `hqc_secret` card asks for: its name and kind are the agent's, fixed. */
@@ -294,11 +294,18 @@ export interface ClarifyQuestion {
   /** A description per option, in the order of `options`; "" where an option has none. */
   option_descriptions?: string[];
   multi?: boolean;
+  /** A field an MCP server's form requires (since 0.174). */
+  required?: boolean;
+  /** What the free-text answer of an MCP server's form field must read as (since 0.174);
+   *  absent for text, a boolean, an enum, and a kind this client does not know. */
+  input?: AnswerInput;
 }
+export const ANSWER_INPUTS = ['integer', 'number'] as const;
+export type AnswerInput = (typeof ANSWER_INPUTS)[number];
 export interface ClarifyRequest {
   request_id: string;
   questions: ClarifyQuestion[];
-  /** The MCP server that asks (since 0.150); absent: the agent asks. */
+  /** The MCP server that asks (since 0.174); absent: the agent asks. */
   server?: string;
   /** The server's text above the questions. */
   message?: string;
@@ -309,7 +316,7 @@ export type ClarifyAnswer = string | string[];
 export interface ClarifyResponse {
   request_id: string;
   answers: Record<string, ClarifyAnswer>;
-  /** Only for an MCP server's request (since 0.150). */
+  /** Only for an MCP server's request (since 0.174). */
   action?: ClarifyAction;
 }
 export interface Attachment {
@@ -596,6 +603,8 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
         options: present(q, 'options') ? strArr(q, 'options') : undefined,
         option_descriptions: optStrArr(q, 'option_descriptions'),
         multi: optBool(q, 'multi'),
+        required: optBool(q, 'required'),
+        input: oneOf(q, 'input', ANSWER_INPUTS),
       };
     }),
     server: optStr(p, 'server'),

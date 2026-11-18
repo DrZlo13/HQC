@@ -161,7 +161,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail};
 use hqc_claude_jsonl::{model_usage_tokens, CostState, TokenSums};
 use hqc_proto::event::{
-    ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
+    AnswerInput, ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
     ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, LiveKind, LiveSubagent,
     SessionState, MODEL_NOT_SWITCHED,
 };
@@ -3315,6 +3315,8 @@ pub(crate) fn parse_questions(input: &Value) -> Option<(Vec<ClarifyQuestion>, Ve
             options: (!options.is_empty()).then_some(options),
             option_descriptions: described.then_some(descriptions),
             multi: q["multiSelect"].as_bool(),
+            required: false,
+            input: None,
         });
         texts.push(raw.to_owned());
     }
@@ -3323,9 +3325,10 @@ pub(crate) fn parse_questions(input: &Value) -> Option<(Vec<ClarifyQuestion>, Ve
 
 /// The questions of an MCP server's form (`elicitation` `requested_schema.properties`, in
 /// `property_order`, then any it leaves out), with each one's type: an `enum` gives its values
-/// as options, a boolean Yes and No, a string, number or integer free text; `title` is the
-/// question's header and `description` its text (the title, or the name, without one), each
-/// cut to [`QUESTION_TEXT_LIMIT`]; names and values are kept whole. `None`:
+/// as options, a boolean Yes and No, a string, number or integer free text (an integer's and a
+/// number's with that `input`); a property the schema's `required` lists is `required`; `title`
+/// is the question's header and `description` its text (the title, or the name, without one),
+/// each cut to [`QUESTION_TEXT_LIMIT`]; names and values are kept whole. `None`:
 /// a property of another type (an object, an array), which the card cannot ask.
 fn form_fields(req: &Value) -> Option<(Vec<ClarifyQuestion>, Fields)> {
     let props = match &req["requested_schema"]["properties"] {
@@ -3333,6 +3336,12 @@ fn form_fields(req: &Value) -> Option<(Vec<ClarifyQuestion>, Fields)> {
         Value::Object(p) => p,
         _ => return None,
     };
+    let required: Vec<&str> = req["requested_schema"]["required"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
     let mut names: Vec<&str> = req["property_order"]
         .as_array()
         .into_iter()
@@ -3371,6 +3380,12 @@ fn form_fields(req: &Value) -> Option<(Vec<ClarifyQuestion>, Fields)> {
             options,
             option_descriptions: None,
             multi: None,
+            required: required.contains(&name),
+            input: match field {
+                Field::Integer => Some(AnswerInput::Integer),
+                Field::Number => Some(AnswerInput::Number),
+                Field::Text | Field::Boolean => None,
+            },
         });
         fields.push((name.to_owned(), field));
     }

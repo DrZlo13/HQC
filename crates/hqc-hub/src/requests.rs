@@ -48,7 +48,7 @@ pub struct AnswerBody {
     pub answers: Option<BTreeMap<String, ClarifyAnswer>>,
     /// Text instead of the call (T26): only with a deny option of an in-session approval.
     pub message: Option<String>,
-    /// The person's choice on an MCP server's clarify request (SPEC §6, since 0.150).
+    /// The person's choice on an MCP server's clarify request (SPEC §6, since 0.174).
     pub action: Option<ClarifyAction>,
 }
 

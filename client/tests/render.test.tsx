@@ -1092,7 +1092,7 @@ describe("clarify.request", () => {
   });
 });
 
-describe("requests of the CLI (SPEC 0.150)", () => {
+describe("requests of the CLI (SPEC 0.174)", () => {
   it("names the tool as the runtime does and says why it asks", () => {
     const t = new Timeline();
     t.apply(ev("event.approval.request.human_only"));
@@ -1172,6 +1172,46 @@ describe("requests of the CLI (SPEC 0.150)", () => {
       root.querySelector<HTMLButtonElement>(".card-clarify button[type=submit]")!.click(),
     );
     expect(again.actions.answer).toHaveBeenLastCalledWith("req-4", { "1": "us-east" }, "accept");
+  });
+
+  it("Answer of an MCP server's form waits for its required fields and an integer that reads as one", async () => {
+    const t = new Timeline();
+    t.apply(ev("event.clarify.request.elicitation"));
+    const { actions } = show(t);
+    const qs = root.querySelectorAll(".card-clarify fieldset");
+    expect(qs[0].querySelector(".question-header")!.textContent).toBe("Region · required");
+    expect(qs[1].querySelector(".question-header")).toBeNull();
+    const submit = () =>
+      root.querySelector<HTMLButtonElement>(".card-clarify button[type=submit]")!;
+    const replicas = (value: string) =>
+      act(() => {
+        const text = qs[1].querySelector<HTMLInputElement>("input[type=text]")!;
+        text.value = value;
+        text.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    // The required region has no answer.
+    expect(submit().disabled).toBe(true);
+    await replicas("3");
+    expect(submit().disabled).toBe(true);
+    await act(() => root.querySelector<HTMLInputElement>('input[value="us-east"]')!.click());
+    expect(submit().disabled).toBe(false);
+    // An integer that does not read as one.
+    await replicas("three");
+    expect(submit().disabled).toBe(true);
+    await act(async () => {
+      root.querySelector("form.card-clarify")!.dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(actions.answer).not.toHaveBeenCalled();
+    // Past a safe integer the worker does not read it as one either.
+    await replicas("99999999999999999999");
+    expect(submit().disabled).toBe(true);
+    await replicas("-3");
+    expect(submit().disabled).toBe(false);
+    // An optional field may stay empty.
+    await replicas("");
+    expect(submit().disabled).toBe(false);
   });
 
   it("shows an MCP server's link with Done, and a declined one", async () => {
@@ -1318,7 +1358,7 @@ describe("tool groups (T26)", () => {
     );
   });
 
-  it("a result's http and https addresses are links; an Artifact call's page is a line under the run (SPEC 0.150)", async () => {
+  it("a result's http and https addresses are links; an Artifact call's page is a line under the run (SPEC 0.174)", async () => {
     const out = (seq: number, call_id: string, result_preview: string) =>
       ev("event.tool.result", (e) => {
         e.seq = seq;
@@ -1353,6 +1393,25 @@ describe("tool groups (T26)", () => {
       "https://a.b/c",
     ]);
     expect(result.textContent).toBe(text);
+  });
+
+  it("labels a result's link with the address it opens, a look-alike host in its punycode form (SPEC 0.174)", async () => {
+    const t = new Timeline();
+    t.apply(call(1, "a", "Bash", { command: "curl -I example.com" }));
+    t.apply(
+      ev("event.tool.result", (e) => {
+        e.seq = 2;
+        e.payload = { call_id: "a", error: false, result_preview: "See https://githаb.com/login" };
+      }),
+    );
+    show(t);
+    const g = root.querySelector(".tool-group")!;
+    await act(async () =>
+      g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
+    );
+    const a = g.querySelector<HTMLAnchorElement>("details.tool-row a")!;
+    expect(a.getAttribute("href")).toBe("https://xn--githb-7ve.com/login");
+    expect(a.textContent).toBe("https://xn--githb-7ve.com/login");
   });
 
   it("shows a result without its call as a group of its own", () => {

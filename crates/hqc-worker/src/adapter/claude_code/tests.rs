@@ -635,6 +635,8 @@ async fn ask_user_question_becomes_clarify() {
                 "client/: TypeScript PWA".into()
             ]),
             multi: Some(false),
+            required: false,
+            input: None,
         }]
     );
     assert_eq!(without_uuids(h.claude.stdin()), lines(fx.stdin));
@@ -2542,7 +2544,7 @@ fn approval_wire(actions: &[Action]) -> Value {
         .expect("approval.request")
 }
 
-/// SPEC 0.150: a request the CLI gives only to a person (`requires_user_interaction`,
+/// SPEC 0.174: a request the CLI gives only to a person (`requires_user_interaction`,
 /// `matched_ask_rule`, `suppress_always_allow_rule`) reaches the card although a session rule
 /// or a folder rule covers the call, with `human_only`, only `once` and `deny`, and no rule
 /// suggested; the others go as before.
@@ -2600,7 +2602,7 @@ fn a_request_only_a_person_may_answer_reaches_the_card() {
     assert!(p.get("human_only").is_none(), "{p}");
 }
 
-/// SPEC 0.150: the card carries why the CLI asks (`decision_reason`) and its name of the tool
+/// SPEC 0.174: the card carries why the CLI asks (`decision_reason`) and its name of the tool
 /// (`display_name`), cut to 1024 and 256 bytes; blank ones are left out.
 #[test]
 fn approval_carries_the_reason_and_the_tools_name() {
@@ -2656,7 +2658,7 @@ fn withdraw(request_id: &str) -> String {
     json!({"type": "control_cancel_request", "request_id": request_id}).to_string()
 }
 
-/// SPEC 0.150: `control_cancel_request` closes the card of the request it names, `withdrawn`
+/// SPEC 0.174: `control_cancel_request` closes the card of the request it names, `withdrawn`
 /// (an approval, a question, an MCP server's request), and an answer that comes later writes
 /// nothing to the CLI; an id not open here gives nothing.
 #[test]
@@ -2812,10 +2814,12 @@ fn clarify_wire(actions: &[Action]) -> Value {
         .expect("clarify.request")
 }
 
-/// SPEC 0.150: an MCP server's form is a question card of the server: its properties in
+/// SPEC 0.174: an MCP server's form is a question card of the server: its properties in
 /// `property_order` (an enum's values as options, a boolean as Yes/No, the rest free text), the
-/// title as the header and the description as the text; the answer goes back typed as
-/// `accept`, Decline as `decline`, the hub's cancel as `cancel`. The turn's end leaves it open.
+/// title as the header and the description as the text, a property the schema's `required` lists
+/// `required`, an integer's or a number's free text with that `input`; the answer goes back
+/// typed as `accept`, Decline as `decline`, the hub's cancel as `cancel`. The turn's end leaves
+/// it open.
 #[test]
 fn an_mcp_servers_form_is_a_question_card() {
     let mut core = Core::new(Uuid::now_v7(), false);
@@ -2843,7 +2847,7 @@ fn an_mcp_servers_form_is_a_question_card() {
         p["questions"].as_array().unwrap()[3..],
         [
             json!({"id": "4", "text": "note"}),
-            json!({"id": "5", "text": "Ratio"})
+            json!({"id": "5", "text": "Ratio", "input": "number"})
         ]
     );
 
@@ -2886,7 +2890,7 @@ fn an_mcp_servers_form_is_a_question_card() {
     assert_eq!(w[0]["response"]["response"], json!({"action": "cancel"}));
 }
 
-/// SPEC 0.150: an MCP server's link is a card with its `url` and no questions, Done is `accept`
+/// SPEC 0.174: an MCP server's link is a card with its `url` and no questions, Done is `accept`
 /// without `content`; a form the card cannot ask (a nested object, an array) and a link without
 /// a URL are answered `cancel` at once, with a `system elicitation_unsupported` line.
 #[test]
@@ -2945,7 +2949,7 @@ fn an_mcp_servers_link_and_a_form_hqc_cannot_ask() {
     }
 }
 
-/// SPEC 0.150: what an MCP server's request only shows is cut: a 10 KB `message` arrives as its
+/// SPEC 0.174: what an MCP server's request only shows is cut: a 10 KB `message` arrives as its
 /// first `PREVIEW_LIMIT` bytes and "…", the server's name as 256 bytes, a field's title and
 /// description as 1024; the field's name, the key of the answer, is kept whole.
 #[test]
@@ -2978,7 +2982,7 @@ fn an_mcp_servers_long_message_is_cut() {
     assert_eq!(w[0]["response"]["response"]["content"], json!({name: "x"}));
 }
 
-/// SPEC 0.150: a request whose `clarify.request` would be over 256 KiB (here its enum values,
+/// SPEC 0.174: a request whose `clarify.request` would be over 256 KiB (here its enum values,
 /// which go back to the server and are not cut) is answered `cancel` at once, with a `system
 /// elicitation_unsupported` line, and gives no card.
 #[test]
@@ -8852,7 +8856,7 @@ fn tool_result_line(content: Value, tool_use_result: Option<Value>) -> String {
     v.to_string()
 }
 
-/// SPEC §8.1, 0.150: a result longer than its 4 KB preview goes with its whole text, at most
+/// SPEC §8.1, 0.174: a result longer than its 4 KB preview goes with its whole text, at most
 /// its first 2 MiB, to be uploaded; a short one is an event as before.
 #[test]
 fn a_long_result_goes_with_its_whole_text() {
@@ -8888,7 +8892,7 @@ fn a_long_result_goes_with_its_whole_text() {
     );
 }
 
-/// SPEC §8.1, 0.150: an image of a result (a screenshot) goes with it decoded, with its media
+/// SPEC §8.1, 0.174: an image of a result (a screenshot) goes with it decoded, with its media
 /// type; the preview keeps its `[image]`, and one that does not decode is left out.
 #[test]
 fn a_result_image_goes_with_it() {
@@ -8918,7 +8922,7 @@ fn a_result_image_goes_with_it() {
     );
 }
 
-/// SPEC §8.1, 0.150: an `Agent` call's result is the subagent's report from `tool_use_result`
+/// SPEC §8.1, 0.174: an `Agent` call's result is the subagent's report from `tool_use_result`
 /// (2.1.312), without the trailer the CLI adds to the `tool_result` for the model.
 #[test]
 fn an_agent_result_is_its_report() {
@@ -8980,7 +8984,7 @@ fn an_agent_result_is_its_report() {
     assert_eq!(got, ["first", "second"]);
 }
 
-/// SPEC §8.1, 0.150: the CLI's "(no content)" for a reply without text is no `agent.message`.
+/// SPEC §8.1, 0.174: the CLI's "(no content)" for a reply without text is no `agent.message`.
 #[test]
 fn no_content_is_no_message() {
     let sid = Uuid::now_v7();

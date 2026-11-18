@@ -90,7 +90,7 @@ describe('examples/wire', () => {
     ]);
   });
 
-  it('reads the images of tool.result (SPEC 0.150), none when absent', () => {
+  it('reads the images of tool.result (SPEC 0.174), none when absent', () => {
     const r = parseEvent(load('event.tool.result.images.json'));
     expect(r.type === 'tool.result' && r.payload.artifact_ids).toEqual(['0199f3a2-7c10-7000-8000-0000000000f3']);
     const plain = parseEvent(load('event.tool.result.json'));

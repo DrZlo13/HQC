@@ -128,13 +128,13 @@ pub enum CancelReason {
     WorkerRestart,
     Archived,
     /// The runtime withdrew its request (Claude Code: `control_cancel_request`, since SPEC
-    /// 0.150).
+    /// 0.174).
     Withdrawn,
     #[serde(other)]
     Unknown,
 }
 
-/// `clarify.response.action` (since SPEC 0.150): what the person did with an MCP server's
+/// `clarify.response.action` (since SPEC 0.174): what the person did with an MCP server's
 /// request (`clarify.request.server`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -184,6 +184,23 @@ pub struct ClarifyQuestion {
     pub option_descriptions: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi: Option<bool>,
+    /// A field an MCP server's form requires (its schema's `required`, since SPEC 0.174).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub required: bool,
+    /// What the free-text answer of an MCP server's form field must read as (since SPEC 0.174);
+    /// absent for text, a boolean, an enum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<AnswerInput>,
+}
+
+/// The kind of a free-text answer of an MCP server's form field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerInput {
+    Integer,
+    Number,
+    #[serde(other)]
+    Unknown,
 }
 
 /// The secret an `hqc_secret` card asks for (SPEC §4, since 0.147).
@@ -379,10 +396,10 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
         /// A diff, or the whole text of a result longer than `result_preview` (Claude Code,
-        /// since SPEC 0.150: its first 2 MiB).
+        /// since SPEC 0.174: its first 2 MiB).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         artifact_id: Option<Uuid>,
-        /// The result's images, in order (since SPEC 0.150); absent when none.
+        /// The result's images, in order (since SPEC 0.174); absent when none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         artifact_ids: Vec<Uuid>,
     },
@@ -408,13 +425,13 @@ pub enum EventKind {
         /// the owner for a secret.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secret: Option<SecretAsk>,
-        /// Why the runtime asks (Claude Code: `decision_reason`, since SPEC 0.150).
+        /// Why the runtime asks (Claude Code: `decision_reason`, since SPEC 0.174).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
-        /// The runtime's name of the tool (Claude Code: `display_name`, since SPEC 0.150).
+        /// The runtime's name of the tool (Claude Code: `display_name`, since SPEC 0.174).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display_name: Option<String>,
-        /// Only a person may answer it (since SPEC 0.150): no stored rule and no
+        /// Only a person may answer it (since SPEC 0.174): no stored rule and no
         /// `auto_approve`; absent when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         human_only: bool,
@@ -439,7 +456,7 @@ pub enum EventKind {
     ClarifyRequest {
         request_id: String,
         questions: Vec<ClarifyQuestion>,
-        /// The MCP server that asks (Claude Code: `elicitation`, since SPEC 0.150); absent: the
+        /// The MCP server that asks (Claude Code: `elicitation`, since SPEC 0.174); absent: the
         /// agent asks.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         server: Option<String>,
@@ -455,7 +472,7 @@ pub enum EventKind {
     ClarifyResponse {
         request_id: String,
         answers: BTreeMap<String, ClarifyAnswer>,
-        /// Only for an MCP server's request (since SPEC 0.150).
+        /// Only for an MCP server's request (since SPEC 0.174).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         action: Option<ClarifyAction>,
     },
@@ -862,8 +879,9 @@ mod tests {
         assert_eq!(serde_json::to_value(&e).unwrap(), wire);
     }
 
-    /// SPEC 0.150: a request only a person may answer, with the runtime's reason and tool
-    /// name; an MCP server's form and link; a declined one. Without the fields they are absent.
+    /// SPEC 0.174: a request only a person may answer, with the runtime's reason and tool
+    /// name; an MCP server's form (a question `required`, one with `input`) and link; a declined
+    /// one. Without the fields they are absent.
     #[test]
     fn request_variants_roundtrip() {
         for src in [
@@ -910,7 +928,7 @@ mod tests {
         assert!(p.get("human_only").is_none() && p.get("reason").is_none());
     }
 
-    /// SPEC 0.150: a tool result's images; without them the field is absent.
+    /// SPEC 0.174: a tool result's images; without them the field is absent.
     #[test]
     fn tool_result_images_roundtrip() {
         let src = include_str!("../examples/wire/event.tool.result.images.json");
@@ -1174,6 +1192,10 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<LiveKind>(v("workflow")).unwrap(),
             LiveKind::Unknown
+        );
+        assert_eq!(
+            serde_json::from_value::<AnswerInput>(v("date")).unwrap(),
+            AnswerInput::Unknown
         );
     }
 

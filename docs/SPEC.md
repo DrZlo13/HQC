@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.172, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
+Version 0.179, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2706,6 +2706,11 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   deleted automatically. A branch outlives its worktree (§13.2), so a default name used again
   (a slug taken again after its session was deleted) is refused by the worker; the agent gives
   `branch` then.
+  Since 0.179 the description also says what to do once the user chose "New session" for a task
+  of their message (§7.2): `project` is the caller's project, `prompt` a brief (the task as the
+  user would send it to a fresh session, the files or area, what done looks like, and what the
+  new session needs from this conversation), the task is not done in the caller, and the agent
+  says in one line that it runs in its own session, with its address, and ends its turn.
 - `hqc_room(project, workspace?, title?, mode?, agents, message)` (since 0.172) — create a room
   of the owner (§7.1.1) as `POST /api/projects/{id}/rooms` does, checked the same way, and
   return its address at once, not waiting for the agents. `project` and `workspace` as for
@@ -3387,7 +3392,8 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   `tools/call`, `notifications/cancelled`; another method gets `-32601`, an unlisted tool
   `-32602`. Hand-written (no MCP SDK crate) since 0.33, T30.
 - `initialize` gives `instructions` (since 0.66): that the tools act with the owner's rights,
-  that the user reads the session in the hqc chat, two requirements (since 0.126), and every
+  that the user reads the session in the hqc chat, two requirements (since 0.126) and a third
+  (since 0.179), and every
   other tool by its use (`hqc_proto::mcp::INSTRUCTIONS`, a test checks each tool is named). The
   requirements: in every session the agent calls `hqc_rename` without `session` (its own
   session) with a short title the moment it understands what the work is, usually on the first
@@ -3406,6 +3412,22 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   agent gave paths of images in its scratchpad until asked to attach them; worded as in 0.126, the
   agent renamed on the first message and again on a different second task, and an agent asked
   only to make a chart wrote it into `.hqc/out/` and attached it (checked on 2026-11-12).
+  The third: when the user's latest message asks for a task that is not part of the session's
+  work (not a question, a quick check or one small edit), the agent asks the user first with its
+  question tool (Claude Code's `AskUserQuestion`, a question card in the chat, §10.1) "Start this
+  in its own session?" with the options "New session" and "Do it here"; on "New session" it
+  starts the task with `hqc_spawn`, whose description says how (§7), and does not do it here; a
+  message from another session or a room (an `[hqc peer` or `[hqc room` header, §7.1, §7.1.1)
+  gets no question: that session or room gave the task and chose where it runs. A scheduled run
+  (§16) reaches the agent as the owner's own message and is not told apart. As in the Claude
+  app's Code tab, the agent decides what is unrelated; hqc has no tool, card or setting of its own
+  for it, and the new session may report back with `hqc_send`, as the app's side session does.
+  With Claude Code 2.1.312 (checked on 2026-11-18, each a fresh session that had done one task
+  before), Opus 5.5 asked on 5 of 5 unrelated tasks (two scripts, a shell script, a word count,
+  a letter) and not on a quick question, a follow-up of its own task or a task in another
+  session's `hqc_send`; on "New session" it called `hqc_spawn` with its own project and a brief,
+  answered with one line and the address and ended its turn; on "Do it here" haiku did the task
+  there. Haiku asked on 2 of 5, taking a small script or a letter for "one small edit".
   Claude Code keeps
   server instructions in the system prompt while the tools wait behind `ToolSearch` (§8.1), so
   the agent knows them from the first turn; without them it did not attach files unasked
@@ -6184,6 +6206,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.172 → 0.179 (an unrelated task offered its own session)
+§7, §7.2: asked for a task that had nothing to do with its session, an agent did it right there;
+only the agent could start another session, and the user was not asked. The instructions of the
+hqc MCP server now require that on such a task in the user's latest message (not a question, a
+quick check or one small edit, and not a message from another session or a room) the agent asks
+the user first with its question tool "Start this in its own session?" — "New session" / "Do it
+here" — and on "New session" starts it with `hqc_spawn`, whose description says how: the
+caller's project, a brief, one line with the new session's address, the end of the turn. As in
+the Claude app's Code tab, the agent decides what is unrelated; hqc has no tool, card or setting
+of its own for it. A scheduled run reaches the agent as the owner's message, so it may ask there.
 
 ### 0.171 → 0.172 (the agents' room)
 §7.1.1 (new), §3, §4, §6, §7, §7.1, §15, §16, §17.2: the owner could talk to one agent per chat,

@@ -1892,28 +1892,36 @@ pub async fn stop(
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Write).await?;
     not_system(&s)?;
-    if s.room_mode.is_some() {
-        let sent = stop_room(&app, &s).await?;
-        return Ok(Json(json!({ "sent": sent })));
-    }
-    let open = db::open_requests_of_session(&app.db, id).await?;
-    let runtimes = |kind: &str| matches!(kind, "approval" | "clarify");
-    for p in open.iter().filter(|p| !runtimes(&p.kind)) {
-        requests::cancel(&app, p, CancelReason::Stopped).await?;
-    }
-    let sent = send_to_worker(&app, &s, HubFrame::SessionStop { session_id: id });
-    if !sent {
-        for p in open.iter().filter(|p| runtimes(&p.kind)) {
-            requests::cancel(&app, p, CancelReason::Stopped).await?;
-        }
-    }
+    let sent = if s.room_mode.is_some() {
+        stop_room(&app, &s).await?
+    } else {
+        stop_session(&app, &s).await?
+    };
     Ok(Json(json!({ "sent": sent })))
 }
 
+/// Stop of session `s`: its open requests other than the runtime's cancelled with `stopped`,
+/// `session.stop` to its worker, and the runtime's approvals and questions cancelled too only
+/// when the worker is not connected (a connected worker keeps those of background subagents
+/// open, SPEC §10.1); `true` when the frame went out.
+async fn stop_session(app: &AppState, s: &SessionRow) -> ApiResult<bool> {
+    let open = db::open_requests_of_session(&app.db, s.id).await?;
+    let runtimes = |kind: &str| matches!(kind, "approval" | "clarify");
+    for p in open.iter().filter(|p| !runtimes(&p.kind)) {
+        requests::cancel(app, p, CancelReason::Stopped).await?;
+    }
+    let sent = send_to_worker(app, s, HubFrame::SessionStop { session_id: s.id });
+    if !sent {
+        for p in open.iter().filter(|p| runtimes(&p.kind)) {
+            requests::cancel(app, p, CancelReason::Stopped).await?;
+        }
+    }
+    Ok(sent)
+}
+
 /// `POST /stop` of room `room` (SPEC §7.1.1), under the room's lock: `system room_stopped`
-/// "Stopped" in the room, then for each agent its open requests cancelled with `stopped` and
-/// `session.stop` to its worker, then the senders' notice ([`crate::rooms::round_ended`]); `true`
-/// when one went out.
+/// "Stopped" in the room, then each agent stopped as its own Stop does ([`stop_session`]), then
+/// the senders' notice ([`crate::rooms::round_ended`]); `true` when a frame went out.
 async fn stop_room(app: &AppState, room: &SessionRow) -> ApiResult<bool> {
     let _room = crate::rooms::lock(app, room.id).await;
     // The agents' inputs stay as they are: the worker keeps the ones it has after a stop. A final
@@ -1922,8 +1930,7 @@ async fn stop_room(app: &AppState, room: &SessionRow) -> ApiResult<bool> {
     events::system(app, room, crate::rooms::ROOM_STOPPED, crate::rooms::STOPPED).await?;
     let mut sent = false;
     for m in db::room_members(&app.db, room.id).await? {
-        requests::cancel_open_of_session(app, m.id, CancelReason::Stopped).await?;
-        sent |= send_to_worker(app, &m, HubFrame::SessionStop { session_id: m.id });
+        sent |= stop_session(app, &m).await?;
         app.session_changed(m.id);
     }
     // After the agents are stopped: the senders of the room's messages are told how it ended, and

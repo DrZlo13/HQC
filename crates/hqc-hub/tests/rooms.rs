@@ -885,6 +885,59 @@ async fn the_speakers_turn_without_a_post_stops_the_room() {
     hub.finish().await;
 }
 
+/// SPEC §7.1.1, §8.1: the speaker's answer an interruption cut off (`interrupted: true`, as after
+/// Stop in the agent's own chat) is no post: it stays in the agent's session, its turn is one
+/// without a post, which stops the room, and the next agent is not woken.
+#[tokio::test]
+async fn an_interrupted_answer_is_no_post() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "conversation", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let a = titled(&members, "opus");
+    say(&hub, &room, "Which store?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ia = inputs[0].clone();
+    assert_eq!(ia["payload"]["session_id"], a["id"]);
+    ack_input(&mut w, &ia).await;
+    w.event(agent_event(
+        id(a),
+        "agent.message",
+        json!({"text": "Postgres, because", "final": true, "interrupted": true,
+               "in_reply_to": ia["payload"]["event_id"]}),
+    ))
+    .await;
+    let idle = agent_event(
+        id(a),
+        "status",
+        json!({"state": "idle", "in_reply_to": ia["payload"]["event_id"]}),
+    );
+    let idle = w.send("event", json!({ "event": idle })).await;
+    let frames = w.within(Duration::from_millis(300)).await;
+    let woken: Vec<&Value> = frames.iter().filter(|f| f["id"] != idle.as_str()).collect();
+    assert!(woken.is_empty(), "{woken:?}");
+    let events = hub.events(id(&room)).await;
+    assert!(posts(&events).is_empty(), "{events:?}");
+    let stopped = lines(&events, "room_stopped");
+    assert_eq!(stopped.len(), 1, "{events:?}");
+    assert_eq!(
+        stopped[0]["payload"]["text"],
+        "opus's turn ended without a post; the agents go on when you write"
+    );
+    let cut = hub
+        .events(id(a))
+        .await
+        .into_iter()
+        .filter(|e| e["type"] == "agent.message" && e["payload"]["interrupted"] == true)
+        .count();
+    assert_eq!(cut, 1);
+    hub.finish().await;
+}
+
 /// SPEC §5.2, §7.1.1: an input from the room that the worker rejects, or that fails with the
 /// agent's start, is a line in the room, in both modes.
 #[tokio::test]
@@ -953,8 +1006,9 @@ async fn a_room_input_that_fails_is_a_line_in_the_room() {
     hub.finish().await;
 }
 
-/// SPEC §6, §7.1.1: `POST /stop` of a room stops each of its agents: its open requests
-/// cancelled, `session.stop`, its inputs left as they are; the room says "Stopped". A final
+/// SPEC §6, §7.1.1: `POST /stop` of a room stops each of its agents as its own Stop does:
+/// `session.stop`, the runtime's requests left to the worker, its inputs left as they are; the
+/// room says "Stopped". A final
 /// message on an input whose message is from before it posts nothing and wakes nobody, whether it
 /// is the stopped turn's, a turn on an input the worker had, or the turn of an agent a post woke
 /// just before the stop; the owner's next message starts the room again from the first agent.
@@ -987,22 +1041,19 @@ async fn stopping_a_room_stops_its_agents() {
         assert_eq!((s, r["sent"].as_bool()), (200, Some(true)), "{r}");
     }
     stop(&hub, &room).await;
-    let f = w.expect("clarify.response").await;
-    assert_eq!(
-        f["payload"],
-        json!({"session_id": id(a), "request_id": "c-1", "answers": {}})
-    );
+    // Each agent is stopped as its own Stop does (SPEC §10.1): with its worker connected the
+    // runtime's question is left to the worker, which cancels those of the interrupted turn and
+    // keeps a background subagent's, so the hub neither answers nor cancels it.
     let mut stopped = Vec::new();
     for _ in 0..2 {
         stopped.push(w.expect("session.stop").await["payload"]["session_id"].clone());
     }
     assert_eq!(stopped, vec![a["id"].clone(), b["id"].clone()]);
     let events = hub.events(id(a)).await;
-    let cancel = events
-        .iter()
-        .find(|e| e["type"] == "clarify.cancel")
-        .unwrap();
-    assert_eq!(cancel["payload"]["reason"], "stopped");
+    assert!(
+        !events.iter().any(|e| e["type"] == "clarify.cancel"),
+        "{events:?}"
+    );
     let delivery = |e: &Value| {
         events
             .iter()

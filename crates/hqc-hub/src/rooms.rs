@@ -620,9 +620,11 @@ async fn room_block(
 /// ([`answered_before`]) only a post counts, as an aside. Otherwise a text that is exactly
 /// `NO_REPLY` once trimmed is a pass, `system room_passed` ([`passed`]); a reply the runtime wrote
 /// itself (`runtime`) is no post, and in a council, or from the speaker of a conversation, a
-/// `room_stopped` line ([`runtime_line`]); any other is the agent's post there ([`post`]). It
-/// wakes nobody: in a conversation the end of the speaker's turn moves the circle on
-/// ([`decide`]).
+/// `room_stopped` line ([`runtime_line`]); any other is the agent's post there ([`post`]). An
+/// answer an interruption cut off (`interrupted`: Stop in the agent's own chat, "No" to a
+/// permission request) posts nothing: its turn is one without a post. It wakes nobody: in a
+/// conversation the end of the speaker's turn moves the circle on ([`decide`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn on_final(
     app: &AppState,
     s: &SessionRow,
@@ -630,8 +632,12 @@ pub async fn on_final(
     input: Uuid,
     text: &str,
     runtime: bool,
+    interrupted: bool,
     row: &EventRow,
 ) -> anyhow::Result<()> {
+    if interrupted {
+        return Ok(());
+    }
     let _room = lock(app, room_id).await;
     let Some(room) = db::session(&app.db, room_id).await? else {
         return Ok(());

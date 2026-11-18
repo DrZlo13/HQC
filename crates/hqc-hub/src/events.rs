@@ -482,6 +482,7 @@ async fn after_store(
             text,
             in_reply_to,
             runtime,
+            interrupted,
             ..
         } => {
             db::set_turn(&app.db, s.id, false, false).await?;
@@ -493,11 +494,19 @@ async fn after_store(
                     crate::peers::on_final(app, s, *input, text, (row.event_id, row.seq)).await?;
                 }
             }
-            // An agent's answer to its room is its post there (SPEC §7.1.1).
+            // An agent's answer to its room is its post there, unless an interruption cut it
+            // off (SPEC §7.1.1).
             if let (Source::Worker, Some(room), Some(input)) = (source, s.room_id, in_reply_to) {
                 // Boxed: the post is a hub event, which comes back here.
                 Box::pin(crate::rooms::on_final(
-                    app, s, room, *input, text, *runtime, row,
+                    app,
+                    s,
+                    room,
+                    *input,
+                    text,
+                    *runtime,
+                    *interrupted,
+                    row,
                 ))
                 .await?;
             }

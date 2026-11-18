@@ -3142,7 +3142,7 @@ describe('a new session', () => {
     expect(menuItems()).toEqual(["The worker's default", 'Ask', 'Auto', 'Allow all']);
     await click(root.querySelector('.ctx-menu .btn-permissions-ask'));
     await click(root.querySelector('.btn-chip-model'));
-    expect(menuItems()).toEqual(["Claude Code's default", 'Opus', 'Sonnet', 'Haiku', 'Fable', 'Another model…']);
+    expect(menuItems()).toEqual(["Claude Code's default", 'Opus', 'Sonnet', 'Haiku', 'Fable', 'Opus 5.5', 'Opus 5', 'Opus 4.8', 'Opus 4.7', 'Opus 4.6', 'Sonnet 5.5', 'Sonnet 5', 'Sonnet 4.6', 'Haiku 5.5', 'Haiku 4.5', 'Fable 5.1', 'Fable 5', 'Another model…']);
     await click(root.querySelector('.ctx-menu .btn-model-haiku'));
     expect(chips()).toEqual(['phys-mp · home-mac', 'Folder net', 'Permissions: Ask', 'Model: Haiku']);
     expect(win()!.querySelector('.chat-meta')!.textContent).toBe('Drafthome-mac/~/work/games/phys-mp/net');
@@ -3180,6 +3180,28 @@ describe('a new session', () => {
     expect(root.querySelector('.group-draft')).toBeNull();
     expect(rowOf('Session 6').querySelector('.session-row')!.getAttribute('aria-current')).toBe('page');
     expect(api.createSession).toHaveBeenCalledTimes(1);
+  });
+
+  // SPEC 0.168: the model chip lists the versions after the aliases, apart; one picked is checked
+  // there and the session starts with it.
+  it('the model chip offers the versions, and starts the session with the one picked', async () => {
+    const { app, api } = draftApp();
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    await click(root.querySelector('.btn-chip-model'));
+    const entries = () =>
+      [...root.querySelectorAll('.ctx-menu > *')].map((el) => (el.classList.contains('menu-sep') ? '—' : el.textContent));
+    expect(entries()).toEqual(["Claude Code's default", 'Opus', 'Sonnet', 'Haiku', 'Fable', '—', 'Opus 5.5', 'Opus 5', 'Opus 4.8', 'Opus 4.7', 'Opus 4.6', 'Sonnet 5.5', 'Sonnet 5', 'Sonnet 4.6', 'Haiku 5.5', 'Haiku 4.5', 'Fable 5.1', 'Fable 5', '—', 'Another model…']);
+    await click(root.querySelector('.ctx-menu .btn-model-claude-opus-4-8'));
+    expect(chips()[3]).toBe('Model: Opus 4.8');
+    await click(root.querySelector('.btn-chip-model'));
+    expect(root.querySelector('.ctx-menu .btn-model-claude-opus-4-8')!.getAttribute('aria-checked')).toBe('true');
+    expect(root.querySelector('.ctx-menu .btn-model-custom')!.getAttribute('aria-checked')).toBe('false');
+    await click(root.querySelector('.ctx-menu .btn-model-claude-opus-4-8'));
+    await typeMessage('Go');
+    await sendMessage();
+    expect(api.createSession).toHaveBeenCalledWith('p1', undefined, expect.objectContaining({ model: 'claude-opus-4-8' }));
   });
 
   it('left unsent, it is gone: another session opened, then "+" again opens a new one with the defaults', async () => {

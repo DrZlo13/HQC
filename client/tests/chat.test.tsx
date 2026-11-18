@@ -417,6 +417,18 @@ describe('model', () => {
       'Sonnet',
       'Haiku',
       'Fable',
+      'Opus 5.5',
+      'Opus 5',
+      'Opus 4.8',
+      'Opus 4.7',
+      'Opus 4.6',
+      'Sonnet 5.5',
+      'Sonnet 5',
+      'Sonnet 4.6',
+      'Haiku 5.5',
+      'Haiku 4.5',
+      'Fable 5.1',
+      'Fable 5',
       'Another model…',
     ]);
     await set('model', 'sonnet');
@@ -557,12 +569,30 @@ describe('model', () => {
     expect(root.querySelector('.limits')).toBeNull();
   });
 
-  it('a name that is no alias shows as typed', async () => {
-    const { app } = setup('idle', { model: 'claude-sonnet-5-5' });
+  // SPEC 0.168: the versions under "Versions"; a name the menu does not list is typed.
+  it('a version is chosen as an alias is, and shows as chosen; another name shows as typed', async () => {
+    let { app, api } = setup('idle');
+    await mount(app);
+    await open();
+    expect(field('model')!.querySelector('optgroup')!.label).toBe('Versions');
+    await set('model', 'claude-opus-4-8');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: 'claude-opus-4-8' });
+    expect(field('model')!.value).toBe('claude-opus-4-8');
+    expect(field('model_name')).toBeNull();
+    render(null, root);
+
+    ({ app } = setup('idle', { model: 'claude-fable-5' }));
+    await mount(app);
+    await open();
+    expect(field('model')!.value).toBe('claude-fable-5');
+    expect(field('model_name')).toBeNull();
+    render(null, root);
+
+    ({ app } = setup('idle', { model: 'claude-sonnet-4-5' }));
     await mount(app);
     await open();
     expect(field('model')!.value).toBe('custom');
-    expect(field<HTMLInputElement>('model_name')!.value).toBe('claude-sonnet-5-5');
+    expect(field<HTMLInputElement>('model_name')!.value).toBe('claude-sonnet-4-5');
   });
 
   it('shows what the hub refused', async () => {
@@ -574,6 +604,152 @@ describe('model', () => {
     await set('model_name', 'a b');
     expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: 'a b' });
     expect($('.notice')!.textContent).toContain('Not changed: model must be');
+  });
+});
+
+// SPEC 0.168: the runtime's reply to a model refusal offers another model while no message of the
+// user came after it; the choice switches the session as "More" does.
+describe('a refusal of the model', () => {
+  const REFUSAL =
+    "API Error: Opus 5.5's safeguards flagged this session. Claude Code can't respond to your last message with Opus 5.5. Try rephrasing the request in a new session or change your model.";
+  const reply = (seq: number, refusal = true) =>
+    ev('event.agent.message', seq, (e) => (e.payload = { text: REFUSAL, final: true, runtime: true, refusal }));
+  const offer = () => $('.line-refusal .btn-switch-model');
+
+  it('offers "Switch model" under the last one; a version picked switches the session and the line says so', async () => {
+    const { app, api } = setup('idle', { history: [HISTORY[0], reply(2)] });
+    await mount(app);
+    expect($('.line-refusal')!.textContent).toBe(`${REFUSAL}Switch model`);
+    await act(async () => offer()!.click());
+    const items = [...root.querySelectorAll<HTMLButtonElement>('.ctx-menu .menu-item')].map((b) => b.textContent);
+    expect(items).toContain('Opus 4.8');
+    // A running agent is not switched to the default: it is not offered.
+    expect(items).not.toContain("Claude Code's default");
+    await act(async () => {
+      root.querySelector<HTMLButtonElement>('.ctx-menu .btn-model-claude-opus-4-8')!.click();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: 'claude-opus-4-8' });
+    expect($('.ctx-menu')).toBeNull();
+    expect(offer()).toBeNull();
+    expect($('.line-refusal .refusal-offer')!.textContent).toBe('Switched to Opus 4.8. Send the message again.');
+  });
+
+  it('a refused switch keeps the offer', async () => {
+    const { app, api } = setup('idle', { history: [HISTORY[0], reply(2)] });
+    api.patchSession.mockRejectedValueOnce(new Error('session is archived'));
+    await mount(app);
+    await act(async () => offer()!.click());
+    await act(async () => {
+      root.querySelector<HTMLButtonElement>('.ctx-menu .btn-model-sonnet')!.click();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect($('.notice')!.textContent).toBe('Not changed: session is archived');
+    expect(offer()).not.toBeNull();
+  });
+
+  it('"Another model…" switches to the name typed; an empty one does nothing', async () => {
+    const { app, api } = setup('idle', { history: [HISTORY[0], reply(2)] });
+    await mount(app);
+    await act(async () => offer()!.click());
+    await act(async () => root.querySelector<HTMLButtonElement>('.ctx-menu .btn-model-custom')!.click());
+    const name = () => root.querySelector<HTMLInputElement>('.ctx-menu input[name=model_name]');
+    const enter = (value: string) =>
+      act(async () => {
+        name()!.value = value;
+        name()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        await new Promise((r) => setTimeout(r, 10));
+      });
+    await enter('  ');
+    expect(api.patchSession).not.toHaveBeenCalled();
+    expect(name()).not.toBeNull();
+    await enter(' claude-sonnet-4-5 ');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: 'claude-sonnet-4-5' });
+    expect($('.ctx-menu')).toBeNull();
+    expect($('.refusal-offer')!.textContent).toBe('Switched to Sonnet 4.5. Send the message again.');
+  });
+
+  it('a provider switches the session to it after the confirmation, and the line names it', async () => {
+    const { app, api } = setup('idle', { history: [HISTORY[0], reply(2)] });
+    app.providers = [
+      { id: 'pr1', name: 'qwen-local', label: 'Qwen 3.8 (local)', base_url: 'http://192.168.1.229:8082', model: 'qwen3.8-27b', workers: ['wk1'] },
+    ];
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    try {
+      await mount(app);
+      await act(async () => offer()!.click());
+      await act(async () => {
+        root.querySelector<HTMLButtonElement>('.ctx-menu .btn-model-provider')!.click();
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      expect(api.patchSession).toHaveBeenLastCalledWith('s1', { provider_id: 'pr1' });
+      expect($('.refusal-offer')!.textContent).toBe('Switched to Qwen 3.8 (local). Send the message again.');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('the session\'s model is checked, and picking it only closes the menu', async () => {
+    const { app, api } = setup('idle', { history: [HISTORY[0], reply(2)], model: 'claude-opus-4-8' });
+    await mount(app);
+    await act(async () => offer()!.click());
+    const checked = root.querySelector<HTMLButtonElement>('.ctx-menu .btn-model-claude-opus-4-8')!;
+    expect(checked.getAttribute('aria-checked')).toBe('true');
+    await act(async () => {
+      checked.click();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(api.patchSession).not.toHaveBeenCalled();
+    expect($('.ctx-menu')).toBeNull();
+    expect(offer()).not.toBeNull();
+  });
+
+  it('none while VS Code holds the session; once it is taken over, the offer is there', async () => {
+    const { app } = setup('locked_vscode', { history: [HISTORY[0], reply(2)] });
+    await mount(app);
+    expect($('.line-runtime')!.textContent).toBe(REFUSAL);
+    expect(offer()).toBeNull();
+    await act(async () =>
+      app.mergeSummary([
+        { session_id: 's1', project_id: 'p1', title: 'test 12', state: 'idle', queue_len: 0, unread: 0, last_seq: 7, last_read_seq: 7 },
+      ]),
+    );
+    expect(offer()).not.toBeNull();
+  });
+
+  it('the offer goes once the user writes after it; a runtime reply that is no refusal has none', async () => {
+    const { app } = setup('idle', { history: [HISTORY[0], reply(2), reply(3, false)] });
+    await mount(app);
+    const lines = () => [...root.querySelectorAll('.line-runtime')].map((l) => [l.textContent, !!l.querySelector('.btn-switch-model')]);
+    expect(lines()).toEqual([
+      [`${REFUSAL}Switch model`, true],
+      [REFUSAL, false],
+    ]);
+    await act(async () => subscriber!.onEvent(HISTORY[3]));
+    expect(lines()).toEqual([
+      [REFUSAL, false],
+      [REFUSAL, false],
+    ]);
+  });
+
+  it('none over a message that waited through the refused turn: it stands under the line', async () => {
+    const waited = ev('event.user.message', 2, (e) => {
+      e.event_id = '0199f3a2-7c10-7000-8000-000000000330';
+      e.client_op_id = 'op-2';
+      e.payload = { text: 'sent meanwhile', artifact_ids: [] };
+      e.delivery = 'pending';
+      delete e.delivered_at;
+    });
+    const refused = ev('event.agent.message', 3, (e) => {
+      e.payload = { text: REFUSAL, final: true, runtime: true, refusal: true, in_reply_to: HISTORY[0].event_id };
+    });
+    const { app } = setup('running', { history: [HISTORY[0], waited, refused] });
+    await mount(app);
+    const line = $('.line-runtime')!;
+    const message = [...root.querySelectorAll('.msg-user')].find((m) => m.textContent?.includes('sent meanwhile'))!;
+    expect(line.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(line.textContent).toBe(REFUSAL);
+    expect(offer()).toBeNull();
   });
 });
 

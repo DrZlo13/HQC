@@ -174,6 +174,9 @@ export interface AgentMessage {
   /** An interrupt cut the reply off before the runtime finished it (Stop, "No" to a permission
    *  request; since SPEC 0.161): shown muted and marked. Absent = false. */
   interrupted?: boolean;
+  /** The runtime's reply to a model refusal (`stop_reason: "refusal"`; since SPEC 0.168): the
+   *  feed offers another model under it. Absent = false. */
+  refusal?: boolean;
 }
 export interface AgentThinking {
   text: string;
@@ -450,6 +453,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     in_reply_to: optStr(p, 'in_reply_to'),
     runtime: optBool(p, 'runtime'),
     interrupted: optBool(p, 'interrupted'),
+    refusal: optBool(p, 'refusal'),
   }),
   'agent.thinking': (p) => ({ text: str(p, 'text') }),
   'tool.call': (p) => ({

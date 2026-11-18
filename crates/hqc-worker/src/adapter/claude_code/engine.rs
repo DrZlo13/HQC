@@ -16,6 +16,7 @@
 //!   last); non-empty `thinking` → `agent.thinking`;
 //! - `assistant` text with `model` `<synthetic>` (the CLI's own reply: an API error, "Credit
 //!   balance is too low") → `agent.message` with `runtime: true`, held and flushed as any;
+//!   with `stop_reason` `refusal` (its reply to a model refusal) also `refusal: true`;
 //! - `assistant` text with `aborted: true` (an interrupt cut it off) → `agent.message` with
 //!   `interrupted: true`, held and flushed as any;
 //! - `system` `task_notification` (a background task ended) → `system task_notification`
@@ -179,6 +180,9 @@ pub const COMMAND_NAME_LIMIT: usize = 100;
 pub const SYNTHETIC_MODEL: &str = "<synthetic>";
 /// `request_id` prefix of our `initialize` control request.
 const INIT_REQUEST: &str = "hqc-init-";
+/// `message.stop_reason` of the CLI's own reply to a model refusal (2.1.312, stream-json and
+/// transcript alike): `agent.message` with `refusal: true`.
+pub const REFUSAL: &str = "refusal";
 /// `request_id` prefix of our `set_permission_mode` control requests.
 const MODE_REQUEST: &str = "hqc-mode-";
 /// `request_id` prefix of our `set_model` control requests.
@@ -282,9 +286,9 @@ impl Pending {
 pub struct Core {
     session_id: Uuid,
     restricted: bool,
-    /// The last assistant text: event id, text, whether the CLI wrote it itself, and whether
-    /// an interrupt cut it off.
-    held: Option<(Uuid, String, bool, bool)>,
+    /// The last assistant text: event id, text, whether the CLI wrote it itself, whether an
+    /// interrupt cut it off, and whether it is the CLI's reply to a model refusal.
+    held: Option<(Uuid, String, bool, bool, bool)>,
     /// Event id of the `context_compacted` of a `compact_boundary`, held for the summary that
     /// follows it ([`Core::release_compaction`]).
     compaction: Option<Uuid>,
@@ -1281,6 +1285,7 @@ impl Core {
         let synthetic = v["message"]["model"] == SYNTHETIC_MODEL;
         // Cut off by an interrupt before the stream completed (2.1.312).
         let aborted = v["aborted"] == true;
+        let refusal = synthetic && v["message"]["stop_reason"] == REFUSAL;
         let mut out = Vec::new();
         // A response other than the one streamed while that one's text stands: the CLI gave up
         // the stream and asked again without one ("Error streaming, falling back to
@@ -1306,7 +1311,7 @@ impl Core {
                     if synthetic {
                         tracing::info!(session_id = %self.session_id, "runtime message");
                     }
-                    self.held = Some((id, text(t), synthetic, aborted));
+                    self.held = Some((id, text(t), synthetic, aborted, refusal));
                     self.live_text = false;
                 }
                 Some("tool_use") => {
@@ -2188,7 +2193,7 @@ impl Core {
     // ---- helpers -----------------------------------------------------------------------
 
     fn flush(&mut self, r#final: bool) -> Option<Action> {
-        let (id, text, runtime, interrupted) = self.held.take()?;
+        let (id, text, runtime, interrupted, refusal) = self.held.take()?;
         Some(self.emit(
             id,
             EventKind::AgentMessage {
@@ -2197,6 +2202,7 @@ impl Core {
                 in_reply_to: self.reply_to(),
                 runtime,
                 interrupted,
+                refusal,
             },
         ))
     }

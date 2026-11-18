@@ -8,10 +8,12 @@
 import type { SecretFields } from '../api';
 import type { ComponentChildren } from 'preact';
 import { useMemo, useState } from 'preact/hooks';
-import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, SessionState } from '../proto';
+import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, ModelProvider, SessionState } from '../proto';
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import type { ArtifactStore } from '../artifacts';
+import { modelMenuItems, type ModelChoice } from './agentSettings';
 import { AttachmentView, PendingAttachments, type ViewedArtifact } from './attachments';
+import { ContextMenu } from './ContextMenu';
 import {
   argsText,
   askTarget,
@@ -59,6 +61,7 @@ import {
   formatTime,
   formatTimer,
   formatTokens,
+  modelName,
   oneLine,
   count,
 } from './labels';
@@ -66,6 +69,16 @@ import { elapsed, stats } from './LiveSubagents';
 import { CodeBlock, CopyButton, Markdown, markdownLine } from './Markdown';
 import { PermissionBlock } from './permission';
 import { PeerMessageBlock, ReplyFromBlock, ReplyToBlock, SentBlock } from './relay';
+
+/** The session's model, for the offer under the runtime's reply to a model refusal (SPEC
+ *  0.168): the one it has now, the providers its worker allows, and `to`, which switches it as
+ *  the chat's menu does and resolves to whether the hub took it. */
+export interface ModelSwitch {
+  model?: string;
+  provider?: string;
+  providers: ModelProvider[];
+  to(choice: ModelChoice): Promise<boolean>;
+}
 
 /** What cards need from the chat: lookups and actions. */
 export interface FolderActions {
@@ -121,6 +134,10 @@ export interface ChatActions {
   /** Gives the secret an agent's `hqc_secret` asks for (SPEC 0.147); absent where it cannot
    *  be given (the session's worker does not take secrets). */
   giveSecret?(requestId: string, f: SecretFields): Promise<void>;
+  /** The offer of another model under a refusal of the model (SPEC 0.168): absent where the
+   *  chat's "More" has no model field, and while VS Code holds the session — its message
+   *  cannot be sent again from here. */
+  modelSwitch?: ModelSwitch;
 }
 
 export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActions }) {
@@ -369,6 +386,7 @@ export function EventView({ event, actions, queued }: { event: HqcEvent; actions
     case 'agent.message':
       // A reply Claude Code wrote itself (an API error, "Credit balance is too low"): a
       // service line, not the agent's text.
+      if (event.payload.runtime && event.payload.refusal) return <RefusalLine event={event} actions={actions} />;
       if (event.payload.runtime) return <Line kind="system line-runtime">{event.payload.text}</Line>;
       return <AgentMessage event={event} />;
     case 'agent.thinking':
@@ -522,6 +540,96 @@ function WorkerLogLine({ event }: { event: EventOf<'system'> }) {
       <span class="log-level">{LOG_LEVEL_LABELS[level] ?? level}</span>{' '}
       <span class="log-text">{event.payload.text}</span>
     </div>
+  );
+}
+
+/** The runtime's reply to a model refusal (SPEC 0.168): the service line of any runtime reply,
+ *  and, while no message of the user stands after it in the feed, "Switch model" under its
+ *  text. It opens the model menu (`ChatActions.modelSwitch`), the session's model checked and
+ *  without Claude Code's default: a running agent is not switched to it, it takes it at its
+ *  next start. The checked one only closes the menu; once another went through, the line says
+ *  so in the button's place. */
+function RefusalLine({ event, actions }: { event: EventOf<'agent.message'>; actions: ChatActions }) {
+  const ms = actions.modelSwitch;
+  const phone = useIsPhone();
+  const [open, setOpen] = useState<{ x: number; y: number; anchor: HTMLElement; custom?: boolean } | null>(null);
+  const [switched, setSwitched] = useState<string | null>(null);
+  // By the place in the feed, not by `seq`: an input that waited through this turn stands under
+  // the line though it came before it.
+  const items = actions.timeline.items();
+  const at = items.findIndex((i) => i.kind === 'event' && i.event.seq === event.seq);
+  const answered = items.slice(at + 1).some((i) => i.kind === 'event' && i.event.type === 'user.message');
+  if (!ms || answered) return <Line kind="system line-runtime">{event.payload.text}</Line>;
+  const pick = (c: ModelChoice) => {
+    if ('provider' in c ? c.provider === ms.provider : !ms.provider && c.model === ms.model) return;
+    const to = 'provider' in c ? ms.providers.find((p) => p.id === c.provider)!.label : modelName(c.model!);
+    void ms.to(c).then((ok) => ok && setSwitched(to));
+  };
+  let menu: ComponentChildren = null;
+  if (open) {
+    const at = { x: open.x, y: open.y, above: true, anchor: open.anchor, backdrop: phone, onClose: () => setOpen(null) };
+    menu = open.custom ? (
+      <ContextMenu {...at} label="Model">
+        <label class="menu-field">
+          <span class="field-label">Model name</span>
+          <input
+            class="input mono"
+            name="model_name"
+            placeholder="claude-sonnet-4-5"
+            data-focus
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter' || e.isComposing) return;
+              e.preventDefault();
+              const m = (e.currentTarget as HTMLInputElement).value.trim();
+              if (!m) return;
+              setOpen(null);
+              pick({ model: m });
+            }}
+          />
+        </label>
+      </ContextMenu>
+    ) : (
+      <ContextMenu
+        {...at}
+        label="Model"
+        items={modelMenuItems({
+          model: ms.model,
+          provider: ms.provider,
+          providers: ms.providers,
+          withDefault: false,
+          onPick: pick,
+          onAnother: () => setOpen({ ...open, custom: true }),
+        })}
+      />
+    );
+  }
+  return (
+    <>
+      <Line kind="system line-runtime line-refusal">
+        {event.payload.text}
+        <span class="refusal-offer" role="status">
+          {switched ? (
+            `Switched to ${switched}. Send the message again.`
+          ) : (
+            <button
+              type="button"
+              class="btn btn-small btn-outline btn-switch-model"
+              aria-haspopup="menu"
+              aria-expanded={!!open}
+              onClick={(e) => {
+                if (open) return setOpen(null);
+                const el = e.currentTarget as HTMLElement;
+                const r = el.getBoundingClientRect();
+                setOpen({ x: r.left, y: r.top - 6, anchor: el });
+              }}
+            >
+              Switch model
+            </button>
+          )}
+        </span>
+      </Line>
+      {menu}
+    </>
   );
 }
 

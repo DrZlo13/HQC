@@ -1430,14 +1430,20 @@ select.input {
 
 /* One context menu (ContextMenu.tsx): fixed at the point it was opened from, an icon per item.
    Items 34 px, 26 px in the compact look, 44 px on a phone. Two classes: the plain .menu rule
-   further down must not win. */
+   further down must not win. One taller than the window (a phone's model menu) scrolls, its
+   items keeping their height. */
 .menu.ctx-menu {
   position: fixed;
   right: auto;
   z-index: 40;
   min-width: 220px;
   max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
   padding: 5px;
+}
+.menu.ctx-menu > * {
+  flex: none;
 }
 .ctx-menu .menu-item {
   display: flex;
@@ -3375,6 +3381,24 @@ select.input {
 }
 .line-system-policy_denied b {
   color: var(--danger);
+}
+/* The runtime's reply to a model refusal (SPEC 0.168): "Switch model" under its text, then the
+   model switched to. Sized as the buttons under a message not sent. */
+.refusal-offer {
+  flex-basis: 100%;
+  display: flex;
+  justify-content: center;
+  margin-top: 6px;
+  color: var(--muted);
+}
+.refusal-offer .btn-small {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 7px;
+}
+.chat-phone .refusal-offer .btn-small {
+  height: 36px;
+  padding: 0 14px;
 }
 
 /* SPEC §9.3: a transcript forked, turns of one writer are missing from the other's context. */

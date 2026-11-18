@@ -14,7 +14,8 @@
 //!   the last prompt of the file;
 //! - `assistant` `tool_use` → `tool.call`, non-empty `thinking` → `agent.thinking`;
 //! - `assistant` text with `model` `<synthetic>` (the CLI's own reply) → `agent.message`
-//!   with `runtime: true`;
+//!   with `runtime: true`, and with `stop_reason` `refusal` (its reply to a model refusal)
+//!   also `refusal: true`;
 //! - `user` with `origin.kind` `task-notification` (a background task ended; the CLI writes
 //!   `<task-notification>…<summary>…</summary>` as its text), and an `attachment`
 //!   `queued_command` with `commandMode: task-notification` (one that came while a turn ran,
@@ -47,8 +48,8 @@ use uuid::Uuid;
 
 use crate::adapter::claude_code::engine::{
     args_preview, parse_questions, preview, result_text, text, COMMAND_OUTPUT, CONTEXT_COMPACTED,
-    CONTEXT_COMPACTED_TEXT, ERROR_TEXT_LIMIT, PREVIEW_LIMIT, SYNTHETIC_MODEL, TASK_NOTIFICATION,
-    TURN_INTERRUPTED, TURN_INTERRUPTED_TEXT,
+    CONTEXT_COMPACTED_TEXT, ERROR_TEXT_LIMIT, PREVIEW_LIMIT, REFUSAL, SYNTHETIC_MODEL,
+    TASK_NOTIFICATION, TURN_INTERRUPTED, TURN_INTERRUPTED_TEXT,
 };
 
 /// `origin.kind` of the `user` record of a background task's notification (2.1.312), and
@@ -509,6 +510,7 @@ fn split_labels(answer: &str, labels: &[String]) -> Vec<String> {
 fn assistant(m: &Message, in_reply_to: Option<Uuid>) -> Vec<Event> {
     let end_turn = m.stop_reason() == Some("end_turn");
     let synthetic = m.model() == Some(SYNTHETIC_MODEL);
+    let refusal = synthetic && m.stop_reason() == Some(REFUSAL);
     let mut out = Vec::new();
     for (i, b) in m.blocks().iter().enumerate() {
         let kind = match b["type"].as_str() {
@@ -523,6 +525,7 @@ fn assistant(m: &Message, in_reply_to: Option<Uuid>) -> Vec<Event> {
                     in_reply_to,
                     runtime: synthetic,
                     interrupted: false,
+                    refusal,
                 }
             }
             Some("tool_use") => EventKind::ToolCall {
@@ -721,6 +724,7 @@ mod tests {
                 in_reply_to: Some(prompt),
                 runtime: true,
                 interrupted: false,
+                refusal: false,
             }]
         );
         assert_eq!(evs[0].author, agent());
@@ -730,6 +734,31 @@ mod tests {
                 &"c294c442-b0d3-4724-94a4-17d06e405b0a".parse().unwrap(),
                 0
             )
+        );
+    }
+
+    /// The CLI's own reply to a model refusal (`<synthetic>`, `stop_reason` `refusal` with its
+    /// `stop_details`, as 2.1.312 writes it; the text shortened) is `agent.message` with
+    /// `runtime` and `refusal`; the reply to an unknown model above is no refusal.
+    #[test]
+    fn a_runtime_reply_to_a_refusal() {
+        let line = r#"{"parentUuid":"ce9e21ed-6734-479d-b65e-8794ac737a0b","isSidechain":false,"type":"assistant","uuid":"5d1f0c4e-8a2b-4f6e-9c3d-7b1a2e4f6a80","timestamp":"2026-11-15T09:12:40.118Z","message":{"id":"0b6f3d2a-4c1e-4f8a-9e7d-2a5c8b1f3e60","container":null,"model":"<synthetic>","role":"assistant","stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber"},"stop_sequence":"","type":"message","content":[{"type":"text","text":"API Error: Opus 5.5's safeguards flagged this session. Claude Code can't respond to your last message with Opus 5.5. Try rephrasing the request in a new session or change your model."}]},"error":"invalid_request","isApiErrorMessage":true,"cwd":"/tmp/hqc-fixture/bg","sessionId":"382723fd-060a-4dad-a3a6-e43899c86dac"}"#;
+        let rec = hqc_claude_jsonl::parse_line(line).unwrap();
+        let prompt = Uuid::now_v7();
+        let evs = record_events(&rec, Some(prompt));
+        assert_eq!(
+            evs.iter().map(|e| e.kind.clone()).collect::<Vec<_>>(),
+            [EventKind::AgentMessage {
+                text: "API Error: Opus 5.5's safeguards flagged this session. Claude Code can't \
+                       respond to your last message with Opus 5.5. Try rephrasing the request \
+                       in a new session or change your model."
+                    .into(),
+                r#final: false,
+                in_reply_to: Some(prompt),
+                runtime: true,
+                interrupted: false,
+                refusal: true,
+            }]
         );
     }
 

@@ -3357,6 +3357,7 @@ fn held_text_is_not_final_before_a_tool_call() {
                 in_reply_to: Some(input),
                 runtime: false,
                 interrupted: false,
+                refusal: false,
             }
         )
     );
@@ -4694,6 +4695,7 @@ fn synthetic_reply_is_a_runtime_agent_message() {
                 in_reply_to: Some(input),
                 runtime: true,
                 interrupted: false,
+                refusal: false,
             }
         )
     );
@@ -4727,6 +4729,41 @@ fn turn_ended_by_a_synthetic_reply_has_a_final_runtime_message() {
     assert_eq!(
         last_message["payload"],
         json!({"text": text, "final": true, "in_reply_to": input, "runtime": true})
+    );
+}
+
+/// The CLI's own reply to a model refusal (`<synthetic>`, `stop_reason` `refusal` with its
+/// `stop_details`, as 2.1.312 builds it; the text shortened) is the turn's final
+/// `agent.message` with `runtime` and `refusal`; another synthetic reply is no refusal
+/// (`synthetic_reply_is_a_runtime_agent_message`).
+#[test]
+fn synthetic_refusal_is_a_refusal_agent_message() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let input = started(&mut core, sid);
+    let text = "API Error: Opus 5.5's safeguards flagged this session. Claude Code can't respond \
+                to your last message with Opus 5.5. Try rephrasing the request in a new session \
+                or change your model.";
+    let stream = format!(
+        r#"{{"type":"assistant","message":{{"id":"0b6f3d2a-4c1e-4f8a-9e7d-2a5c8b1f3e60","model":"<synthetic>","role":"assistant","stop_reason":"refusal","stop_details":{{"type":"refusal","category":"cyber"}},"type":"message","content":[{{"type":"text","text":"{text}"}}]}},"parent_tool_use_id":null,"uuid":"5d1f0c4e-8a2b-4f6e-9c3d-7b1a2e4f6a80","error":"invalid_request","is_api_error_message":true}}
+{{"type":"result","subtype":"success","is_error":true,"result":"{text}","total_cost_usd":0,"usage":{{"input_tokens":0,"output_tokens":0}}}}"#
+    );
+    let evs = emitted(play(&mut core, &stream));
+    let messages: Vec<&EventKind> = events(&evs)
+        .into_iter()
+        .map(|e| &e.kind)
+        .filter(|k| matches!(k, EventKind::AgentMessage { .. }))
+        .collect();
+    assert_eq!(
+        messages,
+        [&EventKind::AgentMessage {
+            text: text.into(),
+            r#final: true,
+            in_reply_to: Some(input),
+            runtime: true,
+            interrupted: false,
+            refusal: true,
+        }]
     );
 }
 

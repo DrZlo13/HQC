@@ -11,7 +11,7 @@ import { onBack, replaceHash } from '../nav';
 import type { PermissionMode, Workspace } from '../proto';
 import type { OutgoingFile } from '../session';
 import { Timeline, type Item } from '../timeline';
-import { MODEL_ALIASES } from './agentSettings';
+import { isTypedModel, modelMenuItems } from './agentSettings';
 import { ChatItems, type ChatActions } from './cards';
 import { Composer, SessionsButton, toOutgoing, type SessionsToggle } from './Chat';
 import { ContextMenu, type MenuEntry } from './ContextMenu';
@@ -290,7 +290,7 @@ const PERMISSIONS: [PermissionMode | undefined, string][] = [
 /** The chips over a new session's input: the workspace (each of the project's with its worker
  *  and whole path, the default marked, "Add a workspace…" under them), the folder inside it
  *  (typed), the permissions (the worker's default, Ask, Auto, Allow all) and the model (Claude Code's
- *  default, an alias, another name typed). Each opens its menu upwards; a pick gives the caret
+ *  default, an alias, a version, another name typed). Each opens its menu upwards; a pick gives the caret
  *  back to the input. */
 function NewSessionChips({
   app,
@@ -311,7 +311,7 @@ function NewSessionChips({
   const id = app.newSessionWorkspace(draft);
   const workspace = list?.find((w) => w.id === id);
   const worker = workspace && app.workerName(workspace.worker_id);
-  const custom = draft.model !== undefined && !(MODEL_ALIASES as readonly string[]).includes(draft.model);
+  const custom = isTypedModel(draft.model);
   // A provider the draft chose that this workspace's worker does not allow is not shown.
   const chosenProvider = app.providersFor(workspace?.worker_id).find((p) => p.id === draft.provider_id);
   const close = () => setOpen(null);
@@ -397,46 +397,17 @@ function NewSessionChips({
         </ContextMenu>
       );
     } else {
-      const claude = !draft.provider_id;
-      const items: MenuEntry[] = [
-        {
-          label: "Claude Code's default",
-          cls: 'btn-model-default',
-          checked: claude && draft.model === undefined,
-          onSelect: () => app.setNewSession({ model: undefined, provider_id: undefined }),
+      const items = modelMenuItems({
+        model: draft.model,
+        provider: draft.provider_id,
+        // The providers the workspace's worker allows (SPEC 0.144).
+        providers: app.providersFor(workspace?.worker_id),
+        onPick: (c) => app.setNewSession('provider' in c ? { provider_id: c.provider } : { model: c.model, provider_id: undefined }),
+        onAnother: () => {
+          app.setNewSession({ provider_id: undefined });
+          setOpen({ ...open, custom: true });
         },
-        ...MODEL_ALIASES.map((m) => ({
-          label: modelName(m),
-          cls: `btn-model-${m}`,
-          checked: claude && draft.model === m,
-          onSelect: () => app.setNewSession({ model: m, provider_id: undefined }),
-        })),
-        // Another model waits for its name, in the menu.
-        {
-          label: 'Another model…',
-          cls: 'btn-model-custom',
-          checked: claude && custom,
-          keepOpen: true,
-          onSelect: () => {
-            app.setNewSession({ provider_id: undefined });
-            setOpen({ ...open, custom: true });
-          },
-        },
-      ];
-      // The providers the workspace's worker allows (SPEC 0.144).
-      const providers = app.providersFor(workspace?.worker_id);
-      if (providers.length) {
-        items.push('sep');
-        for (const p of providers) {
-          items.push({
-            label: p.label,
-            detail: p.model,
-            cls: 'btn-model-provider',
-            checked: draft.provider_id === p.id,
-            onSelect: () => app.setNewSession({ provider_id: p.id }),
-          });
-        }
-      }
+      });
       menu = <ContextMenu {...at} label="Model" items={items} />;
     }
   }
@@ -502,7 +473,7 @@ function ModelName({ value, onChange, onKeyDown }: { value: string; onChange: (m
       <input
         class="input mono"
         name="model_name"
-        placeholder="claude-sonnet-5-5"
+        placeholder="claude-sonnet-4-5"
         data-focus
         value={name}
         onInput={(e) => {

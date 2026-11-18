@@ -483,7 +483,6 @@ async fn after_store(
             in_reply_to,
             runtime,
             interrupted,
-            // A refusal is a runtime reply too (SPEC §4): the room takes it as one.
             ..
         } => {
             db::set_turn(&app.db, s.id, false, false).await?;

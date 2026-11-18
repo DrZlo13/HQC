@@ -2131,8 +2131,9 @@ impl Core {
         //   the final answer, or before an interrupt; 2.1.312);
         // - `cancelled`: not taken, `dropped`;
         // - no line (an older CLI): carried if written during the turn, else taken.
-        // A taken one goes before the turn's events (SPEC §5.2): its `ack` after the `status
-        // idle` would open a turn on the hub that nothing closes.
+        // A taken one goes before the events of this `result` (the final message, usage,
+        // `status idle`; SPEC §5.2): the hub opens a turn on an `ack`, and one after the
+        // `status idle` would leave the session running after its turn.
         let (mut carried, mut dropped, mut taken) = (Vec::new(), Vec::new(), Vec::new());
         for mut w in std::mem::take(&mut self.awaiting_echo) {
             let carry = match w.state.as_deref() {

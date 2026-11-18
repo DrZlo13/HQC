@@ -387,9 +387,9 @@ export function ChipButton({
 /** The chips over a new session's or room's input: the workspace (each of the project's with
  *  its worker and whole path, the default marked, "Add a workspace…" under them), the folder
  *  inside it (typed), the permissions (the worker's default, Ask, Auto, Allow all) and, with
- *  `withModel`, the model (Claude Code's default, an alias, a version, another name typed, a provider); with `mode`,
- *  a room's mode first. Each opens its menu upwards; a pick gives the caret back to the input.
- *  `values` are what is chosen, `onChange` takes what a pick changes. */
+ *  `withModel`, the model (Claude Code's default, an alias, a version, another name typed);
+ *  with `mode`, a room's mode first. Each opens its menu upwards; a pick gives the caret back
+ *  to the input. `values` are what is chosen, `onChange` takes what a pick changes. */
 export function NewSessionChips({
   app,
   projectId,

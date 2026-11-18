@@ -104,7 +104,7 @@ SPEC 0.161: the subagents of `event.subagents.live.json` are `stoppable`, and
 `hub.session.stop_task.json` stops the first of them alone. SPEC 0.169: so is its Monitor row;
 its wakeup and cron rows are not.
 
-SPEC 0.171: `api.room.request.json` — `POST /api/projects/{id}/rooms`, a room in `council` mode
+SPEC 0.172: `api.room.request.json` — `POST /api/projects/{id}/rooms`, a room in `council` mode
 with three agents (the second on a model provider, the last one on the runtime's default model);
 `api.session.room.json` — the room's session object (`room_mode`, no worker, `runtime: none`);
 `api.session.room.member.json` — one of its agents (`room_id`, `spawned_by` the room, its model

@@ -202,7 +202,7 @@ async fn hub_runs_a_claude_code_turn_with_an_approval() {
 
 /// SPEC §5.2: a local slash command (`/name x`, a `result` and no echo) is taken at its turn's
 /// end; its `ack` reaches the hub before that turn's `status idle`, else the hub would open a
-/// turn on it that nothing closes. Several sessions: the connection sends the outbox and its
+/// turn on it after that turn ended. Several sessions: the connection sends the outbox and its
 /// direct frames in an order of its own.
 #[tokio::test]
 async fn a_local_commands_ack_goes_before_its_status() {

@@ -112,17 +112,17 @@ pub struct Session {
     /// Absent — not paused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_at: Option<DateTime<Utc>>,
-    /// The mode of a room (SPEC §7.1.1, since 0.171): a session with no worker and no agent
+    /// The mode of a room (SPEC §7.1.1, since 0.172): a session with no worker and no agent
     /// (`runtime: none`) whose agents are sessions of their own. Present only on a room.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_mode: Option<RoomMode>,
-    /// The room an agent's session belongs to (SPEC §7.1.1, since 0.171). Absent on other
+    /// The room an agent's session belongs to (SPEC §7.1.1, since 0.172). Absent on other
     /// sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_id: Option<Uuid>,
 }
 
-/// How a room's agents wake (SPEC §7.1.1, since 0.171): in `conversation` the owner's message
+/// How a room's agents wake (SPEC §7.1.1, since 0.172): in `conversation` the owner's message
 /// and every agent's post wake the room's other agents; in `council` only the owner's message
 /// wakes them, and each sees the posts since its last turn with its next input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,7 +342,7 @@ pub struct CreateSessionRequest {
     pub provider_id: Option<Uuid>,
 }
 
-/// `POST /api/projects/{id}/rooms` (SPEC §6, §7.1.1, since 0.171): a room and a session for
+/// `POST /api/projects/{id}/rooms` (SPEC §6, §7.1.1, since 0.172): a room and a session for
 /// each of `agents` (at least one), all in one workspace and folder, chosen as for
 /// [`CreateSessionRequest`], in `permission_mode`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1506,7 +1506,7 @@ mod tests {
         );
     }
 
-    // SPEC 0.171: a room is a session with no worker and no agent; its agents are sessions with
+    // SPEC 0.172: a room is a session with no worker and no agent; its agents are sessions with
     // `room_id`.
     #[test]
     fn room_examples_roundtrip() {

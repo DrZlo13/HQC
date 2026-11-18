@@ -882,9 +882,10 @@ async fn the_answer_goes_before_the_stop_at_shutdown() {
 }
 
 /// The same order for an input's `ack`: the next input's goes after the final answer of the turn
-/// before it, written to the outbox first, as `session.state` does; a room decides at a turn's
-/// end whether an input still waits (SPEC §5.2, §7.1.1). Written together, the connection picks
-/// between the outbox and a direct frame at random, so many rounds.
+/// before it, written to the outbox first, as `session.state` does: the hub closes a turn on its
+/// final answer, which after the next input's `ack` would close that input's turn (SPEC §5.2,
+/// §17.1). Written together, the connection picks between the outbox and a direct frame at
+/// random, so many rounds.
 #[tokio::test]
 async fn the_answer_goes_before_the_next_inputs_ack() {
     let mut hub = FakeHub::start().await;

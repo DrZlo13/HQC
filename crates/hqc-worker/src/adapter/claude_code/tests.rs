@@ -5381,8 +5381,8 @@ fn a_cancelled_message_is_not_taken() {
 }
 
 /// A message the CLI took without an echo (`started`, no `isReplay` line: a local command)
-/// is taken at the `result`, also one written during the turn, before the turn's events (SPEC
-/// §5.2).
+/// is taken at the `result`, also one written during the turn, before the events of that
+/// `result` (SPEC §5.2).
 #[test]
 fn a_message_started_without_an_echo_is_taken() {
     let sid = Uuid::now_v7();

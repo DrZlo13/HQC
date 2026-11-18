@@ -1,4 +1,4 @@
-//! SPEC §7.1.1 (0.171): the agents' room with a fake worker: a room and its agents' sessions,
+//! SPEC §7.1.1 (0.172): the agents' room with a fake worker: a room and its agents' sessions,
 //! the owner's message to every agent of a council with the hub's lines in front, an agent's
 //! final message posted to the room (not `NO_REPLY`, not a turn on a direct input) with the files
 //! of its turn, the posts a council agent sees with its next input; a conversation's agents

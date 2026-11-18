@@ -29,10 +29,11 @@ pub struct Direct {
 }
 
 /// Whether direct frame `f` keeps its place among the outbox entries (SPEC §5.2): a session's
-/// state (`stopped` right after a turn must not overtake its final answer) and an input's `ack`
-/// (the next input's must not overtake the final answer and `status` of the turn before it, the
-/// ack of an input taken at a turn's end must not come after its `status idle`: the hub decides
-/// at a turn's end whether an input still waits, §7.1.1, and opens a turn on an ack after it).
+/// state (`stopped` right after a turn must not overtake its final answer) and an input's `ack`.
+/// The hub opens a turn on an input's `ack` and closes it on the final answer or `status idle`
+/// (§17.1): the next input's `ack` must not overtake the final answer and `status` of the turn
+/// before it, which would close that input's turn as it opens, and the `ack` of an input taken
+/// at a turn's end must not come after its `status idle`, which would open a turn after its end.
 fn after_events(f: &WorkerFrame) -> bool {
     match f {
         WorkerFrame::SessionState { .. } => true,

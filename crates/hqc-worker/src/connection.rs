@@ -357,12 +357,15 @@ impl Connection {
                     return Ok(());
                 }
                 _ = ready.notified() => {
-                    // The direct frames queued by now first, each in its place: an entry
-                    // written after a frame that keeps its place must not go before it.
+                    // The outbox up to its last entry now, after the direct frames queued, each
+                    // in its place: an entry written after a frame that keeps its place must not
+                    // go before it. An entry written later goes at the latest on the next wake
+                    // (its notify came after this one), after the frames queued before it.
+                    let upto = self.link.outbox.last_seq().unwrap_or(i64::MAX);
                     while let Ok(d) = self.direct.try_recv() {
                         self.send_queued(ws, &mut sent_upto, &mut in_flight, true, &mut last_rx, d).await?;
                     }
-                    self.send_outbox(ws, &mut sent_upto, &mut in_flight, true, &mut last_rx, i64::MAX).await?;
+                    self.send_outbox(ws, &mut sent_upto, &mut in_flight, true, &mut last_rx, upto).await?;
                 }
                 d = self.direct.recv() => match d {
                     Some(d) => self.send_queued(ws, &mut sent_upto, &mut in_flight, true, &mut last_rx, d).await?,

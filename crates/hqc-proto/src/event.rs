@@ -476,7 +476,7 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task_id: Option<String>,
         /// Only with `room_passed`, in a room: the agent's session that passed (since SPEC
-        /// 0.171, §7.1.1).
+        /// 0.172, §7.1.1).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from_session_id: Option<Uuid>,
         /// Only with [`SESSION_FORKED`]: its fields sit next to `text` and `code`.

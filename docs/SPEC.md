@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.212, 2026-11-22. Status: the architecture agreed after six reviews and a survey of
+Version 0.213, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -594,7 +594,7 @@ the client renders only them. The "source" column is the component that produces
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (short error text; since 0.194 an opened call row in the client shows it only when it is not the start of `result_preview`, which the Claude Code adapter cuts from the same text), `duration_ms?`, `artifact_id?` (a diff or a large result, §12; since 0.180 the Claude Code adapter's whole text of a result longer than `result_preview`, its first 2 MiB, kind `text`, §8.1), `artifact_ids[]?` (since 0.180: the result's images, kind `image`, in order; absent when none, §8.1) | adapter |
-| `approval.request` | `request_id`, `tool`, `description`, `args_preview?`, `options[{id, label, canonical, grant?}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind}`, `subagent?{task_id, description}` (since 0.181: the subagent that asks, §10.1; absent for the agent itself and a subagent the adapter does not know) | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons; `args_preview` (since 0.207) — the call's arguments as `tool.call.args_preview` carries them (the same limit and form), so a card that does not stand right after its call (a subagent's, another session's, one in the Requests list) shows the whole command and every argument; absent from an older worker; `grant` of an option (since 0.207) — what choosing it grants besides this call: `{place, rules?[], exact?}`, `place` ∈ `session` (the worker's session rules, until the process ends) / `local_settings` (Claude Code writes the rules to `.claude/settings.local.json` at the root of the git repository containing the session's cwd, §8.1), `rules` — as Claude Code writes a rule, `toolName` or `toolName(ruleContent)`, at most 10, each at most 256 bytes (a rule cut there ends with `…`; past 10 the tenth item is `… N more`, the count of the rules not listed, which the option grants as well), `exact` — the exact call is allowed too; no field — the option grants nothing more (`once`, `deny`) or the worker does not say; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; since 0.180 `reason?` — why the runtime asks (Claude Code: `decision_reason`, at most 1024 bytes), `display_name?` — the runtime's name of the tool (at most 256 bytes), both absent when blank, and `human_only?` — `true` when only a person may answer it (§8.1): its `options` are `once` and `deny`, it has no `rule_suggestions`, and the hub's `auto_approve` leaves it to the owner (§10.1); absent when false. The client shows `reason` under the card's title and names the tool by `display_name` when there is one, an MCP server's tool as `<tool> (<server>)` (the runtime's `display_name` of one drops the server); `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for; the hub drops it from a worker's event |
+| `approval.request` | `request_id`, `tool`, `description`, `args_preview?`, `options[{id, label, canonical, grant?}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind}`, `subagent?{task_id, description}` (since 0.181: the subagent that asks, §10.1; absent for the agent itself and a subagent the adapter does not know) | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons (since 0.213 also the option ids `server_session` and `server_always`, canonical `session` and `always`, on an MCP tool's card, §10.1); `args_preview` (since 0.207) — the call's arguments as `tool.call.args_preview` carries them (the same limit and form), so a card that does not stand right after its call (a subagent's, another session's, one in the Requests list) shows the whole command and every argument; absent from an older worker; `grant` of an option (since 0.207) — what choosing it grants besides this call: `{place, rules?[], exact?}`, `place` ∈ `session` (the worker's session rules, until the process ends) / `local_settings` (Claude Code writes the rules to `.claude/settings.local.json` at the root of the git repository containing the session's cwd, §8.1), `rules` — as Claude Code writes a rule, `toolName` or `toolName(ruleContent)`, at most 10, each at most 256 bytes (a rule cut there ends with `…`; past 10 the tenth item is `… N more`, the count of the rules not listed, which the option grants as well), `exact` — the exact call is allowed too; no field — the option grants nothing more (`once`, `deny`) or the worker does not say; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; since 0.180 `reason?` — why the runtime asks (Claude Code: `decision_reason`, at most 1024 bytes), `display_name?` — the runtime's name of the tool (at most 256 bytes), both absent when blank, and `human_only?` — `true` when only a person may answer it (§8.1): its `options` are `once` and `deny`, it has no `rule_suggestions`, and the hub's `auto_approve` leaves it to the owner (§10.1); absent when false. The client shows `reason` under the card's title and names the tool by `display_name` when there is one, an MCP server's tool as `<tool> (<server>)` (the runtime's `display_name` of one drops the server); `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for; the hub drops it from a worker's event |
 | `approval.response` | `request_id`, `option_id`, `by` (user id or `auto`), `message?` (the user's text instead of the call, only with a `deny`/`deny_always` option, §10.1) | client, or the hub with `auto_approve` |
 | `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived, since 0.180 withdrawn — the runtime withdrew its request, §8.1; the client says "withdrawn") | adapter, worker or hub. An answer from another device is not a cancellation: the first answer closes the request, the second gets `409 request_closed` (§10.1) |
 | `clarify.request` | `request_id`, `questions[{id, text, header?, options?: [string], option_descriptions?: [string], option_previews?: [string], multi?: bool, required?: bool, input?: "integer" \| "number"}]`, `subagent?{task_id, description}` (since 0.181, as on `approval.request`) | Claude Code adapter: the `AskUserQuestion` tool arrives as `can_use_tool`, the answer goes into `updatedInput.answers` (verified on 2.1.307 with `--permission-prompt-tool stdio`, §8.1). Since 0.69 `header` is the question's short label and `option_descriptions` what each option means, in the order and number of `options`, `""` for an option without one; each is absent when empty. Since 0.199 `option_previews` is each option's mockup (an ASCII sketch, code, a config) by the same rule, cut by the worker to 8 KiB with `\n… (truncated)` after it. The client shows `header` above the question, each description under its option, and an "Other" field: its text is the answer (with `multi`, an item of the array beside the checked labels); "Other" chosen with nothing typed is sent as `"Other"`, as the VS Code tab does. As in the tab, "Answer" stays disabled until every question has an answer: an option picked, a text typed (not only spaces) or "Other" chosen. A question with a preview shows it as plain text in `<pre>`, never rendered as markdown or HTML, not wrapped and scrolling sideways: on a desktop in a column beside the options, the preview of the option last under the pointer while the pointer is over the question (the "Other" row lets it go) or of the option with the keyboard focus (kept while the focus is in the preview), else of the first chosen one, else the first one that has a preview, the column as tall as the tallest preview of the question; on a phone under each chosen option that has one. ACP agents have no source for it. Since 0.180 also an MCP server's request for input (Claude Code: `elicitation`, §8.1), with `server?` — the server that asks, `message?` — its text, `url?` — the page it sends the person to, then with no `questions`; a question of its form carries `required: true` for a field the server requires and `input` (`integer`, `number`) for a free-text field whose answer must read as one, both absent otherwise and in the agent's questions; the client heads the card "<server> asks", shows the text above the questions, "required" beside a required question's header, the link (only an http, https or mailto one as a link, labelled with the address it opens, a host in its punycode form), no "Other", the submit button ("Done" for a link, the card then saying "Done"; unlike the agent's questions it waits only for what the form's schema says, which a server on the MCP SDK checks the answer against, refusing one that does not match (§8.1): every `required` question answered, an `integer` answer an optional minus and digits, at most 2^53 − 1 in size, a `number` one written in decimal (an optional minus, digits with an optional point, an optional exponent) that JavaScript's `Number()` reads as a finite number; a field neither required nor answered may stay empty) and "Decline" |
@@ -4204,7 +4204,10 @@ Permissions: with `--permission-prompts host --permission-prompt-tool stdio` a r
 a `control_request` with `subtype: can_use_tool` (`tool_name`, `input`,
 `permission_suggestions`); the adapter replies with a `control_response` with `behavior:
 allow|deny`. Options for the client: `once`, `session`, `always`, `deny`
-(`always` only if `permission_suggestions` contains `addRules` in `localSettings`). Mapping: `once` → allow;
+(`always` only if `permission_suggestions` contains `addRules` in `localSettings`), and since 0.213
+for an MCP tool `server_session` and `server_always` (`server_always` only for a session with a
+workspace that is not restricted; neither on a request only a person may answer; §10.1).
+Mapping: `once` → allow;
 `deny` → deny as the "No" of the VS Code tab (since 0.69; extension 2.1.309): `message` "The user
 doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit,
 the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell
@@ -5690,7 +5693,8 @@ It is covered by fixtures from real files (one set per CLI version).
 ### 10.1 In a session
 `approval.request` is a first-class event with buttons in the client. The client shows **the
 options from the request's `options[]`**, labelled by `canonical`; for Claude Code these are
-once / session / always / deny, for ACP agents whatever the agent offered. Since 0.69 the card of an
+once / session / always / deny (and for an MCP tool the two all-tools answers, labelled by the
+worker's text, below), for ACP agents whatever the agent offered. Since 0.69 the card of an
 Edit or MultiEdit call shows the change as a diff of `old_string` → `new_string` (each edit of a
 MultiEdit), of a Write the content, read from the call's `tool.call`; a preview cut at 4 KB is
 shown as far as it goes and marked cut. An Edit with `replace_all` is marked "All occurrences".
@@ -5861,6 +5865,28 @@ note that the rule applies only when every part is allowed; on a phone a full-sc
 `canonical: once` option; if saving fails, nothing is answered. This keeps §2.1: a rule is a
 standing answer of the owner within the worker's policy, the hub could answer `once` anyway, and
 no rule lifts the worker's `deny`.
+
+**All tools of an MCP server** (since 0.213). The card of a call of an MCP tool
+`mcp__<server>__<tool>` (the server is the part between `mcp__` and the next `__`) offers two
+more answers after the session and always answers: option `server_session` ("Allow all
+<server> tools for this session", `canonical: session`) and, when the session has a workspace and
+is not restricted, option `server_always` ("Always allow all <server> tools in this folder",
+`canonical: always`); a request only a person may answer (§8.1) offers neither. The worker
+answers `allow` to either and remembers the server for the rest of the process: every
+`mcp__<server>__*` call is then allowed without a card, another server's is not. `server_always`
+is also an answer of the owner that the hub turns into a standing rule: before it forwards the
+answer the hub adds the hqc rule `mcp__<server>` to the session's workspace (§3 Workspace, the
+same code as `POST /api/workspaces/{id}/rules`; the server comes from the tool of the stored
+request, never from the client; a rule the folder has is kept) and sends `workspace.rules`; if
+the rule cannot be stored (`422 invalid_rule` for a server name that is not letters, digits,
+`_` and `-`, `422 too_many_rules`, `400` for a session without a workspace) the answer is refused
+and the request stays open; a rule stored for an answer that comes too late (`409`, the request
+closed meanwhile) stays. The answered row says "allowed all <server> tools for this session" or
+"always allowed all <server> tools in this folder". The buttons carry the worker's labels, which
+name the server (the canonical captions of both would read as "Always in this session" and
+"Always allow"); a long one wraps, and on a phone's sheet takes a row of its own. The rule
+`mcp__<server>` is an ordinary rule of the folder: the rules screen lists and deletes it; the
+session that pressed the button keeps allowing the server until its process restarts.
 
 **A move of the session** (since 0.76). An agent's `hqc_move` into anything but a ready
 workspace of the owner in the environment of the session's folder (§7) is an
@@ -6367,11 +6393,11 @@ deny = ["Bash(sudo:*)", "Bash(git push:*)"]  # never run and never ask
   `Bash(rm -rf /*)`, `Bash(curl * | sh)`, `Bash(curl * | bash)`, `Bash(dd:*)`, `Bash(mkfs*)`,
   `Bash(git push --force:*)`, `Bash(git push -f:*)`; `deny = []` turns it off
   **[decision]**;
-- a rule is `Tool` or `Tool(content)`: the name of Latin letters, digits and `_`
-  (`mcp__hqc`, a trailing `*` is allowed), non-empty content in a single pair of parentheses at
-  the end of the rule, at most 256 bytes, no control characters. An invalid rule or an unknown
-  field is a config read error: in `-p` the CLI silently ignores settings that failed its
-  validation, and one bad rule would drop the whole `deny`.
+- a rule is `Tool` or `Tool(content)`: the name of Latin letters, digits, `_` and `-`
+  (`mcp__hqc`, `mcp__claude-in-chrome`, a trailing `*` is allowed), non-empty content in a
+  single pair of parentheses at the end of the rule, at most 256 bytes, no control characters.
+  An invalid rule or an unknown field is a config read error: in `-p` the CLI silently ignores
+  settings that failed its validation, and one bad rule would drop the whole `deny`.
 
 Three levels, from strongest to weakest: the worker's `deny` (not run, not asked about, `always`,
 `auto` and `allow_all` do not override it) → the worker's `allow`, the `always` rules from
@@ -7195,6 +7221,18 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.212 → 0.213 (all tools of an MCP server in one answer)
+§10.1, §8.1, §4: the card of an MCP tool call offers "Allow all <server> tools for this session"
+(`server_session`) and "Always allow all <server> tools in this folder" (`server_always`, which the
+hub turns into the folder rule `mcp__<server>` before it forwards the answer); until now the answer
+`session` held only for the exact tool, so every other tool of the server asked again. The folder
+rule is the one the rules screen already lists, so a later server-wide setting on the hub replaces
+it without a change here. §10.1, §14: a tool name in a rule (hqc's and the worker's
+`[permissions]`) may have `-`: Claude Code's server names are letters, digits, `_` and `-`
+(`claude-in-chrome`), and until now no rule could name such a server. The hub has to be updated
+before the workers: an older client labels both answers by their canonical, as "Always in this
+session" and "Always allow", and an older hub stores no folder rule for `server_always`.
 
 ### 0.211 → 0.212 (Pause while a subagent works after the turn)
 §6 client layout: Pause was offered for `running`, `waiting` and `queued` only, so a session

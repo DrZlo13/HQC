@@ -337,6 +337,9 @@ pub struct Project {
     /// Since when the project is archived: not in `GET /api/projects`, only with `?archived=1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<DateTime<Utc>>,
+    /// The texts the chat's quick-message button sends to the agent, in the user's order.
+    #[serde(default)]
+    pub quick_messages: Vec<String>,
 }
 
 /// A project's color (SPEC §3 Project, T49): the names of the client's `theme.ts`. No
@@ -538,6 +541,9 @@ pub struct PatchProject {
     /// /api/projects/{id}/icon` (here: `422`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<ProjectIcon>,
+    /// Replaces the whole list of quick messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quick_messages: Option<Vec<String>>,
 }
 
 /// A workspace (SPEC §3 Workspace): a folder on a worker that belongs to one project.

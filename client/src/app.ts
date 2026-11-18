@@ -1235,6 +1235,20 @@ export class AppState {
     this.edited();
   }
 
+  /** One project as the hub has it now, into the list its `archived_at` says: what another
+   *  device changed since the lists were read. */
+  async refreshProject(id: string): Promise<void> {
+    this.placeProject(await this.api.project(id));
+    this.changed();
+  }
+
+  /** A project's quick messages: the whole list replaces the stored one. */
+  async setQuickMessages(id: string, quick_messages: string[]): Promise<void> {
+    const p = await this.api.patchProject(id, { quick_messages });
+    this.placeProject(p);
+    this.edited();
+  }
+
   /** An image as the project's icon; the hub checks it (`422 invalid_icon`). */
   async uploadProjectIcon(id: string, file: File): Promise<void> {
     const p = await this.api.uploadProjectIcon(id, file, file.name);

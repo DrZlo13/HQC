@@ -237,6 +237,97 @@ async fn color_and_icon_round_trip_and_the_personal_project_gets_them_too() {
 }
 
 #[tokio::test]
+async fn quick_messages_are_replaced_as_a_list_and_checked() {
+    let hub = TestHub::start().await;
+    let (s, p) = hub.post("/api/projects", json!({"name": "quick"})).await;
+    assert_eq!(s, 201, "{p}");
+    let pid = p["id"].as_str().unwrap().to_string();
+    assert_eq!(p["quick_messages"], json!([]));
+
+    let list = json!(["Continue", "Run the tests\nand fix what fails"]);
+    let (s, p) = hub
+        .patch(
+            &format!("/api/projects/{pid}"),
+            json!({"quick_messages": list}),
+        )
+        .await;
+    assert_eq!(s, 200, "{p}");
+    assert_eq!(p["quick_messages"], list);
+    let (_, got) = hub.get(&format!("/api/projects/{pid}")).await;
+    assert_eq!(got["quick_messages"], list);
+    let (_, all) = hub.get("/api/projects").await;
+    let listed = all["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == pid.as_str())
+        .unwrap();
+    assert_eq!(listed["quick_messages"], list);
+
+    // A PATCH without the field keeps the list; with it, the list is replaced whole.
+    let (s, p) = hub
+        .patch(&format!("/api/projects/{pid}"), json!({"color": "coral"}))
+        .await;
+    assert_eq!(s, 200, "{p}");
+    assert_eq!(p["quick_messages"], list);
+    let (s, p) = hub
+        .patch(
+            &format!("/api/projects/{pid}"),
+            json!({"quick_messages": ["Only"]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{p}");
+    assert_eq!(p["quick_messages"], json!(["Only"]));
+    let (s, p) = hub
+        .patch(
+            &format!("/api/projects/{pid}"),
+            json!({"quick_messages": []}),
+        )
+        .await;
+    assert_eq!(s, 200, "{p}");
+    assert_eq!(p["quick_messages"], json!([]));
+
+    // Refused: a blank message, more than 100, one over 10 000 characters (the list stays).
+    let (_, _) = hub
+        .patch(
+            &format!("/api/projects/{pid}"),
+            json!({"quick_messages": ["Keep"]}),
+        )
+        .await;
+    let too_many: Vec<String> = (0..101).map(|i| format!("m{i}")).collect();
+    for bad in [
+        json!({"quick_messages": ["fine", "  \n "]}),
+        json!({"quick_messages": [""]}),
+        json!({"quick_messages": too_many}),
+        json!({"quick_messages": ["é".repeat(10_001)]}),
+    ] {
+        let (s, v) = hub
+            .patch(&format!("/api/projects/{pid}"), bad.clone())
+            .await;
+        assert_eq!((s, v["error"].as_str()), (400, Some("bad_request")), "{v}");
+        let (_, got) = hub.get(&format!("/api/projects/{pid}")).await;
+        assert_eq!(got["quick_messages"], json!(["Keep"]));
+    }
+    // The limits themselves are allowed.
+    let most: Vec<String> = (0..100).map(|i| format!("m{i}")).collect();
+    let (s, p) = hub
+        .patch(
+            &format!("/api/projects/{pid}"),
+            json!({"quick_messages": most}),
+        )
+        .await;
+    assert_eq!(s, 200, "{p}");
+    let (s, p) = hub
+        .patch(
+            &format!("/api/projects/{pid}"),
+            json!({"quick_messages": ["é".repeat(10_000)]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{p}");
+    hub.finish().await;
+}
+
+#[tokio::test]
 async fn the_icon_image_is_checked_by_its_content() {
     let hub = TestHub::start().await;
     let (_, p) = hub.post("/api/projects", json!({"name": "ESP"})).await;

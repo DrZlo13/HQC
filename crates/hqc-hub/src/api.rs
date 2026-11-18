@@ -246,6 +246,8 @@ pub async fn project(
 
 pub(crate) const MAX_PROJECT_NAME: usize = 100;
 const MAX_DESCRIPTION: usize = 2000;
+const MAX_QUICK_MESSAGES: usize = 100;
+const MAX_QUICK_MESSAGE: usize = 10_000;
 const MAX_LABEL: usize = 100;
 
 pub(crate) fn project_name(name: &str) -> ApiResult<String> {
@@ -270,6 +272,27 @@ fn description(d: &str) -> ApiResult<String> {
     Ok(hqc_proto::replace_nul(d.trim()).into_owned())
 }
 
+fn quick_messages(list: &[String]) -> ApiResult<Vec<String>> {
+    if list.len() > MAX_QUICK_MESSAGES {
+        return Err(ApiError::BadRequest(format!(
+            "more than {MAX_QUICK_MESSAGES} quick messages"
+        )));
+    }
+    list.iter()
+        .map(|m| {
+            if m.trim().is_empty() {
+                return Err(ApiError::BadRequest("a quick message is blank".into()));
+            }
+            if m.chars().count() > MAX_QUICK_MESSAGE {
+                return Err(ApiError::BadRequest(format!(
+                    "a quick message is longer than {MAX_QUICK_MESSAGE} characters"
+                )));
+            }
+            Ok(hqc_proto::replace_nul(m).into_owned())
+        })
+        .collect()
+}
+
 /// `POST /api/projects` (SPEC §6): `201` and the project.
 pub async fn create_project(
     State(app): State<AppState>,
@@ -283,7 +306,8 @@ pub async fn create_project(
     Ok((StatusCode::CREATED, Json(p.to_api(None))))
 }
 
-/// `PATCH /api/projects/{id}`: name, description, default workspace, color and icon (T49).
+/// `PATCH /api/projects/{id}`: name, description, default workspace, color, icon (T49) and quick
+/// messages.
 /// The personal project keeps its name (SPEC §3 User); its appearance changes like any.
 pub async fn patch_project(
     State(app): State<AppState>,
@@ -311,6 +335,11 @@ pub async fn patch_project(
         }
     }
     let icon = b.icon.map(crate::icons::stored_icon).transpose()?;
+    let quick = b
+        .quick_messages
+        .as_deref()
+        .map(quick_messages)
+        .transpose()?;
     let p = db::update_project(
         &app.db,
         id,
@@ -320,6 +349,7 @@ pub async fn patch_project(
             default_workspace_id: b.default_workspace_id,
             color: b.color,
             icon,
+            quick_messages: quick.as_deref(),
         },
     )
     .await?;

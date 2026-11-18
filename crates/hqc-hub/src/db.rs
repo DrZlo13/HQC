@@ -59,6 +59,8 @@ pub struct ProjectRow {
     pub icon: Option<Value>,
     /// Since when it is archived: off the project bar, its sessions untouched.
     pub archived_at: Option<DateTime<Utc>>,
+    /// The texts the chat's quick-message button sends, in the user's order.
+    pub quick_messages: Vec<String>,
 }
 
 /// Find the user by the verified email, creating it and its personal project on first login
@@ -194,6 +196,7 @@ impl ProjectRow {
             updated_at: self.updated_at,
             favorite_at,
             archived_at: self.archived_at,
+            quick_messages: self.quick_messages.clone(),
         }
     }
 
@@ -263,6 +266,8 @@ pub struct ProjectUpdate<'a> {
     pub color: Option<ProjectColor>,
     /// An emoji or letters (stored as `{kind, value}`); a stored image goes with it.
     pub icon: Option<Value>,
+    /// Replaces the whole list.
+    pub quick_messages: Option<&'a [String]>,
 }
 
 /// `PATCH /api/projects/{id}`: only the given fields change; the slug stays.
@@ -281,7 +286,8 @@ pub async fn update_project(
     let row = sqlx::query_as(
         "UPDATE projects SET name = coalesce($2, name), description = coalesce($3, description),
             default_workspace_id = coalesce($4, default_workspace_id),
-            color = coalesce($5, color), icon = coalesce($6, icon), updated_at = now()
+            color = coalesce($5, color), icon = coalesce($6, icon),
+            quick_messages = coalesce($7, quick_messages), updated_at = now()
          WHERE id = $1 RETURNING *",
     )
     .bind(id)
@@ -290,6 +296,7 @@ pub async fn update_project(
     .bind(u.default_workspace_id)
     .bind(u.color.map(ProjectColor::as_str))
     .bind(u.icon)
+    .bind(u.quick_messages)
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;

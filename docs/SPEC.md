@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.166, 2026-11-17. Status: the architecture agreed after six reviews and a survey of
+Version 0.167, 2026-11-17. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -221,7 +221,7 @@ the hub keeps a copy from `hello` for display and early validation.
 ### Project
 `owner_id`, `name` (1–100 characters), `slug` (unique per owner, does not change on
 rename), `description`, `default_workspace_id` (nullable),
-`session_template` (§13.3), `is_personal`, `color`, `icon`, `archived_at`. A project's first
+`session_template` (§13.3), `is_personal`, `color`, `icon`, `archived_at`, `quick_messages`. A project's first
 workspace becomes its `default_workspace_id`; when the default workspace is deleted, the
 earliest of the remaining ones takes its place. The personal project (`is_personal`) cannot be deleted or renamed (`409
 personal_project`); its other fields can change; any number of new projects can be created.
@@ -245,6 +245,12 @@ out, `?archived=1` lists it, §6) and nothing else. Its sessions, workspaces, fa
 order stay as they are: its sessions are not archived and stay in `GET /api/sessions`, an agent
 of it keeps working, and it opens, takes new sessions and is changed like any project. Archiving
 it again keeps the first time; the personal project is not archived (`409 personal_project`).
+
+`quick_messages` (since 0.167, hub migration `0049_project_quick_messages`) — the project's quick
+messages: texts (`text[]`, empty by default) the chat's quick-message button sends to the agent
+with one press, in the order the user keeps them, always in the project object. Each is one
+message as typed: at least one character other than whitespace, at most 10 000 characters; a
+project keeps at most 100. The personal project has them too.
 
 ### Provider
 Since 0.144 (iteration 5): a model provider of a user, an Anthropic-compatible endpoint
@@ -1429,8 +1435,10 @@ the rest is marked "later"):
   `?archived=1` gives the archived ones instead, in the same order
   (`api.projects.archived.json`), `POST /api/projects` {name, description?} → `201`
   and the project, `GET/PATCH/DELETE /api/projects/{id}` (`PATCH` {name?, description?,
-  default_workspace_id?, color?, icon?} — `default_workspace_id` a workspace of this project,
-  otherwise `400`; `color` one of the 8 names and `icon` an emoji or letters within the limits
+  default_workspace_id?, color?, icon?, quick_messages?} — `default_workspace_id` a workspace
+  of this project, otherwise `400`; `quick_messages` (since 0.167) a list that replaces the whole
+  stored one (absent: unchanged, `[]`: none), a blank message, one over 10 000 characters or
+  more than 100 messages is `400 bad_request` and changes nothing (§3 Project); `color` one of the 8 names and `icon` an emoji or letters within the limits
   of §3 Project, otherwise `422` (`{kind: image}` too: an image comes only by `PUT .../icon`);
   the personal project: `409 personal_project` on rename and delete, its `color` and `icon`
   change; `DELETE` → `204`, §3 Project).
@@ -1925,7 +1933,8 @@ settings…" in the project's menu, below) have Appearance (the "Project appeara
 name, icon as an emoji, letters or an image, the color, a live preview in the app theme; before
 0.88 it also had the app theme; on a phone a full-screen sheet; "Delete project" next to the
 button that opens it; since 0.64, before it a section "Project" had "Rename" and "Delete
-project"; the personal project has neither the name field nor the delete) and Workspaces (the
+project"; the personal project has neither the name field nor the delete), Quick messages (since
+0.167, below) and Workspaces (the
 workspace records with "VS Code sessions", "Make default", "Remove"; "Add a workspace", "Import
 from Claude Code"; they are no longer in the sidebar).
 
@@ -2062,6 +2071,33 @@ the screen the arrow closed. Each entry keeps in its `history.state` the address
 from. A press on a button of the composer (send, attach, remove a file) leaves the focus in the
 field: a phone keeps its keyboard, and the composer does not grow under the tap by the home
 indicator's room before the click lands.
+
+Quick messages (since 0.167, §3 Project). A chat whose project is known has a lightning-bolt
+button in the composer's row, right after the attach one (and after the key button, when there is
+one). It opens a list above the field, in the look of the command list: a row per message of the
+project in its stored order, its first line on one line ending in "…" when it does not fit, the
+whole text as the row's title (each row a button, so Tab reaches it), and a last row "Edit quick messages", a link to the project's
+settings (`#/p/<id>/settings`); with no messages the list says "No quick messages yet — add them
+in project settings" with the same link. A press on a message sends it at once as the input of
+the session, exactly as stored, and closes the list; what is typed in the field and the files
+attached stay as they are, unsent. Esc and a press outside close the list, the field keeps the
+focus; the list and the field's completion list are never open together. Opening the list asks
+the hub for the project again (`GET /api/projects/{id}`): the list kept on the client shows at
+once, and what another device changed shows when the answer comes.
+Each message in the list is a button. The opener has `aria-expanded` and, while the list is open,
+`aria-controls`; Esc on a message of the list puts the focus back on the opener. The new session's
+window has no such button.
+The project settings have a section "Quick messages" between Appearance and Workspaces: a line
+saying what they are, the list in stored order (each message as written, kept to 3 lines, with
+"Edit" and "Delete"), and "Add a quick message"; the form for a new or an edited message is a
+text area with "Save" and "Cancel", an edit happens in place of the row of the message it started
+from (found by its text; gone from the list meanwhile: at the end of the list), and while a form
+is open the other buttons are disabled. Every change
+first reads the project from the hub, applies itself to that list (an added message goes last; an
+edit replaces the first message equal to the text it started from, or adds the new text when none
+is; a delete removes the first message equal to its text, and sends nothing when none is), sends
+the whole list in `PATCH /api/projects/{id}` and shows the hub's refusal under the list.
+The messages cannot be reordered and have no names.
 
 Secrets (since 0.147, §14). The composer of a session whose worker has `session_secrets` has a
 key button beside the attach one: a form above the composer with the kind (Password, SSH key), a
@@ -5711,6 +5747,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.166 → 0.167 (quick messages)
+§3 Project `quick_messages` (hub migration `0049_project_quick_messages`), §6 `PATCH
+/api/projects/{id}` takes `quick_messages` (the whole list; blank, over 10 000 characters or more
+than 100 messages is `400`), the project object always carries it (`api.project.json`,
+`api.projects.json`, `api.projects.archived.json`), §6 client layout: the quick-message button
+and its list in a chat's composer, and the section "Quick messages" of the project settings.
+Saved texts the user sends to the agent with one press, per project; pressing sends at once.
+0.157 is taken by another branch; migrations 0046 and 0047 by open branches.
 
 ### 0.165 → 0.166 (a watcher the CLI keeps by itself is no background work)
 §5.4, §8.1, §17.3: Claude Code 2.1.312 lists among the session's background tasks, with

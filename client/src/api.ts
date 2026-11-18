@@ -299,6 +299,10 @@ export class Api {
     return parseSessionOrder(await this.req('PUT', `/api/projects/${enc(projectId)}/session_order`, body));
   }
 
+  async project(id: string): Promise<Project> {
+    return parseProject(await this.req('GET', `/api/projects/${enc(id)}`));
+  }
+
   async projects(): Promise<Project[]> {
     return parseProjectList(await this.req('GET', '/api/projects'));
   }
@@ -336,6 +340,8 @@ export class Api {
       color?: ProjectColor;
       /** An emoji or letters; an image goes through {@link Api.uploadProjectIcon}. */
       icon?: { kind: 'emoji' | 'letters'; value: string };
+      /** Replaces the whole list. */
+      quick_messages?: string[];
     },
   ): Promise<Project> {
     return parseProject(await this.req('PATCH', `/api/projects/${enc(id)}`, patch));

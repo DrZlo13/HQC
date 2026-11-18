@@ -409,6 +409,65 @@ describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
     expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e3", "e4", "e7", "e8", "e9"]);
   });
 
+  it("a joined input that went past a waiting one stands at its own place", () => {
+    // X waited for a turn of its own and was delivered at 7.1; P1 joined the running turn at 4.5.
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      ev("event.agent.thinking", (e) => ((e.seq = 2), (e.ts = at(2)))),
+      input(3, 7.1),
+      input(4, 4.5, (e) => (e.payload.joined = true)),
+      final(5, 1),
+      idle(6, 1),
+      ev("event.agent.thinking", (e) => ((e.seq = 7), (e.ts = at(7)))),
+      final(8, 3),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e3", "e7", "e8"]);
+  });
+
+  it("a joined input stands behind the last waiting input delivered before it, not at the end of them", () => {
+    // K waits (delivered 7.1), then X (delivered 12.1); e joined at 8.5, in K's turn, past X.
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      ev("event.agent.thinking", (e) => ((e.seq = 2), (e.ts = at(2)))),
+      input(3, 7.1),
+      input(4, 12.1),
+      input(5, 8.5, (e) => (e.payload.joined = true)),
+      final(6, 1),
+      idle(7, 1),
+      ev("event.agent.thinking", (e) => ((e.seq = 8), (e.ts = at(8)))),
+      final(9, 3),
+      idle(10, 3),
+      ev("event.agent.thinking", (e) => ((e.seq = 11), (e.ts = at(11)))),
+      final(12, 4),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e6", "e7", "e3", "e5", "e8", "e9", "e10", "e4", "e11", "e12"]);
+  });
+
+  it("a send of another session that joined the turn stands behind the waiting input like a joined message", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      ev("event.agent.thinking", (e) => ((e.seq = 2), (e.ts = at(2)))),
+      input(3, 6.1),
+      ev("event.peer.message", (e) => {
+        e.seq = 4;
+        e.event_id = id(4);
+        e.ts = at(4);
+        e.delivery = "delivered";
+        e.delivered_at = at(7.1);
+        e.payload = { from_session_id: id(99), text: "FYI", mode: "send", joined: true } as any;
+      }),
+      final(5, 1),
+      idle(6, 1),
+      ev("event.agent.thinking", (e) => ((e.seq = 7), (e.ts = at(7)))),
+      final(8, 3),
+      idle(9, 3),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e3", "e4", "e7", "e8", "e9"]);
+  });
+
   it("a joined input behind a waiting one stays behind it: inputs during a turn another session's question started", () => {
     const t = new Timeline();
     t.applyAll([

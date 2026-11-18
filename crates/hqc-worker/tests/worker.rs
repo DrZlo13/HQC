@@ -3554,6 +3554,20 @@ async fn a_subagents_history_comes_from_its_transcript() {
     assert_eq!(f["payload"]["events"], json!(page), "{f}");
     assert!(f["payload"].get("continues").is_none(), "{f}");
 
+    // Before an event of the page: the ones ahead of it; before one it does not hold: none,
+    // left out.
+    let mut earlier = ask("a52af2b436ded4cea");
+    earlier["before"] = page[1]["event_id"].clone();
+    c.frame("session.subagent_history", earlier.clone()).await;
+    let f = c.expect("result").await;
+    assert_eq!(f["payload"]["events"], json!(page[..1]), "{f}");
+    assert_eq!(f["payload"]["truncated"], false);
+    earlier["before"] = json!(Uuid::new_v4());
+    c.frame("session.subagent_history", earlier).await;
+    let f = c.expect("result").await;
+    assert_eq!(f["payload"]["events"], json!([]), "{f}");
+    assert_eq!(f["payload"]["truncated"], true);
+
     c.frame("session.subagent_history", ask("a55949578b136436b"))
         .await;
     let f = c.expect("result").await;

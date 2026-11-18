@@ -232,8 +232,10 @@ fn command(t: &str) -> Option<String> {
 /// `isSidechain`), as above. Its task, the text of its first `user` record, gives none, nor does
 /// any other text given to it or injected by the CLI. The newest of them, at most
 /// [`MAX_SUBAGENT_HISTORY`] that take at most [`MAX_SUBAGENT_HISTORY_BYTES`] as JSON together (an
-/// event over that alone is left out), and whether any was left out.
-pub fn subagent_events(transcript: &str) -> (Vec<Event>, bool) {
+/// event over that alone is left out), and whether any was left out. With `before`, the
+/// newest of the events before that event; one that is not among the events gives none, left
+/// out.
+pub fn subagent_events(transcript: &str, before: Option<Uuid>) -> (Vec<Event>, bool) {
     let mut out = Vec::new();
     for line in transcript.lines() {
         match hqc_claude_jsonl::parse_line(line) {
@@ -244,6 +246,12 @@ pub fn subagent_events(transcript: &str) -> (Vec<Event>, bool) {
             ),
             Ok(Record::Assistant(m)) => out.extend(assistant(&m, None)),
             _ => {}
+        }
+    }
+    if let Some(b) = before {
+        match out.iter().rposition(|e| e.event_id == b) {
+            Some(i) => out.truncate(i),
+            None => return (vec![], true),
         }
     }
     // Newest first, while they fit: the reply must stay under the hub's 1 MiB per message.
@@ -990,7 +998,7 @@ mod tests {
             ),
         ]
         .join("\n");
-        let (evs, truncated) = subagent_events(&transcript);
+        let (evs, truncated) = subagent_events(&transcript, None);
         assert_eq!(
             evs.iter().map(label).collect::<Vec<_>>(),
             ["thinking", "call:Bash", "result:false", "agent:Fixed.:true"]
@@ -1000,18 +1008,33 @@ mod tests {
             evs.iter().map(|e| e.event_id).collect::<Vec<_>>(),
             ids.map(|u| Event::id_from_claude_block(&u, 0))
         );
-        assert_eq!(subagent_events(""), (vec![], false));
+        assert_eq!(subagent_events("", None), (vec![], false));
 
         let many: Vec<String> = std::iter::once(prompt).chain((0..205).map(call)).collect();
-        let (evs, truncated) = subagent_events(&many[..201].join("\n"));
+        let (evs, truncated) = subagent_events(&many[..201].join("\n"), None);
         assert_eq!((evs.len(), truncated), (200, false));
-        let (evs, truncated) = subagent_events(&many.join("\n"));
+        let (evs, truncated) = subagent_events(&many.join("\n"), None);
         assert_eq!((evs.len(), truncated), (200, true));
         let first = |evs: &[Event]| match &evs[0].kind {
             EventKind::ToolCall { call_id, .. } => call_id.clone(),
             other => panic!("{other:?}"),
         };
         assert_eq!(first(&evs), "toolu_5", "the last 200");
+
+        // `before` cuts first, then the newest 200 of what is left: an event that is not
+        // among them gives none, left out.
+        let id_of = |i: usize| {
+            let v: serde_json::Value = serde_json::from_str(&many[1 + i]).unwrap();
+            Event::id_from_claude_block(&v["uuid"].as_str().unwrap().parse().unwrap(), 0)
+        };
+        let all = many.join("\n");
+        let (evs, truncated) = subagent_events(&all, Some(id_of(5)));
+        assert_eq!((evs.len(), truncated), (5, false));
+        assert_eq!(first(&evs), "toolu_0");
+        let (evs, truncated) = subagent_events(&all, Some(id_of(203)));
+        assert_eq!((evs.len(), truncated), (200, true));
+        assert_eq!(first(&evs), "toolu_3", "the 200 before it");
+        assert_eq!(subagent_events(&all, Some(Uuid::new_v4())), (vec![], true));
     }
 
     /// The history keeps its newest events that take at most 512 KiB as JSON together, so the
@@ -1029,7 +1052,7 @@ mod tests {
         let lines: Vec<String> = (0..200)
             .map(|i| said(format!("{i:03} {}", "x".repeat(4000))))
             .collect();
-        let (evs, truncated) = subagent_events(&lines.join("\n"));
+        let (evs, truncated) = subagent_events(&lines.join("\n"), None);
         let size: usize = evs
             .iter()
             .map(|e| serde_json::to_vec(e).unwrap().len())
@@ -1052,7 +1075,7 @@ mod tests {
 
         let mut huge = lines[..3].to_vec();
         huge.push(said("y".repeat(MAX_SUBAGENT_HISTORY_BYTES)));
-        let (evs, truncated) = subagent_events(&huge.join("\n"));
+        let (evs, truncated) = subagent_events(&huge.join("\n"), None);
         assert_eq!(
             (evs.iter().map(text).collect::<Vec<_>>(), truncated),
             (vec!["000".to_owned(), "001".into(), "002".into()], true)

@@ -2074,6 +2074,7 @@ pub async fn subagent_history(
             session_id: id,
             task_id,
             after: q.after,
+            before: None,
         })
     })
     .await?

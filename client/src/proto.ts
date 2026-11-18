@@ -1017,6 +1017,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'session_id');
     str(p, 'task_id');
     optStr(p, 'after');
+    optStr(p, 'before');
   },
   'session.kill': (p) => void str(p, 'session_id'),
   'session.permission_mode': (p) => {

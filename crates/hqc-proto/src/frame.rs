@@ -1376,7 +1376,7 @@ pub struct PermissionsInspect {
     pub tool: Option<String>,
 }
 
-/// `session.subagent_history {request_id, session_id, task_id, after?}` -> `result`
+/// `session.subagent_history {request_id, session_id, task_id, after?, before?}` -> `result`
 /// [`SubagentHistoryResult`] (since SPEC 0.175): `task_id` is a subagent's of `subagents.live`,
 /// `request_id` equals the frame `id`. A `task_id` that is not [`valid_history_task_id`] is
 /// answered with `error {invalid_frame}`.
@@ -1389,6 +1389,10 @@ pub struct SubagentHistory {
     /// page, the result holds only the ones after it, with `continues`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<Uuid>,
+    /// The `event_id` of the first event the reader has: the page is the newest events before
+    /// it. An event that is not among the events read gives no events, with `truncated`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<Uuid>,
 }
 
 /// Result of `session.subagent_history`: the newest events of the subagent's transcript, at most
@@ -1652,6 +1656,10 @@ mod tests {
         (
             "session.subagent_history",
             include_str!("../examples/wire/hub.session.subagent_history.json"),
+        ),
+        (
+            "session.subagent_history",
+            include_str!("../examples/wire/hub.session.subagent_history.before.json"),
         ),
         (
             "session.kill",

@@ -20,7 +20,7 @@ export const CANONICAL_LABELS: Record<Exclude<ApprovalCanonical, 'unknown'>, str
 };
 
 /** What became of a request after the answer, for its collapsed row. */
-export const CANONICAL_OUTCOMES: Record<Exclude<ApprovalCanonical, 'unknown'>, string> = {
+const CANONICAL_OUTCOMES: Record<Exclude<ApprovalCanonical, 'unknown'>, string> = {
   once: 'allowed',
   session: 'allowed for the rest of the session',
   always: 'always allowed',
@@ -28,8 +28,29 @@ export const CANONICAL_OUTCOMES: Record<Exclude<ApprovalCanonical, 'unknown'>, s
   deny_always: 'always denied',
 };
 
+/** Option ids of an MCP tool's card that stand for all tools of its server (SPEC 0.213). */
+const SERVER_OPTIONS = ['server_session', 'server_always'];
+
+/** The server of an MCP tool `mcp__<server>__<tool>`. */
+function mcpServer(tool: string): string | undefined {
+  const rest = tool.startsWith('mcp__') ? tool.slice(5) : '';
+  const end = rest.indexOf('__');
+  return end > 0 ? rest.slice(0, end) : undefined;
+}
+
+/** A button's caption: by `canonical`, except an unknown one and the all-tools-of-a-server ones,
+ * whose canonical caption would be that of `session` or `always` and whose label names the server. */
 export function optionLabel(o: ApprovalOption): string {
-  return o.canonical === 'unknown' ? o.label : CANONICAL_LABELS[o.canonical];
+  return o.canonical === 'unknown' || SERVER_OPTIONS.includes(o.id) ? o.label : CANONICAL_LABELS[o.canonical];
+}
+
+/** What became of an approval after `o` answered it, for its collapsed row. */
+export function optionOutcome(o: ApprovalOption, tool: string): string {
+  if (o.canonical === 'unknown') return o.label;
+  const server = mcpServer(tool);
+  if (server && o.id === 'server_session') return `allowed all ${server} tools for this session`;
+  if (server && o.id === 'server_always') return `always allowed all ${server} tools in this folder`;
+  return CANONICAL_OUTCOMES[o.canonical];
 }
 
 export function isDeny(o: ApprovalOption): boolean {

@@ -92,6 +92,12 @@ pub enum ApprovalCanonical {
     Unknown,
 }
 
+/// Option ids of an MCP tool's approval besides `once`, `session`, `always` and `deny`: all
+/// tools of the call's server, for the session (canonical `session`) or as a folder rule
+/// (canonical `always`).
+pub const OPTION_SERVER_SESSION: &str = "server_session";
+pub const OPTION_SERVER_ALWAYS: &str = "server_always";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalOption {
     pub id: String,

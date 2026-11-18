@@ -4646,6 +4646,8 @@ a.relay-peer {
 .perm-sheet .perm-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* A later answer fills the cell a full-row answer left empty. */
+  grid-auto-flow: row dense;
   align-items: stretch;
 }
 .perm-sheet .btn-allow {
@@ -4665,6 +4667,20 @@ a.relay-peer {
   white-space: normal;
   line-height: 1.2;
   margin: 0;
+}
+/* The all-tools-of-a-server answers (SPEC 0.213) carry the server's name, so they may be long:
+   they wrap, and on the sheet take a row of their own. */
+.perm-more .btn[data-option^='server_'] {
+  max-width: 100%;
+  height: auto;
+  min-height: 40px;
+  padding-block: 6px;
+  white-space: normal;
+  line-height: 1.2;
+}
+.perm-sheet .perm-more .btn[data-option^='server_'] {
+  grid-column: 1 / -1;
+  min-height: 46px;
 }
 .perm-sheet .perm-reply-open {
   align-self: center;

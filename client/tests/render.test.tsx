@@ -1232,6 +1232,57 @@ describe("approval.request (T26 card)", () => {
     expect(root.querySelector(".perm-card .perm-what pre")!.textContent).toBe('axis: "z"');
   });
 
+  it("names the server of an MCP tool's all-tools answers on the button and in the row", () => {
+    const answered = (option: string) => {
+      const t = new Timeline();
+      t.apply(
+        ev("event.approval.request", (e) => {
+          e.seq = 1;
+          e.payload.tool = "mcp__srv__one";
+          e.payload.options = [
+            { id: "allow", label: "Allow once", canonical: "once" },
+            { id: "session", label: "Allow for this session", canonical: "session" },
+            {
+              id: "server_session",
+              label: "Allow all srv tools for this session",
+              canonical: "session",
+            },
+            {
+              id: "server_always",
+              label: "Always allow all srv tools in this folder",
+              canonical: "always",
+            },
+            { id: "deny", label: "Deny", canonical: "deny" },
+          ];
+        }),
+      );
+      if (option) {
+        t.apply(
+          ev(
+            "event.approval.response",
+            (e) => ((e.seq = 2), (e.payload.option_id = option)),
+          ),
+        );
+      }
+      show(t);
+      return root.querySelector(".perm-done-row")?.textContent ?? "";
+    };
+    answered("");
+    expect(optionButtons().map((b) => b.childNodes[0].textContent)).toEqual([
+      CANONICAL_LABELS.once,
+      CANONICAL_LABELS.session,
+      "Allow all srv tools for this session",
+      "Always allow all srv tools in this folder",
+      CANONICAL_LABELS.deny,
+    ]);
+    expect(answered("server_session")).toContain(
+      "· allowed all srv tools for this session",
+    );
+    expect(answered("server_always")).toContain(
+      "· always allowed all srv tools in this folder",
+    );
+  });
+
   it("removes the buttons on approval.cancel", () => {
     const t = new Timeline();
     t.apply(ev("event.approval.request", withSeq(1)));

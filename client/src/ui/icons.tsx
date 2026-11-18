@@ -75,6 +75,20 @@ export const IconFork = ({ size = 13 }: { size?: number }) => (
   </Svg>
 );
 
+/** "Joined the turn": two paths merging into one that goes on. */
+export const IconJoined = ({ size = 13 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M6.5 5L10 1.5 13.5 5M10 1.5v8.6a3.3 3.3 0 0 1-1 2.4L3.5 18M16.5 18l-4.2-4.2" />
+  </Svg>
+);
+
+/** "Instead of the request": a reply arrow, text sent back in place of an answer. */
+export const IconReply = ({ size = 13 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M8 5l-5 5 5 5M3 10h8a6 6 0 0 1 6 6" />
+  </Svg>
+);
+
 export const IconChevron = ({ size = 14 }: { size?: number }) => (
   <Svg size={size}>
     <path d="M8 5l5 5-5 5" />

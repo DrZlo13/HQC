@@ -59,9 +59,9 @@ pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's 
     when the user did not ask to see it; a path alone is not enough. hqc_attach takes only a file \
     inside the session's workspace, so copy a file you made elsewhere (a scratchpad in /tmp) into \
     .hqc/out/ of the workspace first, not elsewhere in it: hqc keeps .hqc/ out of git. \
-    Other sessions: hqc_list_sessions, hqc_send, hqc_ask, hqc_spawn, hqc_room \
-    (a room of several agents); history: hqc_search_history to find, hqc_read to read a \
-    session or a room in full; later or recurring messages: hqc_schedule; moving this session to \
+    Other sessions: hqc_list_sessions, hqc_send, hqc_ask, hqc_spawn, hqc_room (a room of several \
+    agents); history: hqc_search_history to find, hqc_read to read a session or a room in full, or \
+    what a subagent is doing; later or recurring messages: hqc_schedule; moving this session to \
     another folder or project, only when the user asks (a folder that is not one of the user's \
     workspaces in the same environment waits for the user to allow it): hqc_move; renaming a \
     session: hqc_rename; where this machine allows it, a password or an ssh key from the user \
@@ -237,7 +237,21 @@ pub const TOOLS: &[Tool] = &[
             answer has `earlier`, pass it as `before_seq` for the page before; when it leaves \
             out newer ones it has `later`, pass it as `after_seq` for the page after. Each \
             event has its `seq`. To find where to read, use hqc_search_history, whose hits \
-            give the session's address and the event's `seq`. Reading changes nothing.",
+            give the session's address and the event's `seq`. With `subagent` (the `agentId` in \
+            the result of your Agent call; without `session`, one of this session's own) you read \
+            what that subagent has done so far, while it works and after: its text, tool calls and \
+            their results, oldest first, without a cursor its last steps, in pages of at most 100 \
+            events and 64 KiB. Page with `earlier` and `later` of the answer, passed as \
+            `before_event` and `after_event` (not `before_seq` and `after_seq`): `earlier` reads \
+            the steps before the page; `later` reads what the subagent did after it, also later on \
+            while it works (a page read with `before_event` has no `later`). An id that is not a \
+            subagent's `agentId` has no transcript and gives no events. Its thinking is left out \
+            unless you pass `thinking: true`. Only the last 4 MiB of the subagent's transcript are \
+            read: the oldest steps of a long subagent are not available, and paging back ends \
+            where the part read starts. The session must be running. `gap: true` in the answer: \
+            the `after_event` you gave is no longer among the subagent's last steps, so the page \
+            is its newest ones and the steps in between are read back with `earlier`. Reading \
+            changes nothing.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -245,7 +259,13 @@ pub const TOOLS: &[Tool] = &[
                     "session": {
                         "type": "string",
                         "description": "The session's address `<project-slug>/<session-slug>` \
-                            or its id."
+                            or its id. Required unless `subagent` is given; with `subagent`, \
+                            the session that runs it (default: this session)."
+                    },
+                    "subagent": {
+                        "type": "string",
+                        "description": "A subagent's `agentId`: read what it has done, not the \
+                            session."
                     },
                     "before_seq": {
                         "type": "integer",
@@ -256,9 +276,24 @@ pub const TOOLS: &[Tool] = &[
                         "type": "integer",
                         "description": "The first events after this `seq`; `later` of the \
                             previous answer. Not together with `before_seq`."
+                    },
+                    "before_event": {
+                        "type": "string",
+                        "description": "With `subagent`: the last events before this event; \
+                            `earlier` of the previous answer. Not together with \
+                            `after_event`."
+                    },
+                    "after_event": {
+                        "type": "string",
+                        "description": "With `subagent`: what the subagent did after this \
+                            event, also steps added since; `later` of the previous answer. Not \
+                            together with `before_event`."
+                    },
+                    "thinking": {
+                        "type": "boolean",
+                        "description": "With `subagent`: include its thinking."
                     }
                 },
-                "required": ["session"],
                 "additionalProperties": false
             })
         },

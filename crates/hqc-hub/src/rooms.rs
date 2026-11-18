@@ -12,8 +12,10 @@
 //!   members' posts, and the hub's line in front of it in an agent's input names its sender.
 //! - Such an input goes to the agent without a peer header: the hub puts its own lines, which
 //!   name an agent by its name in the room with its address, the name stripped of what could
-//!   forge a hub line ([`clean_name`]), in front of its text, `[hqc room` in the texts it puts there
-//!   escaped ([`input_text`]); the feed keeps the text as sent. In front go the other agents'
+//!   forge a hub line ([`clean_name`]: invisible and fullwidth characters too), in front of its
+//!   text, what reads as `[hqc room` in the texts it puts there escaped, fullwidth, with any
+//!   whitespace or an invisible character inside ([`escape`], [`input_text`]); the feed keeps
+//!   the text as sent. In front go the other agents'
 //!   posts since the agent's previous input from the room, in a conversation the owner's
 //!   messages too; their files go with it, and they cap it to the lowest cap kept with those
 //!   posts where that is below its own.
@@ -484,14 +486,19 @@ pub async fn input_text(
     Ok(Some(out))
 }
 
-/// A session's title as a name in a hub line: every `|`, `[`, `]`, `"` and control character a
+/// A session's title as a name in a hub line: invisible characters (zero-width, bidi, variation
+/// selectors; [`hqc_proto::lookalike::is_invisible`]) dropped,
+/// every control character, Hangul filler ([`hqc_proto::lookalike::is_filler`], shown as a
+/// blank) and every character that is or folds to `|`, `[`, `]` or `"` (a fullwidth `［`) a
 /// space, runs of whitespace one space, trimmed, so a title cannot close the line, open another
-/// or leave the quotes the hub puts round a name ([`named`]).
+/// or leave the quotes the hub puts round a name ([`named`]), or look like any of them.
 fn clean_name(title: &str) -> String {
+    use hqc_proto::lookalike::{folds_to_any, is_filler, is_invisible};
     title
         .chars()
+        .filter(|c| !is_invisible(*c))
         .map(|c| {
-            if matches!(c, '|' | '[' | ']' | '"') || c.is_control() {
+            if c.is_control() || is_filler(c) || folds_to_any(c, &['|', '[', ']', '"']) {
                 ' '
             } else {
                 c
@@ -524,27 +531,13 @@ fn named(title: Option<&str>, address: &str) -> String {
     }
 }
 
-/// `text` with every `[hqc room` (any ASCII case) replaced by `[hqc-room-text`: every line of the
-/// hub's own that opens the block, a post or the input from a room starts with the mark, so a
-/// text the hub puts there cannot make one.
+/// `text` with every place that reads as `[hqc room` replaced by `[hqc-room-text`: every line of
+/// the hub's own that opens the block, a post or the input from a room starts with the mark, so a
+/// text the hub puts there cannot make one. Any case, fullwidth or other compatibility forms,
+/// any run of Unicode whitespace between the words and invisible characters inside count
+/// ([`hqc_proto::lookalike::escape`]).
 fn escape(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0;
-    let mut i = 0;
-    while i + MARK.len() <= bytes.len() {
-        // The mark is ASCII: a match starts and ends on char boundaries.
-        if bytes[i] == b'[' && bytes[i..i + MARK.len()].eq_ignore_ascii_case(MARK.as_bytes()) {
-            out.push_str(&text[last..i]);
-            out.push_str(ESCAPED);
-            i += MARK.len();
-            last = i;
-        } else {
-            i += 1;
-        }
-    }
-    out.push_str(&text[last..]);
-    out
+    hqc_proto::lookalike::escape(text, MARK, ESCAPED)
 }
 
 /// A `peer.message` of a room (`e.session_id = $1`) from a session that is not one of its
@@ -1391,12 +1384,37 @@ async fn turn_chain(app: &AppState, session_id: Uuid, input: &EventRow) -> anyho
 
 #[cfg(test)]
 mod tests {
-    use super::escape;
+    use super::{clean_name, escape};
 
     #[test]
     fn escapes_the_mark_in_any_case() {
         assert_eq!(escape("ünï [hqc room ✓"), "ünï [hqc-room-text ✓");
         assert_eq!(escape("[[HQC Room"), "[[hqc-room-text");
         assert_eq!(escape("[hqc roo"), "[hqc roo");
+        for lookalike in [
+            "［hqc room",
+            "[hqc\u{3000}room",
+            "[hqc\u{a0}room",
+            "[hqc  room",
+            "[hq\u{200b}c room",
+            "[\u{202e}hqc room",
+            "[ｈｑｃ ｒｏｏｍ",
+            "[hq\u{34f}c room",
+            "[hqc\u{fe0f} room",
+            "[hqc\u{3164}room",
+        ] {
+            assert_eq!(escape(&format!("a {lookalike} b")), "a [hqc-room-text b");
+        }
+    }
+
+    #[test]
+    fn a_name_has_no_lookalike_of_a_hub_character() {
+        assert_eq!(clean_name("a［b］｜＂c"), "a b c");
+        assert_eq!(clean_name("a\u{200b}b\u{202e}c"), "abc");
+        assert_eq!(clean_name("a\u{34f}b\u{fe0f}c"), "abc");
+        assert_eq!(clean_name("  Opt\u{3000}imist \n "), "Opt imist");
+        assert_eq!(clean_name("a\u{3164}b"), "a b");
+        assert_eq!(clean_name("\u{3164}\u{ffa0}"), "");
+        assert_eq!(clean_name("a|b[c]d\"e"), "a b c d e");
     }
 }

@@ -1750,6 +1750,8 @@ pub async fn search(
         fuzzy: matches!(q.fuzzy.as_deref(), Some("1" | "true")),
         cursor,
         limit: q.limit.unwrap_or(crate::search::PAGE),
+        // The owner's own search sees everything.
+        room_agent: None,
     };
     match crate::search::capped(&app, user.id, &query).await {
         Ok(page) => Ok(Json(page)),

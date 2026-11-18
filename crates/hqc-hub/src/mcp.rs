@@ -382,7 +382,8 @@ struct SearchArgs {
 
 /// `hqc_search_history(query, project?, fuzzy?, cursor?)` (SPEC §7, §15): the query of
 /// `GET /api/search` for the calling session's owner, as `{results: [{address, title,
-/// archived, seq?, type?, ts, snippet}], next_cursor?}`. No side effects.
+/// archived, seq?, type?, ts, snippet}], next_cursor?}`; for an agent of a room without the room
+/// and its other agents. No side effects.
 async fn search_history(app: &AppState, caller: &SessionRow, v: Value) -> ToolResult {
     let a: SearchArgs = args(v)?;
     let project_id = match a.project {
@@ -395,6 +396,10 @@ async fn search_history(app: &AppState, caller: &SessionRow, v: Value) -> ToolRe
         fuzzy: a.fuzzy,
         cursor: a.cursor,
         limit: crate::search::PAGE,
+        room_agent: caller.room_id.map(|room| crate::search::RoomAgent {
+            room,
+            agent: caller.id,
+        }),
         ..Default::default()
     };
     let page = crate::search::capped(app, caller.owner_id, &q)

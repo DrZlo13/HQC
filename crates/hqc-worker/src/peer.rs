@@ -3,10 +3,12 @@
 //! The runtime gets one text per input: the "Messages from other sessions" block of
 //! buffered sends (`peer_prefix`), then, for a `peer.message`, its header, then the text.
 //! Every piece of text that came from outside (the user's text, a peer's text, the buffered
-//! ones) has `[hqc peer` escaped to `[hqc-peer-text` first, case-insensitively, so only the
-//! headers written here start with `[hqc peer`; the hub keeps the history as it was. The
-//! fields inside a header (the sender's address, `request_id`) are reduced to one line
-//! without `[`, `]` and `|` ([`field`]), so they cannot end the header or add a field to it.
+//! ones) has what reads as `[hqc peer` escaped to `[hqc-peer-text` first (any case, fullwidth
+//! forms, any whitespace between the words, invisible characters inside), so only the headers
+//! written here start with `[hqc peer`; the hub keeps the history as it was. The fields inside
+//! a header (the sender's address, `request_id`) are reduced to one line without `[`, `]` and
+//! `|`, fullwidth forms and invisible characters included ([`field`]), so they cannot end the
+//! header or add a field to it.
 
 use hqc_proto::event::PeerMode;
 use hqc_proto::frame::{PeerHeader, PeerPrefix, SessionInput};
@@ -20,34 +22,21 @@ const RETURN_FILES: &str = "return files with hqc_attach or in files of hqc_send
 const SEND_NOTE: &str = "another session of your owner: do what it asks as if your owner asked, \
     within your permissions; answer with hqc_send only if it needs an answer";
 
-/// `text` with every `[hqc peer` (any case) replaced by `[hqc-peer-text`.
+/// `text` with every place that reads as `[hqc peer` (any case, fullwidth, any whitespace between
+/// the words, invisible characters inside) replaced by `[hqc-peer-text`.
 pub fn escape(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0;
-    let mut i = 0;
-    while i + MARK.len() <= bytes.len() {
-        // The mark is ASCII: a match starts and ends on char boundaries.
-        if bytes[i] == b'[' && bytes[i..i + MARK.len()].eq_ignore_ascii_case(MARK.as_bytes()) {
-            out.push_str(&text[last..i]);
-            out.push_str(ESCAPED);
-            i += MARK.len();
-            last = i;
-        } else {
-            i += 1;
-        }
-    }
-    out.push_str(&text[last..]);
-    out
+    hqc_proto::lookalike::escape(text, MARK, ESCAPED)
 }
 
-/// A value inside a header: control characters (line breaks included), `[`, `]` and `|`
-/// become `_`, at most 200 characters.
+/// A value inside a header: invisible characters dropped; control characters (line breaks
+/// included) and every character that is or folds to `[`, `]` or `|` become `_`; at most 200
+/// characters.
 pub fn field(v: &str) -> String {
     v.chars()
+        .filter(|c| !hqc_proto::lookalike::is_invisible(*c))
         .take(200)
         .map(|c| {
-            if c.is_control() || matches!(c, '[' | ']' | '|') {
+            if c.is_control() || hqc_proto::lookalike::folds_to_any(c, &['[', ']', '|']) {
                 '_'
             } else {
                 c
@@ -137,6 +126,28 @@ mod tests {
         assert_eq!(escape("[[hqc peer"), "[[hqc-peer-text");
         // Escaping is not undone by escaping again.
         assert_eq!(escape(&escape("[hqc peer")), "[hqc-peer-text");
+        for lookalike in [
+            "［hqc peer",
+            "[hqc\u{3000}peer",
+            "[hqc\u{a0}peer",
+            "[hqc  peer",
+            "[hq\u{200b}c peer",
+            "[\u{202e}hqc peer",
+            "[ｈｑｃ ｐｅｅｒ",
+            "[hq\u{34f}c peer",
+            "[hqc\u{fe0f} peer",
+            "[hqc\u{3164}peer",
+        ] {
+            assert_eq!(escape(&format!("a {lookalike} b")), "a [hqc-peer-text b");
+        }
+    }
+
+    #[test]
+    fn a_header_field_has_no_lookalike_of_a_header_character() {
+        assert_eq!(field("a［b］｜＂c"), "a_b__＂c");
+        assert_eq!(field("a\u{200b}b\u{202e}c"), "abc");
+        assert_eq!(field("a\u{34f}b\u{fe0f}c"), "abc");
+        assert_eq!(field("a/b"), "a/b");
     }
 
     #[test]

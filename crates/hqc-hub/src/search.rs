@@ -8,7 +8,8 @@
 //!   query, so a path or an address is a phrase of its parts.
 //! - Whose: the owner's sessions, archived ones included (and marked), the workers' service
 //!   sessions left out, and of a room's agents' sessions the inputs from the room, which the
-//!   room has itself. Until grants (iteration 6) nobody else's.
+//!   room has itself; for an agent of a room ([`Query::room_agent`]) also the room and its
+//!   other agents' sessions left out. Until grants (iteration 6) nobody else's.
 //! - How: the `hqc` configuration stems Russian and English words, so a word finds its other
 //!   forms. [`Parsed`] reads the query (words ANDed, `"phrase"`, `or`, `-word`, `word*`);
 //!   Postgres reads each operand with `to_tsquery` ([`READ`]), and [`Parsed::assembled`] puts
@@ -74,6 +75,17 @@ pub struct Query {
     pub fuzzy: bool,
     pub cursor: Option<String>,
     pub limit: usize,
+    /// The search of an agent of a room: the room and the agent. It leaves out the room and
+    /// every other agent of it, whose answers the agent reads in the room's own time
+    /// (SPEC §7.1.1), as `hqc_read` does.
+    pub room_agent: Option<RoomAgent>,
+}
+
+/// The room and the agent of it a search is made for ([`Query::room_agent`]).
+#[derive(Debug, Clone, Copy)]
+pub struct RoomAgent {
+    pub room: Uuid,
+    pub agent: Uuid,
 }
 
 /// What a hit is (`kind=` of `GET /api/search`), by the type of its event.
@@ -369,6 +381,8 @@ async fn hits(
              FROM sessions s JOIN projects p ON p.id = s.project_id
              WHERE s.owner_id = $1 AND NOT s.system AND ($2::uuid IS NULL OR s.project_id = $2)
                  AND ($7::uuid IS NULL OR s.id = $7)
+                 AND ($12::uuid IS NULL OR (s.id <> $12 AND (s.room_id IS DISTINCT FROM $12
+                                                              OR s.id = $13::uuid)))
          ), m AS (
              SELECT e.session_id, e.seq, e.type AS kind, e.ts, e.event_id AS id,
                     ts_rank(e.search_words, $6::tsquery, 1) AS rank
@@ -426,6 +440,8 @@ async fn hits(
         .bind(q.since)
         .bind(q.newest)
         .bind(q.per_session.map(|n| n as i64))
+        .bind(q.room_agent.map(|r| r.room))
+        .bind(q.room_agent.map(|r| r.agent))
         .fetch_all(tx)
         .await
 }
@@ -452,6 +468,8 @@ async fn counts(
              SELECT s.id, s.title, s.created_at FROM sessions s
              WHERE s.owner_id = $1 AND NOT s.system AND ($2::uuid IS NULL OR s.project_id = $2)
                  AND ($3::uuid IS NULL OR s.id = $3)
+                 AND ($8::uuid IS NULL OR (s.id <> $8 AND (s.room_id IS DISTINCT FROM $8
+                                                            OR s.id = $9::uuid)))
          ), k AS (
              SELECT * FROM unnest($6::text[], $7::text[]) AS k(type, kind)
          ), m AS (
@@ -483,6 +501,8 @@ async fn counts(
         .bind(q.since)
         .bind(types)
         .bind(kinds)
+        .bind(q.room_agent.map(|r| r.room))
+        .bind(q.room_agent.map(|r| r.agent))
         .fetch_all(tx)
         .await?;
     let mut c = SearchCounts::default();

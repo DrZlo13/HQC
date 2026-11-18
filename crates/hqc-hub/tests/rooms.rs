@@ -1384,6 +1384,74 @@ async fn a_room_input_joining_a_direct_turn_is_posted() {
     hub.finish().await;
 }
 
+/// SPEC §7.1.1, §17.2: in a council an agent's direct turn on the owner's message in its own
+/// session takes the council's input as a joined one, the `joined` ack coming before the turn's
+/// final answer: that answer is the agent's post in the room, and the round ends as usual, a
+/// session outside the room that wrote in it getting the room's notice.
+#[tokio::test]
+async fn a_council_input_joining_a_direct_turn_before_its_answer_is_posted() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "council", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    let (x, tx) = caller(&hub, &mut w).await;
+    // The owner types into A's own session: a direct turn.
+    let u = say(&hub, a, "Unrelated: what time is it?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let iu = inputs[0].clone();
+    assert_eq!(iu["payload"]["event_id"], u["event_id"]);
+    ack_input(&mut w, &iu).await;
+    // A session outside the room writes in it: its input reaches A while that turn runs, and B.
+    let args = json!({"text": "Which store?", "session": addr(&room)});
+    let (_, inputs) = call(&mut w, &tx, "hqc_send", args, "x-1", 2).await;
+    let (ia, ib) = (of(&inputs, a).clone(), of(&inputs, b).clone());
+    w.reply(
+        &ia["id"],
+        "ack",
+        json!({"event_id": ia["payload"]["event_id"], "joined": true}),
+    )
+    .await;
+    ack_input(&mut w, &ib).await;
+    // The joined ack came first; now the direct turn's final answer, which is A's post.
+    assert!(finish(&mut w, a, &iu, "Noon. Postgres.").await.is_empty());
+    w.expect_silence(Duration::from_millis(300)).await;
+    // The round ends when B has answered: the notice to the writer.
+    let frames = finish(&mut w, b, &ib, "SQLite.").await;
+    let n = notice_of(&mut w, frames, &x).await;
+    assert_eq!(
+        n["payload"]["text"],
+        // The entries since the writer's own message: the two posts.
+        notice(
+            "personal/room-1",
+            "every agent answered",
+            &[E::Post(a, "Noon. Postgres."), E::Post(b, "SQLite.")]
+        )
+    );
+    w.expect_silence(Duration::from_millis(200)).await;
+    let events = hub.events(id(&room)).await;
+    let texts: Vec<(&Value, &Value)> = posts(&events)
+        .into_iter()
+        .filter(|p| p["payload"]["room"].is_null() && p["payload"]["notice_seq"].is_null())
+        .filter(|p| p["payload"]["from_session_id"] != x["id"])
+        .map(|p| (&p["payload"]["from_session_id"], &p["payload"]["text"]))
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            (&a["id"], &json!("Noon. Postgres.")),
+            (&b["id"], &json!("SQLite."))
+        ],
+        "{events:?}"
+    );
+    assert!(lines(&events, "room_stopped").is_empty(), "{events:?}");
+    hub.finish().await;
+}
+
 /// SPEC §7.1.1: the speaker's turn on the owner's message in its own session, while its input
 /// from the room waits behind it, posts nothing and wakes nobody; the turn on the room's input
 /// then posts and wakes the next agent, once.
@@ -2647,6 +2715,76 @@ async fn search_finds_an_agents_command_in_its_session() {
         (&json!(1), &json!(1)),
         "{v}"
     );
+    hub.finish().await;
+}
+
+/// SPEC §7, §15: an agent of a room does not find the answers of another agent of its room, nor
+/// the room, by searching, as it cannot by reading them: its own session it finds, and a session
+/// outside the room finds all of them.
+#[tokio::test]
+async fn a_room_agents_search_leaves_out_its_room_and_the_other_agents() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"mode": "council", "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Which store?").await;
+    let (starts, inputs) = starts_and_inputs(&mut w, 2).await;
+    for i in &inputs {
+        ack_input(&mut w, i).await;
+    }
+    assert!(answer(&mut w, a, of(&inputs, a), "Mango.").await.is_empty());
+    assert!(answer(&mut w, b, of(&inputs, b), "Pineapple.")
+        .await
+        .is_empty());
+    let (_, outside) = caller(&hub, &mut w).await;
+    let agent = of(&starts, a)["payload"]["session_token"].as_str().unwrap();
+    let found = |r: &Value| -> Vec<String> {
+        let mut v: Vec<String> = r["result"]["results"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{r}"))
+            .iter()
+            .map(|h| h["address"].as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+    // The other agent's answer: in its session and in the room for a session outside.
+    let args = json!({"query": "pineapple"});
+    let (r, _) = call(
+        &mut w,
+        &outside,
+        "hqc_search_history",
+        args.clone(),
+        "s-1",
+        0,
+    )
+    .await;
+    assert_eq!(found(&r), vec![addr(&room), addr(b)], "{r}");
+    let (r, _) = call(&mut w, agent, "hqc_search_history", args, "s-2", 0).await;
+    assert!(found(&r).is_empty(), "{r}");
+    // The owner's message is in the room only, and the room it is not found in either.
+    let args = json!({"query": "store"});
+    let (r, _) = call(
+        &mut w,
+        &outside,
+        "hqc_search_history",
+        args.clone(),
+        "s-3",
+        0,
+    )
+    .await;
+    assert_eq!(found(&r), vec![addr(&room)], "{r}");
+    let (r, _) = call(&mut w, agent, "hqc_search_history", args, "s-4", 0).await;
+    assert!(found(&r).is_empty(), "{r}");
+    // The agent's own session is found.
+    let args = json!({"query": "mango"});
+    let (r, _) = call(&mut w, agent, "hqc_search_history", args, "s-5", 0).await;
+    assert_eq!(found(&r), vec![addr(a)], "{r}");
     hub.finish().await;
 }
 

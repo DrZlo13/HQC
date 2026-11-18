@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.172, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
+Version 0.178, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2228,8 +2228,20 @@ A run of tool calls is "N tool calls ·
 time" and the call's line when it is one, else the tools it called, each once, in the order
 first called ("(Bash, Read, chrome-devtools/take_screenshot)", an MCP tool as
 `<server>/<tool>`); a Skill call's line names its skill, a SendMessage call's line (since 0.163)
-says what it sent: its `summary`, else its plain-text `message` on one line; thinking and tool
-lines are fainter than the text, and an open thinking block is prose in the feed's font. Since
+says what it sent: its `summary`, else its plain-text `message` on one line; since 0.178 a call
+with none of the keys a line reads (an MCP tool's) shows its arguments in the order of
+`args_preview` (§4: the shortest value first), each field as Claude Code shows one of an MCP
+tool's input, `name: "a", x: 90.7`, and a call's row and the header of a group of one call show
+its result after its line and "→", on the same line: what the opened row shows, the error (without
+the CLI's `<tool_use_error>` tags), else the result (nothing for a change that went through), a
+JSON object as `key: value, …`, a lone `result` field as its value, any other text as written;
+when both do not fit, the result keeps three parts of the width to the line's one, the shorter
+leaving the rest to the other; a row's time runs from the call to its result (`duration_ms` when
+given), a thinking line shows as much of its text as the line holds, not 60 characters, an
+answered request's row names the tool and its argument as the call's row does ("Read src/a.rs",
+"move (probe-bench) x: 90.7") and a request card names an MCP tool as `<tool> (<server>)`;
+thinking and tool lines are fainter than the text, and an open thinking block is prose in the
+feed's font. Since
 0.135 a subagent has two cards in the project's colour, two lines each at any width, which never
 wrap: a long text is cut
 with an ellipsis. Its start: a call of `Agent` (`Task` in older Claude Code) is no row of a run: it
@@ -5797,7 +5809,8 @@ working" line at the bottom of the feed ("Running <command or tool> <time since 
 `ts`>" while the last `tool.call` has no `tool.result`, T26, since 0.132 once that call has run
 for 2 s, counted from its `ts` or from a later answer to a request after it (a permission or a
 question it, or a subagent it runs, waited for), since 0.161 only a call after the last end of a
-turn, §6; since 0.125, when that call is one
+turn, §6; since 0.178 the tool as the feed names it, `move (probe-bench)`, its paths relative to
+the session's folder; since 0.125, when that call is one
 of the session's `foreground_calls`, §6, the line ends with a small "Run in background" button,
 which sends `POST .../background` with its `call_id`, a failure shown as a notice; the button
 goes once the worker reports the call moved or ended), `queued` — "Input queued", `paused` —
@@ -6184,6 +6197,27 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.172 → 0.178 (a call's line shows its arguments and its result)
+§6, §17.1: a call with none of the keys a line reads, an MCP tool's (`move (probe-bench)` with
+`{"x": 90.7, "y": 80.9, "z": 85}`), was a row of just its tool; its line is now its arguments in
+the order of `args_preview`, as the opened row shows them, each field as Claude Code 2.1.325 shows
+one of an MCP tool's input: `z: 85, x: 90.7, y: 80.9` (§4: the shortest value first). A call's row
+and the header of a group of one call showed no result until opened; the result now follows the
+line after "→", on the same line: the error (without the CLI's `<tool_use_error>` tags), else the
+result, as the opened row shows it (a change that went through shows none), a JSON object as `key:
+value, …`, a lone `result` field (what an MCP tool that returns a plain value answers) as that
+value, any other text as written (a number written again would lose digits, `1.10` reading
+`1.1`). The result is often what the call is for, so when both do not fit it keeps three parts of
+the width to the line's one, and the shorter leaves the rest to the other. Other lines that showed
+less than they hold: a row's time was never shown, the worker sends no `duration_ms` (Claude Code
+reports no time of a call), and now runs from the call to its result, as the group's time does; a
+thinking line was cut at 60 characters and now at the end of the line; the "Running" line named
+an MCP tool by its raw name (`mcp__probe-bench__move`) and now as the feed does, its paths
+relative to the session's folder; an answered request's row showed the argument without the tool
+("/Users/me/work/hqc/src/a.rs", an MCP call's would have been its bare arguments) and now names
+both as the call's row does, a request card's title an MCP tool as `<tool> (<server>)`. Client
+only. 0.173–0.177 are taken by other branches.
 
 ### 0.171 → 0.172 (the agents' room)
 §7.1.1 (new), §3, §4, §6, §7, §7.1, §15, §16, §17.2: the owner could talk to one agent per chat,

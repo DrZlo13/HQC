@@ -12,8 +12,9 @@ import { render } from 'preact';
 import { act } from 'preact/test-utils';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Api } from '../src/api';
+import { Api, ApiError } from '../src/api';
 import { ARCHIVE_UNDO_MS, AppState } from '../src/app';
+import { tabMark } from '../src/favicon';
 import { parseEvent, type ListMode, type Project, type ProjectSort, type SessionInfo, type SessionState, type Workspace } from '../src/proto';
 import { trackHistory } from '../src/nav';
 import { applyLook } from '../src/theme';
@@ -308,7 +309,7 @@ const pressKey = (key: string) =>
   });
 
 describe('SessionList (desktop column)', () => {
-  it('a header in one row: the name, search, the order, the project menu, a new session; then the groups', async () => {
+  it('a header in one row: the name, search, the order, the project menu, a new room, a new session; then the groups', async () => {
     await mount(<SessionList app={makeApp()} current="net" />);
     const head = root.querySelector('.side-head')!;
     expect(head.querySelector('.project-title')!.textContent).toBe('physics-mp');
@@ -317,6 +318,7 @@ describe('SessionList (desktop column)', () => {
       'Search sessions and messages',
       'Session order: State',
       'Project: settings, favorites, archive',
+      'New room',
       'New session',
     ]);
     // No tile, no "1 needs you · 2 running", no gear, no row of State / Recent / Custom.
@@ -2176,7 +2178,7 @@ describe('loading a chat ahead', () => {
 });
 
 describe('SessionList (phone)', () => {
-  it('a project\'s screen: one header row — "‹", the name, search, State, "⋯", "+" — then the groups; no chips, gear or floating "New"', async () => {
+  it('a project\'s screen: one header row — "‹", the name, search, State, "⋯", a new room, "+" — then the groups; no chips, gear or floating "New"', async () => {
     await mount(<SessionList app={makeApp()} phone />);
     const head = root.querySelector('.sessions-phone > .side-head')!;
     expect([...head.children].map((c) => c.getAttribute('aria-label') ?? c.textContent)).toEqual([
@@ -2185,6 +2187,7 @@ describe('SessionList (phone)', () => {
       'Search sessions and messages',
       'Session order: State',
       'Project: settings, favorites, archive',
+      'New room',
       'New session',
     ]);
     expect(head.querySelector('.btn-back')!.getAttribute('href')).toBe('#/');
@@ -3581,6 +3584,376 @@ describe('a new session', () => {
     });
     expect(lists.allSessions).toHaveBeenCalledTimes(2);
     expect(app.sessions.has(s.id)).toBe(true);
+  });
+});
+
+// A room: a session with no worker whose agents are member sessions (`room_id`). The lists, the
+// counts and the marks show the room and not its agents, with the state of them all; "New room"
+// beside "+" opens its form.
+describe('a room', () => {
+  const room = (more: Partial<SessionInfo> = {}) =>
+    sess('room', 'Glaze review', 'idle', at(0.05), { room_mode: 'conversation', worker_id: undefined, ...more });
+  const member = (id: string, title: string, state: SessionState, more: Partial<SessionInfo> = {}) =>
+    sess(id, title, state, at(0.01), { room_id: 'room', ...more });
+  const summary = (id: string, title: string, state: SessionState) => ({
+    session_id: id,
+    project_id: 'p1',
+    title,
+    state,
+    queue_len: 0,
+    unread: 0,
+    last_seq: 1,
+    last_read_seq: 1,
+  });
+
+  it('lists the room, not its agents: Needs you while one of them waits, Running while one works, else its own state', async () => {
+    const app = makeApp([
+      ...LIST,
+      room(),
+      member('m1', 'Opus', 'waiting', { unread: 3, favorite_at: at(0.5) }),
+      member('m2', 'Sonnet', 'running'),
+      member('m3', 'Haiku', 'archived'),
+    ]);
+    await mount(<SessionList app={app} current="net" />);
+    // No favorite of an agent, no agent in the groups: the room waits for the user.
+    expect(groups()).toEqual([
+      ['Needs you', '2', ['Glaze review', 'Network sync']],
+      ['Running', '2', ['Stone textures', 'Step determinism']],
+      ['Idle · Yesterday', '1', ['Collision profiling']],
+      ['Idle · Last 7 days', '1', ['Cave scene port']],
+    ]);
+    // The counts and the marks count the room once, an agent's unread events not at all, and an
+    // archived agent is not in the archive.
+    expect(app.projectWaiting('p1')).toBe(2);
+    expect(app.projectUnread('p1')).toBe(false);
+    expect(app.workerRunning('wk1')).toBe(1);
+    expect(app.archivedSessions('p1')).toEqual([]);
+    await mount(<ProjectRail app={app} />);
+    expect([...root.querySelectorAll('.rail-badge')].map((b) => b.getAttribute('aria-label'))).toEqual(['needs you: 2']);
+    await mount(<PhoneHome app={app} />);
+    expect(phoneMarks('physics-mp')).toEqual(['running: 2', 'needs you: 2']);
+    expect(phoneRow('physics-mp').classList.contains('has-unread')).toBe(false);
+    expect(tabMark(makeApp([room(), member('m1', 'Opus', 'idle', { unread: 3 })]))).toBeUndefined();
+
+    // The agent answered: the other one still works, so does the room.
+    await mount(<SessionList app={app} current="net" />);
+    await act(async () => app.mergeSummary([summary('m1', 'Opus', 'idle')]));
+    expect(groups().slice(0, 2)).toEqual([
+      ['Needs you', '1', ['Network sync']],
+      ['Running', '3', ['Stone textures', 'Glaze review', 'Step determinism']],
+    ]);
+    expect(app.projectWaiting('p1')).toBe(1);
+    // Nobody waits or works: the room's own state.
+    await act(async () => app.mergeSummary([summary('m2', 'Sonnet', 'idle')]));
+    expect(groups().find((g) => g[0] === 'Idle · Today')).toEqual(['Idle · Today', '1', ['Glaze review']]);
+    expect(titles()).not.toContain('Opus');
+  });
+
+  it("the bar's stripe and hover text of a project with a room count the room's agents at work, not the room", async () => {
+    const app = makeApp([
+      sess('prof', 'Collision profiling', 'idle', at(22)),
+      room(),
+      member('m1', 'Opus', 'running', { output_per_s: 40, subagents: 2 }),
+      member('m2', 'Sonnet', 'idle', { background_tasks: 1, output_per_s: 3 }),
+      member('m3', 'Haiku', 'idle', { output_per_s: 9 }),
+      member('m4', 'Fable', 'archived', { state: 'running', output_per_s: 50 }),
+    ]);
+    // Opus with its two subagents and Sonnet's background task; the idle and the archived
+    // agent do not count.
+    expect([app.projectAgents('p1'), app.projectRate('p1')]).toEqual([4, 43]);
+    await mount(<ProjectRail app={app} />);
+    expect(root.querySelector('a.rail-project[aria-label="physics-mp"]')!.getAttribute('title')).toBe('physics-mp · 4 agents · 43 tokens/s');
+    expect(root.querySelectorAll('.rail-run')).toHaveLength(1);
+  });
+
+  it("a removed room's agents go with it: the hub deletes their sessions, the client forgets them", async () => {
+    const app = makeApp([
+      ...LIST,
+      room(),
+      member('m1', 'Opus', 'idle'),
+      member('m2', 'Sonnet', 'idle'),
+      member('x1', 'Other room', 'idle', { room_id: 'room2' }),
+    ]);
+    await mount(<SessionList app={app} current="net" />);
+    await act(async () => app.deleteSession('room'));
+    expect(titles()).not.toContain('Glaze review');
+    expect(titles()).not.toContain('Opus');
+    expect(titles()).not.toContain('Sonnet');
+    expect(['room', 'm1', 'm2', 'x1', 'net'].map((id) => app.sessions.has(id))).toEqual([false, false, false, true, true]);
+  });
+
+  it("a room's row has the room icon as its state mark, in place of the dot, with its mode and agents in the tooltip; a session's has the dot; the phone's first screen shows it too", async () => {
+    const app = makeApp([
+      ...LIST,
+      room(),
+      member('m2', 'Sonnet', 'idle'),
+      member('m1', 'Opus', 'idle'),
+      room({ id: 'council', title: 'Votes', room_mode: 'council' }),
+    ]);
+    await mount(<SessionList app={app} current="net" />);
+    const mark = (title: string) => rowOf(title).querySelector<HTMLElement>('.mark-room');
+    // Agents in the order they were made (their ids), not as the client got them.
+    expect(mark('Glaze review')!.title).toBe('Room · Conversation · Opus, Sonnet');
+    expect(mark('Glaze review')!.querySelector('svg')).not.toBeNull();
+    expect(mark('Votes')!.title).toBe('Room · Council');
+    // The mark stands where the dot does, and takes its place: no dot, nothing after the title.
+    expect(rowOf('Glaze review').querySelector('.dot')).toBeNull();
+    expect(rowOf('Glaze review').querySelector('.session-room')).toBeNull();
+    expect(rowOf('Glaze review').querySelector('a.session-row')!.firstElementChild).toBe(mark('Glaze review'));
+    expect(mark('Network sync')).toBeNull();
+    expect(rowOf('Network sync').querySelector('.dot')).not.toBeNull();
+    // It carries the state the dot would.
+    expect(mark('Glaze review')!.classList.contains('mark-idle')).toBe(true);
+    // The same row in a phone's Sessions view.
+    app.phoneView = 'sessions';
+    render(null, root);
+    await mount(<PhoneHome app={app} />);
+    expect(root.querySelector('.mark-room')!.getAttribute('title')).toBe('Room · Conversation · Opus, Sonnet');
+  });
+
+  it("a room's menu has no \"Move to project…\" or \"Restart session\", and its row is not dragged onto a project", async () => {
+    const app = makeApp([...LIST, room()]);
+    await mount(<SessionList app={app} current="net" />);
+    await menuOf('Glaze review');
+    expect(menuItems()).not.toContain('Move to project…');
+    expect(menuItems()).not.toContain('Restart session');
+    expect(menuItems()).toContain('Archive');
+    await pressKey('Escape');
+    render(null, root);
+    await mount(<SessionList app={app} current="net" />);
+    const dt = Object.assign(new DataTransfer(), { setDragImage: vi.fn() });
+    const start = (title: string) =>
+      act(async () => {
+        const e = new MouseEvent('dragstart', { bubbles: true, cancelable: true });
+        Object.defineProperty(e, 'dataTransfer', { value: dt });
+        rowOf(title).querySelector('a.session-row')!.dispatchEvent(e);
+      });
+    await start('Glaze review');
+    expect(dt.getData(SESSION_DRAG)).toBe('');
+    await start('Network sync');
+    expect(dt.getData(SESSION_DRAG)).toBe('net');
+    await act(async () => void rowOf('Network sync').querySelector('a.session-row')!.dispatchEvent(new MouseEvent('dragend', { bubbles: true })));
+  });
+
+  describe('the window', () => {
+    /** The hash change and the hub's (mocked) replies. */
+    const settle = () =>
+      act(async () => {
+        for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+      });
+    const win = () => root.querySelector<HTMLElement>('.main .chat-new');
+    const chips = () => [...root.querySelectorAll('.chat-new .new-chip')].map((c) => c.textContent);
+    const input = () => root.querySelector<HTMLTextAreaElement>('.chat-new .composer-input')!;
+    const typeMessage = (text: string) =>
+      act(async () => {
+        input().value = text;
+        input().dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    const sendMessage = () =>
+      act(async () => {
+        root.querySelector('.chat-new form.composer')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        for (let i = 0; i < 5; i++) await Promise.resolve();
+      });
+    /** A field's new value, and the events a user's typing or pick sends. */
+    const set = (el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, value: string, events = ['input']) =>
+      act(async () => {
+        el.value = value;
+        for (const e of events) el.dispatchEvent(new Event(e, { bubbles: true }));
+      });
+    const menuField = <E extends Element>(sel: string, i = 0) => root.querySelectorAll<E>(`.ctx-menu ${sel}`)[i];
+    /** Opens agent `i`'s menu from its chip. */
+    const openAgent = (i: number) => click(root.querySelectorAll('.chat-new .btn-chip-agent')[i]);
+
+    function roomApp() {
+      let app!: AppState;
+      const api = {
+        ...hubApi(),
+        workspaces: async () => app.workspaces.get('p1') ?? [],
+        createRoom: vi.fn(async (_p: string, _b: unknown) => room({ room_mode: 'council' })),
+        eventsBefore: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, count: 0 })),
+        input: vi.fn(async (id: string, text: string, op: string, ids: string[]) =>
+          parseEvent({
+            session_id: id,
+            event_id: '0199f3a2-7c10-7000-8000-000000000203',
+            seq: 1,
+            ts: at(0),
+            author: { kind: 'user', id: 'u' },
+            type: 'user.message',
+            payload: { text, artifact_ids: ids },
+            client_op_id: op,
+            delivery: 'pending',
+          }),
+        ),
+        readCursor: vi.fn(async () => {}),
+      };
+      app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
+      Object.assign(app.socket, { subscribe: vi.fn(() => () => {}) });
+      return { app, api };
+    }
+
+    beforeEach(() => windowWidth(1280));
+    afterEach(() => {
+      location.hash = '';
+      windowWidth(1024);
+    });
+
+    it('"New room" beside "+" opens a chat window with its chips; the first message creates the room with what they chose, then goes into it as its first message', async () => {
+      const { app, api } = roomApp();
+      location.hash = '#/p/p1';
+      await mount(<App app={app} />);
+      await click(root.querySelector('.side-head .btn-new-room'));
+      await settle();
+      expect(location.hash).toBe('#/p/p1/new-room');
+      expect(win()!.querySelector('.chat-title')!.textContent).toBe('New room');
+      expect(win()!.querySelector('.chat-meta')!.textContent).toBe('Drafthome-mac/~/work/games/phys-mp');
+      expect(win()!.querySelector('.new-empty')!.textContent).toBe(
+        "Write the first message — the room starts with itMode, agents, workspace, folder and permissions are above the box; an agent's name, model and prompt open from its chip.",
+      );
+      // Two agents, the mode, the workspace, the folder and the permissions; nothing on the hub yet.
+      expect(chips()).toEqual(['default', 'default 2', 'Agent', 'Mode: Conversation', 'phys-mp · home-mac', 'Folder .', "Permissions: worker's default"]);
+      expect(api.createRoom).not.toHaveBeenCalled();
+
+      // The mode's menu: each with what it does.
+      await click(root.querySelector('.btn-chip-mode'));
+      // An `above` menu stands on its bottom and is no taller than the space over it: it grows
+      // upwards, and scrolls when even that is not enough.
+      const ctx = root.querySelector<HTMLElement>('.ctx-menu')!;
+      expect([ctx.style.bottom !== '', ctx.style.top, ctx.style.maxHeight !== '', ctx.style.overflowY]).toEqual([true, 'auto', true, 'auto']);
+      expect(menuItems()).toEqual([
+        'ConversationAgents answer one at a time, in turn; each sees what was said since its last turn',
+        "CouncilYour message wakes every agent at once; they see the room's history",
+      ]);
+      await click(root.querySelector('.ctx-menu .btn-mode-council'));
+      expect(chips()[3]).toBe('Mode: Council');
+      await click(root.querySelector('.btn-chip-workspace'));
+      await click(root.querySelectorAll('.ctx-menu .btn-pick-workspace')[1]);
+      await click(root.querySelector('.btn-chip-folder'));
+      await set(menuField('input[name=cwd]'), ' net ');
+      await click(root.querySelector('.btn-chip-permissions'));
+      await click(root.querySelector('.ctx-menu .btn-permissions-ask'));
+
+      // An agent's menu: its name (the placeholder is what the hub would title it), model, prompt.
+      await openAgent(0);
+      expect(menuField<HTMLInputElement>('input[name=agent_name]').placeholder).toBe('default');
+      expect(menuField<HTMLTextAreaElement>('textarea[name=system_prompt]').getAttribute('rows')).toBe('8');
+      await set(menuField('select[name=model]'), 'opus', ['change']);
+      expect(menuField<HTMLInputElement>('input[name=agent_name]').placeholder).toBe('opus');
+      await set(menuField('input[name=agent_name]'), ' Judge ');
+      await set(menuField('textarea[name=system_prompt]'), 'You judge glazes by their chemistry.');
+      expect(chips()[0]).toBe('Judge · Opus');
+      await pressKey('Escape');
+      await openAgent(1);
+      await set(menuField('select[name=model]'), 'haiku', ['change']);
+      await set(menuField('textarea[name=system_prompt]'), 'You count the cost.');
+      await pressKey('Escape');
+      // "+ Agent" adds a third and opens its menu; it goes again by "Remove agent", the others stay.
+      await click(root.querySelector('.btn-add-agent'));
+      expect(root.querySelectorAll('.chat-new .btn-chip-agent')).toHaveLength(3);
+      expect(menuField('input[name=agent_name]')).not.toBeNull();
+      await click(menuField('.btn-remove-agent'));
+      expect(chips().slice(0, 3)).toEqual(['Judge · Opus', 'haiku', 'Agent']);
+
+      await typeMessage('Which glaze for cone 6?');
+      await sendMessage();
+      await settle();
+      expect(api.createRoom.mock.calls).toEqual([
+        [
+          'p1',
+          {
+            mode: 'council',
+            workspace_id: 'w2',
+            cwd: 'net',
+            permission_mode: 'ask',
+            agents: [{ name: 'Judge', model: 'opus', system_prompt: 'You judge glazes by their chemistry.' }, { model: 'haiku', system_prompt: 'You count the cost.' }],
+          },
+        ],
+      ]);
+      // The message goes into the room as its first one, and its chat takes the window's place.
+      expect(api.input.mock.calls.map(([id, text]) => [id, text])).toEqual([['room', 'Which glaze for cone 6?']]);
+      expect(location.hash).toBe('#/s/room');
+      expect(win()).toBeNull();
+      expect(root.querySelector('.main .chat-title')!.textContent).toBe('Glaze review');
+      expect(root.querySelector('.main .chat-room')!.textContent).toBe('Room · Council');
+      expect(titles()).toContain('Glaze review');
+    });
+
+    it("an agent's prompt box is as tall as its text, and as tall as its text when the menu opens with one already in it", async () => {
+      const { app } = roomApp();
+      // The DOM here has no layout: the text's height is what the test says it is.
+      let text = 300;
+      const was = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight');
+      Object.defineProperty(HTMLElement.prototype, 'scrollHeight', { configurable: true, get: () => text });
+      try {
+        location.hash = '#/p/p1/new-room';
+        await mount(<App app={app} />);
+        await settle();
+        await openAgent(0);
+        const box = () => menuField<HTMLTextAreaElement>('textarea[name=system_prompt]');
+        expect(box().style.height).toBe('300px');
+        text = 900;
+        await set(box(), 'one\n\ntwo\n\nthree');
+        expect(box().style.height).toBe('900px');
+        await pressKey('Escape');
+        text = 700;
+        await openAgent(0);
+        expect(box().value).toBe('one\n\ntwo\n\nthree');
+        expect(box().style.height).toBe('700px');
+      } finally {
+        if (was) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', was);
+        else delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+      }
+    });
+
+    it('a create the hub refuses keeps the window, the chips and the text, says why, and the next message creates it', async () => {
+      const { app, api } = roomApp();
+      api.createRoom.mockRejectedValueOnce(new ApiError(400, 'the workspace is not ready', 'bad_request'));
+      location.hash = '#/p/p1/new-room';
+      await mount(<App app={app} />);
+      await settle();
+      await openAgent(0);
+      await set(menuField('input[name=agent_name]'), 'Judge');
+      await pressKey('Escape');
+      await typeMessage('Which glaze?');
+      await sendMessage();
+      await settle();
+      expect(location.hash).toBe('#/p/p1/new-room');
+      expect(api.input).not.toHaveBeenCalled();
+      expect(root.querySelector('.chat-new .notice')!.textContent).toBe('Not created: the workspace is not ready');
+      expect(input().value).toBe('Which glaze?');
+      expect(chips()[0]).toBe('Judge · default');
+      await sendMessage();
+      await settle();
+      expect(api.createRoom).toHaveBeenCalledTimes(2);
+      expect(api.createRoom.mock.calls[1][1]).toMatchObject({ agents: [{ name: 'Judge' }, {}] });
+      expect(location.hash).toBe('#/s/room');
+    });
+
+    it("an agent's model menu has the providers the workspace's worker allows; a provider the newly chosen workspace's worker does not allow is neither shown nor sent", async () => {
+      const { app, api } = roomApp();
+      app.providers = [
+        { id: 'pr1', name: 'qwen-local', label: 'Qwen 3.8 (local)', base_url: 'http://192.168.1.229:8082', model: 'qwen3.8-27b', workers: ['wk1'] },
+        { id: 'pr2', name: 'zai', label: 'GLM', base_url: 'https://api.z.ai/api/anthropic', model: 'glm-5', workers: ['wk2'] },
+      ];
+      location.hash = '#/p/p1/new-room';
+      await mount(<App app={app} />);
+      await settle();
+      // The project's first workspace, on home-mac: its provider only, under the Claude models.
+      await openAgent(0);
+      const options = [...menuField<HTMLSelectElement>('select[name=model]').options].map((o) => o.textContent);
+      expect(options.slice(-1)).toEqual(['Qwen 3.8 (local)']);
+      expect(options).not.toContain('GLM');
+      await set(menuField('select[name=model]'), 'provider:pr1', ['change']);
+      expect(chips()[0]).toBe('Qwen 3.8 (local)');
+      await pressKey('Escape');
+      // drzlo-mac's workspace: home-mac's provider is not there.
+      await click(root.querySelector('.btn-chip-workspace'));
+      await click(root.querySelectorAll('.ctx-menu .btn-pick-workspace')[1]);
+      expect(chips()[0]).toBe('default');
+      await typeMessage('Hi');
+      await sendMessage();
+      await settle();
+      expect(api.createRoom.mock.calls).toEqual([['p1', { mode: 'conversation', workspace_id: 'w2', agents: [{}, {}] }]]);
+    });
   });
 });
 

@@ -13,11 +13,11 @@ use axum::{
 use chrono::Utc;
 use hqc_proto::{
     api::{
-        self, CandidateList, CreateProject, CreateSessionRequest, CreateWorkspaceImport, DirList,
-        EnrollConfirmRequest, EnrollConfirmed, EnrollInfo, EnrollPollRequest, EnrollRequest,
-        EnrollStarted, EventPage, InputRequest, InputResponse, PatchProject, PatchWorkspace,
-        ProjectList, PushSubscription, PutSessionOrder, SessionList, SessionOrder,
-        SessionOrderMode, VapidKey, WorkspaceList, WorkspaceState,
+        self, CandidateList, CreateProject, CreateRoomRequest, CreateSessionRequest,
+        CreateWorkspaceImport, DirList, EnrollConfirmRequest, EnrollConfirmed, EnrollInfo,
+        EnrollPollRequest, EnrollRequest, EnrollStarted, EventPage, InputRequest, InputResponse,
+        PatchProject, PatchWorkspace, ProjectList, PushSubscription, PutSessionOrder, SessionList,
+        SessionOrder, SessionOrderMode, VapidKey, WorkspaceList, WorkspaceState,
     },
     event::CancelReason,
     frame::{
@@ -1157,9 +1157,19 @@ pub async fn new_session(
     b: &CreateSessionRequest,
     spawn: Option<db::Spawn>,
 ) -> ApiResult<SessionRow> {
-    if let Some(m) = &b.model {
-        check_model(m)?;
-    }
+    let id = insert_session(app, owner, project, b, spawn, None).await?;
+    delivery::kick(app, id, true).await;
+    db::session(&app.db, id).await?.ok_or(ApiError::NotFound)
+}
+
+/// The workspace, worker and folder of a new session (SPEC §6, §13.4): a ready workspace of
+/// the project on a worker of `owner`, `cwd` a relative path inside it (`.` when absent).
+async fn session_place<'b>(
+    app: &AppState,
+    owner: Uuid,
+    project: &db::ProjectRow,
+    b: &'b CreateSessionRequest,
+) -> ApiResult<(db::WorkspaceRow, db::WorkerRow, &'b str)> {
     let ws = session_workspace(app, project, b).await?;
     let worker = match db::worker(&app.db, ws.worker_id).await? {
         Some(w) if w.owner_id == owner && w.revoked_at.is_none() => w,
@@ -1179,6 +1189,23 @@ pub async fn new_session(
             "cwd must be a relative path inside the workspace".into(),
         ));
     }
+    Ok((ws, worker, cwd))
+}
+
+/// [`new_session`] without the start: the session (an agent of a room with `member`, SPEC
+/// §7.1.1) and its `system session_created`; its id.
+async fn insert_session(
+    app: &AppState,
+    owner: Uuid,
+    project: &db::ProjectRow,
+    b: &CreateSessionRequest,
+    spawn: Option<db::Spawn>,
+    member: Option<db::Member<'_>>,
+) -> ApiResult<Uuid> {
+    if let Some(m) = &b.model {
+        check_model(m)?;
+    }
+    let (ws, worker, cwd) = session_place(app, owner, project, b).await?;
     // No title: "Session N" (SPEC §3 Session), which the runtime's title may replace.
     let title = b.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
     if let Some(t) = title {
@@ -1202,6 +1229,7 @@ pub async fn new_session(
             permission_mode: b.permission_mode,
         },
         spawn,
+        member,
     )
     .await?;
     if b.provider_id.is_some() {
@@ -1210,7 +1238,128 @@ pub async fn new_session(
     }
     let s = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
     events::system(app, &s, "session_created", "Session created").await?;
-    delivery::kick(app, id, true).await;
+    Ok(id)
+}
+
+/// The longest system prompt of a room's agent, in bytes (SPEC §6).
+const MAX_ROOM_PROMPT: usize = 32 * 1024;
+
+/// `POST /api/projects/{id}/rooms` (SPEC §6, §7.1.1): a room and a session for each of its
+/// agents, checked as `POST .../sessions` checks one; `201` and the room's session object. An
+/// agent's session is titled by its name, else by its model, or its provider's label, "default"
+/// without one, a repeated one numbered ("opus 2"); its agent starts with the room's first
+/// message.
+pub async fn create_room(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(project_id): Path<Uuid>,
+    Json(b): Json<CreateRoomRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let project = project_for(&app, &user, project_id).await?;
+    let room = new_room(&app, user.id, &project, &b, None).await?;
+    let v = state::view(&app, user.id, room).await?;
+    Ok((StatusCode::CREATED, Json(json!(v))))
+}
+
+/// Creates a room of `owner` in their `project` with a session for each agent of `b`
+/// (`POST /api/projects/{id}/rooms` and `hqc_room`, SPEC §7.1.1): checked as the sessions are, the
+/// agents' providers on the workspace's worker too. `spawn`, from `hqc_room`, is the room's id
+/// and the session that made it, and its chain goes on the agents' sessions.
+pub async fn new_room(
+    app: &AppState,
+    owner: Uuid,
+    project: &db::ProjectRow,
+    b: &CreateRoomRequest,
+    spawn: Option<db::Spawn>,
+) -> ApiResult<SessionRow> {
+    if b.agents.is_empty() {
+        return Err(ApiError::BadRequest(
+            "a room needs at least one agent".into(),
+        ));
+    }
+    let title = b.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
+    if let Some(t) = title {
+        check_title(t)?;
+    }
+    let title = title.map(hqc_proto::replace_nul);
+    let mut agents = Vec::new();
+    let mut labels: Vec<String> = Vec::new();
+    for a in &b.agents {
+        let model = a.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+        if let Some(m) = model {
+            check_model(m)?;
+        }
+        // A provider's agent is named by the provider's label, as the client names its model.
+        let label = match a.provider_id {
+            Some(p) => match db::provider(&app.db, p).await? {
+                Some(p) if p.owner_id == owner => p.label,
+                _ => return Err(ApiError::BadRequest("unknown provider".into())),
+            },
+            None => model.unwrap_or("default").to_string(),
+        };
+        // Its name, when given, titles its session; otherwise its label, numbered among the
+        // agents titled by theirs.
+        let name = a.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        if let Some(n) = name {
+            check_title(n)?;
+        }
+        let title = match name {
+            Some(n) => hqc_proto::replace_nul(n).into_owned(),
+            None => {
+                let n = labels.iter().filter(|l| **l == label).count();
+                let title = if n == 0 {
+                    label.clone()
+                } else {
+                    format!("{label} {}", n + 1)
+                };
+                labels.push(label);
+                title
+            }
+        };
+        let req = CreateSessionRequest {
+            title: Some(title),
+            workspace_id: b.workspace_id,
+            cwd: b.cwd.clone(),
+            model: model.map(str::to_string),
+            permission_mode: b.permission_mode,
+            provider_id: a.provider_id,
+            ..CreateSessionRequest::default()
+        };
+        // It goes to the worker as one argument of the CLI, which Linux refuses over 128 KiB; a
+        // NUL, which Postgres refuses, is replaced as in a title.
+        let system_prompt = a.system_prompt.as_deref().map(hqc_proto::replace_nul);
+        if system_prompt
+            .as_ref()
+            .is_some_and(|p| p.len() > MAX_ROOM_PROMPT)
+        {
+            return Err(ApiError::BadRequest(format!(
+                "an agent's system_prompt is at most {} KiB",
+                MAX_ROOM_PROMPT / 1024
+            )));
+        }
+        agents.push((req, system_prompt));
+    }
+    // The room's agents work in one workspace and folder: checked before the room exists, and
+    // every agent's session is created in the workspace found here. So is each agent's provider
+    // on that workspace's worker, the first one's in `session_place`.
+    let (ws, worker, _) = session_place(app, owner, project, &agents[0].0).await?;
+    for (req, _) in &agents[1..] {
+        if let Some(p) = req.provider_id {
+            crate::providers::check(app, owner, &worker, p).await?;
+        }
+    }
+    let id = db::create_room(&app.db, project.id, owner, title.as_deref(), b.mode, spawn).await?;
+    let room = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
+    events::system(app, &room, "session_created", "Room created").await?;
+    for (mut req, system_prompt) in agents {
+        req.workspace_id = Some(ws.id);
+        let member = db::Member {
+            room_id: id,
+            system_prompt: system_prompt.as_deref(),
+            chain_id: spawn.map(|s| s.chain_id),
+        };
+        insert_session(app, owner, project, &req, None, Some(member)).await?;
+    }
     db::session(&app.db, id).await?.ok_or(ApiError::NotFound)
 }
 
@@ -1278,6 +1427,14 @@ pub async fn patch_session(
     Json(b): Json<PatchSession>,
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Manage).await?;
+    if s.room_mode.is_some()
+        && (b.model.is_some() || b.permission_mode.is_some() || b.browser.is_some())
+    {
+        return Err(ApiError::Conflict(
+            "room",
+            "a room has no agent of its own: its agents' sessions have the model, the permission mode and the browser".into(),
+        ));
+    }
     if s.system && (b.model.is_some() || b.provider_id.is_some() || b.browser.is_some()) {
         return Err(ApiError::Conflict(
             "system_session",
@@ -1408,7 +1565,7 @@ pub async fn patch_session(
 }
 
 /// Deleting a session drops its events, cursors and requests; the worker's jsonl files are
-/// not touched (SPEC §17.4).
+/// not touched (SPEC §17.4). A room's agents' sessions are deleted with it (§7.1.1).
 pub async fn delete_session(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -1416,10 +1573,25 @@ pub async fn delete_session(
 ) -> ApiResult<StatusCode> {
     let s = session_for(&app, &user, id, Action::Manage).await?;
     not_system(&s)?;
-    let cleanup = cleanup_frame(&app, &s).await?;
-    send_to_worker(&app, &s, HubFrame::SessionKill { session_id: id });
+    // Before the room: deleting it would clear their `room_id`.
+    if s.room_mode.is_some() {
+        for a in db::room_agents(&app.db, id).await? {
+            remove_session(&app, &a).await?;
+        }
+    }
+    remove_session(&app, &s).await?;
+    // Its requests and asks went with it.
+    app.requests_changed(s.owner_id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Session `s` killed on its worker, its files there cleaned up, and its row deleted.
+async fn remove_session(app: &AppState, s: &SessionRow) -> ApiResult<()> {
+    let id = s.id;
+    let cleanup = cleanup_frame(app, s).await?;
+    send_to_worker(app, s, HubFrame::SessionKill { session_id: id });
     if let Some(f) = cleanup {
-        send_to_worker(&app, &s, f);
+        send_to_worker(app, s, f);
     }
     sqlx::query("DELETE FROM sessions WHERE id = $1")
         .bind(id)
@@ -1431,9 +1603,7 @@ pub async fn delete_session(
     app.token_rate_changed(id, 0);
     app.drop_foreground_calls(id);
     app.session_changed(id);
-    // Its requests and asks went with it.
-    app.requests_changed(s.owner_id);
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 /// `session.cleanup` for an archived or deleted session (T21, SPEC §5.3, §17.4): its inbox
@@ -1617,8 +1787,9 @@ pub(crate) fn driven_from_hqc(s: &SessionRow) -> ApiResult<()> {
 }
 
 /// `POST /api/sessions/{id}/input`: stored as `user.message` with `delivery: pending`
-/// and delivered when the worker is there (SPEC §5.2). A repeated `client_op_id` returns
-/// the event stored the first time, with 200 instead of 201.
+/// and delivered when the worker is there (SPEC §5.2); in a room without `delivery`, each of
+/// its agents getting it (SPEC §7.1.1). A repeated `client_op_id` returns the event stored the
+/// first time, with 200 instead of 201.
 pub async fn input(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -1640,8 +1811,18 @@ pub async fn input(
             "client_op_id is longer than {MAX_CLIENT_OP_ID} bytes"
         )));
     }
+    // A room's message is stored and handed to its agents under the room's lock (SPEC §7.1.1).
+    let _room = match s.room_mode {
+        Some(_) => Some(crate::rooms::lock(&app, id).await),
+        None => None,
+    };
     if let Some(op) = &op {
         if let Some(r) = db::event_by_client_op(&app.db, id, op).await? {
+            // A repeat completes a room's message to its agents cut short the first time; what
+            // reached an agent is not stored twice (SPEC §7.1.1).
+            if s.room_mode.is_some() {
+                crate::rooms::owner_message(&app, &s, &r).await?;
+            }
             return Ok(reply(StatusCode::OK, &r));
         }
     }
@@ -1649,6 +1830,12 @@ pub async fn input(
     crate::artifacts::attach_to_session(&app.db, user.id, id, &b.artifact_ids).await?;
     // A failed turn shows `error` until the next input (SPEC §17.1).
     db::clear_turn_error(&app.db, id).await?;
+    // A room has no agent to deliver to: its agents get the message (SPEC §7.1.1).
+    let delivery = if s.room_mode.is_some() {
+        None
+    } else {
+        Some("pending")
+    };
     let stored = events::store_hub_event(
         &app,
         &s,
@@ -1656,7 +1843,7 @@ pub async fn input(
         "user.message",
         json!({"text": b.text, "artifact_ids": b.artifact_ids}),
         op.clone(),
-        Some("pending"),
+        delivery,
     )
     .await;
     let row = match stored {
@@ -1671,6 +1858,10 @@ pub async fn input(
             return Err(e.into());
         }
     };
+    if s.room_mode.is_some() {
+        crate::rooms::owner_message(&app, &s, &row).await?;
+        return Ok(reply(StatusCode::CREATED, &row));
+    }
     // A typed `/model` switches the agent as `PATCH {model}` does; otherwise the next
     // `session.start` would bring the stored model back.
     if let Some(m) = typed_model(&b.text).filter(|m| *m != s.model) {
@@ -1693,6 +1884,7 @@ pub async fn input(
 /// `stopped`. The runtime's (approvals, questions) are the worker's to close: it cancels those
 /// of the interrupted turn when the turn ends, and a background subagent's stay open, since the
 /// subagent goes on (SPEC §8.1, since 0.161). With no worker connected the hub cancels them too.
+/// Of a room, its agents' turns (SPEC §7.1.1).
 pub async fn stop(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -1700,18 +1892,51 @@ pub async fn stop(
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Write).await?;
     not_system(&s)?;
-    let open = db::open_requests_of_session(&app.db, id).await?;
+    let sent = if s.room_mode.is_some() {
+        stop_room(&app, &s).await?
+    } else {
+        stop_session(&app, &s).await?
+    };
+    Ok(Json(json!({ "sent": sent })))
+}
+
+/// Stop of session `s`: its open requests other than the runtime's cancelled with `stopped`,
+/// `session.stop` to its worker, and the runtime's approvals and questions cancelled too only
+/// when the worker is not connected (a connected worker keeps those of background subagents
+/// open, SPEC §10.1); `true` when the frame went out.
+async fn stop_session(app: &AppState, s: &SessionRow) -> ApiResult<bool> {
+    let open = db::open_requests_of_session(&app.db, s.id).await?;
     let runtimes = |kind: &str| matches!(kind, "approval" | "clarify");
     for p in open.iter().filter(|p| !runtimes(&p.kind)) {
-        requests::cancel(&app, p, CancelReason::Stopped).await?;
+        requests::cancel(app, p, CancelReason::Stopped).await?;
     }
-    let sent = send_to_worker(&app, &s, HubFrame::SessionStop { session_id: id });
+    let sent = send_to_worker(app, s, HubFrame::SessionStop { session_id: s.id });
     if !sent {
         for p in open.iter().filter(|p| runtimes(&p.kind)) {
-            requests::cancel(&app, p, CancelReason::Stopped).await?;
+            requests::cancel(app, p, CancelReason::Stopped).await?;
         }
     }
-    Ok(Json(json!({ "sent": sent })))
+    Ok(sent)
+}
+
+/// `POST /stop` of room `room` (SPEC §7.1.1), under the room's lock: `system room_stopped`
+/// "Stopped" in the room, then each agent stopped as its own Stop does ([`stop_session`]), then
+/// the senders' notice ([`crate::rooms::round_ended`]); `true` when a frame went out.
+async fn stop_room(app: &AppState, room: &SessionRow) -> ApiResult<bool> {
+    let _room = crate::rooms::lock(app, room.id).await;
+    // The agents' inputs stay as they are: the worker keeps the ones it has after a stop. A final
+    // message on an input whose message is from before this line, the part of the turn the stop
+    // cut included, posts nothing and wakes nobody (`rooms::on_final`).
+    events::system(app, room, crate::rooms::ROOM_STOPPED, crate::rooms::STOPPED).await?;
+    let mut sent = false;
+    for m in db::room_members(&app.db, room.id).await? {
+        sent |= stop_session(app, &m).await?;
+        app.session_changed(m.id);
+    }
+    // After the agents are stopped: the senders of the room's messages are told how it ended, and
+    // a notice that fails leaves no agent running.
+    crate::rooms::round_ended(app, room, "stopped by the owner").await?;
+    Ok(sent)
 }
 
 /// Longest `call_id` of `POST .../background` and of a kept foreground call, in bytes.
@@ -1866,7 +2091,8 @@ pub async fn unarchive(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Manage).await?;
-    if s.workspace_id.is_none() {
+    // A room has no workspace of its own (SPEC §7.1.1).
+    if s.workspace_id.is_none() && s.room_mode.is_none() {
         // Its workspace record was removed while it was archived (SPEC §13.2).
         return Err(ApiError::Conflict(
             "no_workspace",

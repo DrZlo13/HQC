@@ -16,6 +16,7 @@ import {
   type HqcEvent,
   type PermissionMode,
   type EventOf,
+  type RoomMode,
   type SessionInfo,
   type SessionState,
   type SlashCommand,
@@ -78,6 +79,7 @@ function setup(
     foreground_calls?: string[];
     model?: string;
     paused_at?: string;
+    room_mode?: RoomMode;
   } = {},
 ) {
   const history = opts.history ?? HISTORY;
@@ -122,6 +124,8 @@ function setup(
     background: vi.fn(async () => {}),
     // POST /api/sessions/{id}/tasks/{task_id}/stop.
     stopTask: vi.fn(async () => {}),
+    // POST /api/sessions/{id}/stop.
+    stop: vi.fn(async () => {}),
     sessions: vi.fn(async () => []),
     projects: vi.fn(async () => []),
     workspaces: vi.fn(async () => [
@@ -173,6 +177,7 @@ function setup(
     foreground_calls: opts.foreground_calls,
     model: opts.model,
     paused_at: opts.paused_at,
+    room_mode: opts.room_mode,
   };
   app.sessions.set('s1', info);
   app.sessions.set('sys', { ...info, id: 'sys', title: 'drzlo-mac', system: true, workspace_id: undefined, held_by: undefined, state: 'idle' });
@@ -349,7 +354,7 @@ describe('permission mode', () => {
     vi.stubGlobal('confirm', confirm);
     try {
       let items = await menu();
-      expect(items.map((b) => b.textContent)).toEqual(['Schedules', 'Move to project…', 'Switch to Ask', 'Switch to Allow all']);
+      expect(items.map((b) => b.textContent)).toEqual(['Rename', 'Schedules', 'Move to project…', 'Switch to Ask', 'Switch to Allow all']);
       await act(async () => items.find((b) => b.textContent === 'Switch to Allow all')!.click());
       expect(confirm).toHaveBeenCalledWith(ALLOW_ALL_CONFIRM);
       expect(ALLOW_ALL_CONFIRM.includes('\n')).toBe(false);
@@ -364,7 +369,7 @@ describe('permission mode', () => {
       expect(api.patchSession).toHaveBeenCalledWith('s1', { permission_mode: 'allow_all' });
       expect($('.perm-allow-all')!.textContent).toBe('Allow all');
       items = await menu();
-      expect(items.map((b) => b.textContent)).toEqual(['Schedules', 'Move to project…', 'Switch to Ask', 'Switch to Auto']);
+      expect(items.map((b) => b.textContent)).toEqual(['Rename', 'Schedules', 'Move to project…', 'Switch to Ask', 'Switch to Auto']);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -851,6 +856,7 @@ describe('header', () => {
     await act(async () => $('.btn-more')!.click());
     // T50: archiving is on the list's rows, not in the header.
     expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual([
+      'Rename',
       'Schedules',
       'Move to project…',
       'Switch to Auto',
@@ -902,6 +908,191 @@ describe('header', () => {
     expect($('.chat-head')!.lastElementChild).toBe(line);
     expect(line.textContent).toBe('started by mpv-sendspin/session-4');
     expect(line.querySelector('a')!.getAttribute('href')).toBe('#/s/s0');
+  });
+
+  it('a room: its mode in place of the model, its agents linked with their states, an agent\'s post as its message; no model or permission switch', async () => {
+    const post = ev('event.peer.message', 2, (e) => {
+      e.payload = { from_session_id: 'm1', from: 'glazes/opus', mode: 'send', text: 'Cone 6 is **fine**' };
+      delete e.chain;
+    });
+    const second = ev('event.peer.message', 3, (e) => {
+      e.payload = { from_session_id: 'm2', from: 'glazes/sonnet', mode: 'send', text: 'Agreed' };
+      delete e.chain;
+    });
+    const { app } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0], post, second] });
+    app.projects.set('p1', { id: 'p1', name: 'Glazes', slug: 'glazes', description: '', is_personal: false, color: 'blue', quick_messages: [], created_at: '2026-10-20T10:00:00Z' });
+    const room = app.sessions.get('s1')!;
+    const member = (id: string, title: string, more: Partial<SessionInfo>) =>
+      app.sessions.set(id, { ...room, id, title, slug: title.toLowerCase(), room_mode: undefined, room_id: 's1', ...more });
+    member('m1', 'Opus', { state: 'waiting', model: 'claude-opus-5-5' });
+    member('m2', 'Sonnet', { state: 'idle', subagents: 1, model: 'claude-sonnet-5-5' });
+    member('m9', 'Elsewhere', { room_id: 'r9' });
+    await mount(app);
+    expect($('.chat-room')!.textContent).toBe('Room · Council');
+    expect($('.chat-model')).toBeNull();
+    expect([...root.querySelectorAll('.chat-room-agent')].map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
+      ['Opus · Waiting for reply', '#/s/m1'],
+      ['Sonnet · Running', '#/s/m2'],
+    ]);
+    // The agent's post in the room: a message from its session, linked. The first chat of a
+    // run renders its history later than the 50 ms `mount` waits.
+    for (let i = 0; i < 20 && !$('.room-post'); i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    // A chat message of the agent, not a relay from another session.
+    expect($('.relay')).toBeNull();
+    for (let i = 0; i < 20 && root.querySelectorAll('.room-post').length < 2; i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    const names = [...root.querySelectorAll<HTMLElement>('.room-post-name')];
+    expect(names.map((n) => n.textContent)).toEqual(['Opus', 'Sonnet']);
+    // Each agent has a color of its own; the model is muted beside the name, if it has one.
+    expect(names[0].style.color).not.toBe('');
+    expect(names[0].style.color).not.toBe(names[1].style.color);
+    expect([...root.querySelectorAll('.room-post-model')].map((m) => m.textContent)).toEqual(['Opus 5.5', 'Sonnet 5.5']);
+    expect($('.room-post .text strong')!.textContent).toBe('fine');
+    // Its menu has Rename only: no model or permission switch.
+    await act(async () => $('.btn-more')!.click());
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Rename']);
+    render(null, root);
+
+    // A phone's header says the same.
+    await mount(app, true);
+    expect($('.chat-room')!.textContent).toBe('Room · Council');
+    expect(root.querySelectorAll('.chat-room-agent')).toHaveLength(2);
+  });
+
+  it("a room's pill has its agents' state, as the list does; Stop stops them while one runs or waits", async () => {
+    const { app, api } = setup('idle', { room_mode: 'conversation', commands: [], history: [HISTORY[0]] });
+    const room = app.sessions.get('s1')!;
+    const member = (id: string, state: SessionState) =>
+      app.sessions.set(id, { ...room, id, title: id, slug: id, room_mode: undefined, room_id: 's1', state });
+    member('m1', 'running');
+    member('m2', 'idle');
+    await mount(app);
+    expect($('.pill')!.textContent).toBe('Running');
+    expect($('.pill')!.classList.contains('state-running')).toBe(true);
+    // The room's own state is idle; the agents' decide.
+    expect(app.sessions.get('s1')!.state).toBe('idle');
+    await act(async () => $('.btn-stop')!.click());
+    expect(api.stop).toHaveBeenCalledWith('s1');
+    render(null, root);
+    // One of them waits for the owner: the room does.
+    member('m2', 'waiting');
+    await mount(app);
+    expect($('.pill')!.textContent).toBe('Waiting for reply');
+    expect($('.btn-stop')).not.toBeNull();
+    render(null, root);
+    // Nobody works: nothing to stop.
+    member('m1', 'idle');
+    member('m2', 'idle');
+    await mount(app);
+    expect($('.btn-stop')).toBeNull();
+  });
+
+  it("a room's feed has a line for each agent at work, in the agents' order, with the command it runs", async () => {
+    const { app, api } = setup('idle', { room_mode: 'conversation', commands: [], history: [HISTORY[0]] });
+    const room = app.sessions.get('s1')!;
+    const member = (id: string, title: string, state: SessionState) =>
+      app.sessions.set(id, { ...room, id, title, slug: id, room_mode: undefined, room_id: 's1', state });
+    // Registered out of order: the lines go by id.
+    member('m3', 'Haiku', 'queued');
+    member('m2', 'Sonnet', 'running');
+    member('m1', 'Opus', 'running');
+    member('m4', 'Fable', 'idle');
+    // Opus runs a command (for a minute); the others have no call open.
+    // Opus has a long history: more than the newest page.
+    const own = (id: string) => (id === 'm1' ? [...Array.from({ length: 150 }, (_, i) => ev('event.agent.message', i + 1)), ev('event.tool.call', 151, (e) => {
+      e.ts = new Date(Date.now() - 60_000).toISOString();
+      e.payload = { call_id: 'c1', tool: 'Bash', args_preview: '{"command":"make test"}' };
+    })] : id === 's1' ? [HISTORY[0]] : []);
+    const page = (id: string, after: number, before = Number.MAX_SAFE_INTEGER, limit = 200) => {
+      const events = own(id).filter((e) => e.seq! > after && e.seq! < before).slice(-limit);
+      const seqs = events.map((e) => e.seq!);
+      return { events, invalid: [], maxSeq: Math.max(0, ...seqs), minSeq: seqs[0], count: events.length };
+    };
+    api.events.mockImplementation(async (id: string, after: number) => page(id, after));
+    api.eventsBefore.mockImplementation(async (id: string, before?: number, limit?: number) => page(id, 0, before, limit));
+    await mount(app);
+    for (let i = 0; i < 20 && root.querySelectorAll('.activity').length < 3; i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    const lines = [...root.querySelectorAll('.activity')];
+    expect(lines.map((l) => l.textContent!.replace(/\d+:\d\d$/, 'M:SS'))).toEqual(['Opus · Runningmake testM:SS', 'Sonnet is working', 'Haiku · Input queued']);
+    // The room's own line is gone: it is never at work itself.
+    expect(root.querySelectorAll('.feed > .activity')).toHaveLength(3);
+    // The agents' chats load the newest page only, not their older history.
+    expect(api.eventsBefore.mock.calls.filter(([id]) => id === 'm1')).toHaveLength(1);
+    // The agents' chats stay open while the room's does, and close with it.
+    expect(app.chat('m1').isOpen).toBe(true);
+    await act(async () => render(null, root));
+    expect(app.chat('m1').isOpen).toBe(false);
+  });
+
+  it('a room without a workspace has Rename in "More" on a computer and a phone, and Retry after it on a phone; an archived room has no button but that Retry', async () => {
+    const { app } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]] });
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, workspace_id: undefined, worker_id: undefined });
+    const items = () => [...root.querySelectorAll('.menu-item')].map((b) => b.textContent);
+    await mount(app);
+    await act(async () => $('.btn-more')!.click());
+    expect(items()).toEqual(['Rename']);
+    render(null, root);
+    await mount(app, true);
+    await act(async () => $('.btn-more')!.click());
+    expect(items()).toEqual(['Rename']);
+    render(null, root);
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, state: 'error' });
+    await mount(app, true);
+    await act(async () => $('.btn-more')!.click());
+    expect(items()).toEqual(['Rename', 'Retry']);
+    render(null, root);
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true, state: 'archived' });
+    await mount(app);
+    expect($('.btn-more')).toBeNull();
+  });
+
+  it('"Rename" in the "More" of a room asks for a title and renames it; a refusal goes to the chat\'s notice', async () => {
+    const { app, api } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]] });
+    api.patchSession.mockImplementation(async (_id: string, patch: SessionPatch) => ({ ...app.sessions.get('s1')!, title: patch.title ?? '' }) as never);
+    await mount(app);
+    const ask = vi.fn(() => ' Glaze review ' as string | null);
+    vi.stubGlobal('prompt', ask);
+    const rename = async () => {
+      await act(async () => $('.btn-more')!.click());
+      await act(async () => $('.btn-rename')!.click());
+    };
+    await rename();
+    expect(ask).toHaveBeenCalledWith('Rename the room', 'test 12');
+    expect(api.patchSession).toHaveBeenCalledWith('s1', { title: 'Glaze review' });
+    expect($('.chat-title')!.textContent).toBe('Glaze review');
+    api.patchSession.mockRejectedValueOnce(new Error('the title is taken'));
+    ask.mockReturnValue('Other');
+    await rename();
+    expect($('.notice')!.textContent).toBe('Not renamed: the title is taken');
+    vi.unstubAllGlobals();
+  });
+
+  it("a room's header shows the sum of its agents' costs as \"this room\", not an agent on a provider's; the phone's \"More\" too", async () => {
+    const { app, api } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]] });
+    const room = app.sessions.get('s1')!;
+    const member = (id: string, more: Partial<SessionInfo> = {}) =>
+      app.sessions.set(id, { ...room, id, title: id, slug: id, room_mode: undefined, room_id: 's1', ...more });
+    member('m1');
+    member('m2');
+    member('m3', { provider: { id: 'pr1', label: 'Qwen' } });
+    const spent = (id: string, usd: number) => [ev('event.usage', 1, (e) => ((e.session_id = id), (e.payload = { input_tokens: 1, output_tokens: 1, cost_usd: usd })))];
+    const own = (id: string) => (id === 'm1' ? spent(id, 0.3) : id === 'm2' ? spent(id, 0.2) : id === 'm3' ? spent(id, 5) : id === 's1' ? [HISTORY[0]] : []);
+    const page = (id: string) => {
+      const events = own(id);
+      return { events, invalid: [], maxSeq: events.length ? 1 : 0, minSeq: events.length ? 1 : 0, count: events.length };
+    };
+    api.events.mockImplementation(async (id: string) => page(id));
+    api.eventsBefore.mockImplementation(async (id: string) => page(id));
+    const waitCost = async () => {
+      for (let i = 0; i < 20 && !$('.chat-cost'); i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    };
+    await mount(app);
+    await waitCost();
+    expect($('.chat-cost')!.textContent).toBe('$0.50 this room');
+    render(null, root);
+    await mount(app, true);
+    await act(async () => void (await new Promise((r) => setTimeout(r, 50))));
+    await act(async () => $('.btn-more')!.click());
+    expect($('.menu-info')!.textContent).toContain('$0.50 this room');
   });
 
   it('pulses while a turn is on, no "Stop" when idle', async () => {

@@ -119,7 +119,8 @@ impl PushSender for WebPush {
     }
 }
 
-fn clip(s: &str, n: usize) -> String {
+/// `s` cut to `n` characters, with `…` after a cut.
+pub(crate) fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
     } else {
@@ -141,11 +142,14 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
             .first()
             .map(|q| format!("Question: {}", clip(&q.text, 140)))
             .unwrap_or_else(|| "The agent has a question".into()),
+        // A room's agent is not shown to the owner: its answer pushes as the post in the room
+        // (SPEC §7.1.1).
         EventKind::AgentMessage {
             text,
             r#final: true,
             ..
-        } => clip(text, 160),
+        } if s.room_id.is_none() => clip(text, 160),
+        EventKind::PeerMessage { text, .. } if s.room_mode.is_some() => clip(text, 160),
         EventKind::System { code, text, .. }
             if code == "agent_start_failed" || code == "input_rejected" =>
         {
@@ -156,6 +160,13 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
     let request_id = match kind {
         EventKind::ApprovalRequest { request_id, .. }
         | EventKind::ClarifyRequest { request_id, .. } => Some(request_id),
+        _ => None,
+    };
+    // A message in a room is named by its agent or its sender (SPEC §16).
+    let post_author = match kind {
+        EventKind::PeerMessage {
+            from_session_id, ..
+        } if s.room_mode.is_some() => Some(*from_session_id),
         _ => None,
     };
     let approval_like = request_id.is_some();
@@ -182,6 +193,17 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
                 })
         } else {
             Vec::new()
+        };
+        let body = match post_author {
+            Some(a) => match db::session(&app.db, a).await {
+                Ok(Some(a)) => format!("{}: {body}", a.title),
+                Ok(None) => body,
+                Err(e) => {
+                    tracing::error!(%session_id, error = %e, "push: the post's agent");
+                    body
+                }
+            },
+            None => body,
         };
         let payload = message(&s, &row, request_id.as_deref(), body);
         let mut users = vec![session_owner];

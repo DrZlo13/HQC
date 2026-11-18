@@ -25,6 +25,7 @@ import {
   IconReorder,
   IconRestart,
   IconRestore,
+  IconRoom,
   IconSearch,
   IconSettings,
   IconShield,
@@ -33,11 +34,11 @@ import {
   IconGlobe,
   IconTrash,
 } from './icons';
-import { agentsLabel, formatWhen, homePath } from './labels';
+import { ROOM_MODE_LABELS, agentsLabel, formatWhen, homePath } from './labels';
 import { newSessionWhere } from './NewSession';
 import { MoveSession, confirmDeleteProject } from './ProjectSettings';
 import { RequestsLink } from './requests';
-import { LIST_MODES, bucketOf, groupSessions, moveTo, runningLabel, subLabel, type SessionGroup } from './sessions';
+import { LIST_MODES, bucketOf, groupSessions, moveTo, renameByPrompt, runningLabel, subLabel, type SessionGroup } from './sessions';
 
 /** "+ project": asks for the name, then opens the new project's settings — a new project
  *  has no workspaces yet, and that is the first thing to add. */
@@ -100,13 +101,6 @@ export function prefetchOn(load: () => void) {
 /** The rules screen of the session's folder (T48), if it has one. */
 function rulesHref(s: SessionInfo): string | undefined {
   return s.workspace_id && `#/p/${s.project_id}/rules/${s.workspace_id}?session=${encodeURIComponent(s.id)}`;
-}
-
-/** Renames a session by a prompt; a refusal goes to the list's notice. */
-function rename(app: AppState, s: SessionInfo): void {
-  const title = prompt('Rename the session', s.title)?.trim();
-  if (!title || title === s.title) return;
-  app.renameSession(s.id, title).catch((e: Error) => app.setListNotice(`Not renamed: ${e.message}`));
 }
 
 /** Adds the session to the user's favorites or takes it out; a refusal goes to the list's
@@ -218,6 +212,9 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   const draft = app.newSession?.projectId === pid ? app.newSession : null;
   const newSession = () => {
     if (pid) location.hash = `#/p/${pid}/new`;
+  };
+  const newRoom = () => {
+    if (pid) location.hash = `#/p/${pid}/new-room`;
   };
 
   useEffect(() => setReorder(null), [pid]);
@@ -390,7 +387,9 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       menuOpen={menu?.id === s.id}
       hover={phone || reorder ? undefined : hoverOn(s.id)}
       // A desktop row is dragged onto a project of the bar to move it there; its buttons go.
-      onDragStart={phone || reorder ? undefined : hideRowButtons}
+      // A room has no folder to move; its row stays where it is.
+      onDragStart={phone || reorder || s.room_mode ? undefined : hideRowButtons}
+      room={roomTip(app, s)}
       onPrefetch={() => app.prefetchChat(s.id)}
       onMenu={(x, y) => openMenu(s.id, x, y)}
     />
@@ -419,7 +418,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   return (
     <section class={`sessions ${phone ? 'sessions-phone' : ''} ${reorder ? 'is-reordering' : ''}`}>
       {/* One row: on a phone "‹" back to the projects, then the project's name, the search (its
-          own page), the order, the project's menu and a new session. */}
+          own page), the order, the project's menu, a new room and a new session. */}
       <header class="side-head">
         {phone && (
           <a class="icon-btn btn-back" href="#/" aria-label="Back to projects" onClick={(e) => onBack(e, '#/')}>
@@ -434,6 +433,16 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
         </a>
         <ModeMenu app={app} pid={pid} mode={mode} disabled={!!reorder} phone={phone} onReorder={startReorder} />
         {project && <ProjectMenu app={app} project={project} phone={phone} />}
+        <button
+          type="button"
+          class="icon-btn btn-new-room"
+          aria-label="New room"
+          title="New room"
+          disabled={!pid || !app.me}
+          onClick={newRoom}
+        >
+          <IconRoom />
+        </button>
         <button
           type="button"
           class="btn btn-primary btn-new-session"
@@ -573,17 +582,26 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   );
 }
 
+/** What a room's row says of it, in the tooltip of its icon: "Room · Conversation · Opus,
+ *  Sonnet" (the names of its agents); undefined for a session. */
+export function roomTip(app: AppState, s: SessionInfo): string | undefined {
+  if (!s.room_mode) return undefined;
+  const names = app.roomMembers(s.id).map((m) => m.title || m.slug);
+  return ['Room', ROOM_MODE_LABELS[s.room_mode], ...(names.length ? [names.join(', ')] : [])].join(' · ');
+}
+
 function titleOf(s: SessionInfo): string {
   return s.title || s.slug || s.id.slice(-8);
 }
 
 /** A session's menu, the same on a desktop row and a phone row: Open in new tab, favorites,
- *  then Rename, Move to project…, Folder rules, then Restart session and Pause session (not for
- *  an archived, a service, a VS Code-driven session or one whose worker is offline), or for a
- *  paused session Resume session alone, Archive and Delete… (a step of its own). */
+ *  then Rename, Move to project… (not for a room), Folder rules, then Restart session and Pause
+ *  session (not for an archived, a service, a VS Code-driven session, a room or one whose worker
+ *  is offline), or for a paused session Resume session alone, Archive and Delete… (a step of its
+ *  own). */
 function sessionMenu(app: AppState, s: SessionInfo, on: { onMove: () => void; onAskDelete: () => void }): MenuEntry[] {
   const rules = rulesHref(s);
-  const restartable = !s.archived && !s.system && s.state !== 'locked_vscode' && s.state !== 'worker_offline';
+  const restartable = !s.archived && !s.system && !s.room_mode && s.state !== 'locked_vscode' && s.state !== 'worker_offline';
   const paused = !!s.paused_at;
   return [
     { label: 'Open in new tab', icon: <IconOpenNew />, cls: 'btn-open-tab', href: `#/s/${s.id}`, newTab: true },
@@ -594,8 +612,8 @@ function sessionMenu(app: AppState, s: SessionInfo, on: { onMove: () => void; on
       onSelect: () => toggleFavorite(app, s),
     },
     'sep',
-    { label: 'Rename', icon: <IconRename />, cls: 'btn-rename', onSelect: () => rename(app, s) },
-    { label: 'Move to project…', icon: <IconMove />, cls: 'btn-move', onSelect: on.onMove },
+    { label: 'Rename', icon: <IconRename />, cls: 'btn-rename', onSelect: () => renameByPrompt(app, s, (m) => app.setListNotice(m)) },
+    ...(s.room_mode ? [] : [{ label: 'Move to project…', icon: <IconMove />, cls: 'btn-move', onSelect: on.onMove }]),
     ...(rules ? [{ label: 'Folder rules', icon: <IconShield />, cls: 'btn-rules', href: rules }] : []),
     'sep',
     ...(restartable && !paused
@@ -777,10 +795,18 @@ type HoverHandlers = {
 };
 
 /** A session's state mark: a dot of its group (amber waits, the accent works, a ring is
- *  idle), `</>` while it is open in VS Code and not working there. `color`: the project's own,
- *  for a working dot in a list of several projects, where `--accent` is the last opened one's. */
-function StateMark({ s, color }: { s: SessionInfo; color?: string }) {
+ *  idle), `</>` while it is open in VS Code and not working there; a room's is its icon, in the
+ *  dot's colors, with `room` (`roomTip`) for its tooltip. `color`: the project's own, for a
+ *  working dot in a list of several projects, where `--accent` is the last opened one's. */
+function StateMark({ s, color, room }: { s: SessionInfo; color?: string; room?: string }) {
   const bucket = bucketOf(s);
+  if (s.room_mode) {
+    return (
+      <span class={`dot-vs mark-room mark-${bucket} state-${s.state}`} style={bucket === 'run' && color ? { color } : undefined} title={room}>
+        <IconRoom size={12} />
+      </span>
+    );
+  }
   if (s.state === 'locked_vscode' && bucket !== 'run') {
     return (
       <span class="dot-vs" aria-hidden="true">
@@ -827,6 +853,7 @@ export function SessionRow({
   menuOpen,
   hover,
   onDragStart,
+  room,
   onPrefetch,
   onMenu,
 }: {
@@ -847,6 +874,8 @@ export function SessionRow({
   /** A desktop row of the live list: it can be dragged onto a project of the bar
    *  (`SESSION_DRAG`), and this runs as the drag starts. */
   onDragStart?: () => void;
+  /** A room's row: the tooltip of its mark (`roomTip`). */
+  room?: string;
   /** Loads the newest page of the chat before it is opened. */
   onPrefetch: () => void;
   onMenu?: (x: number, y: number) => void;
@@ -862,7 +891,7 @@ export function SessionRow({
   );
   const body = (
     <>
-      <StateMark s={s} color={project && colorHex(project.color)} />
+      <StateMark s={s} color={project && colorHex(project.color)} room={room} />
       <span class="session-main">
         <span class="session-top">
           <span class="session-title">{title}</span>

@@ -1,4 +1,4 @@
-import type { ApprovalCanonical, ApprovalOption, CancelReason, PermissionMode, SessionState } from '../proto';
+import type { ApprovalCanonical, ApprovalOption, CancelReason, PermissionMode, RoomMode, SessionState } from '../proto';
 
 /** Button captions by `canonical` (SPEC §10.1); an unknown canonical keeps the agent's label. */
 export const CANONICAL_LABELS: Record<Exclude<ApprovalCanonical, 'unknown'>, string> = {
@@ -36,6 +36,15 @@ export const ALLOW_ALL_CONFIRM =
 
 /** A permission mode's name in the UI (T38). */
 export const MODE_LABELS: Record<PermissionMode, string> = { ask: 'Ask', auto: 'Auto', allow_all: 'Allow all' };
+
+/** A room's mode, in its header and in the mode menu over a new room's input. */
+export const ROOM_MODE_LABELS: Record<RoomMode, string> = { conversation: 'Conversation', council: 'Council' };
+
+/** What each room mode does, under its name in the mode's menu. */
+export const ROOM_MODE_NOTES: Record<RoomMode, string> = {
+  conversation: 'Agents answer one at a time, in turn; each sees what was said since its last turn',
+  council: "Your message wakes every agent at once; they see the room's history",
+};
 
 /** The confirmation a switch to `mode` asks first; none for Ask. */
 export function modeConfirm(mode: PermissionMode): string | undefined {

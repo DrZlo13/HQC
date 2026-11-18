@@ -31,7 +31,9 @@ pub const ATTACH: &str = "hqc_attach";
 pub const SEND: &str = "hqc_send";
 pub const ASK: &str = "hqc_ask";
 pub const SEARCH_HISTORY: &str = "hqc_search_history";
+pub const READ: &str = "hqc_read";
 pub const SPAWN: &str = "hqc_spawn";
+pub const ROOM: &str = "hqc_room";
 pub const SCHEDULE: &str = "hqc_schedule";
 pub const MOVE: &str = "hqc_move";
 pub const RENAME: &str = "hqc_rename";
@@ -57,8 +59,9 @@ pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's 
     when the user did not ask to see it; a path alone is not enough. hqc_attach takes only a file \
     inside the session's workspace, so copy a file you made elsewhere (a scratchpad in /tmp) into \
     .hqc/out/ of the workspace first, not elsewhere in it: hqc keeps .hqc/ out of git. \
-    Other sessions: hqc_list_sessions, hqc_send, hqc_ask, hqc_spawn; history: \
-    hqc_search_history; later or recurring messages: hqc_schedule; moving this session to \
+    Other sessions: hqc_list_sessions, hqc_send, hqc_ask, hqc_spawn, hqc_room \
+    (a room of several agents); history: hqc_search_history to find, hqc_read to read a \
+    session or a room in full; later or recurring messages: hqc_schedule; moving this session to \
     another folder or project, only when the user asks (a folder that is not one of the user's \
     workspaces in the same environment waits for the user to allow it): hqc_move; renaming a \
     session: hqc_rename; where this machine allows it, a password or an ssh key from the user \
@@ -132,7 +135,11 @@ pub const TOOLS: &[Tool] = &[
             artifact ids from hqc_attach); never paste a file's content into `text`. The other \
             agent gets each file as a local path on its own machine. While you answer an \
             hqc_ask, a send to the asker goes back with your reply (its text after your final \
-            message, its files with the reply's files; `delivery: with_reply`).",
+            message, its files with the reply's files; `delivery: with_reply`). `session` may \
+            be a room too (a session with several agents): the message goes to its agents, \
+            and their answers stay in the room; when the room's discussion ends, the room \
+            sends you how it ended and its last two entries (read the rest with hqc_read), \
+            which starts a turn here, so do not poll the room.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -219,6 +226,44 @@ pub const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: READ,
+        description: "Read one hqc session of your owner from the hub, in full, page by page: \
+            any session of your owner, archived ones, a room and this session itself. You get \
+            the events as the hqc chat shows them: the messages of users and agents, messages \
+            between sessions, a room's posts, tool calls with their output, and hqc's own \
+            lines. Without `before_seq` and `after_seq` you get the last events, oldest first. \
+            A page is at most 100 events and 64 KiB (one event is returned even when it alone \
+            is larger); when the page leaves out older events the \
+            answer has `earlier`, pass it as `before_seq` for the page before; when it leaves \
+            out newer ones it has `later`, pass it as `after_seq` for the page after. Each \
+            event has its `seq`. To find where to read, use hqc_search_history, whose hits \
+            give the session's address and the event's `seq`. Reading changes nothing.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "session": {
+                        "type": "string",
+                        "description": "The session's address `<project-slug>/<session-slug>` \
+                            or its id."
+                    },
+                    "before_seq": {
+                        "type": "integer",
+                        "description": "The last events before this `seq`; `earlier` of the \
+                            previous answer."
+                    },
+                    "after_seq": {
+                        "type": "integer",
+                        "description": "The first events after this `seq`; `later` of the \
+                            previous answer. Not together with `before_seq`."
+                    }
+                },
+                "required": ["session"],
+                "additionalProperties": false
+            })
+        },
+    },
+    Tool {
         name: SPAWN,
         description: "Start a new hqc session of your owner and give it its first task: \
             `prompt` reaches the new agent as a message from this session and starts its first \
@@ -263,6 +308,63 @@ pub const TOOLS: &[Tool] = &[
                     }
                 },
                 "required": ["project", "prompt"],
+                "additionalProperties": false
+            })
+        },
+    },
+    Tool {
+        name: ROOM,
+        description: "Create an hqc room of your owner: a shared conversation of several agents \
+            that your owner can read and join, each agent a session of its own with its own \
+            model and system prompt. `message` is the room's first message, from this session; \
+            in a `conversation` (the default) the first agent gets it and the agents then \
+            answer in turn, in a `council` every agent gets it and answers it on its own. \
+            Returns the room's address at once and does not wait for the agents: when their \
+            discussion ends (every agent passed, every agent of a `council` answered, the \
+            posts limit, a stop), the room sends this session how it ended and its last two \
+            entries (read the rest with hqc_read), which starts a turn here, \
+            so do not poll the room; write to it again with hqc_send. The agents run \
+            in a workspace of `project` (the project's default workspace when `workspace` is \
+            absent) on that workspace's machine, in the ask mode, each with your model, or \
+            your model provider if you run on one, unless its `model` or `provider` is given. \
+            Each agent counts as a session you spawned. An agent's `name` titles its session; \
+            its `prompt` is added to its system prompt.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "A project slug or id."},
+                    "workspace": {
+                        "type": "string",
+                        "description": "A workspace of the project: its id, label or path."
+                    },
+                    "title": {"type": "string", "description": "The room's title."},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["conversation", "council"],
+                        "description": "conversation (the default): the agents speak in turn; council: every agent answers each message on its own."
+                    },
+                    "agents": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "The room's agents.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "The agent's name, the title of its session."},
+                                "model": {"type": "string", "description": "The agent's model."},
+                                "provider": {
+                                    "type": "string",
+                                    "description": "A model provider of your owner by its name (Settings → Models); the workspace's machine must allow it. Not together with `model`."
+                                },
+                                "prompt": {"type": "string", "description": "The agent's system prompt."}
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "message": {"type": "string", "description": "The room's first message."}
+                },
+                "required": ["project", "agents", "message"],
                 "additionalProperties": false
             })
         },
@@ -537,9 +639,11 @@ mod tests {
         assert!(tool(LIST_SESSIONS).is_some());
         assert!(tool(SCHEDULE).is_some());
         assert!(tool(SPAWN).is_some());
+        assert!(tool(ROOM).is_some());
         assert!(tool(ATTACH).is_some());
         assert!(tool(SEND).is_some() && tool(ASK).is_some());
         assert!(tool(SEARCH_HISTORY).is_some());
+        assert!(tool(READ).is_some());
         assert!(tool(MOVE).is_some());
         assert!(tool(RENAME).is_some());
     }

@@ -3794,7 +3794,8 @@ async fn entrypoint_for_the_vscode_history() {
 }
 
 /// A local slash command (`/name x`): the CLI answers with a `result` and no replay echo.
-/// The input still counts as taken, otherwise the supervisor resends it forever.
+/// The input still counts as taken, otherwise the supervisor resends it forever; taken before
+/// the turn's `status idle`, whose `ack` after it would open a turn on the hub (SPEC §5.2).
 #[tokio::test]
 async fn local_command_without_echo_is_taken() {
     let stream = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_ms":15,"result":"Session renamed to: x","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#;
@@ -3806,8 +3807,9 @@ async fn local_command_without_echo_is_taken() {
         .iter()
         .position(|e| e == "accepted")
         .expect("input not taken");
+    let status = s.iter().position(|e| e == "status").unwrap();
     let ended = s.iter().position(|e| e == "turn_ended").unwrap();
-    assert!(accepted < ended, "{s:?}");
+    assert!(accepted < status && status < ended, "{s:?}");
     assert!(events
         .iter()
         .any(|e| matches!(e, AdapterEvent::InputAccepted { event_id } if *event_id == id)));
@@ -5331,8 +5333,8 @@ fn a_carried_local_command_is_taken_by_its_own_result() {
         [
             "status to A",
             "turn_ended [B]",
-            "status to -",
             "accepted B",
+            "status to -",
             "turn_ended []"
         ]
     );
@@ -5379,7 +5381,8 @@ fn a_cancelled_message_is_not_taken() {
 }
 
 /// A message the CLI took without an echo (`started`, no `isReplay` line: a local command)
-/// is taken at the `result`, also one written during the turn.
+/// is taken at the `result`, also one written during the turn, before the turn's events (SPEC
+/// §5.2).
 #[test]
 fn a_message_started_without_an_echo_is_taken() {
     let sid = Uuid::now_v7();
@@ -5411,9 +5414,9 @@ fn a_message_started_without_an_echo_is_taken() {
     assert_eq!(
         trace(&out, &names),
         [
+            "accepted B",
             "message \"DONE\" to A",
             "status to A",
-            "accepted B",
             "turn_ended []"
         ]
     );

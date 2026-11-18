@@ -6,7 +6,7 @@
 //! `user.message` when it is delivered into the running turn (SPEC §4, §17.2); the typed
 //! [`EventKind`] drives only the hub's own logic (open requests, turn bookkeeping, push).
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use hqc_proto::{
     event::{Event, EventKind, SessionState},
     frame::Ack,
@@ -339,9 +339,25 @@ pub async fn store_peer_message(
     s: &SessionRow,
     event_id: Uuid,
     author: Value,
+    payload: Value,
+    chain: Value,
+    delivery: Option<&str>,
+) -> anyhow::Result<EventRow> {
+    store_peer_message_at(app, s, event_id, author, payload, chain, delivery, None).await
+}
+
+/// [`store_peer_message`] with `delivered_at` set: a message the session took on arrival (a
+/// room, which has no delivery) shows as delivered to its sender.
+#[allow(clippy::too_many_arguments)]
+pub async fn store_peer_message_at(
+    app: &AppState,
+    s: &SessionRow,
+    event_id: Uuid,
+    author: Value,
     mut payload: Value,
     chain: Value,
     delivery: Option<&str>,
+    delivered_at: Option<DateTime<Utc>>,
 ) -> anyhow::Result<EventRow> {
     hqc_proto::replace_nul_json(&mut payload);
     if app.text_open(s.id) {
@@ -359,7 +375,7 @@ pub async fn store_peer_message(
         chain: Some(chain),
         client_op_id: None,
         delivery: delivery.map(str::to_string),
-        delivered_at: None,
+        delivered_at,
     };
     match db::insert_event(&app.db, &new).await? {
         Inserted::New(row) => {
@@ -465,7 +481,8 @@ async fn after_store(
             r#final: true,
             text,
             in_reply_to,
-            ..
+            runtime,
+            interrupted,
         } => {
             db::set_turn(&app.db, s.id, false, false).await?;
             if source != Source::Hub {
@@ -475,6 +492,22 @@ async fn after_store(
                 if let Some(input) = in_reply_to {
                     crate::peers::on_final(app, s, *input, text, (row.event_id, row.seq)).await?;
                 }
+            }
+            // An agent's answer to its room is its post there, unless an interruption cut it
+            // off (SPEC §7.1.1).
+            if let (Source::Worker, Some(room), Some(input)) = (source, s.room_id, in_reply_to) {
+                // Boxed: the post is a hub event, which comes back here.
+                Box::pin(crate::rooms::on_final(
+                    app,
+                    s,
+                    room,
+                    *input,
+                    text,
+                    *runtime,
+                    *interrupted,
+                    row,
+                ))
+                .await?;
             }
         }
         EventKind::Status {
@@ -490,11 +523,13 @@ async fn after_store(
                 if let Some(input) = in_reply_to {
                     Box::pin(crate::peers::turn_stopped(app, s, *input)).await?;
                 }
+                room_turn_ended(app, s, source).await?;
                 // A session paused during the turn stops now (SPEC §17.3).
                 crate::pause::stop_if_paused(app, s.id).await?;
             }
             SessionState::Error => {
                 db::set_turn(&app.db, s.id, false, true).await?;
+                room_turn_ended(app, s, source).await?;
                 crate::pause::stop_if_paused(app, s.id).await?;
             }
             // A turn the runtime started by itself, with no input to open it (SPEC §17.1); only
@@ -529,6 +564,16 @@ async fn after_store(
     Ok(())
 }
 
+/// The worker's turn of a room's agent `s` ended: in a conversation the speaker's moves the
+/// circle on (SPEC §7.1.1).
+async fn room_turn_ended(app: &AppState, s: &SessionRow, source: Source) -> anyhow::Result<()> {
+    if let (Source::Worker, Some(room)) = (source, s.room_id) {
+        // Boxed: what it stores are hub events, which come back here.
+        Box::pin(crate::rooms::turn_ended(app, s, room)).await?;
+    }
+    Ok(())
+}
+
 /// The worker sent nothing for a `running` session for `idle` (SPEC §17.3): open
 /// approval/clarify requests are cancelled with `timeout`, the turn is closed without a
 /// final answer and the session shows `error` until the next input.
@@ -548,13 +593,10 @@ pub async fn turn_timed_out(
         requests::cancel(app, &p, hqc_proto::event::CancelReason::Timeout).await?;
     }
     db::set_turn(&app.db, session_id, false, true).await?;
-    system(
-        app,
-        &s,
-        "turn_lost",
-        &format!("no events for {} s", idle.as_secs()),
-    )
-    .await?;
+    let why = format!("no events for {} s", idle.as_secs());
+    system(app, &s, "turn_lost", &why).await?;
+    // The speaker of a conversation room: the room stops (SPEC §7.1.1).
+    crate::rooms::turn_lost(app, &s, &why).await?;
     crate::pause::stop_if_paused(app, session_id).await?;
     Ok(())
 }
@@ -577,5 +619,7 @@ pub async fn turn_lost(app: &AppState, session_id: Uuid) -> anyhow::Result<()> {
     .await?;
     // An ask waiting for this turn's reply fails now (SPEC §7.1).
     crate::peers::turn_lost(app, &s).await?;
+    // The speaker of a conversation room: the room stops (SPEC §7.1.1).
+    crate::rooms::turn_lost(app, &s, "its agent process stopped").await?;
     Ok(())
 }

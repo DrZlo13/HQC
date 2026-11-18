@@ -3,7 +3,7 @@
 // the list order (T50) of the projects that have been looked at, a session archived from the
 // list that has not gone to the hub yet, and the archived projects the project search finds.
 
-import { Api, ApiError, type NewSessionOptions, type ProviderFields, type SessionPatch } from './api';
+import { Api, ApiError, type NewRoom, type NewSessionOptions, type ProviderFields, type SessionPatch } from './api';
 import type {
   ClarifyAnswer,
   ListMode,
@@ -460,9 +460,12 @@ export class AppState {
   }
 
   /** The open requests of the sessions `sessionId` waits on through its asks, along the
-   *  chain (SPEC §10.1): shown and answered in its feed. */
+   *  chain (SPEC §10.1), and of its agents when it is a room (§7.1.1): shown and answered in
+   *  its feed. */
   waitedRequests(sessionId: string): OpenRequest[] {
-    return this.requests.filter((r) => r.waiting.some((w) => w.session_id === sessionId));
+    return this.requests.filter(
+      (r) => r.waiting.some((w) => w.session_id === sessionId) || this.sessions.get(r.session_id)?.room_id === sessionId,
+    );
   }
 
   /** Answers an approval wherever it is shown: the request's own session gets the answer,
@@ -733,20 +736,48 @@ export class AppState {
   sortedSessions(projectId = this.currentProjectId): SessionInfo[] {
     return [...this.sessions.values()]
       .filter((s) => s.project_id === projectId && this.listed(s))
-      .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq)
+      .map((s) => this.shown(s));
   }
 
-  /** A session the list shows: not archived, not waiting to be archived, not a service one. */
+  /** A session the list shows: not archived, not waiting to be archived, not a service one,
+   *  not a room's member (its room stands for it). */
   private listed(s: SessionInfo): boolean {
-    return !s.archived && !s.system && s.id !== this.pendingArchive?.id;
+    return !s.archived && !s.system && !s.room_id && s.id !== this.pendingArchive?.id;
+  }
+
+  /** The member sessions of room `roomId` the client has: its agents, in the order they were
+   *  made (the ids are time-ordered), which is the order of the form that made the room. */
+  roomMembers(roomId: string): SessionInfo[] {
+    return [...this.sessions.values()].filter((s) => s.room_id === roomId).sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  /** A session as the lists and the marks show it. A room takes the state of the room and its
+   *  members together: the first that waits for the user, else running while one of them works,
+   *  else its own. */
+  shown(s: SessionInfo): SessionInfo {
+    if (!s.room_mode) return s;
+    const all = [s, ...this.roomMembers(s.id)];
+    const wait = all.find((m) => bucketOf(m) === 'wait');
+    if (wait) return wait === s ? s : { ...s, state: wait.state };
+    return bucketOf(s) !== 'run' && all.some((m) => bucketOf(m) === 'run') ? { ...s, state: 'running' } : s;
+  }
+
+  /** The sessions the projects' marks count (of project `projectId`, else of all), each as the
+   *  lists show it: not archived, not a service session, not a room's member. */
+  countedSessions(projectId?: string): SessionInfo[] {
+    return [...this.sessions.values()]
+      .filter((s) => (projectId === undefined || s.project_id === projectId) && !s.archived && !s.system && !s.room_id)
+      .map((s) => this.shown(s));
   }
 
   /** The user's favorite sessions of the project (the current one by default), the newest
-   *  favorite first, without archived ones and the one waiting to be archived. */
+   *  favorite first, without archived ones, the one waiting to be archived and rooms' members. */
   favoriteSessions(projectId = this.currentProjectId): SessionInfo[] {
     return [...this.sessions.values()]
-      .filter((s) => s.favorite_at && !s.archived && s.project_id === projectId && s.id !== this.pendingArchive?.id)
-      .sort((a, b) => Date.parse(b.favorite_at!) - Date.parse(a.favorite_at!));
+      .filter((s) => s.favorite_at && !s.archived && !s.room_id && s.project_id === projectId && s.id !== this.pendingArchive?.id)
+      .sort((a, b) => Date.parse(b.favorite_at!) - Date.parse(a.favorite_at!))
+      .map((s) => this.shown(s));
   }
 
   /** Marks the session a favorite or not; the hub's `session.summary` says the same to the
@@ -758,11 +789,12 @@ export class AppState {
     this.edited();
   }
 
-  /** Archived sessions of the project, the last archived first: archive mode (T50). */
+  /** Archived sessions of the project, the last archived first, without rooms' members: archive
+   *  mode (T50). */
   archivedSessions(projectId = this.currentProjectId): SessionInfo[] {
     const at = (s: SessionInfo) => s.archived_at ?? '';
     return [...this.sessions.values()]
-      .filter((s) => s.archived && !s.system && s.project_id === projectId)
+      .filter((s) => s.archived && !s.system && !s.room_id && s.project_id === projectId)
       .sort((a, b) => at(b).localeCompare(at(a)) || b.updated_at.localeCompare(a.updated_at));
   }
 
@@ -885,9 +917,12 @@ export class AppState {
     this.changed();
   }
 
-  /** Forgets a session the hub has deleted. */
+  /** Forgets a session the hub has deleted. A room's agents' sessions go with it, on the hub
+   *  and here. */
   removeSession(id: string): void {
-    if (this.sessions.delete(id)) this.edited();
+    if (!this.sessions.delete(id)) return;
+    for (const m of this.roomMembers(id)) this.sessions.delete(m.id);
+    this.edited();
   }
 
   /** The workers' service sessions (SPEC §10.2), by worker name: the "Workers" list (above the
@@ -903,8 +938,8 @@ export class AppState {
    *  "needs you" on the project. */
   projectWaiting(projectId: string): number {
     let n = 0;
-    for (const s of this.sessions.values()) {
-      if (s.project_id === projectId && !s.archived && !s.system && (s.state === 'waiting' || s.state === 'error')) n++;
+    for (const s of this.countedSessions(projectId)) {
+      if (s.state === 'waiting' || s.state === 'error') n++;
     }
     return n;
   }
@@ -918,20 +953,20 @@ export class AppState {
   }
 
   /** Whether one of the project's sessions has unread events, among the ones
-   *  [`projectWaiting`] counts (no archived or service sessions). */
+   *  [`projectWaiting`] counts (no archived or service sessions, no rooms' members). */
   projectUnread(projectId: string): boolean {
-    for (const s of this.sessions.values()) {
-      if (s.project_id === projectId && !s.archived && !s.system && s.unread > 0) return true;
+    for (const s of this.countedSessions(projectId)) {
+      if (s.unread > 0) return true;
     }
     return false;
   }
 
   /** Whether one of the project's sessions works: the same rule as a session row's pulsing
    *  dot ([`bucketOf`] "run"), among the ones [`projectWaiting`] counts (no archived or
-   *  service sessions). */
+   *  service sessions, no rooms' members). */
   projectRunning(projectId: string): boolean {
-    for (const s of this.sessions.values()) {
-      if (s.project_id === projectId && !s.archived && !s.system && bucketOf(s) === 'run') return true;
+    for (const s of this.countedSessions(projectId)) {
+      if (bucketOf(s) === 'run') return true;
     }
     return false;
   }
@@ -940,9 +975,7 @@ export class AppState {
    *  included (`output_per_s`). */
   projectRate(projectId: string): number {
     let n = 0;
-    for (const s of this.sessions.values()) {
-      if (s.project_id === projectId && !s.archived && !s.system && bucketOf(s) === 'run') n += s.output_per_s ?? 0;
-    }
+    for (const s of this.workingSessions(projectId)) n += s.output_per_s ?? 0;
     return n;
   }
 
@@ -950,10 +983,19 @@ export class AppState {
    *  subagents. */
   projectAgents(projectId: string): number {
     let n = 0;
-    for (const s of this.sessions.values()) {
-      if (s.project_id === projectId && !s.archived && !s.system && bucketOf(s) === 'run') n += 1 + (s.subagents ?? 0);
-    }
+    for (const s of this.workingSessions(projectId)) n += 1 + (s.subagents ?? 0);
     return n;
+  }
+
+  /** The sessions [`projectRunning`] counts that work, a room by its agents that work (not
+   *  archived): the room itself has no tokens or subagents of its own. */
+  private workingSessions(projectId: string): SessionInfo[] {
+    const out: SessionInfo[] = [];
+    for (const s of this.countedSessions(projectId)) {
+      if (s.room_mode) out.push(...this.roomMembers(s.id).filter((m) => !m.archived && bucketOf(m) === 'run'));
+      else if (bucketOf(s) === 'run') out.push(s);
+    }
+    return out;
   }
 
   /** A worker's name: the title of its service session (SPEC §10.2). */
@@ -965,11 +1007,12 @@ export class AppState {
 
   /** Sessions on the worker that work, by the same rule as the list's Running group
    *  ([`bucketOf`] "run"). It counts the worker's sessions in every project, favorites too, so
-   *  it can be more than the open project's Running group shows. */
+   *  it can be more than the open project's Running group shows. Rooms' members are not
+   *  counted. */
   workerRunning(workerId: string | undefined): number {
     let n = 0;
     for (const s of this.sessions.values()) {
-      if (s.system || s.archived || s.worker_id !== workerId) continue;
+      if (s.system || s.archived || s.room_id || s.worker_id !== workerId) continue;
       if (bucketOf(s) === 'run') n++;
     }
     return n;
@@ -1004,6 +1047,15 @@ export class AppState {
   async createSession(title?: string, opts: NewSessionOptions = {}, projectId = this.currentProjectId): Promise<SessionInfo> {
     if (!this.me || !projectId) throw new Error('not signed in');
     const s = await this.api.createSession(projectId, title, opts);
+    this.sessions.set(s.id, s);
+    this.edited();
+    return s;
+  }
+
+  /** A room in project `projectId`, in the list at once; its agents' sessions come with the
+   *  next list of sessions. */
+  async createRoom(projectId: string, body: NewRoom): Promise<SessionInfo> {
+    const s = await this.api.createRoom(projectId, body);
     this.sessions.set(s.id, s);
     this.edited();
     return s;

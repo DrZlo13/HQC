@@ -7,6 +7,9 @@
 //!   after a successful `hello.ack`.
 //! - Heartbeat: a WebSocket ping every 20 s; a connection silent for
 //!   [`ConnOptions::dead_after`] is dropped.
+//! - Direct frames go as they come; one that keeps its place ([`crate::link::Direct::after`])
+//!   goes, on the connection it was queued on, after the outbox entries written before it and
+//!   before those written later.
 //! - After `hello.ack` the whole outbox is sent in order, then new entries as they come, with
 //!   at most [`MAX_IN_FLIGHT`] entries un-acked at a time: while that many wait, the worker
 //!   reads the hub's frames before sending the next one (SPEC §5.2).
@@ -335,8 +338,15 @@ impl Connection {
         let mut sent_upto = 0i64;
         let mut in_flight: HashMap<String, Uuid> = HashMap::new();
         let mut last_rx = Instant::now();
-        self.send_outbox(ws, &mut sent_upto, &mut in_flight, true, &mut last_rx)
-            .await?;
+        self.send_outbox(
+            ws,
+            &mut sent_upto,
+            &mut in_flight,
+            true,
+            &mut last_rx,
+            i64::MAX,
+        )
+        .await?;
         let mut heartbeat = tokio::time::interval(self.opts.heartbeat);
         heartbeat.tick().await;
         let ready = self.link.outbox_ready.clone();
@@ -347,17 +357,15 @@ impl Connection {
                     return Ok(());
                 }
                 _ = ready.notified() => {
-                    self.send_outbox(ws, &mut sent_upto, &mut in_flight, true, &mut last_rx).await?;
+                    // The direct frames queued by now first, each in its place: an entry
+                    // written after a frame that keeps its place must not go before it.
+                    while let Ok(d) = self.direct.try_recv() {
+                        self.send_queued(ws, &mut sent_upto, &mut in_flight, true, &mut last_rx, d).await?;
+                    }
+                    self.send_outbox(ws, &mut sent_upto, &mut in_flight, true, &mut last_rx, i64::MAX).await?;
                 }
                 d = self.direct.recv() => match d {
-                    Some(d) => {
-                        // A session's state goes after the events it wrote before (SPEC §5.2):
-                        // `stopped` right after a turn must not overtake its final answer.
-                        if matches!(d.frame, WorkerFrame::SessionState { .. }) {
-                            self.send_outbox(ws, &mut sent_upto, &mut in_flight, true, &mut last_rx).await?;
-                        }
-                        self.send_direct(ws, d).await?
-                    }
+                    Some(d) => self.send_queued(ws, &mut sent_upto, &mut in_flight, true, &mut last_rx, d).await?,
                     None => return Ok(()),
                 },
                 m = ws.next() => {
@@ -390,15 +398,18 @@ impl Connection {
         let deadline = Instant::now() + self.opts.flush_timeout;
         let r: Result<(), String> = async {
             while let Ok(d) = self.direct.try_recv() {
-                // As while connected: a session's state after the events it wrote before.
-                if matches!(d.frame, WorkerFrame::SessionState { .. }) {
-                    self.send_outbox(ws, sent_upto, in_flight, false, &mut Instant::now())
-                        .await?;
-                }
-                self.send_direct(ws, d).await?;
+                self.send_queued(ws, sent_upto, in_flight, false, &mut Instant::now(), d)
+                    .await?;
             }
-            self.send_outbox(ws, sent_upto, in_flight, false, &mut Instant::now())
-                .await?;
+            self.send_outbox(
+                ws,
+                sent_upto,
+                in_flight,
+                false,
+                &mut Instant::now(),
+                i64::MAX,
+            )
+            .await?;
             while !self.link.outbox.is_empty().map_err(|e| e.to_string())? {
                 tokio::select! {
                     _ = tokio::time::sleep_until(deadline) => break,
@@ -421,6 +432,24 @@ impl Connection {
         let _ = ws.close(None).await;
     }
 
+    /// Direct frame `d`, after the outbox entries it keeps its place behind ([`Direct::after`]).
+    async fn send_queued(
+        &mut self,
+        ws: &mut Ws,
+        sent_upto: &mut i64,
+        in_flight: &mut HashMap<String, Uuid>,
+        dispatch: bool,
+        last_rx: &mut Instant,
+        d: Direct,
+    ) -> Result<(), String> {
+        if let Some(upto) = d.after {
+            self.send_outbox(ws, sent_upto, in_flight, dispatch, last_rx, upto)
+                .await?;
+        }
+        self.send_direct(ws, d).await
+    }
+
+    /// The outbox entries not sent yet on this connection, up to local `seq` `upto`.
     async fn send_outbox(
         &mut self,
         ws: &mut Ws,
@@ -428,13 +457,14 @@ impl Connection {
         in_flight: &mut HashMap<String, Uuid>,
         dispatch: bool,
         last_rx: &mut Instant,
+        upto: i64,
     ) -> Result<(), String> {
         let entries = self
             .link
             .outbox
             .after(*sent_upto)
             .map_err(|e| format!("reading outbox: {e:#}"))?;
-        for mut e in entries {
+        for mut e in entries.into_iter().take_while(|e| e.seq <= upto) {
             // A full window: read the hub's frames (its acks) before sending more.
             // The deadline is for a slot to free up, not for the next frame: the hub's pings
             // would otherwise keep a worker waiting forever on entries the hub never answers.

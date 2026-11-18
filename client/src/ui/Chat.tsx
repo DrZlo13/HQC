@@ -18,14 +18,14 @@ import { copyText } from '../clipboard';
 import { ContextMenu } from './ContextMenu';
 import { ComposerSecret } from './secrets';
 import { IconArchive, IconAttach, IconBolt, IconKey, IconBack, IconCode, IconCopy, IconLock, IconMore, IconPanel, IconQuote, IconSearch, IconSend, IconShield, IconStop } from './icons';
-import { MODE_LABELS, STATE_LABELS, agentsLabel, formatCost, homePath, modeConfirm, modelName, shownModel } from './labels';
+import { MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatCost, homePath, modeConfirm, modelName, shownModel } from './labels';
 import { LiveSubagents } from './LiveSubagents';
 import { CopyButton } from './Markdown';
 import { PermissionBlock } from './permission';
 import { MoveSession } from './ProjectSettings';
 import { WaitedRequests } from './requests';
 import { SchedulesPanel } from './Schedules';
-import { archivedLabel, atWorkAfterTurn, pausingAfterTurn } from './sessions';
+import { archivedLabel, atWorkAfterTurn, pausingAfterTurn, renameByPrompt } from './sessions';
 
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
 /** Blocks of the feed rendered on open; scrolling to the top adds `SHOWN` more. */
@@ -130,6 +130,21 @@ export function Chat({
   // The worker's service session (SPEC §10.2): requests and log lines, no input.
   const system = info?.system ?? false;
   const t = chat.timeline;
+  // A room's agents: their chats stay open while the room's is, the newest page and the live
+  // events only, for the running command each one's activity line names.
+  const room = info?.room_mode;
+  // Its mode stands where a session names its model, and its agents' sessions go under the line.
+  const members = room ? app.roomMembers(sessionId) : [];
+  const memberIds = members.map((m) => m.id).join(' ');
+  const memberChats = useMemo(() => (memberIds ? memberIds.split(' ').map((id) => app.chat(id)) : []), [app, memberIds]);
+  useEffect(() => {
+    for (const c of memberChats) void c.open({ older: false });
+    return () => memberChats.forEach((c) => c.close());
+  }, [memberChats]);
+  useSubscription((fn) => {
+    const offs = memberChats.map((c) => c.timeline.onChange(fn));
+    return () => offs.forEach((off) => off());
+  }, [memberChats]);
 
   // The folder of the session, for the header and the requests' "outside the working folder".
   useEffect(() => {
@@ -194,6 +209,12 @@ export function Chat({
     hotkeyRequest: firstApproval?.payload.request_id,
     sheetRequest,
     findSession: (ref) => app.findSession(ref),
+    roomAgent: room
+      ? (id) => {
+          const i = members.findIndex((m) => m.id === id);
+          return i < 0 ? undefined : { index: i, name: members[i].title || undefined, model: members[i].model };
+        }
+      : undefined,
     peerMessage,
     giveSecret: !system && app.takesSecrets(info?.worker_id)
       ? async (requestId, f) => void (await app.api.giveSecret(sessionId, f, requestId))
@@ -453,9 +474,19 @@ export function Chat({
   const usage = t.usageTotals();
   // A provider's model is what the provider names; the CLI prices it at a made-up rate.
   const model = info?.provider ? undefined : shownModel(info?.model, usage.model);
-  const cost = info?.provider ? undefined : usage.cost;
-  // Running, as in the list, while a background subagent or task works after the turn.
-  const shown = info && atWorkAfterTurn(info) ? 'running' : state;
+  // A room has no spending of its own: the sum over its agents', each on the Claude Code price
+  // list (an agent on a provider has none, as a session on one shows none).
+  let cost = info?.provider ? undefined : usage.cost;
+  if (room) {
+    cost = undefined;
+    members.forEach((m, i) => {
+      const spent = m.provider ? undefined : memberChats[i].timeline.usageTotals().cost;
+      if (spent !== undefined) cost = (cost ?? 0) + spent;
+    });
+  }
+  // Running, as in the list, while a background subagent or task works after the turn; a room,
+  // as in the list, with its agents' state (and Stop stops them all).
+  const shown = info?.room_mode ? app.shown(info).state : info && atWorkAfterTurn(info) ? 'running' : state;
   const pill = <StatePill state={shown} timeline={t} where={locked ? `In ${holder}${worker ? ` on ${worker}` : ''}` : undefined} pausing={!!info && pausingAfterTurn(info)} />;
   const agents = agentsLabel(info?.subagents);
   const conn = app.offline && <span class="conn-lost">offline</span>;
@@ -530,8 +561,11 @@ export function Chat({
             {system && <span class="chat-system-note">the worker's service session</span>}
             {!phone && spawned}
             {phone ? (
-              // Held elsewhere, the machine is in the pill already.
-              <span class="chat-where mono">{[!locked && worker, path && homePath(path).split('/').pop()].filter(Boolean).join(' · ')}</span>
+              <>
+                {/* Held elsewhere, the machine is in the pill already. */}
+                <span class="chat-where mono">{[!locked && worker, path && homePath(path).split('/').pop()].filter(Boolean).join(' · ')}</span>
+                {room && <span class="chat-room">Room · {ROOM_MODE_LABELS[room]}</span>}
+              </>
             ) : (
               <>
                 {worker && !system && !locked && <span>{worker}</span>}
@@ -555,7 +589,7 @@ export function Chat({
                     </span>
                   </>
                 )}
-                {info?.browser && (
+                {!room && info?.browser && (
                   <>
                     <span class="sep">/</span>
                     <span class="chat-model chat-browser" title={`The agent has your Chrome on ${worker ?? 'its worker'}`}>
@@ -563,23 +597,41 @@ export function Chat({
                     </span>
                   </>
                 )}
-                {model && (
+                {room ? (
                   <>
-                    <span class="sep">/</span>
-                    <span class="chat-model" title={model}>
-                      {modelName(model)}
-                    </span>
+                    {(worker || path) && <span class="sep">/</span>}
+                    <span class="chat-room">Room · {ROOM_MODE_LABELS[room]}</span>
                   </>
+                ) : (
+                  model && (
+                    <>
+                      <span class="sep">/</span>
+                      <span class="chat-model" title={model}>
+                        {modelName(model)}
+                      </span>
+                    </>
+                  )
                 )}
                 {cost !== undefined && (
                   <>
                     <span class="sep">/</span>
-                    <span class="chat-cost">{formatCost(cost)} this session</span>
+                    <span class="chat-cost">
+                      {formatCost(cost)} this {room ? 'room' : 'session'}
+                    </span>
                   </>
                 )}
               </>
             )}
           </div>
+          {members.length > 0 && (
+            <div class="chat-room-agents">
+              {members.map((m) => (
+                <a key={m.id} class="chat-room-agent" href={`#/s/${m.id}`}>
+                  {m.title || m.slug} · {STATE_LABELS[atWorkAfterTurn(m) ? 'running' : m.state]}
+                </a>
+              ))}
+            </div>
+          )}
         </div>
         {system && (
           <button
@@ -612,7 +664,7 @@ export function Chat({
             Retry
           </button>
         )}
-        {!system && STOPPABLE.has(state) &&
+        {!system && STOPPABLE.has(room ? shown : state) &&
           (phone ? (
             <button type="button" class="icon-btn icon-btn-round btn-stop" aria-label="Stop the agent" onClick={stop}>
               <IconStop size={14} />
@@ -632,6 +684,7 @@ export function Chat({
             cost={cost}
             loadLimits={() => app.api.workers().then((ws) => ws.find((w) => w.id === info.worker_id)?.limits ?? undefined)}
             onRetry={showRetry && phone ? () => void act(() => chat.retry(), 'Retry failed') : undefined}
+            onRename={() => renameByPrompt(app, info, setNotice)}
             onSchedules={() => setSchedules(true)}
             onMove={() => setMoving(true)}
             onPermissionMode={setMode}
@@ -691,7 +744,11 @@ export function Chat({
           {requestsOnly && items.length === 0 && <div class="empty">No requests</div>}
           {t.streaming && <StreamingMessage text={t.streaming} />}
           <FeedBlocks blocks={under} actions={actions} />
-          {!system && <ActivityLine state={state} timeline={t} foreground={info?.foreground_calls} onBackground={toBackground} />}
+          {!system && !room && <ActivityLine state={state} timeline={t} foreground={info?.foreground_calls} onBackground={toBackground} />}
+          {room &&
+            members.map((m, i) => (
+              <ActivityLine key={m.id} state={m.state} timeline={memberChats[i].timeline} name={m.title || m.slug} />
+            ))}
           {!system && <WaitedRequests app={app} sessionId={sessionId} />}
         </div>
       </div>
@@ -986,7 +1043,7 @@ function agentPatch(info: SessionInfo, c: ModelChoice): AgentPatch {
   return info.provider ? { provider_id: null, model: c.model ?? null } : { model: c.model ?? null };
 }
 
-/** "More": schedules, the move to another project, the permission mode and the model; on
+/** "More": rename, schedules, the move to another project, the permission mode and the model; on
  *  a phone also the path, the model of the last turn and the cost. Archiving is on the
  *  list's rows, restore and delete on the archive's (T50). */
 function MoreMenu({
@@ -996,6 +1053,7 @@ function MoreMenu({
   model,
   cost,
   onRetry,
+  onRename,
   onSchedules,
   onMove,
   onPermissionMode,
@@ -1011,6 +1069,8 @@ function MoreMenu({
   cost?: number;
   /** On a phone "Retry" lives here, not in the crowded header. */
   onRetry?: () => void;
+  /** "Rename": a prompt for the title, as in the list's menu. */
+  onRename: () => void;
   onSchedules: () => void;
   /** "Move to project…": the session continues in another folder and project. */
   onMove: () => void;
@@ -1041,6 +1101,9 @@ function MoreMenu({
       doc.removeEventListener('keydown', esc);
     };
   }, [open]);
+  const facts = phone && (path || model || cost !== undefined);
+  // An archived room has only Retry and a phone's facts: without them, no button.
+  if (info.room_mode && info.archived && !onRetry && !facts) return null;
   const item = (cls: string, label: string, fn: () => void, title?: string) => (
     <button
       type="button"
@@ -1069,7 +1132,7 @@ function MoreMenu({
       </button>
       {open && (
         <div class="menu" role="menu">
-          {phone && (path || model || cost !== undefined) && (
+          {facts && (
             <div class="menu-info">
               {path && (
                 <div class="menu-info-row">
@@ -1078,23 +1141,30 @@ function MoreMenu({
                 </div>
               )}
               {model && <div class="menu-info-row">{modelName(model)}</div>}
-              {cost !== undefined && <div class="menu-info-row">{formatCost(cost)} this session</div>}
+              {cost !== undefined && <div class="menu-info-row">{formatCost(cost)} this {info.room_mode ? 'room' : 'session'}</div>}
             </div>
           )}
+          {!info.archived && item('btn-rename', 'Rename', onRename)}
           {onRetry && item('btn-retry', 'Retry', onRetry)}
-          {item('btn-schedules', 'Schedules', onSchedules, 'Messages scheduled into this session')}
+          {/* A room has no worker: a scheduled message would wait there for ever, and there is
+              no folder to move. Nor has it a model, permission mode or browser of its own, or
+              limits to show: its agents have them. */}
+          {!info.room_mode && item('btn-schedules', 'Schedules', onSchedules, 'Messages scheduled into this session')}
           {!info.archived &&
+            !info.room_mode &&
             item('btn-move', 'Move to project…', onMove, 'Continue this session in another folder and project on its worker')}
           {!info.archived &&
+            !info.room_mode &&
             PERMISSION_MODES.filter((m) => m !== currentMode(info)).map((m) =>
               item(`btn-mode-${m}`, `Switch to ${MODE_LABELS[m]}`, () => onPermissionMode(m), SWITCH_TITLES[m]),
             )}
           {!info.archived &&
+            !info.room_mode &&
             onBrowser &&
             (info.browser
               ? item('btn-browser btn-browser-off', 'Browser: on · Turn off', () => onBrowser(false), 'The agent restarts without your Chrome')
               : item('btn-browser btn-browser-on', 'Browser: off · Give the browser', () => onBrowser(true), 'The agent restarts with your Chrome on its worker'))}
-          {!info.archived && (
+          {!info.archived && !info.room_mode && (
             <div class="menu-settings">
               <ModelField
                 value={info.model}

@@ -221,6 +221,33 @@ describe('the request of a waited-on session in the asking session', () => {
   });
 });
 
+// SPEC §7.1.1: an agent's session is in no list, so its requests are shown in its room.
+describe("the request of a room's agent in the room", () => {
+  it('shows in the room as the agent\'s card, named by the agent, and answers into its session', async () => {
+    // A is a room, B one of its agents; nobody waits on B's request through an ask.
+    const { api, app } = setup(REQUESTS.map((r) => ({ ...r, waiting: [] })));
+    const room = info(A, 'Glaze review', { room_mode: 'council', workspace_id: undefined, worker_id: undefined, state: 'idle' });
+    api.session.mockResolvedValue(room);
+    app.sessions.set(A, room);
+    app.sessions.set(B, { ...app.sessions.get(B)!, room_id: A });
+    await mount(<Chat app={app} sessionId={A} />);
+    const card = $('.waited-requests .foreign-request')!;
+    expect(card).not.toBeNull();
+    expect(card.querySelector('.req-session')!.textContent).toBe('Check the build on llm-server');
+    expect(card.querySelector<HTMLAnchorElement>('.req-session')!.getAttribute('href')).toBe(`#/s/${B}`);
+    expect(card.querySelector('.req-waiting')).toBeNull();
+    expect(card.querySelector('.perm .perm-what')!.textContent).toBe('$ cargo build --release');
+    // The worker's own request is not the room's.
+    expect($$('.foreign-request')).toHaveLength(1);
+    await act(async () => {
+      button(card, 'Allow')!.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(api.approve.mock.calls[0]).toEqual([B, 'req-7', 'allow', undefined]);
+    expect($('.foreign-request')).toBeNull();
+  });
+});
+
 describe('the "Requests" list', () => {
   it('lists every open request, the worker\'s too, each with its session', async () => {
     const { app } = setup();

@@ -137,6 +137,14 @@ describe('layout widths', () => {
     expect(CSS.indexOf('.attachments > .attachment-kind-image')).toBeGreaterThan(CSS.indexOf('.attachments > .attachment {'));
   });
 
+  it("a room's agents in its header wrap, and its agent's menu is the window's width less the gutter, up to 560px", () => {
+    // Not checked in a browser.
+    expect(rule('.chat-room-agents')['flex-wrap']).toBe('wrap');
+    expect(rule('.chat-room-agent')['overflow-wrap']).toBe('anywhere');
+    expect([rule('.menu-agent')['width'], rule('.menu-agent')['max-width']]).toEqual(['calc(100vw - 32px)', '560px']);
+    expect([rule('.room-prompt')['resize'], rule('.room-prompt')['max-height']]).toEqual(['vertical', '45vh']);
+  });
+
   it("a dot has a width as well as a flex basis: Safari sizes a project's running mark by its items' widths", () => {
     expect([rule('.dot')['flex'], rule('.dot')['width']]).toEqual(['0 0 8px', '8px']);
     for (const sel of ['.sessions-phone .dot', '.preview-row .dot']) {

@@ -5,6 +5,7 @@ import { applyLook, applyTheme } from '../theme';
 import { Chat, SessionsButton, type SessionsToggle } from './Chat';
 import { Enroll } from './Enroll';
 import { useIsNarrow, useIsPhone, useSubscription } from './hooks';
+import { NewRoom } from './NewRoom';
 import { NewSessionChat } from './NewSession';
 import { PhoneHome } from './PhoneHome';
 import { ProjectRail, onMac } from './ProjectRail';
@@ -20,6 +21,7 @@ export type Route =
   | { name: 'list' }
   | { name: 'project'; id: string }
   | { name: 'newSession'; projectId: string }
+  | { name: 'newRoom'; projectId: string }
   | { name: 'projectSettings'; projectId: string }
   | { name: 'rules'; projectId: string; workspaceId: string; sessionId?: string }
   | { name: 'session'; id: string; seq?: number }
@@ -30,7 +32,8 @@ export type Route =
 
 /** Hash routes, so the hub can serve the client as static files: `#/p/<project>`,
  *  `#/p/<project>/new` (a new session, not on the hub until its first message),
- *  `#/p/<project>/settings` (the project's settings, T49), `#/p/<project>/rules/<workspace>`
+ *  `#/p/<project>/new-room` (the chat window of a new room), `#/p/<project>/settings` (the project's
+ *  settings, T49), `#/p/<project>/rules/<workspace>`
  *  (`?session=<id>`: opened from that session; the folder's rules, T48), `#/s/<session>` (`?seq=<seq>`:
  *  scrolled to that event, a search hit), `#/search` (the search page; `?q=…` and its filters,
  *  read by the page),
@@ -52,6 +55,7 @@ export function parseRoute(hash: string): Route {
       return { name: 'rules', projectId: id, workspaceId: decodeURIComponent(parts[3]), sessionId };
     }
     if (parts[2] === 'new') return { name: 'newSession', projectId: id };
+    if (parts[2] === 'new-room') return { name: 'newRoom', projectId: id };
     return parts[2] === 'settings' ? { name: 'projectSettings', projectId: id } : { name: 'project', id };
   }
   if (parts[0] === 'settings') return { name: 'settings' };
@@ -94,7 +98,7 @@ export function App({ app }: { app: AppState }) {
   const routeProject =
     route.name === 'project'
       ? route.id
-      : route.name === 'projectSettings' || route.name === 'rules' || route.name === 'newSession'
+      : route.name === 'projectSettings' || route.name === 'rules' || route.name === 'newSession' || route.name === 'newRoom'
         ? route.projectId
         : sessionProject;
   // The first render already shows the route's project: effects run after the first paint,
@@ -170,6 +174,9 @@ export function App({ app }: { app: AppState }) {
       break;
     case 'newSession':
       main = <NewSessionChat key={route.projectId} app={app} projectId={route.projectId} phone={phone} sessions={sessions} />;
+      break;
+    case 'newRoom':
+      main = <NewRoom key={route.projectId} app={app} projectId={route.projectId} phone={phone} sessions={sessions} />;
       break;
     case 'search': {
       const pid = app.currentProjectId;

@@ -1,9 +1,12 @@
 //! `hqc_send` and `hqc_ask` (SPEC §7.1): messages between the sessions of one owner.
 //!
 //! - The target is an address `<project-slug>/<session-slug>` or an id of a session of the
-//!   caller's owner, not archived, not a worker's service session; anything else is
-//!   `not_found`. The calling session itself, a blank text and a target driven from VS Code
-//!   are refused at once.
+//!   caller's owner, not archived, not a worker's service session; anything else is `not_found`.
+//!   A room is the target of `hqc_send` only, from a session that is none of its agents (SPEC
+//!   §7.1.1): the message is stored in the room and goes to its agents as the owner's does
+//!   ([`into_room`]); `hqc_ask` to a room, and any message of an agent to its own room, are
+//!   refused. The calling session itself, another agent of the caller's room, a blank text
+//!   and a target driven from VS Code are refused at once.
 //! - The message is a `peer.message` in the target, authored by the calling agent, with the
 //!   chain of the caller's current turn moved on ([`next_chain`]). Its `event_id` is derived
 //!   from the caller and the call's `request_id` ([`message_id`]): a call the worker sends
@@ -104,12 +107,9 @@ pub async fn address(app: &AppState, s: &SessionRow) -> anyhow::Result<String> {
     ))
 }
 
-/// The owner's session `addr` points at (an address or an id), with its address.
-pub(crate) async fn target(
-    app: &AppState,
-    caller: &SessionRow,
-    addr: &str,
-) -> Result<(SessionRow, String), McpError> {
+/// The session of the caller's owner `addr` points at (an address or an id), archived or not,
+/// a room too; never another owner's, a service session or a deleted one.
+async fn locate(app: &AppState, caller: &SessionRow, addr: &str) -> Result<SessionRow, McpError> {
     let not_found = || err(error_code::NOT_FOUND, format!("no session {addr}"));
     let addr = addr.trim();
     let found = if let Ok(id) = addr.parse::<Uuid>() {
@@ -128,30 +128,134 @@ pub(crate) async fn target(
             .into_iter()
             .find(|x| x.slug == s)
     };
-    let t = found
-        .filter(|t| t.owner_id == caller.owner_id && !t.archived && !t.system)
-        .ok_or_else(not_found)?;
+    found
+        .filter(|t| t.owner_id == caller.owner_id && !t.system)
+        .ok_or_else(not_found)
+}
+
+/// The owner's live (not archived) session `addr` points at (an address or an id), with its
+/// address.
+pub(crate) async fn target(
+    app: &AppState,
+    caller: &SessionRow,
+    addr: &str,
+) -> Result<(SessionRow, String), McpError> {
+    find(app, caller, addr, false).await
+}
+
+/// [`target`]; with `rooms` a room is found too.
+async fn find(
+    app: &AppState,
+    caller: &SessionRow,
+    addr: &str,
+    rooms: bool,
+) -> Result<(SessionRow, String), McpError> {
+    // A room has no agent: its agents are the targets, and a room itself only of a send
+    // (SPEC §7.1.1).
+    let t = locate(app, caller, addr).await.and_then(|t| {
+        if t.archived || (!rooms && t.room_mode.is_some()) {
+            Err(err(error_code::NOT_FOUND, format!("no session {addr}")))
+        } else {
+            Ok(t)
+        }
+    })?;
     let a = address(app, &t).await.map_err(internal)?;
     Ok((t, a))
 }
 
-/// The checks both tools make before anything is stored.
+/// The owner's session `addr` points at for reading, archived ones and rooms too, with its
+/// address; an agent of a room reads neither the room nor another agent of it
+/// ([`not_read_in_my_room`]).
+pub(crate) async fn readable(
+    app: &AppState,
+    caller: &SessionRow,
+    addr: &str,
+) -> Result<(SessionRow, String), McpError> {
+    let t = locate(app, caller, addr).await?;
+    let a = address(app, &t).await.map_err(internal)?;
+    not_read_in_my_room(caller, &t, &a)?;
+    Ok((t, a))
+}
+
+/// An agent of a room does not see the answers of the others to the message it answers: what is
+/// said in the room comes to it with its next input from the room (SPEC §7.1.1), so reading the
+/// room, or another agent of it, would show it early. `t` — the session found for address `to`;
+/// the caller's own session passes.
+fn not_read_in_my_room(caller: &SessionRow, t: &SessionRow, to: &str) -> Result<(), McpError> {
+    let Some(room) = caller.room_id else {
+        return Ok(());
+    };
+    let what = if t.id == room {
+        "your room"
+    } else if t.room_id == Some(room) && t.id != caller.id {
+        "another agent of your room"
+    } else {
+        return Ok(());
+    };
+    Err(err(
+        error_code::INVALID_ARGS,
+        format!(
+            "{to} is {what}: what is said there comes to you with your input from the room, \
+             not by reading"
+        ),
+    ))
+}
+
+/// The agents of a room speak in the room (SPEC §7.1.1): what one sends or schedules another
+/// goes past the room, and its answer never reaches the room either. `t` — the target found
+/// for address `to`; the caller itself passes.
+pub(crate) fn not_of_my_room(
+    caller: &SessionRow,
+    t: &SessionRow,
+    to: &str,
+) -> Result<(), McpError> {
+    if caller.room_id.is_some() && t.room_id == caller.room_id && t.id != caller.id {
+        return Err(err(
+            error_code::INVALID_ARGS,
+            format!(
+                "{to} is another agent of your room: your final message is posted to the room, \
+                 and the other agents read it there; answer there, not in a message to them"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The checks both tools make before anything is stored; `ask` for `hqc_ask`.
 async fn checked_target(
     app: &AppState,
     caller: &SessionRow,
     text: &str,
     session: &str,
+    ask: bool,
 ) -> Result<(SessionRow, String), McpError> {
     if text.trim().is_empty() {
         return Err(err(error_code::INVALID_ARGS, "text is empty"));
     }
-    let (t, to) = target(app, caller, session).await?;
+    let (t, to) = find(app, caller, session, true).await?;
+    if t.room_mode.is_some() {
+        if ask {
+            return Err(err(
+                error_code::INVALID_ARGS,
+                format!("{to} is a room, which answers no ask; write to it with hqc_send"),
+            ));
+        }
+        if caller.room_id == Some(t.id) {
+            return Err(err(
+                error_code::INVALID_ARGS,
+                format!(
+                    "{to} is your own room: your final message is posted to it; do not send to it"
+                ),
+            ));
+        }
+    }
     if t.id == caller.id {
         return Err(err(
             error_code::INVALID_ARGS,
             "that is this session itself; send to another one",
         ));
     }
+    not_of_my_room(caller, &t, &to)?;
     if t.locked_by == "vscode" {
         // No silent queue for a session driven from VS Code (SPEC §9.3).
         return Err(err(
@@ -207,7 +311,11 @@ async fn checked_files(
 
 /// Links artifacts `ids` to session `session_id`, so that its worker may download them
 /// (SPEC §12).
-async fn link_files(app: &AppState, session_id: Uuid, ids: &[Uuid]) -> anyhow::Result<()> {
+pub(crate) async fn link_files(
+    app: &AppState,
+    session_id: Uuid,
+    ids: &[Uuid],
+) -> anyhow::Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
@@ -247,7 +355,7 @@ async fn last_delivered(app: &AppState, session_id: Uuid) -> anyhow::Result<Opti
 /// The chain of input `input` of a session: its own, or for a human's input one derived
 /// from it; capped by `buffered` when the send buffer the input carried had a lower cap than
 /// its own chain (T40, [`take_prefix`]).
-fn input_chain(
+pub(crate) fn input_chain(
     session_id: Uuid,
     input: Uuid,
     chain: Option<Value>,
@@ -328,8 +436,11 @@ pub(crate) async fn admit(
     chain: &Chain,
 ) -> Result<(), McpError> {
     let limits = &app.config.limits;
+    // Without the copies a room makes of a message for its agents' inputs (`payload.room`): a post
+    // counts once, as a send does.
     let in_chain: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM events WHERE type = 'peer.message' AND chain ->> 'chain_id' = $1",
+        "SELECT count(*) FROM events
+         WHERE type = 'peer.message' AND chain ->> 'chain_id' = $1 AND NOT (payload ? 'room')",
     )
     .bind(chain.chain_id.to_string())
     .fetch_one(&app.db)
@@ -409,8 +520,27 @@ pub fn next_chain(
     mode: PermissionMode,
     from: &str,
 ) -> Result<Chain, McpError> {
+    let c = moved_on(turn, ask, mode, from);
+    if c.depth > MAX_DEPTH {
+        return Err(err(
+            error_code::LIMIT_EXCEEDED,
+            format!("asks nest at most {MAX_DEPTH} deep in one chain; a person has to continue it"),
+        ));
+    }
+    if c.hops > MAX_HOPS {
+        return Err(err(
+            error_code::LIMIT_EXCEEDED,
+            format!("one chain carries at most {MAX_HOPS} messages between sessions; a person has to continue it"),
+        ));
+    }
+    Ok(c)
+}
+
+/// [`next_chain`] without the limits: what the turn's chain becomes with one more message. A
+/// room's post carries it, as the agent's own `hqc_send` from that turn would (SPEC §7.1.1).
+pub fn moved_on(turn: Option<Chain>, ask: bool, mode: PermissionMode, from: &str) -> Chain {
     let (permission_cap, capped_by) = chain_cap(turn.as_ref(), mode, from);
-    let c = match turn {
+    match turn {
         None => Chain {
             chain_id: Uuid::now_v7(),
             depth: u8::from(ask),
@@ -425,20 +555,7 @@ pub fn next_chain(
             permission_cap: Some(permission_cap),
             capped_by,
         },
-    };
-    if c.depth > MAX_DEPTH {
-        return Err(err(
-            error_code::LIMIT_EXCEEDED,
-            format!("asks nest at most {MAX_DEPTH} deep in one chain; a person has to continue it"),
-        ));
     }
-    if c.hops > MAX_HOPS {
-        return Err(err(
-            error_code::LIMIT_EXCEEDED,
-            format!("one chain carries at most {MAX_HOPS} messages between sessions; a person has to continue it"),
-        ));
-    }
-    Ok(c)
 }
 
 /// What a `peer.message` says.
@@ -511,6 +628,14 @@ pub async fn send(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
             .map_err(internal)?
             .ok_or_else(|| err(error_code::NOT_FOUND, "the target session is gone"))?;
         let to = address(app, &t).await.map_err(internal)?;
+        if t.room_mode.is_some() {
+            // The room's agents may not have got it the first time.
+            let _room = crate::rooms::lock(app, t.id).await;
+            crate::rooms::owner_message(app, &t, &row)
+                .await
+                .map_err(internal)?;
+            return Ok(Answer::Now(send_result(&to, QUEUED, row.seq)));
+        }
         let how = if row.delivery.is_some() {
             QUEUED
         } else if joined(app, t.id, id).await.map_err(internal)? {
@@ -520,10 +645,15 @@ pub async fn send(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
         };
         return Ok(Answer::Now(send_result(&to, how, row.seq)));
     }
-    let (t, to) = checked_target(app, caller, &a.text, &a.session).await?;
+    let (t, to) = checked_target(app, caller, &a.text, &a.session, false).await?;
     let files = checked_files(app, caller, &a.artifact_ids).await?;
     let chain = outgoing_chain(app, caller, c, false).await?;
     admit(app, caller, &chain).await?;
+    if t.room_mode.is_some() {
+        let row = into_room(app, caller, &t, &c.request_id, &a.text, &files, &chain).await?;
+        tracing::info!(from = %caller.id, to = %t.id, "peer message sent to a room");
+        return Ok(Answer::Now(send_result(&to, QUEUED, row.seq)));
+    }
     let m = Message {
         text: &a.text,
         files: &files,
@@ -555,6 +685,53 @@ pub async fn send(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
         if wake { QUEUED } else { BUFFERED },
         row.seq,
     )))
+}
+
+/// `text` from `caller`, a session that is none of the agents of `room`, as a message in the
+/// room (SPEC §7.1.1), once per call: a `peer.message` from the caller without `delivery`, with
+/// its `files` and the chain of the send (the inputs made from it continue it), stored under the room's lock and handed to the room's
+/// agents as the owner's message is ([`crate::rooms::owner_message`]). The stored message.
+pub(crate) async fn into_room(
+    app: &AppState,
+    caller: &SessionRow,
+    room: &SessionRow,
+    request_id: &str,
+    text: &str,
+    files: &[Uuid],
+    chain: &Chain,
+) -> Result<EventRow, McpError> {
+    let from = address(app, caller).await.map_err(internal)?;
+    let mut payload = json!({
+        "from_session_id": caller.id,
+        "from": from,
+        "text": text,
+        "mode": "send",
+    });
+    if !files.is_empty() {
+        payload["artifact_ids"] = json!(files);
+    }
+    // Before the message exists: its agents' workers download the files once they get it.
+    link_files(app, room.id, files).await.map_err(internal)?;
+    // A room has no agent to deliver to: its agents get the message. A repeat finds the message
+    // and gives an agent what it did not get the first time.
+    let _room = crate::rooms::lock(app, room.id).await;
+    // The room took it as it came: it shows as delivered to the sender.
+    let row = events::store_peer_message_at(
+        app,
+        room,
+        message_id(caller.id, request_id),
+        json!({"kind": "agent", "id": caller.id}),
+        payload,
+        serde_json::to_value(chain).map_err(internal)?,
+        None,
+        Some(Utc::now()),
+    )
+    .await
+    .map_err(internal)?;
+    crate::rooms::owner_message(app, room, &row)
+        .await
+        .map_err(internal)?;
+    Ok(row)
 }
 
 /// `delivery` of an `hqc_send` result (SPEC §7).
@@ -667,7 +844,7 @@ pub async fn ask(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Ans
         Some(t) => t.min(max),
         None => max,
     };
-    let (t, to) = checked_target(app, caller, &a.text, &a.session).await?;
+    let (t, to) = checked_target(app, caller, &a.text, &a.session, true).await?;
     if t.paused_at.is_some() {
         // No silent wait for its timeout: nothing answers until it is resumed (SPEC §7.1, §17.3).
         return Err(err(
@@ -1047,7 +1224,7 @@ pub async fn on_final(
             }
         }
         let to = p.payload["to"].as_str().unwrap_or_default().to_string();
-        let files = reply_files(app, s, p.session_id, in_reply_to, seq, &sent_files).await?;
+        let files = reply_files(app, s, p.session_id, in_reply_to, 0, seq, &sent_files).await?;
         tracing::info!(session_id = %p.session_id, request_id = %p.request_id, files = files.len(), joined = joined.len(), "peer ask answered");
         let mut result = json!({"from": to, "reply": reply});
         if !files.is_empty() {
@@ -1074,10 +1251,10 @@ pub async fn on_final(
 }
 
 /// The files of a reply (T41, SPEC §7.1): the artifacts of the `attachment` events of
-/// session `s` in the answering turn, after the question `question` and after the last end of a
-/// turn before the final message at `seq` (a question that came while a turn ran waited for a
-/// turn of its own, SPEC §6), oldest first, once each, at most [`MAX_FILES`]. Only artifacts of
-/// the session's owner count: a worker
+/// session `s` in the answering turn, after the question `question` (or `since`, a `seq` of `s`,
+/// when that is later) and after the last end of a turn before the final message at `seq` (a
+/// question that came while a turn ran waited for a turn of its own, SPEC §6), oldest first, once
+/// each, at most [`MAX_FILES`]. Only artifacts of the session's owner count: a worker
 /// may write `attachment` events of its own, and the id of another owner's artifact in one
 /// must not reach the asking worker. Then `sent`, the files of the messages the turn sent to
 /// the asker (T42), in order. They are linked to the asking session `asker`, so its worker may
@@ -1087,6 +1264,7 @@ pub async fn reply_files(
     s: &SessionRow,
     asker: Uuid,
     question: Uuid,
+    since: i64,
     seq: i64,
     sent: &[Uuid],
 ) -> anyhow::Result<Vec<ReplyArtifact>> {
@@ -1104,13 +1282,14 @@ pub async fn reply_files(
                                             AND t.payload ->> 'state' IN ('idle', 'error'))
                                         OR (t.type = 'system'
                                             AND t.payload ->> 'code' = 'turn_lost'))), 0)
-           AND e.seq < $4
+           AND e.seq > $5 AND e.seq < $4
          ORDER BY e.seq"#,
     )
     .bind(s.id)
     .bind(s.owner_id)
     .bind(question)
     .bind(seq)
+    .bind(since)
     .fetch_all(&app.db)
     .await?;
     if !sent.is_empty() {

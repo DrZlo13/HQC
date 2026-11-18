@@ -1,5 +1,5 @@
 //! `hqc_spawn` (SPEC §7, §13.4): an agent starts a session of its owner and gives it its
-//! first input.
+//! first input; `hqc_room` ([`room`]) starts a room of agents the same way.
 //!
 //! - The session is created by the path of `POST /api/projects/{id}/sessions`
 //!   ([`api::new_session`]): a project of the caller's owner (slug or id), a workspace of
@@ -25,11 +25,22 @@
 //!   the worker made it ([`Answer::Wait`]), then creates the session there and also returns
 //!   the worktree's path and branch. A failed worktree fails the call with the worker's reason
 //!   and leaves neither a session nor the record. A worktree being made counts as a spawn.
+//! - `hqc_room(project, workspace?, title?, mode?, agents, message)`: a room (SPEC §7.1.1) by
+//!   [`api::new_room`], the path of `POST /api/projects/{id}/rooms`, and `message` as its first
+//!   message from the caller, a `peer.message` that [`peers::into_room`] hands to the room's
+//!   agents (the first in a conversation, each in a council). Its limits, its id derived from the
+//!   call and its repeats are `hqc_spawn`'s; the room's agents count as spawns, one each, in the
+//!   limits (their `spawn_chain_id` is the caller's chain), the room itself does not (its
+//!   `spawned_by` is the caller); the agents' sessions are the room's and run in `ask`. An agent's model or provider
+//!   is chosen as `hqc_spawn` chooses it.
 
 use std::time::Duration;
 
 use hqc_proto::{
-    api::{CreateSessionRequest, CreateWorkspace, WorkspaceState},
+    api::{
+        CreateRoomRequest, CreateSessionRequest, CreateWorkspace, RoomAgent, RoomMode,
+        WorkspaceState,
+    },
     event::Chain,
     frame::{McpCall, McpError, PermissionMode},
     mcp::error_code,
@@ -192,35 +203,11 @@ async fn create(
         return Ok(s);
     }
     if ws.is_none() {
-        limits(app, caller.owner_id, chain_id).await?;
+        limits(app, caller.owner_id, chain_id, 1).await?;
         peers::admit(app, caller, chain).await?;
     }
-    // The caller's model, or its provider, unless the call names one (SPEC 0.144).
-    let (model, provider_id) = match (&a.model, &a.provider) {
-        (Some(_), Some(_)) => {
-            return Err(err(
-                error_code::INVALID_ARGS,
-                "give model or provider, not both",
-            ))
-        }
-        (Some(m), None) => (Some(m.clone()), None),
-        (None, Some(name)) => {
-            let p = db::provider_by_name(&app.db, caller.owner_id, name)
-                .await
-                .map_err(internal)?
-                .ok_or_else(|| {
-                    err(
-                        error_code::INVALID_ARGS,
-                        format!("no model provider named {name:?}"),
-                    )
-                })?;
-            (None, Some(p.id))
-        }
-        (None, None) => (caller.model.clone(), caller.provider_id),
-    };
-    // Inherited, not asked for: a workspace whose machine does not allow it runs the new agent
-    // on the runtime's own endpoint instead of failing the call.
-    let inherited = a.model.is_none() && a.provider.is_none() && provider_id.is_some();
+    let (model, provider_id, inherited) =
+        model_of(app, caller, a.model.as_deref(), a.provider.as_deref()).await?;
     let req = CreateSessionRequest {
         workspace_id,
         model,
@@ -258,6 +245,44 @@ async fn create(
     }
 }
 
+/// The model and provider of a new agent: the caller's model, or its provider, unless the call
+/// names one (SPEC 0.144); and whether they are the caller's. Inherited, not asked for: a
+/// workspace whose machine does not allow the provider runs the new agent on the runtime's own
+/// endpoint instead of failing the call.
+async fn model_of(
+    app: &AppState,
+    caller: &SessionRow,
+    model: Option<&str>,
+    provider: Option<&str>,
+) -> Result<(Option<String>, Option<Uuid>, bool), McpError> {
+    Ok(match (model, provider) {
+        (Some(_), Some(_)) => {
+            return Err(err(
+                error_code::INVALID_ARGS,
+                "give model or provider, not both",
+            ))
+        }
+        (Some(m), None) => (Some(m.to_string()), None, false),
+        (None, Some(name)) => {
+            let p = db::provider_by_name(&app.db, caller.owner_id, name)
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| {
+                    err(
+                        error_code::INVALID_ARGS,
+                        format!("no model provider named {name:?}"),
+                    )
+                })?;
+            (None, Some(p.id), false)
+        }
+        (None, None) => (
+            caller.model.clone(),
+            caller.provider_id,
+            caller.provider_id.is_some(),
+        ),
+    })
+}
+
 /// The owner's project of the call (slug or id), with `runtime` checked.
 async fn project(
     app: &AppState,
@@ -270,11 +295,155 @@ async fn project(
             format!("runtime {r} is not available; only claude_code"),
         ));
     }
-    let project = owner_project(app, caller.owner_id, &a.project).await?;
+    project_row(app, caller, &a.project).await
+}
+
+/// The owner's project `name` (slug or id).
+async fn project_row(
+    app: &AppState,
+    caller: &SessionRow,
+    name: &str,
+) -> Result<db::ProjectRow, McpError> {
+    let project = owner_project(app, caller.owner_id, name).await?;
     db::project(&app.db, project)
         .await
         .map_err(internal)?
-        .ok_or_else(|| err(error_code::NOT_FOUND, format!("no project {}", a.project)))
+        .ok_or_else(|| err(error_code::NOT_FOUND, format!("no project {name}")))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomArgs {
+    project: String,
+    workspace: Option<String>,
+    title: Option<String>,
+    mode: Option<String>,
+    agents: Vec<AgentArgs>,
+    message: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentArgs {
+    name: Option<String>,
+    model: Option<String>,
+    provider: Option<String>,
+    /// The agent's system prompt.
+    prompt: Option<String>,
+}
+
+/// `hqc_room(project, workspace?, title?, mode?, agents, message)`: `{address}` of the room.
+pub async fn room(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Answer, McpError> {
+    let a: RoomArgs = args(c.args.clone())?;
+    if a.message.trim().is_empty() {
+        return Err(err(error_code::INVALID_ARGS, "message is empty"));
+    }
+    let mode = match a.mode.as_deref() {
+        None => RoomMode::Conversation,
+        Some(m) => RoomMode::parse(m).ok_or_else(|| {
+            err(
+                error_code::INVALID_ARGS,
+                format!("mode {m} is not known; conversation or council"),
+            )
+        })?,
+    };
+    let chain = peers::outgoing_chain(app, caller, c, false).await?;
+    let id = once_id(hqc_proto::mcp::ROOM, caller.id, &c.request_id);
+    let room = match db::session(&app.db, id).await.map_err(internal)? {
+        // A repeat (SPEC §5.2): the room is there, and the message below is found if the first
+        // call got that far.
+        Some(s) if s.owner_id == caller.owner_id => s,
+        Some(_) => return Err(internal(format!("session {id} is not the caller's"))),
+        None => create_room(app, caller, id, &chain, &a, mode).await?,
+    };
+    posted(app, caller, c, &a.message, &room, &chain)
+        .await
+        .map(Answer::Now)
+}
+
+/// Checks the arguments and the limits, then creates the room `id` in `chain` and its agents.
+async fn create_room(
+    app: &AppState,
+    caller: &SessionRow,
+    id: Uuid,
+    chain: &Chain,
+    a: &RoomArgs,
+    mode: RoomMode,
+) -> Result<SessionRow, McpError> {
+    let project = project_row(app, caller, &a.project).await?;
+    let workspace_id = match a.workspace.as_deref() {
+        Some(w) => Some(workspace(app, &project, w).await?),
+        None => None,
+    };
+    // Held until the room is created: the next spawn of the owner counts it.
+    let _lock = app.owner_lock("spawn", caller.owner_id).await;
+    if let Some(s) = db::session(&app.db, id).await.map_err(internal)? {
+        // The same call ran meanwhile (a repeat that came in parallel).
+        return Ok(s);
+    }
+    limits(app, caller.owner_id, chain.chain_id, a.agents.len() as i64).await?;
+    peers::admit(app, caller, chain).await?;
+    let mut agents = Vec::new();
+    let mut inherited = false;
+    for x in &a.agents {
+        let (model, provider_id, inherits) =
+            model_of(app, caller, x.model.as_deref(), x.provider.as_deref()).await?;
+        inherited |= inherits;
+        agents.push(RoomAgent {
+            name: x.name.clone(),
+            model,
+            provider_id,
+            system_prompt: x.prompt.clone(),
+        });
+    }
+    let req = CreateRoomRequest {
+        title: a.title.clone(),
+        mode,
+        workspace_id,
+        cwd: None,
+        // Never `auto`, as for a spawned session (T38).
+        permission_mode: Some(PermissionMode::Ask),
+        agents,
+    };
+    let spawn = db::Spawn {
+        id,
+        by: caller.id,
+        chain_id: chain.chain_id,
+        number: None,
+    };
+    match api::new_room(app, caller.owner_id, &project, &req, Some(spawn)).await {
+        Ok(s) => Ok(s),
+        // The caller's provider is not allowed on the workspace's machine: its agents run on the
+        // runtime's own endpoint, as a spawned session does.
+        Err(ApiError::Unprocessable("provider_not_allowed", _)) if inherited => {
+            let mut req = req;
+            for (agent, x) in req.agents.iter_mut().zip(&a.agents) {
+                if x.model.is_none() && x.provider.is_none() {
+                    agent.provider_id = None;
+                }
+            }
+            api::new_room(app, caller.owner_id, &project, &req, Some(spawn))
+                .await
+                .map_err(api_error)
+        }
+        Err(e) => Err(api_error(e)),
+    }
+}
+
+/// `message` as the room's first message from the caller ([`peers::into_room`], once per call),
+/// and the call's result.
+async fn posted(
+    app: &AppState,
+    caller: &SessionRow,
+    c: &McpCall,
+    message: &str,
+    room: &SessionRow,
+    chain: &Chain,
+) -> Result<Value, McpError> {
+    peers::into_room(app, caller, room, &c.request_id, message, &[], chain).await?;
+    let address = peers::address(app, room).await.map_err(internal)?;
+    tracing::info!(from = %caller.id, session_id = %room.id, %address, "room created");
+    Ok(json!({ "address": address }))
 }
 
 /// Starts the call's ephemeral worktree (T47), or finds it on a repeat; its id. The origin is
@@ -326,7 +495,7 @@ async fn worktree(
     {
         return Ok(id);
     }
-    limits(app, caller.owner_id, chain.chain_id).await?;
+    limits(app, caller.owner_id, chain.chain_id, 1).await?;
     peers::admit(app, caller, chain).await?;
     let branch = match a.branch.as_deref().map(str::trim) {
         Some(b) => b.to_string(),
@@ -437,9 +606,10 @@ async fn workspace(app: &AppState, project: &db::ProjectRow, w: &str) -> Result<
         })
 }
 
-/// The spawn limits of SPEC §20. A worktree a spawn is waiting for counts like its session
-/// (T47), in every chain of the owner for the seconds it takes.
-async fn limits(app: &AppState, owner: Uuid, chain_id: Uuid) -> Result<(), McpError> {
+/// The spawn limits of SPEC §20 for a call that creates `n` sessions. A worktree a spawn is
+/// waiting for counts like its session (T47), in every chain of the owner for the seconds it
+/// takes.
+async fn limits(app: &AppState, owner: Uuid, chain_id: Uuid, n: i64) -> Result<(), McpError> {
     let (per_chain, per_hour) = (
         app.config.limits.spawns_per_chain,
         app.config.limits.spawns_per_hour,
@@ -456,13 +626,13 @@ async fn limits(app: &AppState, owner: Uuid, chain_id: Uuid) -> Result<(), McpEr
     .fetch_one(&app.db)
     .await
     .map_err(internal)?;
-    if in_chain + making >= per_chain {
+    if in_chain + making + n > per_chain {
         return Err(err(
             error_code::LIMIT_EXCEEDED,
             format!("one chain spawns at most {per_chain} sessions; a person has to continue it"),
         ));
     }
-    if last_hour + making >= per_hour {
+    if last_hour + making + n > per_hour {
         return Err(err(
             error_code::LIMIT_EXCEEDED,
             format!("at most {per_hour} sessions are spawned per hour; try again later"),

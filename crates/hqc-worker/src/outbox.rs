@@ -181,6 +181,14 @@ impl Outbox {
         .collect()
     }
 
+    /// The local `seq` of the last entry waiting, 0 when none: every entry written so far and not
+    /// acked yet has a `seq` up to it.
+    pub fn last_seq(&self) -> anyhow::Result<i64> {
+        Ok(self
+            .db()
+            .query_row("SELECT COALESCE(max(seq), 0) FROM outbox", [], |r| r.get(0))?)
+    }
+
     pub fn len(&self) -> anyhow::Result<usize> {
         let n: i64 = self
             .db()

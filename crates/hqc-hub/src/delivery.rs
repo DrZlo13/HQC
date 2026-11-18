@@ -84,6 +84,12 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
                     continue;
                 }
                 let mut frame = input_frame(session_id, p.event_id, &p.payload, p.chain.as_ref());
+                // An input from the agent's room goes with the hub's lines in front of its text
+                // instead of a peer header (SPEC §7.1.1); the feed keeps the text as sent.
+                if let Some(text) = crate::rooms::input_text(app, &s, &p).await? {
+                    frame.text = text;
+                    frame.peer = None;
+                }
                 let prefix = crate::peers::take_prefix(app, session_id, p.event_id).await?;
                 frame.peer_prefix = prefix.messages;
                 // Buffered text never runs above the mode of the session that sent it (T40).
@@ -293,14 +299,19 @@ pub async fn on_input_ack(
         // already running (`joined`, kept on the message). The ack bypasses the worker's
         // outbox and may come after the turn's own events (SPEC §5.2): a turn that already
         // has its final answer stays closed, and a joined input's ack after that answer must
-        // not open it again. Only a person's message joins (§17.2): a `joined` on another
-        // input (a `peer.message`, a run of a schedule) is the worker's mistake, it is not
-        // kept, and its turn opens.
+        // not open it again. Only a person's message and a room's input (which the worker
+        // gets without a peer header, §7.1.1) join (§17.2): a `joined` on another input (a
+        // `peer.message` of `hqc_send`, a run of a schedule) is the worker's mistake, it is
+        // not kept, and its turn opens.
         let kept = is_joined(&row);
         if joined && !kept {
             tracing::warn!(%session_id, %event_id, kind = %row.kind, "a worker joined an input that cannot join a turn; its turn opens");
         }
-        if !kept && !db::turn_answered(&app.db, session_id, event_id).await? {
+        if kept || db::turn_answered(&app.db, session_id, event_id).await? {
+            // No turn opens: a room's input acked after its turn already ended goes on from
+            // that turn's end (SPEC §7.1.1).
+            crate::rooms::acked(app, session_id, &row).await?;
+        } else {
             db::set_turn(&app.db, session_id, true, false).await?;
         }
     }
@@ -335,6 +346,8 @@ pub async fn on_input_failed(
                 &format!("Input was not delivered: {}", err.message),
             )
             .await?;
+            // An input from a room: the room says so (SPEC §7.1.1).
+            crate::rooms::input_failed(app, &s, &row, &err.message).await?;
         }
     }
     app.session_changed(session_id);
@@ -343,8 +356,9 @@ pub async fn on_input_failed(
 
 /// All pending input of the session becomes `failed` (SPEC §5.2).
 async fn fail_pending(app: &AppState, session_id: Uuid, reason: &str) -> anyhow::Result<()> {
-    for row in db::move_inputs(&app.db, session_id, "pending", "failed").await? {
-        notify_delivery(app, &row);
+    let rows = db::move_inputs(&app.db, session_id, "pending", "failed").await?;
+    for row in &rows {
+        notify_delivery(app, row);
     }
     if let Some(s) = db::session(&app.db, session_id).await? {
         events::system(
@@ -354,6 +368,10 @@ async fn fail_pending(app: &AppState, session_id: Uuid, reason: &str) -> anyhow:
             &format!("The agent did not start, input was not delivered: {reason}"),
         )
         .await?;
+        // Each input from a room: the room says so (SPEC §7.1.1).
+        for row in &rows {
+            crate::rooms::input_failed(app, &s, row, reason).await?;
+        }
     }
     Ok(())
 }

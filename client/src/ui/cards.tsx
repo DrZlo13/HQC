@@ -90,6 +90,15 @@ export interface FolderActions {
   save(rules: string[]): Promise<void>;
 }
 
+/** An agent of a room as its posts show it. */
+export interface RoomAgent {
+  /** Its place among the room's agents. */
+  index: number;
+  /** Its session's current title. */
+  name?: string;
+  model?: string;
+}
+
 export interface ChatActions {
   timeline: Timeline;
   approve(requestId: string, optionId: string, message?: string): Promise<void>;
@@ -123,6 +132,9 @@ export interface ChatActions {
   /** A session of the user by id or address, for the other side of a message between
    *  sessions (T51); undefined for a deleted or unknown one. */
   findSession?(ref: string): { id: string; address: string; title?: string } | undefined;
+  /** In a room: the agent (its place among the room's agents, current title and model) whose
+   *  session is `id`, whose post is shown as a chat message; absent outside a room. */
+  roomAgent?(id: string): RoomAgent | undefined;
   /** The event at `seq` of session `sessionId`: a message this session sent there (T51). */
   peerMessage?(sessionId: string, seq: number): Promise<HqcEvent | undefined>;
   /** A new session with the conversation before this message of the user, the message in
@@ -151,7 +163,7 @@ export function FeedBlocks({ blocks, actions }: { blocks: Block[]; actions: Chat
       {blocks.map((b) => {
         // The request on a phone's bottom sheet is not drawn here, nor its mark.
         const g: Gutter =
-          b.kind === 'approval' && b.event.payload.request_id === actions.sheetRequest ? {} : gutter(b, actions.timeline);
+          b.kind === 'approval' && b.event.payload.request_id === actions.sheetRequest ? {} : gutter(b, actions);
         return (
           <div key={b.key} class={g.full ? 'feed-block feed-full' : 'feed-block'} data-seq={blockSeq(b)}>
             <BlockView block={b} actions={actions} />
@@ -181,7 +193,8 @@ const mark = (kind: string, icon: ComponentChildren) => (
  *  between sessions, a shield for a permission request, a question for the agent's questions,
  *  a clip for a file, a chevron for what folds. The user's messages and the service lines
  *  between hairlines have none and span the feed (`full`). */
-function gutter(b: Block, timeline: Timeline): Gutter {
+function gutter(b: Block, actions: ChatActions): Gutter {
+  const timeline = actions.timeline;
   switch (b.kind) {
     case 'agent':
       return { mark: mark('dot', <span class="feed-dot" />) };
@@ -230,7 +243,8 @@ function gutter(b: Block, timeline: Timeline): Gutter {
         case 'attachment':
           return { mark: mark('file', <IconAttach size={14} />) };
         case 'peer.message':
-          return { mark: mark('relay', <IconArrowIn />) };
+          // An agent's post in its room is a message of the room, marked as an agent's text.
+          return actions.roomAgent?.(e.payload.from_session_id) ? { mark: mark('dot', <span class="feed-dot" />) } : { mark: mark('relay', <IconArrowIn />) };
         case 'system':
           if (e.payload.code === 'task_notification') return { mark: mark('fold', <IconChevron size={12} />) };
           return { full: true };
@@ -315,22 +329,26 @@ const CALL_SHOWN_AFTER_MS = 2000;
 /** The last line of the feed while a turn is on or input waits (SPEC §17.1): the running
  *  command with its timer, or what the session is doing. A command or subagent the runtime
  *  runs in the foreground (`foreground`, the session's `foreground_calls`) gets "Run in
- *  background", which calls `onBackground` with its `call_id`. */
+ *  background", which calls `onBackground` with its `call_id`. In a room each working agent
+ *  has a line of its own, led by its `name`. */
 export function ActivityLine({
   state,
   timeline,
+  name,
   now,
   foreground,
   onBackground,
 }: {
   state: SessionState;
   timeline: Timeline;
+  name?: string;
   now?: () => number;
   foreground?: string[];
   onBackground?: (callId: string) => void;
 }) {
   const call = state === 'running' ? timeline.runningCall() : undefined;
   const t = useNow(1000, !!call, now);
+  const who = name && <span class="activity-name">{name} · </span>;
   if (call && t - timeline.runSince(call) >= CALL_SHOWN_AFTER_MS) {
     const asked = askTarget(call.payload.tool, call.payload.args_preview);
     if (asked !== undefined) {
@@ -338,6 +356,7 @@ export function ActivityLine({
       return (
         <div class="activity activity-running activity-ask" role="status" aria-live="polite">
           <span class="pulse-dot" aria-hidden="true" />
+          {who}
           <span class="activity-label">Waiting for a reply</span>
           <span class="activity-what mono">{asked ? `from ${asked}` : ''}</span>
           <span class="activity-timer">{formatTimer(t - Date.parse(call.ts))}</span>
@@ -349,6 +368,7 @@ export function ActivityLine({
     return (
       <div class="activity activity-running" role="status" aria-live="polite">
         <span class="pulse-dot" aria-hidden="true" />
+        {who}
         <span class="activity-label">Running</span>
         <span class="activity-what mono">{line.text ? (line.shell ? line.text : `${call.payload.tool} ${line.text}`) : call.payload.tool}</span>
         <span class="activity-timer">{formatTimer(t - Date.parse(call.ts))}</span>
@@ -361,13 +381,14 @@ export function ActivityLine({
     );
   }
   let label: string | null = null;
-  if (state === 'running') label = 'Agent is working';
+  if (state === 'running') label = name ? `${name} is working` : 'Agent is working';
   else if (state === 'queued') label = 'Input queued';
   else if (state === 'waiting' && timeline.openRequests().length === 0) label = 'Waiting for approval';
   if (!label) return null;
   return (
     <div class={`activity activity-${state}`} role="status" aria-live="polite">
       {state === 'running' && <span class="pulse-dot" aria-hidden="true" />}
+      {state !== 'running' && who}
       <span class="activity-label">{label}</span>
     </div>
   );

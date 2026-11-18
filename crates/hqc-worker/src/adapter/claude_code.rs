@@ -940,6 +940,7 @@ impl ClaudeCodeAdapter {
                     call_id: None,
                     status: None,
                     task_id: None,
+                    from_session_id: None,
                     fork: None,
                 },
             );
@@ -956,6 +957,7 @@ impl ClaudeCodeAdapter {
                     call_id: None,
                     status: None,
                     task_id: None,
+                    from_session_id: None,
                     fork: None,
                 },
             );
@@ -975,6 +977,7 @@ impl ClaudeCodeAdapter {
                     call_id: None,
                     status: None,
                     task_id: None,
+                    from_session_id: None,
                     fork: None,
                 },
             );

@@ -475,6 +475,10 @@ pub enum EventKind {
         /// `task_id`, a subagent's `agentId`; since SPEC 0.135).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task_id: Option<String>,
+        /// Only with `room_passed`, in a room: the agent's session that passed (since SPEC
+        /// 0.171, §7.1.1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_session_id: Option<Uuid>,
         /// Only with [`SESSION_FORKED`]: its fields sit next to `text` and `code`.
         #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
         fork: Option<SessionForked>,
@@ -864,6 +868,36 @@ mod tests {
             .is_none());
     }
 
+    /// SPEC §4, §7.1.1: a room's `system room_passed` names the agent that passed by its
+    /// session; any other line leaves `from_session_id` out.
+    #[test]
+    fn a_room_passed_line_roundtrips() {
+        let src = include_str!("../examples/wire/event.system.room_passed.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::System {
+            code,
+            from_session_id,
+            ..
+        } = &e.kind
+        else {
+            panic!("{e:?}");
+        };
+        assert_eq!(
+            (code.as_str(), *from_session_id),
+            (
+                "room_passed",
+                Some(Uuid::parse_str("0199f3a2-7c10-7000-8000-000000000002").unwrap())
+            )
+        );
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.system.json")).unwrap();
+        assert!(serde_json::to_value(&plain).unwrap()["payload"]
+            .get("from_session_id")
+            .is_none());
+    }
+
     #[test]
     fn unknown_type_is_kept_as_is() {
         let wire: Value = serde_json::from_str(UNKNOWN_EXAMPLE).unwrap();
@@ -1003,6 +1037,7 @@ mod tests {
                 call_id: None,
                 status: None,
                 task_id: None,
+                from_session_id: None,
                 fork: None
             }
         );

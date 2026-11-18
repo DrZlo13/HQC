@@ -229,10 +229,10 @@ export function Chat({
           )
       : undefined,
     forking: (eventId) => app.forking(eventId),
-    // Where "More" has the model field (SPEC 0.168), and not while VS Code holds the session:
-    // its message cannot be sent again from here.
+    // Where "More" has the model field (SPEC 0.168; a room has none), and not while VS Code
+    // holds the session: its message cannot be sent again from here.
     modelSwitch:
-      !system && info && !info.archived && state !== 'locked_vscode'
+      !system && !room && info && !info.archived && state !== 'locked_vscode'
         ? {
             model: info.model,
             provider: info.provider?.id,

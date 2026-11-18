@@ -749,14 +749,16 @@ impl Supervisor {
                 // After a worker restart the hub must send `session.start` before resending
                 // inputs; until then the session is unknown here.
                 tracing::warn!(%session_id, "frame for a session that was not started here");
-                self.link.reply(
-                    &id_of(&cmd),
-                    wire_error(
-                        error_code::UNKNOWN_SESSION,
-                        "session is not started on this worker; send session.start first",
-                        matches!(cmd, Cmd::Input { .. }),
-                    ),
+                let err = wire_error(
+                    error_code::UNKNOWN_SESSION,
+                    "session is not started on this worker; send session.start first",
+                    matches!(cmd, Cmd::Input { .. }),
                 );
+                if matches!(cmd, Cmd::Input { .. }) {
+                    self.link.reply_input(session_id, None, &id_of(&cmd), err);
+                } else {
+                    self.link.reply(&id_of(&cmd), err);
+                }
             }
         }
     }
@@ -1646,6 +1648,20 @@ impl Session {
         }
     }
 
+    /// A reply to the `session.input` frame `id` of this session (SPEC §5.2).
+    fn reply_input(&self, id: &str, frame: WorkerFrame) {
+        self.link
+            .reply_input(self.id, self.transcript().as_deref(), id, frame);
+    }
+
+    /// The transcript this session runs: what `session.state` reports as its
+    /// `runtime_session_id`.
+    fn transcript(&self) -> Option<String> {
+        self.runtime_session_id
+            .clone()
+            .or_else(|| self.spec.runtime_session_id.clone())
+    }
+
     fn reply_result(&self, id: &str, r: anyhow::Result<()>) {
         match r {
             Ok(()) => self.link.reply(id, ack(None)),
@@ -1664,7 +1680,7 @@ impl Session {
         if self.released {
             // The hub refuses input while VS Code drives the session; input sent anyway
             // must not take the session back silently (SPEC §9.3).
-            self.link.reply(
+            self.reply_input(
                 &id,
                 wire_error(
                     LOCKED_VSCODE,
@@ -1682,7 +1698,7 @@ impl Session {
             } else {
                 ack(Some(eid))
             };
-            self.link.reply(&id, a);
+            self.reply_input(&id, a);
             return;
         }
         if let Some(t) = self.turn.as_mut().filter(|t| t.input.event_id == eid) {
@@ -1809,7 +1825,7 @@ impl Session {
             }
             Err(e) => {
                 tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, "attachments: {e:#}");
-                self.link.reply(
+                self.reply_input(
                     &q.frame_id,
                     wire_error(
                         error_code::INTERNAL,
@@ -1865,7 +1881,7 @@ impl Session {
             }
             Err(e) => {
                 tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, "input failed: {e:#}");
-                self.link.reply(
+                self.reply_input(
                     &q.frame_id,
                     wire_error(error_code::INTERNAL, format!("{e:#}"), true),
                 );
@@ -1894,7 +1910,7 @@ impl Session {
             }
             Err(e) => {
                 tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, "input failed: {e:#}");
-                self.link.reply(
+                self.reply_input(
                     &q.frame_id,
                     wire_error(error_code::INTERNAL, format!("{e:#}"), true),
                 );
@@ -1954,11 +1970,17 @@ impl Session {
                 }
             }
             AdapterEvent::InputAccepted { event_id } => {
+                let transcript = self.transcript();
                 let (joined, slash) = if let Some(t) =
                     self.turn.as_mut().filter(|t| t.input.event_id == event_id)
                 {
                     t.accepted = true;
-                    self.link.reply(&t.frame_id, ack(Some(event_id)));
+                    self.link.reply_input(
+                        self.id,
+                        transcript.as_deref(),
+                        &t.frame_id,
+                        ack(Some(event_id)),
+                    );
                     (false, t.input.text.starts_with('/'))
                 } else if let Some(i) = self
                     .injected
@@ -1967,7 +1989,7 @@ impl Session {
                 {
                     // Taken into the running turn: delivered, no turn of its own.
                     let q = self.injected.remove(i);
-                    self.link.reply(&q.frame_id, joined_ack(event_id));
+                    self.reply_input(&q.frame_id, joined_ack(event_id));
                     (true, q.input.text.starts_with('/'))
                 } else {
                     tracing::warn!(session_id = %self.id, %event_id, "adapter accepted an input that is not in flight");
@@ -2158,7 +2180,7 @@ impl Session {
     /// running again, since they wanted it gone.
     fn cancelled_by_stop(&self, frame_id: &str, event_id: Uuid) {
         tracing::info!(session_id = %self.id, %event_id, "input cancelled by stop");
-        self.link.reply(
+        self.reply_input(
             frame_id,
             wire_error(error_code::INTERNAL, "cancelled by Stop".to_string(), false),
         );
@@ -2170,7 +2192,7 @@ impl Session {
             // The runtime keeps ending turns without taking this input: give it up instead of
             // resending it forever (the hub marks it failed after the retries of SPEC §5.2).
             tracing::error!(session_id = %self.id, event_id = %q.input.event_id, "input never taken by the runtime; giving up");
-            self.link.reply(
+            self.reply_input(
                 &q.frame_id,
                 wire_error(
                     error_code::INTERNAL,
@@ -2280,8 +2302,10 @@ impl Session {
 
     /// Every queued input gets the start failure; the hub counts them (SPEC §5.2).
     fn fail_queue(&mut self, e: &anyhow::Error) {
+        let transcript = self.transcript();
         for q in self.queue.drain(..) {
-            self.link.reply(&q.frame_id, start_failed(e));
+            self.link
+                .reply_input(self.id, transcript.as_deref(), &q.frame_id, start_failed(e));
         }
     }
 
@@ -2315,10 +2339,7 @@ impl Session {
         self.link.send(WorkerFrame::SessionState {
             session_id: self.id,
             process_state: self.state,
-            runtime_session_id: self
-                .runtime_session_id
-                .clone()
-                .or_else(|| self.spec.runtime_session_id.clone()),
+            runtime_session_id: self.transcript(),
             locked_by: if self.released {
                 LockedBy::Vscode
             } else if self.state == ProcessState::Stopped {

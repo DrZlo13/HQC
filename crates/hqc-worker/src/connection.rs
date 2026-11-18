@@ -8,8 +8,9 @@
 //! - Heartbeat: a WebSocket ping every 20 s; a connection silent for
 //!   [`ConnOptions::dead_after`] is dropped.
 //! - Direct frames go as they come; one that keeps its place ([`crate::link::Direct::after`])
-//!   goes, on the connection it was queued on, after the outbox entries written before it and
-//!   before those written later.
+//!   goes, on the connection it was queued on, after the outbox entries up to the last one of
+//!   its session's stream or its transcript's written before it (the outbox is sent in order, so
+//!   the entries of other sessions before that one go first) and before those written later.
 //! - After `hello.ack` the whole outbox is sent in order, then new entries as they come, with
 //!   at most [`MAX_IN_FLIGHT`] entries un-acked at a time: while that many wait, the worker
 //!   reads the hub's frames before sending the next one (SPEC §5.2).
@@ -358,9 +359,9 @@ impl Connection {
                 }
                 _ = ready.notified() => {
                     // The outbox up to its last entry now, after the direct frames queued, each
-                    // in its place: an entry written after a frame that keeps its place must not
-                    // go before it. An entry written later goes at the latest on the next wake
-                    // (its notify came after this one), after the frames queued before it.
+                    // in its place: an entry written after a frame that keeps its place must
+                    // not go before it. An entry written later goes at the latest on the next
+                    // wake (its notify came after this one), after the frames queued before it.
                     let upto = self.link.outbox.last_seq().unwrap_or(i64::MAX);
                     while let Ok(d) = self.direct.try_recv() {
                         self.send_queued(ws, &mut sent_upto, &mut in_flight, true, &mut last_rx, d).await?;
@@ -465,9 +466,9 @@ impl Connection {
         let entries = self
             .link
             .outbox
-            .after(*sent_upto)
+            .after(*sent_upto, upto)
             .map_err(|e| format!("reading outbox: {e:#}"))?;
-        for mut e in entries.into_iter().take_while(|e| e.seq <= upto) {
+        for mut e in entries {
             // A full window: read the hub's frames (its acks) before sending more.
             // The deadline is for a slot to free up, not for the next frame: the hub's pings
             // would otherwise keep a worker waiting forever on entries the hub never answers.

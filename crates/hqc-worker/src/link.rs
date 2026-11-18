@@ -4,8 +4,10 @@
 //! connection is woken to send them. Everything else (`agent.delta`, `subagents.live`,
 //! `tokens.rate`, replies to hub frames, `session.state`, `mcp.cancel`) is sent directly when
 //! connected and dropped otherwise: the hub resends pending inputs after `hello` and the
-//! supervisor resends `session.state` on connect. A session's state and an input's `ack` keep
-//! their place among the outbox entries ([`Direct::after`]).
+//! supervisor resends `session.state` on connect. A session's state and every reply to its
+//! `session.input` (the `ack`, the joined ack, an `error`) keep their place among the outbox
+//! entries: after the last entry of the session's stream and of its transcript's
+//! ([`Direct::after`]).
 
 use std::sync::Arc;
 
@@ -22,24 +24,13 @@ use crate::outbox::Outbox;
 pub struct Direct {
     pub id: Option<String>,
     pub frame: WorkerFrame,
-    /// `Some(seq)`: on the connection it was queued on, the frame goes after the outbox
-    /// entries up to local `seq`, the last one written when it was queued, and before those
-    /// written later (SPEC §5.2): a session's state and an input's `ack` ([`after_events`]).
+    /// `Some(seq)`: on the connection it was queued on, the frame goes after every outbox
+    /// entry up to local `seq`, the last entry of its session's stream or of its transcript's
+    /// written when it was queued, and before those written later (SPEC §5.2): a session's state
+    /// and the replies to its `session.input` ([`HubLink::reply_input`]). The outbox is sent in
+    /// order, so the entries of other sessions written before that one go first; those written
+    /// after it do not hold the frame.
     pub after: Option<i64>,
-}
-
-/// Whether direct frame `f` keeps its place among the outbox entries (SPEC §5.2): a session's
-/// state (`stopped` right after a turn must not overtake its final answer) and an input's `ack`.
-/// The hub opens a turn on an input's `ack` and closes it on the final answer or `status idle`
-/// (§17.1): the next input's `ack` must not overtake the final answer and `status` of the turn
-/// before it, which would close that input's turn as it opens, and the `ack` of an input taken
-/// at a turn's end must not come after its `status idle`, which would open a turn after its end.
-fn after_events(f: &WorkerFrame) -> bool {
-    match f {
-        WorkerFrame::SessionState { .. } => true,
-        WorkerFrame::Ack(a) => a.event_id.is_some(),
-        _ => false,
-    }
 }
 
 #[derive(Clone)]
@@ -87,10 +78,12 @@ impl HubLink {
         if let Some(input) = self.mcp.turn(session_id) {
             payload["turn_input"] = serde_json::json!(input);
         }
-        if let Err(e) = self
-            .outbox
-            .push_frame(request_id, crate::outbox::FRAME_MCP_CALL, &payload)
-        {
+        if let Err(e) = self.outbox.push_frame(
+            &session_id.to_string(),
+            request_id,
+            crate::outbox::FRAME_MCP_CALL,
+            &payload,
+        ) {
             self.mcp.forget(request_id);
             return Err(e);
         }
@@ -124,7 +117,11 @@ impl HubLink {
             self.send(WorkerFrame::Event { event: ev });
             return Ok(());
         }
-        self.outbox.push(ev.event_id, &serde_json::to_value(&ev)?)?;
+        self.outbox.push(
+            &ev.session_id.to_string(),
+            ev.event_id,
+            &serde_json::to_value(&ev)?,
+        )?;
         self.outbox_ready.notify_one();
         Ok(())
     }
@@ -137,14 +134,21 @@ impl HubLink {
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| anyhow::anyhow!("event without event_id"))?;
-        self.outbox.push(id, ev)?;
+        let session_id: Uuid = ev
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| anyhow::anyhow!("event without session_id"))?;
+        self.outbox.push(&session_id.to_string(), id, ev)?;
         self.outbox_ready.notify_one();
         Ok(())
     }
 
-    /// Queue a `mirror.event` (SPEC §5.4, §9.2): through the outbox, keyed by its event id.
+    /// Queue a `mirror.event` (SPEC §5.4, §9.2): through the outbox, keyed by its event id, in
+    /// the stream of its transcript.
     pub fn mirror_event(&self, ev: hqc_proto::frame::MirrorEvent) -> anyhow::Result<()> {
         self.outbox.push_frame(
+            &transcript_stream(&ev.runtime_session_id),
             ev.event.event_id,
             crate::outbox::FRAME_MIRROR_EVENT,
             &serde_json::to_value(&ev)?,
@@ -153,7 +157,8 @@ impl HubLink {
         Ok(())
     }
 
-    /// Queue a holder report (SPEC §5.4, §9.3) behind the `mirror.event`s already queued.
+    /// Queue a holder report (SPEC §5.4, §9.3) behind the `mirror.event`s already queued, in the
+    /// stream of its transcript: the state of a session that runs the transcript goes after it.
     pub fn holder_report(
         &self,
         runtime_session_id: Uuid,
@@ -175,8 +180,12 @@ impl HubLink {
             foreground_calls: vec![],
         };
         let payload = serde_json::to_value(&frame)?["payload"].take();
-        self.outbox
-            .push_frame(Uuid::now_v7(), crate::outbox::FRAME_SESSION_STATE, &payload)?;
+        self.outbox.push_frame(
+            &runtime_session_id.to_string(),
+            Uuid::now_v7(),
+            crate::outbox::FRAME_SESSION_STATE,
+            &payload,
+        )?;
         self.outbox_ready.notify_one();
         Ok(())
     }
@@ -195,21 +204,77 @@ impl HubLink {
 
     /// A reply to the hub frame `id`.
     pub fn reply(&self, id: &str, frame: WorkerFrame) {
-        self.direct(Some(id.to_string()), frame);
-    }
-
-    pub fn send(&self, frame: WorkerFrame) {
-        self.direct(None, frame);
-    }
-
-    fn direct(&self, id: Option<String>, frame: WorkerFrame) {
-        let after = after_events(&frame).then(|| {
-            self.outbox.last_seq().unwrap_or_else(|e| {
-                // Not known: the whole outbox goes before the frame.
-                tracing::error!("reading the outbox: {e:#}");
-                i64::MAX
-            })
+        let _ = self.direct.send(Direct {
+            id: Some(id.to_string()),
+            frame,
+            after: None,
         });
-        let _ = self.direct.send(Direct { id, frame, after });
     }
+
+    /// A reply to the `session.input` frame `id` of `session_id`, which runs transcript
+    /// `runtime_session_id`: the `ack`, the joined ack or an `error`. It goes after the outbox
+    /// entries of the session and of its transcript written before it (SPEC §5.2).
+    ///
+    /// Why it keeps its place: the hub opens a turn on an input's `ack` and closes it on the
+    /// final answer or `status idle` (§17.1). The next input's `ack` must not overtake the final
+    /// answer and `status` of the turn before it, which would close that input's turn as it
+    /// opens; the `ack` of an input taken at a turn's end must not come after its `status idle`,
+    /// which would open a turn after its end; and an `error` answer (a failed delivery) must not
+    /// overtake the answer of the turn before it either.
+    pub fn reply_input(
+        &self,
+        session_id: Uuid,
+        runtime_session_id: Option<&str>,
+        id: &str,
+        frame: WorkerFrame,
+    ) {
+        let after = self.after_of(Some((session_id, runtime_session_id)));
+        let _ = self.direct.send(Direct {
+            id: Some(id.to_string()),
+            frame,
+            after,
+        });
+    }
+
+    /// Sends `frame` directly. A `session.state` keeps its place like a reply to an input: a
+    /// session's `stopped` right after a turn must not overtake its final answer, nor a
+    /// `locked_by: vscode` the holder report of its transcript (§9.3).
+    pub fn send(&self, frame: WorkerFrame) {
+        let after = match &frame {
+            WorkerFrame::SessionState {
+                session_id,
+                runtime_session_id,
+                ..
+            } => self.after_of(Some((*session_id, runtime_session_id.as_deref()))),
+            _ => None,
+        };
+        let _ = self.direct.send(Direct {
+            id: None,
+            frame,
+            after,
+        });
+    }
+
+    /// The last outbox entry of the stream of a session and of its transcript.
+    fn after_of(&self, place: Option<(Uuid, Option<&str>)>) -> Option<i64> {
+        let (session_id, runtime) = place?;
+        let runtime = runtime.map(transcript_stream);
+        Some(
+            self.outbox
+                .last_seq_of(&session_id.to_string(), runtime.as_deref())
+                .unwrap_or_else(|e| {
+                    // Not known: the whole outbox goes before the frame.
+                    tracing::error!("reading the outbox: {e:#}");
+                    i64::MAX
+                }),
+        )
+    }
+}
+
+/// The stream of a transcript in the outbox: its id as `Uuid` writes it.
+fn transcript_stream(runtime_session_id: &str) -> String {
+    runtime_session_id
+        .parse::<Uuid>()
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| runtime_session_id.to_string())
 }

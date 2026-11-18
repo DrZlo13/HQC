@@ -11,6 +11,14 @@
 //! sessions), so the cost of a synchronous commit per event does not matter. Access is
 //! synchronous under a mutex: each call is one short local transaction.
 //!
+//! `stream` is the stream of an entry, the unit whose order the frames that keep their place
+//! rely on ([`crate::link::Direct::after`]): the session's id for its events, its `mcp.call`s
+//! and the worker's own log lines (those of the service session); the transcript's id
+//! (`runtime_session_id`) for a `mirror.event` and a holder report. A frame of a session goes
+//! after the last entry of its own stream and of its transcript's ([`Outbox::last_seq_of`]). An
+//! entry of an outbox from before the column has `''`: it is from an earlier run, and a
+//! connection sends the whole outbox before any direct frame, so nothing waits on it.
+//!
 //! `attempts` counts retryable `error` replies of the hub to an event; the connection drops
 //! an event after [`crate::connection::MAX_EVENT_ATTEMPTS`] of them (SPEC §5.2).
 
@@ -91,12 +99,31 @@ impl Outbox {
             db.execute_batch("ALTER TABLE outbox ADD COLUMN frame TEXT NOT NULL DEFAULT 'event'")
                 .context("adding outbox.frame")?;
         }
+        // Outboxes before the entries' streams have no `stream`.
+        let has_stream: bool = db
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('outbox') WHERE name = 'stream'",
+                [],
+                |r| r.get(0),
+            )
+            .context("reading the outbox schema")?;
+        if !has_stream {
+            db.execute_batch("ALTER TABLE outbox ADD COLUMN stream TEXT NOT NULL DEFAULT ''")
+                .context("adding outbox.stream")?;
+        }
+        db.execute_batch("CREATE INDEX IF NOT EXISTS outbox_stream ON outbox (stream, seq)")
+            .context("indexing outbox.stream")?;
         Ok(Self { db: Mutex::new(db) })
     }
 
-    /// Appends an event; an `event_id` already waiting is kept as is.
-    pub fn push(&self, event_id: Uuid, event: &serde_json::Value) -> anyhow::Result<()> {
-        self.push_frame(event_id, FRAME_EVENT, event)
+    /// Appends an event of `stream`; an `event_id` already waiting is kept as is.
+    pub fn push(
+        &self,
+        stream: &str,
+        event_id: Uuid,
+        event: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        self.push_frame(stream, event_id, FRAME_EVENT, event)
     }
 
     /// Appends a frame carrying event `event_id`: `payload` is the event for
@@ -104,14 +131,16 @@ impl Outbox {
     /// (the adapter's copy of a mirrored record) is kept as is.
     pub fn push_frame(
         &self,
+        stream: &str,
         event_id: Uuid,
         frame: &str,
         payload: &serde_json::Value,
     ) -> anyhow::Result<()> {
         self.db()
             .execute(
-                "INSERT OR IGNORE INTO outbox (event_id, event, frame) VALUES (?1, ?2, ?3)",
-                params![event_id.to_string(), payload.to_string(), frame],
+                "INSERT OR IGNORE INTO outbox (stream, event_id, event, frame)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![stream, event_id.to_string(), payload.to_string(), frame],
             )
             .context("writing to the outbox")?;
         Ok(())
@@ -155,13 +184,14 @@ impl Outbox {
             .context("counting a failed send")
     }
 
-    /// Entries with local `seq > after`, in order.
-    pub fn after(&self, after: i64) -> anyhow::Result<Vec<Entry>> {
+    /// Entries with local `seq` in `(after, upto]`, in order.
+    pub fn after(&self, after: i64, upto: i64) -> anyhow::Result<Vec<Entry>> {
         let db = self.db();
         let mut st = db.prepare_cached(
-            "SELECT seq, event_id, event, frame FROM outbox WHERE seq > ?1 ORDER BY seq",
+            "SELECT seq, event_id, event, frame FROM outbox
+             WHERE seq > ?1 AND seq <= ?2 ORDER BY seq",
         )?;
-        let rows = st.query_map(params![after], |r| {
+        let rows = st.query_map(params![after, upto], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
@@ -187,6 +217,15 @@ impl Outbox {
         Ok(self
             .db()
             .query_row("SELECT COALESCE(max(seq), 0) FROM outbox", [], |r| r.get(0))?)
+    }
+
+    /// The local `seq` of the last entry waiting in `a` or, when given, in `b`; 0 when none.
+    pub fn last_seq_of(&self, a: &str, b: Option<&str>) -> anyhow::Result<i64> {
+        Ok(self.db().query_row(
+            "SELECT COALESCE(max(seq), 0) FROM outbox WHERE stream = ?1 OR stream = ?2",
+            params![a, b.unwrap_or(a)],
+            |r| r.get(0),
+        )?)
     }
 
     pub fn len(&self) -> anyhow::Result<usize> {
@@ -266,7 +305,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("outbox");
         let ob = Outbox::open(&dir).unwrap();
-        ob.push(Uuid::now_v7(), &json!({})).unwrap();
+        ob.push("", Uuid::now_v7(), &json!({})).unwrap();
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir), 0o700);
         for f in std::fs::read_dir(&dir).unwrap() {
@@ -289,19 +328,19 @@ mod tests {
         {
             let ob = Outbox::open(dir.path()).unwrap();
             for (i, id) in ids.iter().enumerate() {
-                ob.push(*id, &json!({ "n": i })).unwrap();
+                ob.push("", *id, &json!({ "n": i })).unwrap();
             }
-            ob.push(ids[0], &json!({ "n": 99 })).unwrap();
+            ob.push("", ids[0], &json!({ "n": 99 })).unwrap();
             assert_eq!(ob.len().unwrap(), 4);
             assert!(ob.remove(ids[1]).unwrap());
             assert!(!ob.remove(ids[1]).unwrap());
         }
         let ob = Outbox::open(dir.path()).unwrap();
-        let all = ob.after(0).unwrap();
+        let all = ob.after(0, i64::MAX).unwrap();
         let got: Vec<Uuid> = all.iter().map(|e| e.event_id).collect();
         assert_eq!(got, [ids[0], ids[2], ids[3]]);
         assert_eq!(all[0].event, json!({ "n": 0 }));
-        assert_eq!(ob.after(all[1].seq).unwrap().len(), 1);
+        assert_eq!(ob.after(all[1].seq, i64::MAX).unwrap().len(), 1);
         assert!(ob.contains(ids[3]).unwrap());
         assert_eq!(ob.failed(ids[3]).unwrap(), Some(1));
         assert_eq!(ob.failed(ids[3]).unwrap(), Some(2));
@@ -329,5 +368,30 @@ mod tests {
         assert_eq!(ob.failed(id).unwrap(), Some(1));
         drop(ob);
         Outbox::open(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn after_is_bounded_and_last_seq_is_per_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let ob = Outbox::open(dir.path()).unwrap();
+        for (stream, n) in [("a", 0), ("b", 1), ("a", 2), ("c", 3), ("a", 4)] {
+            ob.push(stream, Uuid::now_v7(), &json!({ "n": n })).unwrap();
+        }
+        let all = ob.after(0, i64::MAX).unwrap();
+        let n = |es: &[Entry]| {
+            es.iter()
+                .map(|e| e.event["n"].as_i64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(n(&all), [0, 1, 2, 3, 4]);
+        let got = ob.after(all[0].seq, all[3].seq).unwrap();
+        assert_eq!(n(&got), [1, 2, 3]);
+        assert!(ob.after(all[4].seq, i64::MAX).unwrap().is_empty());
+        assert_eq!(ob.last_seq_of("a", None).unwrap(), all[4].seq);
+        assert_eq!(ob.last_seq_of("b", None).unwrap(), all[1].seq);
+        // Two streams: the later of their last entries.
+        assert_eq!(ob.last_seq_of("b", Some("c")).unwrap(), all[3].seq);
+        assert_eq!(ob.last_seq_of("none", None).unwrap(), 0);
+        assert_eq!(ob.last_seq().unwrap(), all[4].seq);
     }
 }

@@ -10,16 +10,19 @@ use std::time::Duration;
 
 use common::*;
 use hqc_proto::event::EventKind;
-use hqc_proto::frame::{Ack, Hello, LockedBy, ProcessState, WorkerFrame};
+use hqc_proto::frame::{Ack, HeldBy, Hello, LockedBy, ProcessState, WorkerFrame};
 use hqc_worker::adapter::claude_code::paths::encode_project_dir;
 use hqc_worker::adapter::fake::{agent_event, agent_message, FakeAdapters, FakeCall};
 use hqc_worker::adapter::AdapterEvent;
-use hqc_worker::connection::{Connection, Status};
+use hqc_worker::connection::{Connection, Status, MAX_IN_FLIGHT};
+use hqc_worker::inbox::ArtifactClient;
+use hqc_worker::known_paths::KnownPaths;
 use hqc_worker::link::HubLink;
 use hqc_worker::mirror::store::Store;
 use hqc_worker::outbox::Outbox;
-use hqc_worker::supervisor::Inbound;
+use hqc_worker::supervisor::{wire_error, Inbound, Supervisor, LOCKED_VSCODE};
 use hqc_worker::token::Secret;
+use hqc_worker::workspaces::Created;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -898,7 +901,9 @@ async fn the_answer_goes_before_the_next_inputs_ack() {
         let answer_id = answer.event_id;
         link.event(answer).unwrap();
         let frame = format!("f-{i}");
-        link.reply(
+        link.reply_input(
+            sid,
+            None,
             &frame,
             WorkerFrame::Ack(Ack {
                 event_id: Some(Uuid::now_v7()),
@@ -922,6 +927,258 @@ async fn the_answer_goes_before_the_next_inputs_ack() {
     tokio::time::timeout(WAIT, task)
         .await
         .expect("connection stopped")
+        .unwrap();
+}
+
+/// An `error` answer to a `session.input` (`locked_vscode`, a failed delivery) keeps its place
+/// like the `ack`: after the answer of the turn before it, written to the outbox first (SPEC
+/// §5.2). Many rounds, as above.
+#[tokio::test]
+async fn an_error_answer_to_an_input_goes_after_the_answer_before_it() {
+    let mut hub = FakeHub::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (link, stop, task, _inbound, mut c) = bare_connection(&mut hub, dir.path()).await;
+    let sid = Uuid::now_v7();
+    for i in 0..50 {
+        let answer = agent_message(sid, "done");
+        let answer_id = answer.event_id;
+        link.event(answer).unwrap();
+        let frame = format!("f-{i}");
+        link.reply_input(
+            sid,
+            None,
+            &frame,
+            wire_error(LOCKED_VSCODE, "the session continues in VS Code", false),
+        );
+        let mut answered = false;
+        loop {
+            let f = c.recv().await;
+            if f["type"] == "event" && event_id(&f) == answer_id {
+                answered = true;
+                c.ack_event(&f, 1).await;
+            } else if f["type"] == "error" && f["id"] == frame.as_str() {
+                assert!(answered, "input {i}: its error before the answer before it");
+                break;
+            }
+        }
+    }
+    stop.cancel();
+    tokio::time::timeout(WAIT, task)
+        .await
+        .expect("connection stopped")
+        .unwrap();
+}
+
+/// Another session's outbox entries do not hold an input's `ack`: a session writes more events
+/// than the window of un-acked entries, the hub acks none, and the `ack` of an input of a session
+/// with no entries still reaches the hub (SPEC §5.2).
+#[tokio::test]
+async fn another_sessions_entries_do_not_hold_an_inputs_ack() {
+    let mut hub = FakeHub::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (link, stop, task, _inbound, mut c) = bare_connection(&mut hub, dir.path()).await;
+    let (busy, quiet) = (Uuid::now_v7(), Uuid::now_v7());
+    let flood = MAX_IN_FLIGHT + 50;
+    for _ in 0..flood {
+        link.event(agent_message(busy, "x")).unwrap();
+    }
+    link.reply_input(
+        quiet,
+        None,
+        "f-quiet",
+        WorkerFrame::Ack(Ack {
+            event_id: Some(Uuid::now_v7()),
+            seq: None,
+            joined: false,
+        }),
+    );
+    // The hub acks no event: the busy session's entries all wait while the `ack` arrives.
+    let mut events = 0;
+    loop {
+        let f = c.recv().await;
+        if f["type"] == "event" {
+            events += 1;
+        } else if f["type"] == "ack" && f["id"] == "f-quiet" {
+            break;
+        }
+    }
+    assert!(
+        events < flood,
+        "the ack came after {events} of {flood} events"
+    );
+    // Let the connection finish: ack what it sends.
+    while let Some(f) = c.try_recv(Duration::from_millis(300)).await {
+        if f["type"] == "event" {
+            c.ack_event(&f, 1).await;
+        }
+    }
+    stop.cancel();
+    tokio::time::timeout(WAIT, task)
+        .await
+        .expect("connection stopped")
+        .unwrap();
+}
+
+/// The state of a session that runs a transcript goes after the holder report of that transcript
+/// written before it: the hub reads `locked_by: vscode` after a holder report as the VS Code tab
+/// opening the session, and before it as another writer's continuation (SPEC §9.3, §5.2).
+#[tokio::test]
+async fn a_sessions_state_goes_after_the_holder_report_of_its_transcript() {
+    let mut hub = FakeHub::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (link, stop, task, _inbound, mut c) = bare_connection(&mut hub, dir.path()).await;
+    let (sid, transcript) = (Uuid::now_v7(), Uuid::now_v7());
+    link.holder_report(
+        transcript,
+        Some(HeldBy {
+            entrypoint: "claude-vscode".into(),
+            status: "idle".into(),
+        }),
+    )
+    .unwrap();
+    link.send(WorkerFrame::SessionState {
+        session_id: sid,
+        process_state: ProcessState::Stopped,
+        runtime_session_id: Some(transcript.to_string()),
+        locked_by: LockedBy::Vscode,
+        title: None,
+        held_by: None,
+        commands: None,
+        command_info: None,
+        permission_mode: None,
+        capped_input: None,
+        subagents: 0,
+        background_tasks: 0,
+        foreground_calls: vec![],
+    });
+    let mut order = vec![];
+    while order.len() < 2 {
+        let f = c.recv().await;
+        if f["type"] == "session.state" {
+            let who = f["payload"]["session_id"].as_str().unwrap().to_owned();
+            order.push(who.parse::<Uuid>().unwrap());
+            if f["payload"]["session_id"] == Uuid::nil().to_string() {
+                c.ack_event(
+                    &json!({"id": f["id"], "payload": {"event": f["payload"]}}),
+                    1,
+                )
+                .await;
+            }
+        }
+    }
+    assert_eq!(
+        order,
+        [Uuid::nil(), sid],
+        "the state before the holder report"
+    );
+    stop.cancel();
+    tokio::time::timeout(WAIT, task)
+        .await
+        .expect("connection stopped")
+        .unwrap();
+}
+
+/// A session released to VS Code answers an input with `locked_vscode` after the entries of its
+/// own stream and of its transcript's: the worker's reply to a `session.input` keeps its place
+/// (SPEC §5.2). Read off the frame the supervisor queues, `Direct::after`: nothing is sent.
+#[tokio::test]
+async fn a_refused_input_keeps_its_place_in_the_supervisor() {
+    let env = Env::new();
+    let cfg = Arc::new(env.config("https://h"));
+    let outbox = Arc::new(Outbox::open(&env.outbox()).unwrap());
+    let (link, mut direct) = HubLink::new(outbox.clone());
+    let sup = Supervisor::new(
+        cfg.clone(),
+        Arc::new(FakeAdapters::new()),
+        link.clone(),
+        ArtifactClient::new(&cfg.hub_url, Secret::new(TOKEN)),
+        Duration::from_secs(5),
+        Arc::new(KnownPaths::load(&env.dir.path().join("known.json")).unwrap()),
+        Created::load(&env.dir.path().join("created.json"), &cfg).unwrap(),
+    );
+    let (tx, rx) = mpsc::channel(16);
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(sup.run(rx, shutdown.clone()));
+
+    let sid = Uuid::now_v7();
+    let transcript = Uuid::now_v7();
+    let mut start = env.start_payload(sid);
+    start["runtime_session_id"] = json!(transcript);
+    let frame = |id: &str, ty: &str, payload: Value| -> Inbound {
+        Inbound::Frame(
+            serde_json::from_value(json!({"id": id, "type": ty, "payload": payload})).unwrap(),
+        )
+    };
+    tx.send(frame("start", "session.start", start))
+        .await
+        .unwrap();
+    // The session runs; the VS Code tab takes the transcript.
+    tokio::time::timeout(WAIT, async {
+        loop {
+            match direct.recv().await.unwrap().frame {
+                WorkerFrame::SessionState {
+                    process_state: ProcessState::Running,
+                    ..
+                } => break,
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("the session runs");
+    tx.send(Inbound::Holder {
+        runtime_session_id: transcript,
+        held_by: Some(HeldBy {
+            entrypoint: "claude-vscode".into(),
+            status: "idle".into(),
+        }),
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(WAIT, async {
+        loop {
+            match direct.recv().await.unwrap().frame {
+                WorkerFrame::SessionState {
+                    locked_by: LockedBy::Vscode,
+                    ..
+                } => break,
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("the session is released");
+
+    // An entry of the session's stream and one of its transcript's, then the input.
+    link.event(agent_message(sid, "answer")).unwrap();
+    link.holder_report(transcript, None).unwrap();
+    let last = outbox.last_seq().unwrap();
+    assert!(last > 0);
+    let input = json!({"session_id": sid, "event_id": Uuid::now_v7(), "text": "again",
+        "artifact_ids": [], "peer_prefix": []});
+    tx.send(frame("input", "session.input", input))
+        .await
+        .unwrap();
+    let d = tokio::time::timeout(WAIT, async {
+        loop {
+            let d = direct.recv().await.unwrap();
+            if d.id.as_deref() == Some("input") {
+                break d;
+            }
+        }
+    })
+    .await
+    .expect("the input is answered");
+    assert!(matches!(&d.frame, WorkerFrame::Error(e) if e.code == LOCKED_VSCODE));
+    assert_eq!(
+        d.after,
+        Some(last),
+        "the error answer does not keep its place"
+    );
+    shutdown.cancel();
+    tokio::time::timeout(WAIT, task)
+        .await
+        .expect("supervisor stopped")
         .unwrap();
 }
 

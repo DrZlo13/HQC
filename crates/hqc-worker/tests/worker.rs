@@ -289,7 +289,7 @@ async fn outbox_survives_reconnect_and_restart() {
 
     // Restart the worker process without acking: the outbox is on disk.
     w.stop().await;
-    assert_eq!(ob.after(0).unwrap().len(), 3);
+    assert_eq!(ob.after(0, i64::MAX).unwrap().len(), 3);
     let adapters2 = FakeAdapters::new();
     let w2 = start_worker(&env, &hub.url(), &adapters2);
     let mut c3 = hub.accept().await;
@@ -367,8 +367,12 @@ async fn outbox_keeps_at_most_max_in_flight_unacked() {
     let want: Vec<Uuid> = (0..2 * MAX_IN_FLIGHT + 10)
         .map(|i| {
             let ev = agent_message(sid, &format!("m{i}"));
-            ob.push(ev.event_id, &serde_json::to_value(&ev).unwrap())
-                .unwrap();
+            ob.push(
+                &ev.session_id.to_string(),
+                ev.event_id,
+                &serde_json::to_value(&ev).unwrap(),
+            )
+            .unwrap();
             ev.event_id
         })
         .collect();
@@ -411,8 +415,12 @@ async fn outbox_window_reconnects_when_no_entry_is_answered() {
     let want: Vec<Uuid> = (0..MAX_IN_FLIGHT + 1)
         .map(|i| {
             let ev = agent_message(sid, &format!("m{i}"));
-            ob.push(ev.event_id, &serde_json::to_value(&ev).unwrap())
-                .unwrap();
+            ob.push(
+                &ev.session_id.to_string(),
+                ev.event_id,
+                &serde_json::to_value(&ev).unwrap(),
+            )
+            .unwrap();
             ev.event_id
         })
         .collect();

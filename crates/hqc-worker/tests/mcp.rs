@@ -199,7 +199,7 @@ async fn a_call_goes_to_the_hub_and_back() {
     assert!(rid.parse::<Uuid>().is_ok());
     // The call sits in the outbox until answered, without its token.
     let ob = Outbox::open(&env.outbox()).unwrap();
-    let e = ob.after(0).unwrap();
+    let e = ob.after(0, i64::MAX).unwrap();
     assert_eq!(e.len(), 1);
     assert_eq!(e[0].frame, FRAME_MCP_CALL);
     assert!(e[0].event.get("session_token").is_none());
@@ -454,6 +454,7 @@ async fn a_call_of_a_previous_run_is_not_sent() {
     {
         let ob = Outbox::open(&env.outbox()).unwrap();
         ob.push_frame(
+            &Uuid::nil().to_string(),
             stale,
             FRAME_MCP_CALL,
             &json!({"request_id": stale, "tool": "hqc_list_sessions", "args": {}}),

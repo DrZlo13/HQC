@@ -141,9 +141,9 @@ pub trait Adapter: Send {
         let _ = files;
         self.input(input).await
     }
-    /// Whether a person's input can go into the running turn now (SPEC §17.2; Claude Code: a
-    /// turn runs and no permission request or question is open). By default never: input
-    /// waits for the end of the turn.
+    /// Whether an input that may join (a person's input or a `send` of another session, SPEC
+    /// §17.2) can go into the running turn now (Claude Code: a turn runs and no permission
+    /// request or question is open). By default never: input waits for the end of the turn.
     fn can_inject(&self) -> bool {
         false
     }

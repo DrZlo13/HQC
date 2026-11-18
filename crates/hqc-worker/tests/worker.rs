@@ -2834,10 +2834,10 @@ async fn input_during_a_turn_goes_into_it() {
     w.stop().await;
 }
 
-// SPEC §17.2: what does not go into a turn waits for its end, as before: an input while the
-// turn is capped to `ask` (T39), a message of another session (`peer`), a capped input.
+// SPEC §17.2: a capped input does not go into a turn: it waits for its end and runs as a turn
+// of its own.
 #[tokio::test]
-async fn input_that_may_not_go_into_the_turn_waits_for_its_end() {
+async fn a_capped_input_waits_for_the_end_of_the_turn() {
     let env = Env::new();
     let adapters = FakeAdapters::new();
     adapters.set_injectable(true);
@@ -2846,50 +2846,16 @@ async fn input_that_may_not_go_into_the_turn_waits_for_its_end() {
     let sid = Uuid::now_v7();
     let mut c = hub.accept().await;
     c.handshake().await;
-    start_session(&mut c, &env, sid).await;
-    let (a, h, p, k) = (
-        Uuid::now_v7(),
-        Uuid::now_v7(),
-        Uuid::now_v7(),
-        Uuid::now_v7(),
-    );
-    let injected = |adapters: &FakeAdapters| {
-        adapters
-            .calls()
-            .into_iter()
-            .filter(|c| matches!(c, FakeCall::Inject { .. }))
-            .collect::<Vec<_>>()
-    };
-
-    // The session runs in ask: a capped input is handed at once, its turn is capped.
-    c.frame("session.input", capped_input(sid, a, "ask")).await;
-    adapters
-        .wait_for("capped A", has_call(input_call(sid, a)))
-        .await;
-    c.frame("session.input", input(sid, h, "mine")).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(injected(&adapters).is_empty(), "{:?}", adapters.calls());
-    adapters.accept_input(sid, a).await;
-    adapters.end_turn(sid).await;
-    adapters
-        .wait_for("H as a turn", has_call(input_call(sid, h)))
-        .await;
-    adapters.accept_input(sid, h).await;
-
-    let mut peer = input(sid, p, "from another session");
-    peer["peer"] = json!({"from": "hqc/a", "mode": "send"});
-    c.frame("session.input", peer).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(injected(&adapters).is_empty(), "{:?}", adapters.calls());
-    adapters.end_turn(sid).await;
-    adapters
-        .wait_for("the peer message as a turn", has_call(input_call(sid, p)))
-        .await;
-    adapters.accept_input(sid, p).await;
+    let (a, k) = (Uuid::now_v7(), Uuid::now_v7());
+    turn_of(&mut c, &env, &adapters, sid, a).await;
 
     c.frame("session.input", capped_input(sid, k, "ask")).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(injected(&adapters).is_empty(), "{:?}", adapters.calls());
+    assert!(
+        injected_calls(&adapters).is_empty(),
+        "{:?}",
+        adapters.calls()
+    );
     adapters.end_turn(sid).await;
     adapters
         .wait_for("K as a turn", has_call(input_call(sid, k)))
@@ -2997,6 +2963,419 @@ async fn a_persons_input_does_not_join_an_ask_carried_into_the_next_turn() {
         "{:?}",
         adapters.calls()
     );
+    w.stop().await;
+}
+
+/// A `send` of another session `from`, as a `session.input` frame.
+fn send_input(sid: Uuid, eid: Uuid, text: &str) -> Value {
+    let mut v = input(sid, eid, text);
+    v["peer"] = json!({"from": "hqc/a", "mode": "send"});
+    v
+}
+
+// SPEC §17.2: a `send` of another session goes into the running turn of a person's input as a
+// person's input does, and its acceptance is `ack {joined: true}`: it opens no turn.
+#[tokio::test]
+async fn a_send_during_a_persons_turn_joins_it() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let (a, s) = (Uuid::now_v7(), Uuid::now_v7());
+    turn_of(&mut c, &env, &adapters, sid, a).await;
+
+    let fs = c.frame("session.input", send_input(sid, s, "FYI")).await;
+    adapters
+        .wait_for("the send into the turn", has_call(inject_call(sid, s)))
+        .await;
+    adapters.accept_input(sid, s).await;
+    assert_eq!(
+        ack_of(&mut c, &fs).await["payload"],
+        json!({"event_id": s, "joined": true})
+    );
+    adapters.end_turn(sid).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !adapters.calls().contains(&input_call(sid, s)),
+        "{:?}",
+        adapters.calls()
+    );
+    w.stop().await;
+}
+
+// SPEC §17.2: a person's input goes past the waiting inputs in front of it that are no person's
+// and cannot join (an `hqc_ask`, a run of a schedule); they keep their places and run as turns
+// of their own after the turn, in order.
+#[tokio::test]
+async fn a_persons_input_passes_a_waiting_ask_and_a_schedule_run() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let (a, p, s, u) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+    turn_of(&mut c, &env, &adapters, sid, a).await;
+
+    c.frame("session.input", ask_input(sid, p)).await;
+    let mut scheduled = input(sid, s, "Check the build");
+    scheduled["schedule_id"] = json!(Uuid::now_v7());
+    c.frame("session.input", scheduled).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        injected_calls(&adapters).is_empty(),
+        "{:?}",
+        adapters.calls()
+    );
+    let fu = c.frame("session.input", input(sid, u, "mine")).await;
+    adapters
+        .wait_for("U into the turn", has_call(inject_call(sid, u)))
+        .await;
+    adapters.accept_input(sid, u).await;
+    assert_eq!(
+        ack_of(&mut c, &fu).await["payload"],
+        json!({"event_id": u, "joined": true})
+    );
+
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("the ask as a turn", has_call(input_call(sid, p)))
+        .await;
+    adapters.accept_input(sid, p).await;
+    adapters.end_turn(sid).await;
+    let calls = adapters
+        .wait_for("the scheduled run as a turn", has_call(input_call(sid, s)))
+        .await;
+    let written: Vec<&FakeCall> = calls
+        .iter()
+        .filter(|c| matches!(c, FakeCall::Input { .. } | FakeCall::Inject { .. }))
+        .collect();
+    assert_eq!(
+        written,
+        [
+            &input_call(sid, a),
+            &inject_call(sid, u),
+            &input_call(sid, p),
+            &input_call(sid, s)
+        ]
+    );
+    w.stop().await;
+}
+
+// SPEC §17.2: a slash command of a person stops the search: a person's input behind it does
+// not go past it.
+#[tokio::test]
+async fn a_persons_input_does_not_pass_a_slash_command() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let (a, k, u) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    turn_of(&mut c, &env, &adapters, sid, a).await;
+
+    c.frame("session.input", input(sid, k, "/compact")).await;
+    c.frame("session.input", input(sid, u, "mine")).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        injected_calls(&adapters).is_empty(),
+        "{:?}",
+        adapters.calls()
+    );
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("the slash command as a turn", has_call(input_call(sid, k)))
+        .await;
+    w.stop().await;
+}
+
+// SPEC §17.2: a turn started by a `send`, or capped to `ask`, takes a person's input; the turn
+// of an `hqc_ask` takes nothing, a `send` included (its answer goes to its sender).
+#[tokio::test]
+async fn what_may_join_goes_into_a_send_turn_and_a_capped_turn_but_not_an_ask_turn() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let (s, u, k, v, p, t) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+
+    c.frame("session.input", send_input(sid, s, "do X")).await;
+    adapters
+        .wait_for("the send as a turn", has_call(input_call(sid, s)))
+        .await;
+    adapters.accept_input(sid, s).await;
+    c.frame("session.input", input(sid, u, "and Y")).await;
+    adapters
+        .wait_for("U into the send's turn", has_call(inject_call(sid, u)))
+        .await;
+    adapters.accept_input(sid, u).await;
+    adapters.end_turn(sid).await;
+
+    c.frame("session.input", capped_input(sid, k, "ask")).await;
+    adapters
+        .wait_for("the capped input as a turn", has_call(input_call(sid, k)))
+        .await;
+    adapters.accept_input(sid, k).await;
+    c.frame("session.input", input(sid, v, "mine")).await;
+    adapters
+        .wait_for("V into the capped turn", has_call(inject_call(sid, v)))
+        .await;
+    adapters.accept_input(sid, v).await;
+    adapters.end_turn(sid).await;
+
+    c.frame("session.input", ask_input(sid, p)).await;
+    adapters
+        .wait_for("the ask as a turn", has_call(input_call(sid, p)))
+        .await;
+    adapters.accept_input(sid, p).await;
+    c.frame("session.input", send_input(sid, t, "FYI")).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        injected_calls(&adapters),
+        [inject_call(sid, u), inject_call(sid, v)]
+    );
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("the send after the ask", has_call(input_call(sid, t)))
+        .await;
+    w.stop().await;
+}
+
+// SPEC §17.2: a `send` whose cap is below the session's own mode does not go into a running
+// turn (it would hold the turn's mode down); a person's input goes past it, and a send whose
+// cap is the session's mode goes in.
+#[tokio::test]
+async fn a_send_capped_below_the_session_does_not_join() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    started_in(&mut c, &env, sid, "auto").await;
+    let (a, s, u, m) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+    c.frame("session.input", input(sid, a, "A")).await;
+    adapters
+        .wait_for("input A", has_call(input_call(sid, a)))
+        .await;
+    adapters.accept_input(sid, a).await;
+
+    let mut low = send_input(sid, s, "from a session in ask");
+    low["permission_cap"] = json!("ask");
+    c.frame("session.input", low).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        injected_calls(&adapters).is_empty(),
+        "{:?}",
+        adapters.calls()
+    );
+    c.frame("session.input", input(sid, u, "mine")).await;
+    adapters
+        .wait_for("U past the capped send", has_call(inject_call(sid, u)))
+        .await;
+    let mut level = send_input(sid, m, "from a session in auto");
+    level["permission_cap"] = json!("auto");
+    c.frame("session.input", level).await;
+    adapters
+        .wait_for("the send of the same mode", has_call(inject_call(sid, m)))
+        .await;
+    assert_eq!(
+        injected_calls(&adapters),
+        [inject_call(sid, u), inject_call(sid, m)]
+    );
+    w.stop().await;
+}
+
+// SPEC §17.2: a `send` joins only while the runtime is confirmed at or below its cap: an owner's
+// switch the runtime has not confirmed (or refused) leaves the turn above it.
+#[tokio::test]
+async fn a_send_does_not_join_while_the_runtime_is_above_its_cap() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    started_in(&mut c, &env, sid, "auto").await;
+    let (a, s, u) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    c.frame("session.input", input(sid, a, "A")).await;
+    adapters
+        .wait_for("input A", has_call(input_call(sid, a)))
+        .await;
+    adapters.accept_input(sid, a).await;
+
+    // The owner lowers the session to ask; the fake runtime never confirms it.
+    c.frame(
+        "session.permission_mode",
+        json!({"session_id": sid, "permission_mode": "ask"}),
+    )
+    .await;
+    c.expect("ack").await;
+    adapters
+        .wait_for(
+            "the switch to ask",
+            has_call(FakeCall::PermissionMode(sid, PermissionMode::Ask)),
+        )
+        .await;
+    let mut low = send_input(sid, s, "from a session in ask");
+    low["permission_cap"] = json!("ask");
+    c.frame("session.input", low).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        injected_calls(&adapters).is_empty(),
+        "{:?}",
+        adapters.calls()
+    );
+    // A person's input is not held by the runtime's mode.
+    c.frame("session.input", input(sid, u, "mine")).await;
+    adapters
+        .wait_for("U past the send", has_call(inject_call(sid, u)))
+        .await;
+    w.stop().await;
+}
+
+// SPEC §17.2: a `send` that becomes the next turn (the runtime ran it by itself) keeps its cap:
+// the owner's raise during that turn stays at it, as for a send that waited in the queue.
+#[tokio::test]
+async fn a_carried_send_keeps_its_cap_on_the_turn() {
+    use PermissionMode::{AllowAll, Auto};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let cfg = hqc_worker::config::Config::parse(&format!(
+        "{}[permissions]\nallow_all = true\n",
+        env.config_toml(&hub.url())
+    ))
+    .unwrap();
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    started_in(&mut c, &env, sid, "auto").await;
+    let (a, s) = (Uuid::now_v7(), Uuid::now_v7());
+    c.frame("session.input", input(sid, a, "A")).await;
+    adapters
+        .wait_for("input A", has_call(input_call(sid, a)))
+        .await;
+    adapters.accept_input(sid, a).await;
+
+    let mut capped = send_input(sid, s, "from a session in auto");
+    capped["permission_cap"] = json!("auto");
+    c.frame("session.input", capped).await;
+    adapters
+        .wait_for("the send into the turn", has_call(inject_call(sid, s)))
+        .await;
+    // The runtime ends the turn and runs the send by itself.
+    adapters.end_turn_carrying(sid, vec![s], vec![]).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    c.frame(
+        "session.permission_mode",
+        json!({"session_id": sid, "permission_mode": "allow_all"}),
+    )
+    .await;
+    c.expect("ack").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let calls = adapters.calls();
+    assert!(
+        !calls.contains(&FakeCall::PermissionMode(sid, AllowAll)),
+        "{calls:?}"
+    );
+    assert!(switches(&calls).iter().all(|m| *m <= Auto), "{calls:?}");
+    w.stop().await;
+}
+
+// SPEC §17.2, T39: a send that joined a capped turn and becomes the next turn runs it in its own
+// mode (the lower of its cap and the session's), not in the one the turn before left: the
+// runtime is switched up and the hub learns the turn is no longer held by the cap.
+#[tokio::test]
+async fn a_carried_send_after_a_capped_turn_runs_in_its_own_mode() {
+    use PermissionMode::{Ask, Auto};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    started_in(&mut c, &env, sid, "auto").await;
+    let (s1, s2) = (Uuid::now_v7(), Uuid::now_v7());
+
+    // T0: a send from a session in ask; the runtime is lowered to ask for it.
+    let mut first = send_input(sid, s1, "from a session in ask");
+    first["permission_cap"] = json!("ask");
+    c.frame("session.input", first).await;
+    adapters
+        .wait_for(
+            "the switch to ask",
+            has_call(FakeCall::PermissionMode(sid, Ask)),
+        )
+        .await;
+    adapters.emit(sid, AdapterEvent::PermissionMode(Ask)).await;
+    adapters
+        .wait_for("S1 as a turn", has_call(input_call(sid, s1)))
+        .await;
+    state_where(&mut c, sid, |st| st["payload"]["capped_input"] == json!(s1)).await;
+    adapters.accept_input(sid, s1).await;
+
+    // A send from a session in auto joins it (the runtime is at ask, below the cap).
+    let mut second = send_input(sid, s2, "from a session in auto");
+    second["permission_cap"] = json!("auto");
+    c.frame("session.input", second).await;
+    adapters
+        .wait_for("S2 into the turn", has_call(inject_call(sid, s2)))
+        .await;
+    c.skipped.clear();
+    // The runtime ends the turn and runs S2 by itself.
+    adapters.end_turn_carrying(sid, vec![s2], vec![]).await;
+    let calls = adapters
+        .wait_for(
+            "the switch up to auto",
+            has_call(FakeCall::PermissionMode(sid, Auto)),
+        )
+        .await;
+    assert_eq!(switches(&calls), [Ask, Auto]);
+    let st = state_where(&mut c, sid, |st| {
+        st["payload"].get("capped_input").is_none()
+    })
+    .await;
+    assert!(st["payload"].get("capped_input").is_none(), "{st}");
     w.stop().await;
 }
 

@@ -660,8 +660,8 @@ impl Core {
         vec![self.write(input, images, false)]
     }
 
-    /// A person's input may go into the running turn (SPEC §17.2): a turn runs and no
-    /// permission request or question is open.
+    /// An input that may join (a person's input or a `send`, SPEC §17.2) may go into the
+    /// running turn: a turn runs and no permission request or question is open.
     pub fn can_inject(&self) -> bool {
         self.in_turn && self.pending.is_empty()
     }

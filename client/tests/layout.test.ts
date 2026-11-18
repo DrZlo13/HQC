@@ -116,6 +116,26 @@ describe('layout widths', () => {
     expect(rule('.perm-done-row .btn-link')['margin-left']).toBe('auto');
   });
 
+  it("a call's line and its result share one line, the result three parts to the line's one; a thinking line is one line", () => {
+    // Checked in Chromium and WebKit at 1280 and 390px: one line each, the arguments ~25% when
+    // both are long, the time and the mark at the right edge.
+    const text = rule('.tool-text');
+    expect([text['flex'], text['min-width'], text['display']]).toEqual(['1', '0', 'flex']);
+    const line = rule('.tool-group-head > .tool-peek.mono, .tool-line');
+    expect([line['flex'], line['max-width']]).toEqual(['1 1 0', 'max-content']);
+    const result = rule('.tool-result');
+    expect([result['flex'], result['min-width'], result['max-width']]).toEqual(['3 1 0', '0', 'max-content']);
+    expect([result['white-space'], result['overflow'], result['text-overflow']]).toEqual(['nowrap', 'hidden', 'ellipsis']);
+    expect(rule('.tool-line:empty')['display']).toBe('none');
+    const think = rule('.thinking-peek');
+    expect([think['min-width'], think['white-space'], think['overflow'], think['text-overflow']]).toEqual([
+      '0',
+      'nowrap',
+      'hidden',
+      'ellipsis',
+    ]);
+  });
+
   it('on a phone the "started by" line takes the header\'s whole width, one line: a long address ends in an ellipsis instead of breaking', () => {
     expect(rule('.chat-phone .chat-head:has(> .chat-spawned)')['flex-wrap']).toBe('wrap');
     // The title's column has a basis of 0: it stays on the first line beside the buttons.

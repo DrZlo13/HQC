@@ -9,7 +9,7 @@
 // its result and its state, and so is its end: its notification, or its result when it ran in
 // the foreground. Pure logic, no DOM.
 
-import type { EventOf, HqcEvent, LiveSubagent } from '../proto';
+import type { EventOf, HqcEvent, LiveSubagent, ToolResult } from '../proto';
 import type { Item, Timeline } from '../timeline';
 import { oneLine } from './labels';
 
@@ -378,7 +378,7 @@ export function subagentEnd(
 }
 
 /** From `from` to `to`; undefined when the times say nothing. */
-function between(from: string, to: string): number | undefined {
+export function between(from: string, to: string): number | undefined {
   const ms = Date.parse(to) - Date.parse(from);
   return Number.isFinite(ms) && ms > 0 ? ms : undefined;
 }
@@ -419,10 +419,11 @@ export function callArgs(argsPreview: string): Record<string, unknown> {
 // SendMessage call sent, its summary, else its plain-text message on one line.
 const BRIEF_KEYS = ['file_path', 'notebook_path', 'path', 'pattern', 'url', 'query', 'command', 'description', 'prompt', 'skill', 'summary', 'message'];
 
-/** One line for a call: `$ command` for Bash, else the tool and its main argument. The
+/** One line for a call: `$ command` for Bash, else the tool and its main argument; a call with
+ *  none of the keys above (an MCP tool's, say) shows its arguments, `name: "a", x: 90.7`. The
  *  preview is read as far as it goes (cut at 4 KB, SPEC §4): a script longer than that, cut
- *  inside its `command`, still shows its first line; `cut`: the preview was cut, so
- *  more lines may follow than are counted. */
+ *  inside its `command`, still shows its first line; `cut`: the preview was cut, so more lines
+ *  may follow than are counted. */
 export function callLine(tool: string, argsPreview: string): { shell: boolean; text: string; more?: number; cut?: boolean } {
   const read = cutJson(argsPreview);
   const args = read && isRecord(read.value) ? read.value : {};
@@ -433,7 +434,47 @@ export function callLine(tool: string, argsPreview: string): { shell: boolean; t
     return { shell: true, text: oneLine(lines[0], 400), more: more || undefined, cut: read?.cut || undefined };
   }
   const key = BRIEF_KEYS.find((k) => typeof args[k] === 'string' && args[k]);
-  return { shell: false, text: key ? oneLine(String(args[key]), 400) : '' };
+  return { shell: false, text: oneLine(key ? String(args[key]) : fieldsLine(args), 400) };
+}
+
+/** An object's fields on one line, each as Claude Code 2.1.325 shows a field of an MCP tool's
+ *  input: `key: value, …`, the value as JSON (a string in quotes). In the order of the object:
+ *  for `args_preview` the worker's, the shortest value first (SPEC §4), as the opened row shows
+ *  them. */
+function fieldsLine(v: Record<string, unknown>): string {
+  return Object.entries(v)
+    .map(([k, x]) => `${k}: ${JSON.stringify(x)}`)
+    .join(', ');
+}
+
+/** A call's result on its line, after its arguments: what its opened row shows, the error,
+ *  else the result, so nothing for a change that went through (an Edit, a MultiEdit or a Write
+ *  shows its change instead). A JSON object as `key: value, …`; a lone `result` field (what an
+ *  MCP tool that returns a plain value answers) as that value. Empty: nothing to show. */
+export function resultLine(tool: string, argsPreview: string, r: ToolResult | undefined): string {
+  if (!r || (!r.error && fileChange(tool, argsPreview))) return '';
+  // Claude Code wraps a tool's own error in `<tool_use_error>`: on a line the tags are noise. The
+  // closing one may be cut off (`error_text` is cut at 300 bytes) or have text after it; a text
+  // that does not open with the tag (output that mentions it) stays as it is.
+  const raw = r.error ? r.error_text || r.result_preview : r.result_preview;
+  const text = /^\s*<tool_use_error>/.test(raw)
+    ? raw.replace(/^\s*<tool_use_error>/, '').replace('</tool_use_error>', ' ')
+    : raw;
+  // Only a whole JSON object is read; a cut preview, a number, a list or a text that only starts
+  // like JSON stay as written (written again, `1.10` would read `1.1`).
+  if (!/^\s*\{/.test(text)) return oneLine(text, 400);
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return oneLine(text, 400);
+  }
+  if (!isRecord(value)) return oneLine(text, 400);
+  if (Object.keys(value).length === 1 && 'result' in value) {
+    const v = value.result;
+    return oneLine(typeof v === 'string' ? v : isRecord(v) ? fieldsLine(v) : JSON.stringify(v), 400);
+  }
+  return oneLine(fieldsLine(value), 400);
 }
 
 /** A tool as the Claude Code tab names it: an MCP tool `mcp__<server>__<tool>` as

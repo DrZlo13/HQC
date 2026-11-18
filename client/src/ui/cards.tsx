@@ -17,6 +17,7 @@ import { ContextMenu } from './ContextMenu';
 import {
   argsText,
   askTarget,
+  between,
   buildFeed,
   callArgs,
   callLine,
@@ -26,6 +27,7 @@ import {
   groupDuration,
   groupState,
   relativePaths,
+  resultLine,
   subagentEnd,
   subagentState,
   toolKind,
@@ -336,6 +338,7 @@ export function ActivityLine({
   timeline,
   name,
   now,
+  root,
   foreground,
   onBackground,
 }: {
@@ -343,6 +346,8 @@ export function ActivityLine({
   timeline: Timeline;
   name?: string;
   now?: () => number;
+  /** The session's folder: paths under it are shown relative to it, as in the feed. */
+  root?: string;
   foreground?: string[];
   onBackground?: (callId: string) => void;
 }) {
@@ -364,13 +369,14 @@ export function ActivityLine({
       );
     }
     const line = callLine(call.payload.tool, call.payload.args_preview);
+    const text = relativePaths(line.text, root);
     const callId = call.payload.call_id;
     return (
       <div class="activity activity-running" role="status" aria-live="polite">
         <span class="pulse-dot" aria-hidden="true" />
         {who}
         <span class="activity-label">Running</span>
-        <span class="activity-what mono">{line.text ? (line.shell ? line.text : `${call.payload.tool} ${line.text}`) : call.payload.tool}</span>
+        <span class="activity-what mono">{line.shell && text ? text : [toolLabel(call.payload.tool), text].filter(Boolean).join(' ')}</span>
         <span class="activity-timer">{formatTimer(t - Date.parse(call.ts))}</span>
         {onBackground && foreground?.includes(callId) && (
           <button type="button" class="btn-link activity-background" onClick={() => onBackground(callId)}>
@@ -872,7 +878,8 @@ function Thinking({ event }: { event: EventOf<'agent.thinking'> }) {
     <details class="thinking">
       <summary>
         <IconChevron size={12} />
-        Thinking · {oneLine(event.payload.text, 60)}
+        {/* Cut where the line ends: 2000 characters are wider than any window. */}
+        <span class="thinking-peek">Thinking · {oneLine(event.payload.text.slice(0, 2000), 2000)}</span>
       </summary>
       {/* The feed's own font, no box: prose, as in the VS Code tab. */}
       <div class="thinking-text">{event.payload.text}</div>
@@ -880,9 +887,9 @@ function Thinking({ event }: { event: EventOf<'agent.thinking'> }) {
   );
 }
 
-/** A run of tool calls, collapsed: "N tool calls · time", then the call's line when it is
- *  one, else the tools it called, each once, in the order first called; open, a row per call
- *  (T26). */
+/** A run of tool calls, collapsed: "N tool calls · time", then the call's line and its result
+ *  when it is one, else the tools it called, each once, in the order first called; open, a row
+ *  per call (T26). */
 function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }>; actions: ChatActions }) {
   const [open, setOpen] = useState(false);
   const calls = callRows(block.rows);
@@ -892,6 +899,13 @@ function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }
   const stats = ms !== undefined ? `${n} · ${formatDuration(ms)}` : n;
   const one = calls.length === 1 ? calls[0].call : undefined;
   const peek = one && callPeek(one.payload.tool, one.payload.args_preview, actions.workspaceRoot);
+  const peekResult =
+    one &&
+    resultLine(
+      one.payload.tool,
+      one.payload.args_preview,
+      (actions.timeline.resultFor(one.payload.call_id) ?? calls[0].result)?.payload,
+    );
   const kinds = [...new Set(calls.flatMap((r) => (r.call ? [toolKind(r.call.payload.tool)] : [])))];
   return (
     <div class={`tool-group tool-${state} ${open ? 'is-open' : ''}`}>
@@ -902,7 +916,10 @@ function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }
         <StateMark state={state} />
         <span class="tool-stats">{stats}</span>
         {peek ? (
-          <span class="tool-peek mono">{peek}</span>
+          <>
+            <span class="tool-peek mono">{peek}</span>
+            {peekResult && <span class="tool-result mono">{relativePaths(peekResult, actions.workspaceRoot)}</span>}
+          </>
         ) : (
           calls.length > 1 && kinds.length > 0 && <span class="tool-peek tool-kinds">({kinds.join(', ')})</span>
         )}
@@ -934,8 +951,8 @@ function StateMark({ state }: { state: 'running' | 'unfinished' | 'error' | 'ok'
 }
 
 /** One call: `$ command` for Bash, else the tool and its main argument, paths under the
- *  session's folder relative to it; open, the change of an Edit, a MultiEdit or a Write (its
- *  result only if it failed), else the arguments and the result. */
+ *  session's folder relative to it, then its result; open, the change of an Edit, a MultiEdit or
+ *  a Write (its result only if it failed), else the arguments and the result. */
 function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
   if (row.kind === 'thinking') return <Thinking event={row.event} />;
   const { call } = row;
@@ -943,6 +960,10 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
   const r = result?.payload;
   const state = !r ? (row.unfinished ? 'unfinished' : 'running') : r.error ? 'error' : 'ok';
   const line = call ? callLine(call.payload.tool, call.payload.args_preview) : undefined;
+  const shown = call && resultLine(call.payload.tool, call.payload.args_preview, r);
+  // Claude Code reports no time of a call, so the worker sends no `duration_ms`: from the call to
+  // its result, as the group's time is counted.
+  const ms = r?.duration_ms ?? (call && result ? between(call.ts, result.ts) : undefined);
   return (
     <details class={`tool-row tool-${state}`}>
       <summary>
@@ -951,8 +972,11 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
         ) : (
           <span class="tool-name">{call ? toolLabel(call.payload.tool) : 'Tool result'}</span>
         )}
-        <span class="tool-line mono">
-          {line ? relativePaths(line.text, actions.workspaceRoot) : oneLine(r?.result_preview ?? '', 80)}
+        <span class="tool-text">
+          <span class="tool-line mono">
+            {line ? relativePaths(line.text, actions.workspaceRoot) : oneLine(r?.result_preview ?? '', 80)}
+          </span>
+          {shown && <span class="tool-result mono">{relativePaths(shown, actions.workspaceRoot)}</span>}
         </span>
         {line?.more && (
           // "+N lines"; a cut preview counts only the lines it carries: "+N+ lines", at least that many.
@@ -961,7 +985,7 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
             {line.cut ? '+' : ''} {line.more === 1 && !line.cut ? 'line' : 'lines'}
           </span>
         )}
-        {r?.duration_ms !== undefined && <span class="tool-time">{formatDuration(r.duration_ms)}</span>}
+        {ms !== undefined && <span class="tool-time">{formatDuration(ms)}</span>}
         <StateMark state={state} />
       </summary>
       <ToolCallBody call={call} result={result} actions={actions} />

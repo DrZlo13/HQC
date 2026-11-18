@@ -734,6 +734,32 @@ describe("approval.request (T26 card)", () => {
     expect(optionButtons()).toHaveLength(0);
   });
 
+  it("an answered request's row names its tool and argument as the call's row does; a card names an MCP tool by name and server", () => {
+    const request = (seq: number, tool: string) =>
+      ev("event.approval.request", (e) => {
+        e.seq = seq;
+        e.payload = { ...e.payload, request_id: `req-${seq}`, tool, description: tool, rule_suggestions: [] };
+      });
+    const allowed = (seq: number, request_id: string) =>
+      ev("event.approval.response", (e) => ((e.seq = seq), (e.payload = { ...e.payload, request_id, option_id: "allow" })));
+    const t = new Timeline();
+    t.apply(call(1, "a", "mcp__probe-bench__move", { x: 90.7, y: 80.9 }));
+    t.apply(request(2, "mcp__probe-bench__move"));
+    t.apply(allowed(3, "req-2"));
+    t.apply(call(4, "b", "Read", { file_path: "/w/hqc/src/a.rs" }));
+    t.apply(request(5, "Read"));
+    t.apply(allowed(6, "req-5"));
+    t.apply(call(7, "c", "mcp__probe-bench__home", { axis: "z" }));
+    t.apply(request(8, "mcp__probe-bench__home"));
+    show(t, { workspaceRoot: "/w/hqc" });
+    expect([...root.querySelectorAll(".perm-done-what")].map((s) => s.textContent)).toEqual([
+      "move (probe-bench) x: 90.7, y: 80.9",
+      "Read src/a.rs",
+    ]);
+    expect(root.querySelector(".perm-card .perm-title")!.textContent).toBe("The agent wants to use home (probe-bench)");
+    expect(root.querySelector(".perm-card .perm-what pre")!.textContent).toBe('axis: "z"');
+  });
+
   it("removes the buttons on approval.cancel", () => {
     const t = new Timeline();
     t.apply(ev("event.approval.request", withSeq(1)));
@@ -1315,6 +1341,108 @@ describe("tool groups (T26)", () => {
     expect(one.querySelector(".tool-stats")!.textContent).toMatch(/^1 tool call\b/);
     expect(one.querySelector(".tool-peek.mono")!.textContent).toBe("$ make test");
     expect(one.querySelector(".tool-kinds")).toBeNull();
+  });
+
+  it("a call's line shows its arguments when it has no main one, and its result after them", async () => {
+    // As the worker sends them: no `duration_ms` (Claude Code reports no time of a call).
+    const out = (seq: number, call_id: string, result_preview: string, error_text?: string) =>
+      ev("event.tool.result", (e) => {
+        e.seq = seq;
+        e.ts = new Date(Date.parse("2026-10-22T10:00:00Z") + seq * 1000).toISOString();
+        e.payload = {
+          call_id,
+          error: error_text !== undefined,
+          result_preview,
+          ...(error_text !== undefined && { error_text }),
+        };
+      });
+    // `args_preview` as the worker writes it: the shortest value first (SPEC §4).
+    const preview = (seq: number, call_id: string, tool: string, args_preview: string) =>
+      ev("event.tool.call", (e) => {
+        e.seq = seq;
+        e.ts = new Date(Date.parse("2026-10-22T10:00:00Z") + seq * 1000).toISOString();
+        e.payload = { call_id, tool, args_preview };
+      });
+    const t = new Timeline();
+    t.apply(agentText(1, "Moving.", true));
+    // An MCP tool's input has none of the keys a line reads: its fields in the preview's order,
+    // as Claude Code shows each; a lone `result` field of the answer is its value.
+    t.apply(preview(2, "a", "mcp__probe-bench__move", '{"z":85,"x":90.7,"y":80.9}'));
+    t.apply(out(3, "a", '{"result":"X90.70 Y80.90 Z85.00"}'));
+    t.apply(preview(4, "b", "mcp__gitea__list_issues", '{"limit":5,"owner":"me"}'));
+    t.apply(out(5, "b", '{"total": 2, "items": [1, 2]}'));
+    t.apply(call(6, "c", "mcp__probe-bench__look", {}));
+    t.apply(out(7, "c", "3 files\nchanged"));
+    t.apply(call(8, "d", "Bash", { command: "git status --short" }));
+    t.apply(out(9, "d", " M a.ts\n M b.ts"));
+    // A change that went through shows its change, not its result; a failed one, its error.
+    t.apply(call(10, "e", "Edit", { file_path: "a.ts", old_string: "a", new_string: "b" }));
+    t.apply(out(11, "e", "The file a.ts has been updated successfully."));
+    t.apply(call(12, "f", "Write", { file_path: "b.ts", content: "x" }));
+    t.apply(out(13, "f", "", "File has not been read yet."));
+    // A number or a list stays as written: read and written again, `1.10` would be `1.1`.
+    t.apply(call(14, "h", "Bash", { command: "cat VERSION" }));
+    t.apply(out(15, "h", "1.10"));
+    t.apply(call(16, "i", "Bash", { command: "date +%s%N" }));
+    t.apply(out(17, "i", "1763452800123456789"));
+    // The CLI's own error, in its tags as it writes it; a long one cut at 300 bytes before its
+    // closing tag.
+    t.apply(call(18, "j", "mcp__probe-bench__point", { at: "a1" }));
+    t.apply(
+      out(19, "j", "", "<tool_use_error>Error: No such tool available: mcp__probe-bench__point</tool_use_error>"),
+    );
+    const cut = `<tool_use_error>String to replace not found in file.\nString: ${"x".repeat(300)}`.slice(0, 300);
+    t.apply(call(20, "k", "Edit", { file_path: "c.ts", old_string: "x".repeat(300), new_string: "y" }));
+    t.apply(out(21, "k", "", cut));
+    t.apply(agentText(22, "One more.", true));
+    t.apply(call(23, "g", "mcp__probe-bench__snapshot", { zoom: 2 }));
+    t.apply(out(24, "g", '{"result": 42}'));
+    show(t);
+    const [g, one] = [...root.querySelectorAll(".tool-group")];
+    // Many calls: the head names the tools, no result.
+    expect(g.querySelector(".tool-group-head .tool-result")).toBeNull();
+    // One call: its line and its result.
+    expect(one.querySelector(".tool-peek.mono")!.textContent).toBe("snapshot (probe-bench) zoom: 2");
+    expect(one.querySelector(".tool-group-head .tool-result")!.textContent).toBe("42");
+    await act(async () =>
+      g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
+    );
+    const rows = [...g.querySelectorAll(".tool-row summary")];
+    expect(rows.map((s) => s.querySelector(".tool-line")!.textContent)).toEqual([
+      "z: 85, x: 90.7, y: 80.9",
+      'limit: 5, owner: "me"',
+      "",
+      "git status --short",
+      "a.ts",
+      "b.ts",
+      "cat VERSION",
+      "date +%s%N",
+      'at: "a1"',
+      "c.ts",
+    ]);
+    expect(rows.map((s) => s.querySelector(".tool-result")?.textContent ?? null)).toEqual([
+      "X90.70 Y80.90 Z85.00",
+      "total: 2, items: [1,2]",
+      "3 files changed",
+      "M a.ts M b.ts",
+      null,
+      "File has not been read yet.",
+      "1.10",
+      "1763452800123456789",
+      "Error: No such tool available: mcp__probe-bench__point",
+      // 300 bytes less the 61 of the tag, the sentence and "String: ".
+      `String to replace not found in file. String: ${"x".repeat(239)}`,
+    ]);
+    // Each row's time: from the call to its result.
+    expect(rows.map((s) => s.querySelector(".tool-time")?.textContent)).toEqual(Array(10).fill("1 s"));
+  });
+
+  it("a thinking line shows as much of its text as the line holds, not 60 characters", () => {
+    const text = "The board is resting on a translucent ring, back side up with the connector to the left.";
+    const t = new Timeline();
+    t.apply(ev("event.agent.thinking", (e) => ((e.seq = 1), (e.payload = { text }))));
+    show(t);
+    expect(root.querySelector(".thinking-peek")!.textContent).toBe(`Thinking · ${text}`);
   });
 
   it("takes its mark from the last call", () => {
@@ -2150,6 +2278,22 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
       render(null, root);
       vi.useRealTimers();
     }
+  });
+
+  it("names an MCP tool as the feed does, its arguments after it, paths relative to the session's folder", () => {
+    const line = (tool: string, args: object) => {
+      const t = new Timeline();
+      t.apply(call(1, "a", tool, args));
+      if (root) render(null, root);
+      root = document.createElement("div");
+      document.body.appendChild(root);
+      act(() => render(<ActivityLine state="running" timeline={t} now={() => NOW} root="/w/hqc" />, root));
+      return root.querySelector(".activity-what")!.textContent;
+    };
+    expect(line("mcp__probe-bench__move", { x: 90.7, y: 80.9 })).toBe("move (probe-bench) x: 90.7, y: 80.9");
+    expect(line("mcp__probe-bench__look", {})).toBe("look (probe-bench)");
+    expect(line("Read", { file_path: "/w/hqc/src/a.rs" })).toBe("Read src/a.rs");
+    expect(line("Bash", { command: "cat /w/hqc/Cargo.toml" })).toBe("cat Cargo.toml");
   });
 
   it("a call before the last end of a turn is not the running one", () => {

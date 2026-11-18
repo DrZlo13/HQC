@@ -1699,8 +1699,9 @@ the rest is marked "later"):
   holds the transcript: `409 vscode_open` with `held_by`; no registry data and VS Code wrote
   less than 30 s ago: `409 vscode_active`; worker offline: `409 worker_offline`; archived:
   `409 archived`; service session: `409 system_session`. Since 0.168 `/stop` of a room stops its
-  agents (§7.1.1): `system room_stopped` "Stopped" in the room first, then for each agent that
-  is not archived its open requests cancelled with `stopped` and `session.stop` to its worker;
+  agents (§7.1.1): `system room_stopped` "Stopped" in the room first, then each agent that is
+  not archived stopped as its own `/stop` does (its own requests cancelled with `stopped`, the
+  runtime's left to a connected worker, §10.1, and `session.stop` to its worker);
   the agents' inputs stay as they are (`session.stop` interrupts the current turn only, §5.3),
   and a turn on a message from before "Stopped" posts nothing unless a later one joined it
   (§7.1.1); `{sent}` is `true` when one went out. Since 0.130 `/restart` ends the agent's
@@ -3202,7 +3203,9 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   decision, 2026-11-16). A reply the runtime wrote itself (`runtime: true`, §4: an API error,
   "Credit balance is too low") posts nothing: in a `council`, and from the speaker in a
   `conversation` (below), it is `system room_stopped` "<agent's title>: <the reply>", the reply
-  cut to 200 characters. Any other turn posts nothing: a turn without a final message, a turn
+  cut to 200 characters. An answer cut off by an interruption (`interrupted`, §8.1) posts nothing
+  and counts as a turn without a post. Any other turn posts nothing: a turn without a final
+  message, a turn
   on an input the agent got otherwise (the owner's message in the agent's own session, another
   session's send) that no room's input joined, and a turn on a message from before the room's
   last "Stopped" that no later one joined; its final message, the part of a turn the stop cut
@@ -3247,8 +3250,10 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   `room_stopped` there is no speaker, and the owner's next message wakes the first agent. While
   the room is archived its agents' posts are stored and wake nobody, in both modes.
 - `POST /stop` of the room (§6), in both modes, writes `system room_stopped` "Stopped" and
-  stops every agent's turn; the agents' inputs are not failed (`session.stop` interrupts the
-  current turn only, and the worker keeps the inputs it has, §5.3). A turn on a message from
+  stops every agent as the agent's own Stop does (§8.1: its background subagents spared;
+  §10.1: the runtime's open requests left to a connected worker); the agents' inputs are not failed
+  (`session.stop` interrupts the current turn only, and the worker keeps the inputs it has,
+  §5.3). A turn on a message from
   before "Stopped" posts nothing unless a later one joined it (above), and with no speaker no
   turn's end wakes an agent.
 - The hub decides and stores all of this under one lock per room, in the hub's memory (the hub
@@ -6099,7 +6104,8 @@ next to the address stored with the input, the name stripped of `|`, `[`, `]`, `
 characters) and the agent's own name; `[hqc room` in the text escaped as `[hqc-room-text`); the
 final message of an agent's turn that took such an input, as the turn's own or one that joined it,
 is the agent's post in the room, and one that is exactly `NO_REPLY` its pass (`system room_passed`,
-a quiet line); a post wakes nobody by itself. In `council` the owner's message wakes every agent.
+a quiet line); an answer an interruption cut off (`interrupted`) posts nothing and counts as a turn
+without a post; a post wakes nobody by itself. In `council` the owner's message wakes every agent.
 In `conversation` the agents speak one at a time in the room's order: the owner's message wakes the
 speaker, else the first agent; the end of the speaker's turn (`status idle` or `error`, a lost
 turn), with none of its inputs from the room still pending, moves the circle on: its latest post

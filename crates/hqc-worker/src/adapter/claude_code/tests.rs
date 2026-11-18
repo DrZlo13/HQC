@@ -5926,6 +5926,50 @@ fn a_subagent_waiting_on_its_background_command_still_counts() {
     assert_eq!(task_counts(MOVED_SUBAGENT.lines()), want);
 }
 
+/// The CLI's own watcher of the comments on a page the agent published (`ambient: true`, it
+/// stays for the whole process) is no background work: the count leaves it out, also when it
+/// reconnects and leaves and rejoins the list.
+#[test]
+fn an_ambient_task_is_no_background_work() {
+    const LINES: &str = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"w1","task_type":"monitor_ws","description":"Comments on the page","ambient":true}]}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"w1","task_type":"monitor_ws","description":"Comments on the page","ambient":true},{"task_id":"b1","task_type":"local_bash","description":"Run the checks"}]}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"w1","task_type":"monitor_ws","description":"Comments on the page","ambient":true}]}
+{"type":"system","subtype":"background_tasks_changed","tasks":[]}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"w2","task_type":"monitor_ws","description":"Comments on the page","ambient":true}]}"#;
+    let want: [&[&str]; 5] = [
+        &[],
+        &["background_tasks:1"],
+        &["background_tasks:0"],
+        &[],
+        &[],
+    ];
+    assert_eq!(task_counts(LINES.lines()), want);
+}
+
+/// A subagent publishes a page and ends without a report (`handback`): 2.1.312 leaves the
+/// page's comment watcher in the list with the subagent as its `parent_task_id`. The watcher
+/// does not keep the subagent counted: it ends at the next line of another kind.
+#[test]
+fn an_ambient_task_of_a_subagent_does_not_keep_it_running() {
+    const LINES: &str = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"A","task_type":"local_agent"}]}
+{"type":"system","subtype":"task_started","task_id":"A","description":"Publish the page","is_backgrounded":true,"task_type":"local_agent"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"A","task_type":"local_agent"},{"task_id":"w1","task_type":"monitor_ws","description":"Comments on the page","parent_task_id":"A","ambient":true}]}
+{"type":"system","subtype":"task_updated","task_id":"A","patch":{"status":"completed"}}
+{"type":"system","subtype":"task_notification","task_id":"A","status":"completed","summary":"Published the page."}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"w1","task_type":"monitor_ws","description":"Comments on the page","parent_task_id":"A","ambient":true}]}
+{"type":"result","subtype":"success","num_turns":1}"#;
+    let want: [&[&str]; 7] = [
+        &["background_tasks:1", "subagents:1"],
+        &[],
+        &[],
+        &[],
+        &[],
+        &["background_tasks:0"],
+        &["subagents:0", "turn_ended"],
+    ];
+    assert_eq!(task_counts(LINES.lines()), want);
+}
+
 /// [`MOVED_SUBAGENT`]: the CLI lists the subagent before its `task_started`, so it is shown
 /// with no title until that start gives it one; its start again when the `ping` ends sends
 /// nothing; it goes when it stops counting. That start keeps its run time from the first one

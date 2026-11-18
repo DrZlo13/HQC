@@ -164,15 +164,41 @@ async fn find(
 }
 
 /// The owner's session `addr` points at for reading, archived ones and rooms too, with its
-/// address.
-pub(crate) async fn reader(
+/// address; an agent of a room reads neither the room nor another agent of it
+/// ([`not_read_in_my_room`]).
+pub(crate) async fn readable(
     app: &AppState,
     caller: &SessionRow,
     addr: &str,
 ) -> Result<(SessionRow, String), McpError> {
     let t = locate(app, caller, addr).await?;
     let a = address(app, &t).await.map_err(internal)?;
+    not_read_in_my_room(caller, &t, &a)?;
     Ok((t, a))
+}
+
+/// An agent of a room does not see the answers of the others to the message it answers: what is
+/// said in the room comes to it with its next input from the room (SPEC §7.1.1), so reading the
+/// room, or another agent of it, would show it early. `t` — the session found for address `to`;
+/// the caller's own session passes.
+fn not_read_in_my_room(caller: &SessionRow, t: &SessionRow, to: &str) -> Result<(), McpError> {
+    let Some(room) = caller.room_id else {
+        return Ok(());
+    };
+    let what = if t.id == room {
+        "your room"
+    } else if t.room_id == Some(room) && t.id != caller.id {
+        "another agent of your room"
+    } else {
+        return Ok(());
+    };
+    Err(err(
+        error_code::INVALID_ARGS,
+        format!(
+            "{to} is {what}: what is said there comes to you with your input from the room, \
+             not by reading"
+        ),
+    ))
 }
 
 /// The agents of a room speak in the room (SPEC §7.1.1): what one sends or schedules another

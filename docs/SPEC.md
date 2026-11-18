@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.175, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
+Version 0.176, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1082,9 +1082,10 @@ MCP calls (worker → hub → worker):
   request, §8.1). The client sends a `stoppable` row of the session's `subagents.live` (§4).
   Like `session.kill` it is acked also when no agent runs; what the runtime answers (stopped,
   refused) is only in the worker's log, and the task's end comes as any end of it.
-- `session.subagent_history` {request_id, session_id, task_id, after?} → `result {request_id,
-  events[], truncated, continues?}` (since 0.175) — what subagent `task_id` of `subagents.live`
-  (§4) has done, for the history the client opens under its line (§6); nothing is stored.
+- `session.subagent_history` {request_id, session_id, task_id, after?, before?} → `result
+  {request_id, events[], truncated, continues?}` (since 0.175) — what subagent `task_id` of
+  `subagents.live` (§4) has done, for the history the client opens under its line (§6) and, since
+  0.176, for `hqc_read` (§7); nothing is stored.
   `task_id` is 1 to 64 bytes of `[A-Za-z0-9_-]`, since the worker reads a file by it, else
   `error {invalid_frame}`. The worker
   reads the subagent's transcript (Claude Code: §8.1), only its last 4 MiB, since one runs to
@@ -1099,7 +1100,10 @@ MCP calls (worker → hub → worker):
   when it is not (more than 200 new ones or more than 512 KiB of them, or the tail read moved past
   it), the whole page, without
   `continues`. A worker that does not know `after` ignores it and sends the whole page, which the
-  client takes in place of its own. A session the worker has not started is
+  client takes in place of its own. `before` (since 0.176, `hqc_read` pages back with it) is the
+  `event_id` of an event: the page is then the newest events before it, under the same caps, and
+  `truncated` when older ones were left out; one that is not among the events read gives no
+  events and `truncated`. The hub never sends both. A session the worker has not started is
   `error {unknown_session}`. As for `fs.stat`, `request_id` equals the frame's `id` and the hub
   waits 10 s for the answer.
 - `session.steer` {session_id, text} — intervene in a turn without interrupting it, if the
@@ -2867,6 +2871,31 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   moves, nothing is written. An agent of a room cannot read its room or another agent of it
   (`invalid_args`): what is said there comes to it with its input from the room, and in a `council`
   it does not see the others' answers to the message it answers. Its own session it reads.
+  Since 0.176: `hqc_read(session?, subagent, before_event?, after_event?, thinking?)` reads what a
+  subagent of the session has done, while it works and after (the agent otherwise sees only its
+  final report). `subagent` is its id, the `task_id` of `subagents.live` (Claude Code: the
+  `agentId` the result of its `Agent` call names); without `session`, a subagent of the calling
+  session. The session is found and refused as above, and the hub asks its worker with
+  `session.subagent_history` (§5.3), the request of the client's history (§6): `before_event` goes
+  as `before`, `after_event` as `after`, and the call waits off the connection's loop, since the
+  worker answers on the connection the call may have come by. The page is cut as a session's is,
+  at most 100 events and 64 KiB, one always returned: from its newest end without a cursor, with
+  `before_event`, and with an `after_event` the worker's page does not hold; from its oldest end
+  when it continues after `after_event`. `agent.thinking` is left out, costing nothing, unless
+  `thinking: true`. The result is `{address, subagent, events (oldest first), earlier?, later?,
+  gap?}`: `earlier` (the `event_id` to pass as `before_event`) when older events exist; `later`
+  (to pass as `after_event`, for the next steps now or later on, while the subagent works) the
+  newest event of every page not read with `before_event`, and the `after_event` itself when
+  nothing came after it; `gap: true` when the events do not follow `after_event` (more came since
+  than one page of the worker holds, or the event is no longer read) and the ones between are
+  read back with `earlier`. Only the last 4 MiB of the subagent's transcript are read (§8.1), so
+  the oldest steps of a long one are not there, and an id with no transcript gives no events.
+  `before_seq` or `after_seq` with `subagent`, `before_event`, `after_event` or `thinking: true`
+  without it, both `*_event`, no `session` and no `subagent`, and a `subagent` that is not 1 to
+  64 bytes of `[A-Za-z0-9_-]` are `invalid_args`; a session without a worker or with its
+  `process_state` `stopped` (without the agent's process its worker finds no transcript), its
+  worker offline, busy or silent for 10 s, and a session its worker has not started
+  (`unknown_session`) are `unavailable`.
 - `hqc_schedule(session, at|cron, message)` — the hub's cron (§16). Since 0.38 (T35):
   `hqc_schedule(session, message, at?, cron?, timezone?, catch_up?)`; `session` — an address or
   an id of the owner's session (the calling one too), by the target rules of §7.1 except that a
@@ -4158,8 +4187,9 @@ anything but a regular file (a FIFO would hang the read), gives none. Of a file 
 the last 4 MiB are read, the line cut at their start left out, and the reply is `truncated`. The
 reply keeps the newest of them, at most 200 that take at most 512 KiB as JSON
 together; one over that alone is left out, and the ones before it are kept. With `after` among
-them, only the ones after it, with `continues` and not `truncated`; the ids it compares are of §3,
-from the records' `uuid`, so one event has the same id in every read.
+them, only the ones after it, with `continues` and not `truncated`; with `before` (since 0.176)
+the caps apply to the events before it alone; the ids it compares are of §3, from the records'
+`uuid`, so one event has the same id in every read.
 Since 0.173 the worker reports what the main agent waits on as `session.state.activity` (§5.4),
 whenever it changes, a new thinking estimate at most once per 2 s (the CLI sends one with every
 piece of a thinking, about ten a second), and none when the agent's process stops. `system`
@@ -6498,6 +6528,18 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.175 → 0.176 (`hqc_read` reads a subagent's work)
+§5.3, §7, §8.1: an agent knew what its subagent did only from its final report, and nothing while
+it worked; the client's history of a subagent (0.175) was for a person. `hqc_read` takes
+`subagent` (without `session`, one of the calling session) and answers with the subagent's steps
+in pages of at most 100 events and 64 KiB, `agent.thinking` only with `thinking: true`, paged with
+`before_event` and `after_event` and the `earlier`, `later` and `gap` of the result; `later` of the
+newest page is also what the agent passes to read only the steps that came since. It asks the
+worker with the client's `session.subagent_history`, which gets `before`: the newest events before
+that one, under the same caps. Only the last 4 MiB of the transcript are read, as for the client.
+An older worker ignores `before` and sends its newest page, so paging back from it repeats that
+page; the client's history does not change. No migration.
 
 ### 0.174 → 0.175 (a background task's end, the CLI's own tasks, a subagent's request and history)
 §5.4, §8.1, §17.3: a subagent the CLI marks `ambient: true` (no activity, the SDK says) was counted

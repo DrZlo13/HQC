@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.172, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
+Version 0.186, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -819,12 +819,29 @@ Worker → hub:
   without final text (only `status idle|error`) stays "in progress" until the next turn when
   its `ack` is late like this **[verify]**.
 - A session's `session.state` bypasses the outbox too, but since 0.75 the worker sends it only
-  after the outbox entries written before it, also in what it sends at once when it stops. The
-  hub ends an open turn as lost on `stopped` (§17.3), and a stop right after a turn (a move,
-  §5.3) used to reach it before that turn's final `agent.message` in a few restarts of a
-  hundred. Since 0.171 so does an `ack` that names an `event_id` (the answer to
-  `session.input`), and on the connection they were queued on both keep their place: after the
-  outbox entries written before the frame was queued and before those written after it. The
+  after the outbox entries written before it (since 0.186 only up to the last one of its session
+  or its transcript), also in what it sends at once when it stops. The hub ends an open turn as lost on `stopped` (§17.3),
+  and a stop right after a turn (a move, §5.3) used to reach it before that turn's final
+  `agent.message` in a few restarts of a hundred. Since 0.171 so does the answer to a
+  `session.input` that names an `event_id`: the `ack`, the joined `ack`; since 0.186 also an
+  `error` answer (`locked_vscode`, an attachment or start failure, Stop, `unknown_session`),
+  which matters for whoever reacts to a failed delivery relative to a turn's end. Each outbox
+  entry carries its stream: the session's id for its events and its `mcp.call`s, the service
+  session's id for the worker's log lines, the transcript's id (`runtime_session_id`) for a `mirror.event` and a holder report
+  (§5.4, §9.3). On the connection a frame was queued on, a frame that keeps its place goes after
+  every outbox entry up to the last entry of its own session's stream or its transcript's that
+  was written before it, and before those written after it. The outbox is sent in order by one
+  cursor, so the entries of other sessions written before that last entry still go first; a frame
+  of a session with no entries (or only old ones) no longer waits for the rest of the outbox,
+  which before 0.186 it did, up to the last entry of every session (after a mirror import of tens
+  of thousands of entries, the `ack` of one session's input waited for all of them, 256 un-acked
+  at a time). The connection reads from the outbox only the entries up to that point, not every
+  unsent row. A batch the connection is already sending still holds the whole direct channel
+  until it is sent, or until the connection drops on a window that stays full, as it did before
+  0.171: this change does
+  not serve the direct frames in the middle of a batch. The transcript matters for the holder
+  report: the session's `locked_by: vscode` must not reach the hub before the report of the
+  transcript's holder, which the mirror wrote just before it (§9.3). The
   hub opens a turn on an input's `ack` and closes it on a final `agent.message` or `status
   idle` (§17.1). So the next input's `ack` never reaches the hub before the final answer and
   `status` of the turn before it, which closed that input's turn as it opened (the session was
@@ -841,8 +858,8 @@ Hub → worker:
   `session.input`. The worker answers `ack {event_id}` after handing the input to the runtime
   (Claude Code — after the `--replay-user-messages` echo; ACP — after sending `session/prompt`).
   Since 0.70 `ack {event_id, joined: true}` says the input went into the turn already running
-  (§17.2): the hub marks it `delivered` and does not open a turn for it (the `ack` goes past the
-  worker's outbox and may come after that turn's final answer); since 0.112 it keeps that on the
+  (§17.2): the hub marks it `delivered` and does not open a turn for it (its `ack` goes after the
+  outbox entries of the session written before it, §5.2); since 0.112 it keeps that on the
   message as `payload.joined: true` and sends it to clients with the `delivery` frame (§6).
   After `hello` the hub sends `session.start` with `mode: resume` to every session of this worker
   that has a `pending` input, an open `approval`/`clarify` or an answer to a request not yet
@@ -6184,6 +6201,27 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.172 → 0.186 (a keep-place frame waits for its session's entries, not the whole outbox)
+§5.2: a `session.state` and the answers to a `session.input` keep their place among the outbox
+entries (0.171), but the frame waited for the last entry of the whole outbox, the entries of every
+session, and each such frame made the connection load every unsent row to send a part of them.
+After a mirror import the `ack` of one session's input waited until all the imported entries were
+sent (256 un-acked at a time), and the direct frames queued behind it (deltas, replies to
+`fs.stat`, the `ack` of a `session.start`) with it; nothing was lost, only late. The order is
+needed only within a session and its transcript. The outbox now stores each entry's stream
+(`outbox.stream`: the session's id for its events, `mcp.call`s and the worker's log lines, the
+transcript's id for a `mirror.event` and a holder report; an outbox from before keeps `''` for its
+old entries, which a connection sends in full before any direct frame). A frame that keeps its
+place goes after every entry up to the last one of its session's stream or its transcript's (the
+transcript: the holder report the mirror wrote just before a `locked_by: vscode` state must come
+first, §9.3); one cursor sends the outbox in order, so other sessions' entries before that one
+still go first, and a frame of an idle session no longer waits for the rest of the outbox. The
+connection reads only the entries up to the frame's. A batch the connection is already sending
+still holds the whole direct channel until it is sent, as before 0.171. An `error` answer to a
+`session.input` (`locked_vscode`, an attachment or start failure, Stop, `unknown_session`) now
+keeps its place like the `ack` and the joined `ack`, which matters for whoever reacts to a failed
+delivery relative to a turn's end. Only the worker changes.
 
 ### 0.171 → 0.172 (the agents' room)
 §7.1.1 (new), §3, §4, §6, §7, §7.1, §15, §16, §17.2: the owner could talk to one agent per chat,

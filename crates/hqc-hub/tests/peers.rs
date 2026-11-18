@@ -364,6 +364,181 @@ async fn an_ask_to_a_paused_session_is_refused_at_once() {
     hub.finish().await;
 }
 
+/// SPEC §17.2: a `send` the worker acks `joined` went into the turn already running: the hub
+/// keeps `payload.joined` on it and opens no turn for it (its ack, which can come after that
+/// turn's final answer, must not open the turn again).
+#[tokio::test]
+async fn a_joined_ack_on_a_send_is_kept_and_opens_no_turn() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (_, ta) = started(&hub, &mut w, "Asker", None).await;
+    let (b, _) = started(&hub, &mut w, "Helper", None).await;
+    let (_, r) = hub
+        .post(&format!("/api/sessions/{b}/input"), json!({"text": "work"}))
+        .await;
+    let work = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    w.reply(&si["id"], "ack", json!({"event_id": work})).await;
+    hub.wait_session(&b, "running", |v| v["state"] == "running")
+        .await;
+
+    let rid = Uuid::now_v7().to_string();
+    call_with(
+        &mut w,
+        &ta,
+        "hqc_send",
+        json!({"text": "FYI", "session": "personal/helper"}),
+        &rid,
+    )
+    .await;
+    let f = frames(&mut w, 2).await;
+    assert_eq!(
+        pick(&f, "mcp.result")["payload"]["result"]["delivery"],
+        "queued"
+    );
+    let send = pick(&f, "session.input").clone();
+    assert_eq!(send["payload"]["peer"]["mode"], "send");
+    // The turn ends before the send's ack arrives.
+    w.event(agent_event(
+        &b,
+        "agent.message",
+        json!({"text": "done", "final": true, "in_reply_to": work}),
+    ))
+    .await;
+    hub.wait_session(&b, "turn closed", |v| v["state"] == "queued")
+        .await;
+    let sent = send["payload"]["event_id"].clone();
+    w.reply(
+        &send["id"],
+        "ack",
+        json!({"event_id": sent, "joined": true}),
+    )
+    .await;
+    w.send(
+        "session.state",
+        json!({"session_id": b, "process_state": "running", "locked_by": "hqc"}),
+    )
+    .await;
+    w.expect("ack").await;
+    let v = hub.session(&b).await;
+    assert_eq!(
+        (v["queue_len"].as_u64(), v["state"].as_str()),
+        (Some(0), Some("idle")),
+        "{v}"
+    );
+    let events = hub.events(&b).await;
+    let stored = events.iter().find(|e| e["event_id"] == sent).unwrap();
+    assert_eq!(stored["delivery"], "delivered");
+    assert_eq!(stored["payload"]["joined"], true, "{stored}");
+    hub.finish().await;
+}
+
+/// A turn of `b` on a person's input, an `hqc_ask` X of the asker (token `ta`) queued behind it
+/// and a person's input P1 that joined the running turn past X (SPEC §17.2): X runs as the
+/// next turn and has a lower `seq` than P1, delivered before it. Returns the ask's request id
+/// and X's event id once X's turn runs.
+async fn ask_run_after_a_bypass(
+    hub: &TestHub,
+    w: &mut FakeWorker,
+    ta: &str,
+    b: &str,
+) -> (String, String) {
+    let (_, r) = hub
+        .post(&format!("/api/sessions/{b}/input"), json!({"text": "work"}))
+        .await;
+    let work = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    w.reply(&si["id"], "ack", json!({"event_id": work})).await;
+    hub.wait_session(b, "running", |v| v["state"] == "running")
+        .await;
+    let (rid, x) = ask_same_worker(
+        w,
+        ta,
+        json!({"text": "green?", "session": "personal/helper"}),
+    )
+    .await;
+    let (_, r) = hub
+        .post(&format!("/api/sessions/{b}/input"), json!({"text": "mine"}))
+        .await;
+    let p1 = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    assert_eq!(si["payload"]["event_id"], p1);
+    w.reply(&si["id"], "ack", json!({"event_id": p1, "joined": true}))
+        .await;
+    w.event(agent_event(
+        b,
+        "agent.message",
+        json!({"text": "done", "final": true, "in_reply_to": work}),
+    ))
+    .await;
+    // The ask runs as the turn after it: its ack comes later than P1's.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    ack_input(w, &x).await;
+    hub.wait_session(b, "running", |v| v["state"] == "running")
+        .await;
+    (rid, x["payload"]["event_id"].as_str().unwrap().to_string())
+}
+
+/// SPEC §7.1: the turn's input is the last one delivered by delivery time, not by `seq`: an
+/// input that joined the turn before wins over a waiting ask only until the ask is delivered.
+/// The calls of the ask's turn carry the ask's chain.
+#[tokio::test]
+async fn the_calls_of_an_ask_run_after_a_bypass_carry_its_chain() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (a, ta) = started(&hub, &mut w, "Asker", None).await;
+    let (b, tb) = started(&hub, &mut w, "Helper", None).await;
+    let (_, x) = ask_run_after_a_bypass(&hub, &mut w, &ta, &b).await;
+
+    // The reply goes to the asker with the answer to its ask (`with_reply`), as an event of it.
+    let r = fast(
+        &mut w,
+        &tb,
+        "hqc_send",
+        json!({"text": "from the ask's turn", "session": &a}),
+    )
+    .await;
+    assert!(r["result"].is_object(), "{r}");
+    let events_b = hub.events(&b).await;
+    let ask_chain = events_b.iter().find(|e| e["event_id"] == x).unwrap()["chain"].clone();
+    let sent = hub
+        .events(&a)
+        .await
+        .into_iter()
+        .find(|e| e["type"] == "peer.message" && e["payload"]["text"] == "from the ask's turn")
+        .unwrap();
+    assert_eq!(sent["chain"]["chain_id"], ask_chain["chain_id"], "{sent}");
+    hub.finish().await;
+}
+
+/// SPEC §7.1: a turn lost after such a bypass fails the ask that runs it, not at its timeout.
+#[tokio::test]
+async fn a_lost_turn_of_an_ask_run_after_a_bypass_fails_it() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (_, ta) = started(&hub, &mut w, "Asker", None).await;
+    let (b, _) = started(&hub, &mut w, "Helper", None).await;
+    let (rid, _) = ask_run_after_a_bypass(&hub, &mut w, &ta, &b).await;
+
+    w.send(
+        "session.state",
+        json!({"session_id": b, "process_state": "stopped", "locked_by": "none"}),
+    )
+    .await;
+    let r = loop {
+        let f = w.recv().await;
+        if f["type"] == "mcp.result" {
+            break f;
+        }
+    };
+    assert_eq!(r["payload"]["request_id"], rid.as_str());
+    assert_eq!(r["payload"]["error"]["code"], "unavailable", "{r}");
+    hub.finish().await;
+}
+
 #[tokio::test]
 async fn sends_wait_in_the_buffer_for_the_next_input() {
     let hub = TestHub::start().await;

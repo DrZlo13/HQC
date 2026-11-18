@@ -299,10 +299,10 @@ pub async fn on_input_ack(
         // already running (`joined`, kept on the message). The ack bypasses the worker's
         // outbox and may come after the turn's own events (SPEC §5.2): a turn that already
         // has its final answer stays closed, and a joined input's ack after that answer must
-        // not open it again. Only a person's message and a room's input (which the worker
-        // gets without a peer header, §7.1.1) join (§17.2): a `joined` on another input (a
-        // `peer.message` of `hqc_send`, a run of a schedule) is the worker's mistake, it is
-        // not kept, and its turn opens.
+        // not open it again. A person's message, a room's input (which the worker gets
+        // without a peer header, §7.1.1) and a `send` of another session join (§17.2): a
+        // `joined` on another input (an `hqc_ask`, a run of a schedule) is the worker's
+        // mistake, it is not kept, and its turn opens.
         let kept = is_joined(&row);
         if joined && !kept {
             tracing::warn!(%session_id, %event_id, kind = %row.kind, "a worker joined an input that cannot join a turn; its turn opens");

@@ -125,6 +125,18 @@ describe('layout widths', () => {
     expect([spawned['white-space'], spawned['overflow'], spawned['text-overflow']]).toEqual(['nowrap', 'clip', 'ellipsis']);
   });
 
+  it("a message's images stand in one row while they fit, any other file keeps a row of its own", () => {
+    for (const box of ['.attachments', '.relay-files']) {
+      expect(rule(box)['flex-wrap'], box).toBe('wrap');
+      expect(rule(box)['flex-direction'], box).toBeUndefined();
+    }
+    expect(rule('.attachments > .attachment')['flex']).toBe('1 1 100%');
+    expect(rule('.relay-files > *')['flex']).toBe('1 1 100%');
+    // Two classes, as `.attachments > .attachment`, and after it: it wins for an image.
+    expect(rule('.attachments > .attachment-kind-image, .relay-files > .attachment-kind-image')['flex']).toBe('0 1 auto');
+    expect(CSS.indexOf('.attachments > .attachment-kind-image')).toBeGreaterThan(CSS.indexOf('.attachments > .attachment {'));
+  });
+
   it("a dot has a width as well as a flex basis: Safari sizes a project's running mark by its items' widths", () => {
     expect([rule('.dot')['flex'], rule('.dot')['width']]).toEqual(['0 0 8px', '8px']);
     for (const sel of ['.sessions-phone .dot', '.preview-row .dot']) {

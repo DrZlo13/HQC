@@ -3776,8 +3776,13 @@ a.relay-peer {
 
 .relay-files {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   gap: 4px;
+}
+
+.relay-files > * {
+  flex: 1 1 100%;
+  min-width: 0;
 }
 
 .relay .card-attachment,
@@ -6803,6 +6808,13 @@ button.ps-look {
 .attachments > .attachment {
   flex: 1 1 100%;
   min-width: 0;
+}
+
+/* An image of a message takes its own width: images stand in one row while they fit and
+   wrap when they do not; any other file keeps a row of its own. */
+.attachments > .attachment-kind-image,
+.relay-files > .attachment-kind-image {
+  flex: 0 1 auto;
 }
 
 .attachment-image {

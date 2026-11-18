@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.170, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
+Version 0.171, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -812,7 +812,18 @@ Worker → hub:
   after the outbox entries written before it, also in what it sends at once when it stops. The
   hub ends an open turn as lost on `stopped` (§17.3), and a stop right after a turn (a move,
   §5.3) used to reach it before that turn's final `agent.message` in a few restarts of a
-  hundred.
+  hundred. Since 0.171 so does an `ack` that names an `event_id` (the answer to
+  `session.input`), and on the connection they were queued on both keep their place: after the
+  outbox entries written before the frame was queued and before those written after it. The
+  hub opens a turn on an input's `ack` and closes it on a final `agent.message` or `status
+  idle` (§17.1). So the next input's `ack` never reaches the hub before the final answer and
+  `status` of the turn before it, which closed that input's turn as it opened (the session was
+  not `running` while its agent worked on it), and an input the CLI takes at a turn's end
+  without an echo (a local slash command, §8.1) is acknowledged before that turn's `status
+  idle`, which names no input: an `ack` after it opened a turn after that turn's end, `running`
+  until the next turn or the turn watchdog (§17.3). A frame queued while the worker connects
+  again goes after the whole outbox, and an `ack` lost with the link comes again only after it
+  (the late `ack` above). An input's `ack` may still come after events of its own turn (above).
 - An event for a session of another worker is handled as for an unknown one: `ack` without `seq`.
 
 Hub → worker:
@@ -3462,8 +3473,9 @@ input of a turn, for `in_reply_to`, is the one whose `started` or echo begins a 
 during a turn the CLI began by itself (the first input of a process, and every input with a CLI
 that sends no such lines: the one written). At `result`
 an input written and not echoed is taken when its last line is `started` or `completed` (a
-local slash command), carried into the next turn, which the CLI then runs by itself, when it is
-only `queued`, and not taken when `cancelled`; without lifecycle lines it is carried when it was
+local slash command; since 0.171 before the events of that `result`, its final message, usage
+and `status idle`, §5.2), carried into the next turn, which the CLI then runs by itself, when it
+is only `queued`, and not taken when `cancelled`; without lifecycle lines it is carried when it was
 written during the turn, taken otherwise. A carried input whose line after that `result` is
 `cancelled` (a second Stop before it started) ends the turn it was carried into, for which no
 `result` comes: it is not taken, the other inputs carried with it stay carried, and with none
@@ -5838,6 +5850,21 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.170 → 0.171 (an input's ack keeps its place)
+§5.2, §8.1: the worker sends an input's `ack` past its outbox, and its connection picked between
+the outbox and such a frame at random, so the `ack` could reach the hub before events written
+before it. The hub opens a turn on an input's `ack` and closes it on a final `agent.message` or
+`status idle` (§17.1): the next input's `ack`, ahead of the final answer and `status` of the turn
+before it, had its turn closed as it opened, the session not `running` while its agent worked on
+that input; and the Claude Code adapter acknowledged an input the CLI takes at a turn's end
+without an echo (a local slash command) after that turn's final message, usage and `status idle`,
+so its `ack` opened a turn after the turn's end, `running` until the next turn or the turn
+watchdog (§17.3). An input's `ack` and `session.state` now keep their place among the outbox
+entries, after those written before them and before those written later, so the next input's
+`ack` never overtakes the turn before it, and the adapter acknowledges a local slash command
+before the events of its turn's `result` (the final message, usage, `status idle`). Only the
+worker changes.
 
 ### 0.169 → 0.170 (a compaction's usage line shows its tokens)
 §4 `usage`, §8.1: a `/compact` ends with a `result` whose `usage` has zeros but which costs, so

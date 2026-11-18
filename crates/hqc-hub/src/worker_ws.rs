@@ -155,8 +155,17 @@ impl WorkerConn {
         }
     }
 
+    /// `h-<connection>-<n>` (SPEC §5): the ids of one connection are not those of another. A
+    /// worker answers a frame of an earlier connection after reconnecting under that frame's id
+    /// (an input it held until the agent took it); with `h-<n>` counted from 1 on each
+    /// connection the answer matched another frame of the new one, and the hub credited that
+    /// frame's input or start with it. `<connection>` — the random low bits of `conn_id`.
     fn next_frame_id(&self) -> String {
-        format!("h-{}", self.next_id.fetch_add(1, Ordering::Relaxed))
+        format!(
+            "h-{:08x}-{}",
+            self.conn_id.as_u128() as u32,
+            self.next_id.fetch_add(1, Ordering::Relaxed)
+        )
     }
 
     /// A closed channel means the connection is going away; a full one drops the

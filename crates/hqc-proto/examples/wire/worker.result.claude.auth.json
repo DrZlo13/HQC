@@ -1,0 +1,8 @@
+{
+  "id": "h-41",
+  "type": "result",
+  "payload": {
+    "request_id": "h-41",
+    "claude_auth": { "logged_in": true, "auth_method": "claude.ai", "email": "owner@example.com", "org_name": "Example Org", "subscription_type": "team", "expires_at": "2026-12-12T20:53:03.852Z" }
+  }
+}

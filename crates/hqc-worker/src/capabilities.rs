@@ -22,7 +22,8 @@ pub async fn detect(claude_bin: Option<&Path>) -> Value {
 pub fn build(claude_version: Option<&str>) -> Value {
     let mut caps = json!({ "acp_agents": [] });
     if let Some(v) = claude_version {
-        caps["claude_code"] = json!({ "version": v });
+        // `login`: the worker signs its Claude Code in from hqc (SPEC 0.185).
+        caps["claude_code"] = json!({ "version": v, "login": true });
     }
     caps
 }

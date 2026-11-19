@@ -1,0 +1,8 @@
+{
+  "id": "h-43",
+  "type": "result",
+  "payload": {
+    "request_id": "h-43",
+    "login_done": { "ok": true, "status": { "logged_in": true, "auth_method": "claude.ai", "email": "owner@example.com", "subscription_type": "team" } }
+  }
+}

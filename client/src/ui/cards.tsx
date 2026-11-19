@@ -524,6 +524,20 @@ function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => numb
       </Line>
     );
   }
+  // The worker's Claude Code is signed out (SPEC 0.185): its sign-in is in Settings → Workers.
+  if (p.code === 'claude_signed_out') {
+    return (
+      <Line kind={kind}>
+        <span class="warn-icon" role="img" aria-label="Warning">
+          <IconWarn />
+        </span>
+        <Markdown text={p.text} />
+        <a class="btn btn-small line-sign-in" href="#/settings">
+          Sign in
+        </a>
+      </Line>
+    );
+  }
   return (
     <Line kind={caption ? kind : 'system'}>
       {warning && (

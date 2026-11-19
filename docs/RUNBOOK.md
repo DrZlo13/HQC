@@ -1023,7 +1023,7 @@ The name and OS come from the new enrollment (use `--name` to keep the old one).
 processes of the old run are considered finished (as on a worker restart): input continues
 through `--resume`. If "New worker" was confirmed by mistake, revoke it, then re-enroll the
 machine once more replacing the old one; a spare worker without sessions is removed with the
-"Delete" button (§2.6).
+"Delete" button (§2.7).
 
 ### 2.4 launchd agent for `run`
 
@@ -1090,7 +1090,19 @@ worker token`: the token is revoked or this is the wrong hub; `worker update nee
 version does not match (the worker retries once an hour and does nothing else); `agent start failed`:
 `claude` does not start (path, login).
 
-### 2.6 Token revocation
+### 2.6 Signing the worker's Claude Code in
+
+When a turn ends with "Claude Code on this worker is signed out" (or `claude auth status` on the
+machine says so), sign it in from the client, not on the machine: "Settings" → "Workers" →
+"Sign in" under the worker (SPEC 0.185). "Open the sign-in page" opens Anthropic's page; sign in
+with the account this machine should use, copy the code it shows, paste it into the field and
+"Send". The worker runs `claude auth login` itself, so the tokens land where the CLI keeps them
+(the login Keychain on macOS: the worker runs in the GUI domain, where it is unlocked) and never
+pass through the hub. A worker older than 0.185 has no "Sign in": update it, or run `claude` in
+a terminal on the machine (not over ssh: the Keychain is locked there, and the CLI writes
+`~/.claude/.credentials.json` instead).
+
+### 2.7 Token revocation
 
 In the client: "Settings" → "Workers" → "Revoke". The hub marks the token revoked, drops the
 connection and archives the worker's service session (with the line `Token of worker “…” revoked` in it);

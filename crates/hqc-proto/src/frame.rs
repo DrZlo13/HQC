@@ -604,6 +604,18 @@ pub enum HubFrame {
     /// Forget one of them (since SPEC 0.147).
     #[serde(rename = "workspace.key_delete")]
     WorkspaceKeyDelete(WorkspaceKeyDelete),
+    /// The sign-in of the worker's own Claude Code (since SPEC 0.185, §5.3).
+    #[serde(rename = "claude.auth")]
+    ClaudeAuth(ClaudeAuthRequest),
+    /// Start a sign-in of the worker's Claude Code: the answer is the page to sign in on.
+    #[serde(rename = "claude.login")]
+    ClaudeLogin(ClaudeAuthRequest),
+    /// The code that page gave, for the sign-in `login_id`.
+    #[serde(rename = "claude.login_code")]
+    ClaudeLoginCode(ClaudeLoginCode),
+    /// Give up the sign-in `login_id`.
+    #[serde(rename = "claude.login_cancel")]
+    ClaudeLoginCancel(ClaudeLoginCancel),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -860,6 +872,86 @@ pub enum ResultBody {
     WorkspaceKeys(WorkspaceKeysResult),
     WorkspaceKeyDeleted(WorkspaceKeyDeleteResult),
     SubagentHistory(SubagentHistoryResult),
+    ClaudeAuth(ClaudeAuthResult),
+    ClaudeLogin(ClaudeLoginResult),
+    ClaudeLoginDone(ClaudeLoginDoneResult),
+}
+
+/// `claude.auth {request_id}` -> `result {claude_auth}`; `claude.login {request_id}` ->
+/// `result {login}` (since SPEC 0.185). `request_id` equals the frame `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeAuthRequest {
+    pub request_id: String,
+}
+
+/// How the worker's own Claude Code is signed in, as `claude auth status` reports it in the
+/// worker's environment (since SPEC 0.185). Nothing secret: no token.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeAuthStatus {
+    pub logged_in: bool,
+    /// `claude.ai` (a subscription), `console` (API billing), …; absent when signed out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_name: Option<String>,
+    /// `pro`, `max`, `team`, …
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription_type: Option<String>,
+    /// When the sign-in ends, as the CLI gives it (RFC 3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// Why the status could not be read (the CLI missing, a timeout); absent when it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeAuthResult {
+    pub claude_auth: ClaudeAuthStatus,
+}
+
+/// A sign-in under way: the page the owner signs in on, which gives the code to send back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeLogin {
+    pub login_id: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeLoginResult {
+    pub login: ClaudeLogin,
+}
+
+/// `claude.login_code {request_id, login_id, code}` -> `result {login_done}` (since SPEC
+/// 0.185). The code is used once and never logged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeLoginCode {
+    pub request_id: String,
+    pub login_id: String,
+    pub code: SecretValue,
+}
+
+/// `claude.login_cancel {request_id, login_id}` -> `ack`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeLoginCancel {
+    pub request_id: String,
+    pub login_id: String,
+}
+
+/// How a sign-in ended: `ok`, the CLI's words when it did not, and the status after it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeLoginDone {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub status: ClaudeAuthStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeLoginDoneResult {
+    pub login_done: ClaudeLoginDone,
 }
 
 /// A value that is never printed: `Debug` shows its length only, so a frame that is logged
@@ -1601,6 +1693,10 @@ mod tests {
         "secret.put",
         "workspace.keys",
         "workspace.key_delete",
+        "claude.auth",
+        "claude.login",
+        "claude.login_code",
+        "claude.login_cancel",
         "ack",
         "error",
     ];
@@ -1786,6 +1882,22 @@ mod tests {
             "workspace.key_delete",
             include_str!("../examples/wire/hub.workspace.key_delete.json"),
         ),
+        (
+            "claude.auth",
+            include_str!("../examples/wire/hub.claude.auth.json"),
+        ),
+        (
+            "claude.login",
+            include_str!("../examples/wire/hub.claude.login.json"),
+        ),
+        (
+            "claude.login_code",
+            include_str!("../examples/wire/hub.claude.login_code.json"),
+        ),
+        (
+            "claude.login_cancel",
+            include_str!("../examples/wire/hub.claude.login_cancel.json"),
+        ),
         ("ack", include_str!("../examples/wire/hub.ack.json")),
         (
             "ack",
@@ -1862,6 +1974,18 @@ mod tests {
         ),
         (
             "result",
+            include_str!("../examples/wire/worker.result.claude.auth.json"),
+        ),
+        (
+            "result",
+            include_str!("../examples/wire/worker.result.claude.login.json"),
+        ),
+        (
+            "result",
+            include_str!("../examples/wire/worker.result.claude.login_done.json"),
+        ),
+        (
+            "result",
             include_str!("../examples/wire/worker.result.subagent_history.json"),
         ),
         (
@@ -1935,6 +2059,10 @@ mod tests {
             HubFrame::SecretPut(_) => "secret.put",
             HubFrame::WorkspaceKeys(_) => "workspace.keys",
             HubFrame::WorkspaceKeyDelete(_) => "workspace.key_delete",
+            HubFrame::ClaudeAuth(_) => "claude.auth",
+            HubFrame::ClaudeLogin(_) => "claude.login",
+            HubFrame::ClaudeLoginCode(_) => "claude.login_code",
+            HubFrame::ClaudeLoginCancel(_) => "claude.login_cancel",
             HubFrame::Ack(_) => "ack",
             HubFrame::Error(_) => "error",
         }
@@ -2226,6 +2354,7 @@ mod tests {
     #[test]
     fn a_secret_is_not_in_debug() {
         for src in [
+            include_str!("../examples/wire/hub.claude.login_code.json"),
             include_str!("../examples/wire/hub.secret.put.json"),
             include_str!("../examples/wire/hub.secret.put.key.json"),
         ] {
@@ -2249,6 +2378,18 @@ mod tests {
     #[test]
     fn results_answer_their_requests() {
         let pairs = [
+            (
+                include_str!("../examples/wire/hub.claude.auth.json"),
+                include_str!("../examples/wire/worker.result.claude.auth.json"),
+            ),
+            (
+                include_str!("../examples/wire/hub.claude.login.json"),
+                include_str!("../examples/wire/worker.result.claude.login.json"),
+            ),
+            (
+                include_str!("../examples/wire/hub.claude.login_code.json"),
+                include_str!("../examples/wire/worker.result.claude.login_done.json"),
+            ),
             (
                 include_str!("../examples/wire/hub.fs.stat.json"),
                 include_str!("../examples/wire/worker.result.fs.stat.json"),
@@ -2313,6 +2454,9 @@ mod tests {
                 HubFrame::WorkspaceKeys(r) => (&r.request_id, 8),
                 HubFrame::WorkspaceKeyDelete(r) => (&r.request_id, 9),
                 HubFrame::SessionSubagentHistory(r) => (&r.request_id, 10),
+                HubFrame::ClaudeAuth(r) => (&r.request_id, 11),
+                HubFrame::ClaudeLogin(r) => (&r.request_id, 12),
+                HubFrame::ClaudeLoginCode(r) => (&r.request_id, 13),
                 other => panic!("not a request: {other:?}"),
             };
             assert_eq!(&req.id, request_id, "request_id is the frame id");
@@ -2332,6 +2476,9 @@ mod tests {
                 ResultBody::WorkspaceKeys(_) => 8,
                 ResultBody::WorkspaceKeyDeleted(_) => 9,
                 ResultBody::SubagentHistory(_) => 10,
+                ResultBody::ClaudeAuth(_) => 11,
+                ResultBody::ClaudeLogin(_) => 12,
+                ResultBody::ClaudeLoginDone(_) => 13,
             };
             assert_eq!(got, kind);
         }

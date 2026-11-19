@@ -3145,7 +3145,7 @@ describe('a new session', () => {
     expect(menuItems()).toEqual(["The worker's default", 'Ask', 'Auto', 'Allow all']);
     await click(root.querySelector('.ctx-menu .btn-permissions-ask'));
     await click(root.querySelector('.btn-chip-model'));
-    expect(menuItems()).toEqual(["Claude Code's default", 'Opus', 'Sonnet', 'Haiku', 'Fable', 'Opus 5.5', 'Opus 5', 'Opus 4.8', 'Opus 4.7', 'Opus 4.6', 'Sonnet 5.5', 'Sonnet 5', 'Sonnet 4.6', 'Haiku 5.5', 'Haiku 4.5', 'Fable 5.1', 'Fable 5', 'Another model…']);
+    expect(menuItems()).toEqual(["Claude Code's default", 'Opus', 'Sonnet', 'Haiku', 'Fable', 'Opus 5.5', 'Opus 5', 'Opus 4.8', 'Opus 4.7', 'Opus 4.6', 'Sonnet 5.5', 'Sonnet 5', 'Sonnet 4.6', 'Haiku 5.5', 'Haiku 4.5', 'Fable 5.2', 'Fable 5.1', 'Fable 5', 'Another model…']);
     await click(root.querySelector('.ctx-menu .btn-model-haiku'));
     expect(chips()).toEqual(['phys-mp · home-mac', 'Folder net', 'Permissions: Ask', 'Model: Haiku']);
     expect(win()!.querySelector('.chat-meta')!.textContent).toBe('Drafthome-mac/~/work/games/phys-mp/net');
@@ -3195,7 +3195,7 @@ describe('a new session', () => {
     await click(root.querySelector('.btn-chip-model'));
     const entries = () =>
       [...root.querySelectorAll('.ctx-menu > *')].map((el) => (el.classList.contains('menu-sep') ? '—' : el.textContent));
-    expect(entries()).toEqual(["Claude Code's default", 'Opus', 'Sonnet', 'Haiku', 'Fable', '—', 'Opus 5.5', 'Opus 5', 'Opus 4.8', 'Opus 4.7', 'Opus 4.6', 'Sonnet 5.5', 'Sonnet 5', 'Sonnet 4.6', 'Haiku 5.5', 'Haiku 4.5', 'Fable 5.1', 'Fable 5', '—', 'Another model…']);
+    expect(entries()).toEqual(["Claude Code's default", 'Opus', 'Sonnet', 'Haiku', 'Fable', '—', 'Opus 5.5', 'Opus 5', 'Opus 4.8', 'Opus 4.7', 'Opus 4.6', 'Sonnet 5.5', 'Sonnet 5', 'Sonnet 4.6', 'Haiku 5.5', 'Haiku 4.5', 'Fable 5.2', 'Fable 5.1', 'Fable 5', '—', 'Another model…']);
     await click(root.querySelector('.ctx-menu .btn-model-claude-opus-4-8'));
     expect(chips()[3]).toBe('Model: Opus 4.8');
     await click(root.querySelector('.btn-chip-model'));

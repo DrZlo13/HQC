@@ -164,10 +164,8 @@ describe('the hover buttons', () => {
     expect(r).toMatch(/position: absolute;/);
     expect(r).toMatch(/right: 100%;/);
     expect(rule('.msg-bubble > .msg-time')).toMatch(/position: relative;/);
-    // A bubble with them holds them; on a plate with a note, and on a touch screen, they are in
-    // the line's flow.
+    // A bubble with them holds them; on a touch screen they are in the line's flow.
     expect(rule('.msg-bubble-acts')).toMatch(/min-width: 7\.5em;/);
-    expect(rule(':root.feed-column .msg-noted .msg-time-actions')).toMatch(/position: static;/);
     expect(CSS).toMatch(/@media \(hover: none\) \{\s*\.msg-time-actions \{\s*position: static;/);
     expect(CSS).toMatch(/\n\.feed-block:hover \.msg-time-actions,\s*\.msg-time-actions:focus-within \{\s*opacity: 1;/);
     expect(rule('.chat:not(.chat-phone) .msg-time-actions .btn-copy-idle')).toMatch(/height: 18px;/);
@@ -232,25 +230,33 @@ describe('joined the turn', () => {
       e.delivery = 'pending';
       delete e.delivered_at;
     });
-  const notes = () => [...root.querySelectorAll('.msg-user')].map((m) => m.querySelector('.msg-note')?.textContent ?? null);
+  const notes = () => [...root.querySelectorAll('.msg-user')].map((m) => m.querySelector('.msg-note')?.getAttribute('title') ?? null);
 
-  it('a message the hub keeps as joined has the note, in its bubble after the time', () => {
+  it('a message the hub keeps as joined has the mark: an icon right before its time, the words its tooltip', () => {
     show([user(1, 'Fix the search'), agent(2, 'Looking.', 1), user(3, 'and keep it fast', (e) => (e.payload.joined = true))]);
-    expect(notes()).toEqual([null, 'joined the turn']);
-    // In the bubble or the plate, after the time and before the text: the time keeps its first
-    // place; styles.css puts the note on the first line of a bubble with the time at its end,
-    // left of the time on a plate.
+    expect(notes()).toEqual([null, 'Joined the turn']);
+    // Inside the time's span, so it takes an icon's room of the first line, not a line or a
+    // run of words of its own.
     const bubble = root.querySelectorAll('.msg-user')[1].querySelector('.msg-bubble')!;
-    expect(bubble.classList.contains('msg-noted')).toBe(true);
-    expect([...bubble.children].map((c) => c.className)).toEqual(['msg-time', 'msg-note', 'text msg-text']);
-    expect(bubble.firstElementChild!.textContent).toBe(formatTime(at(3)));
-    expect(root.querySelectorAll('.msg-noted')).toHaveLength(1);
+    expect([...bubble.children].map((c) => c.className)).toEqual(['msg-time', 'text msg-text']);
+    const time = bubble.firstElementChild!;
+    const mark = time.querySelector('.msg-note')!;
+    expect(mark.parentElement).toBe(time);
+    expect(mark.nextElementSibling!.tagName).toBe('TIME');
+    expect(mark.textContent).toBe('');
+    expect(mark.querySelector('svg')).not.toBeNull();
+    expect(mark.getAttribute('role')).toBe('img');
+    expect(mark.getAttribute('aria-label')).toBe('Joined the turn');
+    expect(time.textContent).toBe(formatTime(at(3)));
+    expect(root.querySelectorAll('.msg-note')).toHaveLength(1);
   });
 
-  it('styles.css: the first line of a bubble with the time, left of the time on a plate', () => {
-    expect(rule('.msg-note')).toMatch(/display: inline;/);
-    expect(rule(':root.feed-column .msg-note')).toMatch(/float: right;/);
-    expect(rule(':root.feed-column .msg-noted > .msg-time')).toMatch(/margin: 0 0 0 8px;/);
+  it('styles.css: the mark stands in the line of the time, neither floated nor on a line of its own', () => {
+    const r = rule('.msg-note');
+    expect(r).toMatch(/display: inline-flex;/);
+    expect(r).not.toMatch(/float/);
+    expect(CSS).not.toMatch(/\.msg-note::after/);
+    expect(CSS).not.toMatch(/\.msg-noted/);
   });
 
   it('not a message that waited for the turn to end: typed during it, the final answer after it, then delivered', () => {
@@ -265,7 +271,7 @@ describe('joined the turn', () => {
     expect(notes()).toEqual([null, null]);
     timeline.applyDelivery({ session_id: 's', event_id: id(3), seq: 3, delivery: 'delivered', delivered_at: at(3), joined: true });
     draw();
-    expect(notes()).toEqual([null, 'joined the turn']);
+    expect(notes()).toEqual([null, 'Joined the turn']);
   });
 
   it("the hub's copy of a message that joined meanwhile carries it (a frame lost with the socket)", () => {
@@ -273,12 +279,12 @@ describe('joined the turn', () => {
     const copy = user(3, 'and keep it fast', (e) => (e.payload.joined = true));
     timeline.refresh([copy]);
     draw();
-    expect(notes()).toEqual([null, 'joined the turn']);
+    expect(notes()).toEqual([null, 'Joined the turn']);
     // A copy in the stream (the subscription again) does the same.
     const t2 = show([user(1, 'go'), waiting(2, 'and this')]);
     t2.timeline.apply(user(2, 'and this', (e) => (e.payload.joined = true)));
     t2.draw();
-    expect(notes()).toEqual([null, 'joined the turn']);
+    expect(notes()).toEqual([null, 'Joined the turn']);
   });
 });
 

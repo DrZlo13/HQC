@@ -45,7 +45,9 @@ import {
   IconChevron,
   IconCross,
   IconFork,
+  IconJoined,
   IconQuestion,
+  IconReply,
   IconShield,
   IconStop,
   IconWarn,
@@ -681,9 +683,17 @@ function MessageTime({ ts, before, children }: { ts: string; before?: ComponentC
   );
 }
 
-/** The user's bubble (a plate in one column) with its time and, when there is one, its note
- *  ("joined the turn"): in a bubble the first line with the time at its end, the text under
- *  them; left of the time on a plate (styles.css). */
+/** A bubble's note ("Joined the turn"): an icon with the words as its tooltip and its name. */
+interface BubbleNote {
+  label: string;
+  icon: ComponentChildren;
+}
+
+const JOINED: BubbleNote = { label: 'Joined the turn', icon: <IconJoined /> };
+const INSTEAD: BubbleNote = { label: 'Instead of the request', icon: <IconReply /> };
+
+/** The user's bubble (a plate in one column) with its time and, when there is one, its note:
+ *  an icon right before the time, in the time's line, so it takes an icon's room. */
 function Bubble({
   ts,
   note,
@@ -692,18 +702,27 @@ function Bubble({
   children,
 }: {
   ts: string;
-  note?: string;
+  note?: BubbleNote;
   time?: ComponentChildren;
   /** Shown on hover left of the time (a computer's; a phone has them under the message). */
   buttons?: ComponentChildren;
   children: ComponentChildren;
 }) {
   return (
-    <div class={['msg-bubble', note && 'msg-noted', buttons && 'msg-bubble-acts'].filter(Boolean).join(' ')}>
-      <MessageTime ts={ts} before={buttons && <span class="msg-time-actions">{buttons}</span>}>
+    <div class={['msg-bubble', buttons && 'msg-bubble-acts'].filter(Boolean).join(' ')}>
+      <MessageTime
+        ts={ts}
+        before={[
+          buttons && <span class="msg-time-actions">{buttons}</span>,
+          note && (
+            <span class="msg-note" role="img" aria-label={note.label} title={note.label}>
+              {note.icon}
+            </span>
+          ),
+        ]}
+      >
         {time}
       </MessageTime>
-      {note && <span class="msg-note">{note}</span>}
       {children}
     </div>
   );
@@ -744,7 +763,7 @@ function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'
       <Bubble
         ts={event.ts}
         buttons={!phone && buttons}
-        note={event.payload.joined ? 'joined the turn' : undefined}
+        note={event.payload.joined ? JOINED : undefined}
         time={[
           event.payload.schedule_id && <span class="scheduled"> · scheduled</span>,
           d === 'pending' && <span class="delivery"> · {queued ? 'queued' : 'awaiting delivery'}</span>,
@@ -781,7 +800,7 @@ function TextAnswer({ event }: { event: EventOf<'approval.response'> }) {
   const text = event.payload.message!;
   return (
     <div class="msg-user msg-answer">
-      <Bubble ts={event.ts} note="instead of the request">
+      <Bubble ts={event.ts} note={INSTEAD}>
         <UserText text={text} />
       </Bubble>
       <MessageActions>

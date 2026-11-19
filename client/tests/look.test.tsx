@@ -168,8 +168,4 @@ it("a bubble's text shares a line box with the floated time, so a short message 
   const css = readFileSync(join(import.meta.dirname, '../src/styles.css'), 'utf8');
   expect(css).toMatch(/\n\.msg-time \{\s*float: right;/);
   expect(css).toMatch(/\n\.msg-bubble > \.msg-text \{\s*display: inline;\s*\}/);
-  // The note too, with a line break after it; not on a plate, where it floats left of the time.
-  expect(css).toMatch(/\n\.msg-note \{\s*display: inline;/);
-  expect(css).toMatch(/\n\.msg-note::after \{\s*content: '\\A';\s*white-space: pre;/);
-  expect(css).toMatch(/\n:root\.feed-column \.msg-note::after \{\s*content: none;/);
 });

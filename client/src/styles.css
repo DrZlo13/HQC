@@ -3093,19 +3093,14 @@ select.input {
   position: relative;
   margin-left: 12px;
 }
-/* A bubble's note ("joined the turn", "instead of the request"): the first line, the time at
-   its right end, the text under them. Inline with a line break after it, so the note, the time
-   and the text are in one line box flow and the bubble is as wide as the longer of its lines. */
+/* A bubble's note ("Joined the turn", "Instead of the request"): an icon right before the time,
+   in the time's line; its words are the tooltip. */
 .msg-note {
-  display: inline;
-  font-size: 12px;
-  line-height: 18px;
+  display: inline-flex;
+  margin-right: 4px;
+  vertical-align: -2px;
   color: var(--accent-text);
-  font-weight: 600;
-}
-.msg-note::after {
-  content: '\A';
-  white-space: pre;
+  cursor: help;
 }
 /* A message's copy and fork buttons, on hover, at the edge opposite its time: a column in the
    margin left of the feed, from the message's top, its right edge on the block's left edge so
@@ -3217,16 +3212,6 @@ select.input {
 .msg-bubble-acts {
   min-width: 7.5em;
 }
-/* On a plate with a note the buttons stand in the line's flow, between the note and the time,
-   not over the note. */
-:root.feed-column .msg-noted .msg-time-actions {
-  position: static;
-  transform: none;
-  padding: 0;
-  margin-right: 6px;
-  vertical-align: middle;
-  background: none;
-}
 /* A touch screen as wide as a computer's has no hover: the buttons stay, in the line's flow so
    they cover no text. */
 @media (hover: none) {
@@ -3271,18 +3256,6 @@ select.input {
 }
 :root.feed-column .msg-bubble > .msg-time {
   margin-left: 16px;
-}
-/* On a plate the note stands left of the time, on the first line. */
-:root.feed-column .msg-note {
-  float: right;
-  margin: 0 0 0 16px;
-  line-height: var(--feed-line);
-}
-:root.feed-column .msg-note::after {
-  content: none;
-}
-:root.feed-column .msg-noted > .msg-time {
-  margin: 0 0 0 8px;
 }
 
 .msg-pending .msg-bubble {

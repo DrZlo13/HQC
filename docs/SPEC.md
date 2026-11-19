@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.177, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
+Version 0.178, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2236,13 +2236,14 @@ Code on <worker>" in the pill, marked `</>` ("In Claude Code…" when another pr
 from here." while it is held, else "VS Code was the last to run this session." with "Take over
 here" (§9.3). "Retry" of a failed session is a filled button. In the feed a message's time
 stands at the right end of its first line, inside the bubble or plate for the user's, after a
-note on that line ("joined the turn", §17.2; "instead of the request", §10.1) and before "·
-scheduled", "· awaiting delivery", "· queued" (since 0.161, an input that came while a turn
-ran, see the WebSocket below), "· not delivered" or "· forking…"; its buttons show on hover: the
-user's copy and "Fork from here" inside the bubble left of the time, an agent message's copy in the
-margin left of the feed, on a phone under the message. Since 0.156, until the hub answers a fork (it
-copies the source's history first, seconds for a long session) the message says "· forking…" and its
-"Fork from here" is disabled; the client asks for no second fork before the same message meanwhile.
+note on that line (since 0.178 an icon, its words the tooltip: "Joined the turn", §17.2; "Instead
+of the request", §10.1) and before "· scheduled", "· awaiting delivery", "· queued" (since 0.161,
+an input that came while a turn ran, see the WebSocket below), "· not delivered" or "· forking…";
+its buttons show on hover: the user's copy and "Fork from here" inside the bubble left of the
+time, an agent message's copy in the margin left of the feed, on a phone under the message. Since
+0.156, until the hub answers a fork (it copies the source's history first, seconds for a long
+session) the message says "· forking…" and its "Fork from here" is disabled; the client asks for
+no second fork before the same message meanwhile.
 A run of tool calls is "N tool calls ·
 time" and the call's line when it is one, else the tools it called, each once, in the order
 first called ("(Bash, Read, chrome-devtools/take_screenshot)", an MCP tool as
@@ -5931,8 +5932,7 @@ may join: the cap of §7.1 caps it whenever one of them comes from a session in 
 worker gets without `peer` (§7.1.1), and (since 0.174) a `peer.message` of mode `send` without
 `schedule_id`; a `joined` on any other input is the worker's mistake, logged, not kept, and the
 input's turn opens (since 0.71). Since 0.112 the hub keeps an honoured one on the message,
-`payload.joined: true` (§4), and sends it with the `delivery` frame (§6); the client says
-"joined the turn" on the first line of a person's message (a send's bubble has no such note).
+`payload.joined: true` (§4), and sends it with the `delivery` frame (§6); the client marks the first line of a person's message with an icon before the time, "Joined the turn" its tooltip (since 0.178; the words in the line before; a send's bubble has no such note).
 What may not join waits for the end of the turn as before (scheduled runs and slash commands
 always do), and a person's inputs keep their `seq` order among themselves. Since 0.75 nothing
 is written into the turn either while a move of the session waits (§5.3): the input is for the
@@ -6288,6 +6288,13 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.177 → 0.178 (a bubble's note as an icon)
+§6, §17.2: the note of a user's message, "joined the turn" (§17.2) or "instead of the request"
+(§10.1), took a line of its own in a bubble and a run of bold words left of the time on a plate.
+It is now an icon right before the time, in the time's line: two arrows merging for "Joined the
+turn", a reply arrow for "Instead of the request"; the words are its tooltip and its name for a
+screen reader. Client only. 0.173–0.177 are taken by other branches.
 
 ### 0.176 → 0.177 (a call's line shows its arguments and its result)
 §6, §17.1: a call with none of the keys a line reads, an MCP tool's (`move (probe-bench)` with

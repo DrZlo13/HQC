@@ -914,9 +914,10 @@ describe("approval.request (T26 card)", () => {
     expect(msg.querySelector(".msg-bubble .msg-text")!.textContent).toBe(
       "Build first, tests later",
     );
-    expect(msg.querySelector(".msg-bubble.msg-noted > .msg-note")!.textContent).toBe(
-      "instead of the request",
-    );
+    // A mark before the time, the words its tooltip (feedlook.test.tsx, "joined the turn").
+    const mark = msg.querySelector(".msg-bubble > .msg-time > .msg-note")!;
+    expect(mark.getAttribute("title")).toBe("Instead of the request");
+    expect(mark.textContent).toBe("");
   });
 
   it('"Back to the request" gives the buttons back', async () => {

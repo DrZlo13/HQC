@@ -45,8 +45,12 @@ export type Item =
   | { kind: "invalid"; key: string; invalid: InvalidEvent }
   | { kind: "pending"; key: string; pending: PendingMessage };
 
+/** An `approval.response` this client wrote itself, before the hub's event arrived: `by` is
+ *  the hub's to name, and this client does not know it. */
+export type LocalApprovalResponse = Omit<ApprovalResponse, "by"> & { by?: string };
+
 export interface RequestFate {
-  response?: ApprovalResponse | ClarifyResponse;
+  response?: LocalApprovalResponse | ClarifyResponse;
   cancel?: RequestCancel;
   /** `seq` of the cancel. */
   cancelSeq?: number;
@@ -58,6 +62,9 @@ export class Timeline {
   private readonly pending = new Map<string, PendingMessage>();
   private readonly echoed = new Set<string>();
   private readonly fates = new Map<string, RequestFate>();
+  /** The answers this client sent and the hub took, by request id, until the hub's
+   *  `*.response` or `*.cancel` event for the request arrives. */
+  private readonly answered = new Map<string, LocalApprovalResponse | ClarifyResponse>();
   private readonly results = new Map<string, EventOf<"tool.result">>();
   private readonly calls = new Map<string, EventOf<"tool.call">>();
   /** The first `system task_notification` by its `call_id`, and by its `task_id`. */
@@ -202,9 +209,11 @@ export class Timeline {
       case "approval.response":
       case "clarify.response":
         this.fate(ev.payload.request_id).response = ev.payload;
+        this.answered.delete(ev.payload.request_id);
         break;
       case "approval.cancel":
       case "clarify.cancel": {
+        this.answered.delete(ev.payload.request_id);
         const f = this.fate(ev.payload.request_id);
         f.cancel = ev.payload;
         f.cancelSeq = ev.seq;
@@ -289,8 +298,28 @@ export class Timeline {
     return f;
   }
 
+  /** The request counts as answered once the hub took the answer, without waiting for its
+   *  `*.response` event over the socket, which may come late. */
+  markAnswered(requestId: string, response: LocalApprovalResponse | ClarifyResponse): void {
+    // The event came before the reply of the POST: it is the answer already.
+    const f = this.fates.get(requestId);
+    if (f?.response || f?.cancel) return;
+    this.answered.set(requestId, response);
+    this.changed();
+  }
+
+  /** An answer of this client is still missing its event: the session's `state`, which comes
+   *  over the same socket, may still say it waits for it. */
+  answeredLocally(): boolean {
+    return this.answered.size > 0;
+  }
+
+  /** The hub's response or cancel when it has one, else the answer sent from this client. */
   requestFate(requestId: string): RequestFate {
-    return this.fates.get(requestId) ?? {};
+    const f = this.fates.get(requestId);
+    if (f?.response || f?.cancel) return f;
+    const local = this.answered.get(requestId);
+    return local ? { ...f, response: local } : (f ?? {});
   }
 
   /** The first user's message after `seq`: a stored one, else one not stored yet (`failed`
@@ -360,8 +389,8 @@ export class Timeline {
   openRequests(): EventOf<"approval.request" | "clarify.request">[] {
     return [...this.requests.values()]
       .filter((r) => {
-        const f = this.fates.get(r.payload.request_id);
-        return !f?.response && !f?.cancel;
+        const f = this.requestFate(r.payload.request_id);
+        return !f.response && !f.cancel;
       })
       .sort((a, b) => a.seq! - b.seq!);
   }

@@ -65,11 +65,11 @@ describe('secret names', () => {
 });
 
 describe('the composer’s Secret', () => {
-  function setup(opts: { secrets?: boolean; fail?: boolean } = {}) {
+  function setup(opts: { secrets?: boolean; fail?: boolean; events?: HqcEvent[] } = {}) {
     const api = {
       session: vi.fn(async () => info),
       events: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, count: 0 })),
-      eventsBefore: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, minSeq: undefined, count: 0 })),
+      eventsBefore: vi.fn(async () => ({ events: opts.events ?? [], invalid: [], maxSeq: opts.events?.length ?? 0, minSeq: opts.events ? 1 : undefined, count: opts.events?.length ?? 0 })),
       readCursor: vi.fn(async () => {}),
       sessions: vi.fn(async () => []),
       projects: vi.fn(async () => []),
@@ -114,6 +114,27 @@ describe('the composer’s Secret', () => {
     });
   }
   const area = () => $<HTMLTextAreaElement>('.composer-input')!;
+
+  it("the card of a request closes when the secret was given, before the hub's event", async () => {
+    const asked = ev('event.approval.request', 1, (e) => {
+      e.author = { kind: 'system' };
+      e.payload = {
+        request_id: 'toolu_1',
+        tool: 'hqc_secret',
+        description: 'The Wi-Fi password',
+        options: [{ id: 'deny', label: 'Decline', canonical: 'deny' }],
+        secret: { name: 'WIFI_PASS', kind: 'secret' },
+      };
+    });
+    const { app } = setup({ events: [asked] });
+    await mount(app);
+    await flush();
+    await typeInto($<HTMLInputElement>('.secret-value')!, PASSWORD);
+    await act(async () => buttonByText('Give')!.click());
+    await flush();
+    expect($('section[aria-label="Secret request"]')).toBeNull();
+    expect($('.secret-done')!.textContent).toContain('given');
+  });
 
   it('is not offered where the worker does not take secrets', async () => {
     const { app } = setup({ secrets: false });

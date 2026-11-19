@@ -1,6 +1,6 @@
 // One open chat: history over REST, live tail over /api/ws, actions over REST (SPEC §6).
 
-import type { Api, EventPage } from './api';
+import { ApiError, type Api, type EventPage } from './api';
 import type { ClarifyAction, ClarifyAnswer, HqcEvent } from './proto';
 import { Timeline, type PendingAttachment } from './timeline';
 import type { HubSocket } from './ws';
@@ -192,12 +192,44 @@ export class ChatSession {
     return o.ids as string[];
   }
 
-  approve(requestId: string, optionId: string, message?: string): Promise<void> {
-    return this.api.approve(this.id, requestId, optionId, message);
+  /** The card closes when the hub took the answer, not when its event comes over the socket. */
+  async approve(requestId: string, optionId: string, message?: string): Promise<void> {
+    if (!(await this.taken(requestId, () => this.api.approve(this.id, requestId, optionId, message)))) return;
+    this.timeline.markAnswered(requestId, {
+      request_id: requestId,
+      option_id: optionId,
+      ...(message !== undefined && { message }),
+    });
   }
 
-  answer(requestId: string, answers: Record<string, ClarifyAnswer>, action?: ClarifyAction): Promise<void> {
-    return this.api.clarify(this.id, requestId, answers, action);
+  async answer(requestId: string, answers: Record<string, ClarifyAnswer>, action?: ClarifyAction): Promise<void> {
+    if (!(await this.taken(requestId, () => this.api.clarify(this.id, requestId, answers, action)))) return;
+    this.timeline.markAnswered(requestId, { request_id: requestId, answers, ...(action && { action }) });
+  }
+
+  /** Whether the hub took the answer. A request closed first, from another device, is not an
+   *  error here: the newest events are fetched and only the event that closed this request is
+   *  applied, as a reply is (`lastSeq` stays, the late socket still brings the rest in order),
+   *  so the card shows what became of it. Without that event among them the `409` stands. */
+  private async taken(requestId: string, post: () => Promise<void>): Promise<boolean> {
+    try {
+      await post();
+      return true;
+    } catch (e) {
+      if (!(e instanceof ApiError && e.code === 'request_closed')) throw e;
+      const page = await this.api.eventsBefore(this.id, undefined, TAIL);
+      const closing = page.events.filter(
+        (ev) =>
+          (ev.type === 'approval.response' ||
+            ev.type === 'clarify.response' ||
+            ev.type === 'approval.cancel' ||
+            ev.type === 'clarify.cancel') &&
+          ev.payload.request_id === requestId,
+      );
+      if (!closing.length) throw e;
+      for (const ev of closing) this.timeline.applyReply(ev);
+      return false;
+    }
   }
 
   stop(): Promise<void> {

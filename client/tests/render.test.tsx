@@ -8,6 +8,9 @@ import { act } from "preact/test-utils";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseEvent, parseServerFrame, type Activity, type EventOf, type HqcEvent } from "../src/proto";
+import { ChatSession } from "../src/session";
+import { ApiError, type Api } from "../src/api";
+import type { HubSocket } from "../src/ws";
 import { Timeline } from "../src/timeline";
 import { PermissionBlock } from "../src/ui/permission";
 import {
@@ -3465,5 +3468,132 @@ describe("the feed like the Claude Code tab", () => {
     expect(sent.querySelector(".msg-text")!.textContent).toBe(text);
     expect(pending.querySelector(".msg-text")!.textContent).toBe("_still_ typed");
     expect(root.querySelector(".msg-user strong, .msg-user em, .msg-user li, .msg-user code")).toBeNull();
+  });
+});
+
+// An answer the hub took closes the card at once, before the response event comes over the
+// socket (SPEC 0.188).
+describe("an answered request closes before its event", () => {
+  const session = (api: Partial<Api>) => {
+    const socket = { subscribe: () => () => {} } as unknown as HubSocket;
+    return new ChatSession(api as Api, socket, "s1");
+  };
+
+  it("a clarify card closes when its Answer resolved", async () => {
+    const s = session({ clarify: vi.fn(async () => ({})) as never });
+    s.timeline.apply(ev("event.clarify.request", withSeq(1)));
+    const { draw } = show(s.timeline, {
+      answer: (id, a, action) => s.answer(id, a, action),
+    });
+    for (const v of ["Worker", "clippy"]) await act(async () => void root.querySelector<HTMLInputElement>(`input[value="${v}"]`)!.click());
+    const text = root.querySelector<HTMLInputElement>(".card-clarify fieldset:nth-of-type(3) input[type=text]")!;
+    await act(() => {
+      text.value = "no";
+      text.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => root.querySelector<HTMLButtonElement>(".card-clarify button[type=submit]")!.click());
+    await act(async () => {});
+    draw();
+    expect(root.querySelector(".card-clarify button")).toBeNull();
+    expect(root.querySelector(".card-clarify.is-closed")).not.toBeNull();
+  });
+
+  it("a permission card shows its outcome when its Allow resolved", async () => {
+    const s = session({ approve: vi.fn(async () => ({})) as never });
+    s.timeline.apply(ev("event.approval.request", withSeq(1)));
+    const { draw } = show(s.timeline, {
+      approve: (id, o, m) => s.approve(id, o, m),
+    });
+    await act(async () => optionButtons()[0].click());
+    await act(async () => {});
+    draw();
+    expect(optionButtons()).toHaveLength(0);
+    expect(root.querySelector(".perm-done-row .outcome")!.textContent).toContain("allowed");
+  });
+
+  it("a 409 on Answer leaves no error and the card shows the outcome of the refreshed page", async () => {
+    const response = ev("event.clarify.response", withSeq(2));
+    const api = {
+      clarify: vi.fn(async () => {
+        throw new ApiError(409, "the request is already closed", "request_closed");
+      }),
+      eventsBefore: vi.fn(async () => ({ events: [response], invalid: [], maxSeq: 2, minSeq: 2, count: 1 })),
+    };
+    const s = session(api as never);
+    s.timeline.apply(ev("event.clarify.request", withSeq(1)));
+    const { draw } = show(s.timeline, { answer: (id, a, action) => s.answer(id, a, action) });
+    for (const v of ["Worker", "clippy"]) await act(async () => void root.querySelector<HTMLInputElement>(`input[value="${v}"]`)!.click());
+    const text = root.querySelector<HTMLInputElement>(".card-clarify fieldset:nth-of-type(3) input[type=text]")!;
+    await act(() => {
+      text.value = "no";
+      text.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => root.querySelector<HTMLButtonElement>(".card-clarify button[type=submit]")!.click());
+    await act(async () => {});
+    draw();
+    expect(root.querySelector(".card-clarify .error-text")).toBeNull();
+    expect(root.querySelector(".card-clarify.is-closed")).not.toBeNull();
+  });
+
+  it("a 409 applies only the event that closed the request: the rest of the page waits for the socket", async () => {
+    const request = ev("event.clarify.request", withSeq(1));
+    const later = ev("event.agent.message", withSeq(3));
+    const api = {
+      clarify: vi.fn(async () => {
+        throw new ApiError(409, "the request is already closed", "request_closed");
+      }),
+      eventsBefore: vi.fn(async () => ({
+        events: [ev("event.clarify.response", withSeq(2)), later],
+        invalid: [],
+        maxSeq: 3,
+        minSeq: 2,
+        count: 2,
+      })),
+    };
+    const s = session(api as never);
+    s.timeline.apply(request);
+    await s.answer("req-2", {});
+    expect(s.timeline.requestFate("req-2").response).toBeDefined();
+    expect(s.timeline.lastSeq).toBe(1);
+    expect(s.timeline.events().some((e) => e.seq === 3)).toBe(false);
+  });
+
+  it("a 409 without the closing event in the page stays an error", async () => {
+    const request = ev("event.clarify.request", withSeq(1));
+    const api = {
+      clarify: vi.fn(async () => {
+        throw new ApiError(409, "the request is already closed", "request_closed");
+      }),
+      eventsBefore: vi.fn(async () => ({ events: [ev("event.agent.message", withSeq(2))], invalid: [], maxSeq: 2, minSeq: 2, count: 1 })),
+    };
+    const s = session(api as never);
+    s.timeline.apply(request);
+    await expect(s.answer("req-2", {})).rejects.toMatchObject({ code: "request_closed" });
+    expect(s.timeline.requestFate("req-2").response).toBeUndefined();
+  });
+
+  it("the local answer is dropped when the hub's event comes, and not kept after it", () => {
+    const t = new Timeline();
+    t.apply(ev("event.approval.request", withSeq(1)));
+    t.markAnswered("req-1", { request_id: "req-1", option_id: "allow" });
+    expect(t.answeredLocally()).toBe(true);
+    expect(t.openRequests()).toHaveLength(0);
+    t.apply(ev("event.approval.response", withSeq(2)));
+    expect(t.answeredLocally()).toBe(false);
+    t.markAnswered("req-1", { request_id: "req-1", option_id: "allow" });
+    expect(t.answeredLocally()).toBe(false);
+  });
+
+  it("two presses in one tick send one request", async () => {
+    const approve = vi.fn(() => new Promise<void>(() => {}));
+    const t = new Timeline();
+    t.apply(ev("event.approval.request", withSeq(1)));
+    show(t, { approve });
+    await act(async () => {
+      const b = optionButtons()[0];
+      b.click();
+      b.click();
+    });
+    expect(approve).toHaveBeenCalledTimes(1);
   });
 });

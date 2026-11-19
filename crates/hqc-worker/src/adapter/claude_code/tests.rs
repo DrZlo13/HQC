@@ -3688,6 +3688,49 @@ fn a_new_request_drops_the_text_of_an_abandoned_attempt() {
     );
 }
 
+/// An attempt the CLI abandoned while it was thinking: its thinking goes with it, as the VS
+/// Code tab drops every row of the attempt (`retireAbandonedStreamedRows`); once saved it stays.
+#[test]
+fn a_new_request_drops_the_thinking_of_an_abandoned_attempt() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let ev = |e: Value| {
+        json!({"type": "stream_event", "parent_tool_use_id": null, "event": e,
+            "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+    };
+    let start = ev(json!({"type": "message_start", "message": {"id": "msg_01"}})).to_string();
+    let thought = ev(json!({"type": "content_block_delta", "index": 0,
+        "delta": {"type": "thinking_delta", "thinking": "Let me think"}}))
+    .to_string();
+    let saved = json!({"type": "assistant", "message": {"id": "msg_01",
+        "model": "claude-haiku-5-5", "role": "assistant",
+        "content": [{"type": "thinking", "thinking": "Let me think"}]},
+        "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+    .to_string();
+    let resets = |a: Vec<Action>| -> usize {
+        events(&emitted(a))
+            .iter()
+            .filter(|e| matches!(e.kind, EventKind::AgentDelta { reset: true, .. }))
+            .count()
+    };
+    play(&mut core, &start);
+    play(&mut core, &thought);
+    assert_eq!(
+        resets(play(&mut core, &start)),
+        1,
+        "the abandoned attempt's"
+    );
+    assert_eq!(resets(play(&mut core, &start)), 0, "dropped once");
+    play(&mut core, &thought);
+    play(&mut core, &saved);
+    assert_eq!(
+        resets(play(&mut core, &start)),
+        0,
+        "a saved thinking took it up"
+    );
+}
+
 /// A stream broken after some text that the CLI retried without one (2.1.312: "Error
 /// streaming, falling back to non-streaming mode"): no `message_start` comes, the response
 /// arrives as an `assistant` of another `message.id`, and the text written so far is dropped

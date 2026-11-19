@@ -519,7 +519,8 @@ it('adds a model provider in "Settings" and lists the workers that allow it', as
   await new Promise((r) => setTimeout(r, 10));
   $<HTMLButtonElement>('.btn-save-provider')!.click();
   await until('the edited provider', () => app.providers[0]?.base_url === 'http://192.168.1.229:8083');
-  expect($('.provider-form')).toBeNull();
+  // The form closes once the lists are loaded again after the save, a request later (#100).
+  await until('the form closed', () => $('.provider-form') === null);
 });
 
 it('is a full-screen sheet on a phone, with the same sections', async () => {

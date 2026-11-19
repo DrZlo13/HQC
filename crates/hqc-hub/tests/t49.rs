@@ -24,6 +24,21 @@ async fn put_icon(
     mime: &str,
     bytes: Vec<u8>,
 ) -> (u16, Value) {
+    try_put_icon(hub, pid, name, mime, bytes)
+        .await
+        .expect("the upload got no answer")
+}
+
+/// [`put_icon`], `None` when the connection closed before an answer came: the hub stops
+/// reading an upload far over its limit and answers at once, and a client still writing the
+/// body may get the close instead of the answer.
+async fn try_put_icon(
+    hub: &TestHub,
+    pid: &str,
+    name: &str,
+    mime: &str,
+    bytes: Vec<u8>,
+) -> Option<(u16, Value)> {
     let part = reqwest::multipart::Part::bytes(bytes)
         .file_name(name.to_string())
         .mime_str(mime)
@@ -34,9 +49,9 @@ async fn put_icon(
         .multipart(reqwest::multipart::Form::new().part("file", part))
         .send()
         .await
-        .unwrap();
+        .ok()?;
     let s = r.status().as_u16();
-    (s, r.json().await.unwrap_or(Value::Null))
+    Some((s, r.json().await.unwrap_or(Value::Null)))
 }
 
 #[tokio::test]
@@ -348,11 +363,15 @@ async fn the_icon_image_is_checked_by_its_content() {
     big.resize(256 * 1024 + 1, 0);
     let (s, v) = put_icon(&hub, &pid, "big.png", "image/png", big).await;
     assert_eq!(s, 422, "{v}");
-    // Far larger than the body limit: still the same answer, the upload stops early.
+    // Far larger than the body limit: still the same answer, the upload stops early; the client
+    // may see the connection close before the answer comes, and nothing is stored either way.
     let mut huge = png(512, 512);
     huge.resize(3 << 20, 0);
-    let (s, v) = put_icon(&hub, &pid, "huge.png", "image/png", huge).await;
-    assert_eq!(s, 422, "{v}");
+    if let Some((s, v)) = try_put_icon(&hub, &pid, "huge.png", "image/png", huge).await {
+        assert_eq!(s, 422, "{v}");
+    }
+    let (_, p) = hub.get(&format!("/api/projects/{pid}")).await;
+    assert!(p.get("icon").is_none(), "{p}");
     // Not square, too small, too large in pixels.
     for (w, h) in [(512, 256), (64, 64), (2048, 2048)] {
         let (s, v) = put_icon(&hub, &pid, "x.png", "image/png", png(w, h)).await;

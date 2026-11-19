@@ -2233,6 +2233,11 @@ describe('history', () => {
       (id, before, limit) => new Promise((r) => (older = () => r(tail(id, before, limit)))),
     );
     await mount(app);
+    // The newest page, once it is in: a run that starts with this test pays for the first
+    // imports and renders it later than the 50 ms of `mount` (#47).
+    for (let i = 0; i < 300 && !root.querySelector('.feed-block'); i++) {
+      await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    }
     expect(api.events).not.toHaveBeenCalled();
     expect(root.querySelector('.feed .empty')).toBeNull();
     expect(api.eventsBefore.mock.calls[1]?.[1]).toBe(351);

@@ -7,6 +7,7 @@ pub mod api;
 pub mod client_frame;
 pub mod event;
 pub mod frame;
+pub mod lookalike;
 pub mod mcp;
 pub mod rules;
 

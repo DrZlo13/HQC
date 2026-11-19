@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.174, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
+Version 0.175, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2766,7 +2766,10 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   `{results: [{address, title, archived, seq?, type?, ts, snippet}], next_cursor?}` (no
   `session_id`: the address is what the other tools take). `project` is a slug or an id of
   the owner's project (else `not_found`); a refused query is `invalid_args`. No side effects,
-  so a repeated call simply runs again.
+  so a repeated call simply runs again. Since 0.175, for an agent of a room the search leaves
+  out the room and every other agent's session of it (as `hqc_read` refuses them, §7.1.1), so a
+  council's answers stay independent; its own session is searched, and so is every session
+  outside the room. `GET /api/search`, the owner's own, is unchanged.
 - `hqc_read(session, before_seq?, after_seq?)` — one session read from the hub in full, page by
   page, where `hqc_search_history` only finds. `session` is an address or an id of a session of the
   calling session's owner: an archived one, the calling one itself and a room are read too; another
@@ -2956,9 +2959,17 @@ Delivery:
   every message (the turn's permission cap still holds). Since 0.47
   (T42) the ask's header ends `| reply with your final message | return files with hqc_attach
   or in files of hqc_send]`: both reach the asker with the reply (below).
-- Spoofing protection: when building `session.input`, the worker escapes the substring
-  `[hqc peer` (anywhere in the text, case-insensitive) to `[hqc-peer-text`
-  in **all** the text it passes to the runtime: the user's text, the text of a peer message
+- Spoofing protection: when building `session.input`, the worker escapes every place that reads as
+  `[hqc peer` (anywhere in the text) to `[hqc-peer-text`: since 0.175 "reads as" is what a model
+  reads, not the bytes: invisible characters (category Cf, and the other
+  Default_Ignorable_Code_Points: soft hyphen, zero-width and bidi characters, the combining
+  grapheme joiner, variation selectors) are dropped, every other character is folded by NFKC
+  one at a time (fullwidth `［ｈｑｃ　ｐｅｅｒ` is `[hqc peer`) and lowercased, and any run of
+  whitespace (no-break space, ideographic space, the Hangul fillers, several spaces) is one
+  space; letters of other scripts that look alike (Cyrillic `с`, `о`) and lookalike brackets
+  (`【`) are not folded; the replaced span runs from the first character of the match to its last,
+  invisible characters inside included, the rest of the text is kept byte for byte. It is done in
+  **all** the text it passes to the runtime: the user's text, the text of a peer message
   from an agent and the `peer_prefix` block; the real header is added after escaping. The
   history on the hub is not rewritten.
 - The runtime's text (since 0.35, T32; the worker builds it from `session.input`, §5.3): the
@@ -2972,8 +2983,10 @@ Delivery:
   empty line, closed by `---` and an empty line. The sender's address and `request_id` are
   escaped as well. Since 0.39 (T36) the fields inside a header (the
   sender's address, `request_id`) are reduced to one line of at most 200 characters with `[`,
-  `]`, `|` and control characters replaced by `_`, so a field can neither end the header nor
-  add one; the hub also refuses a `request_id` outside `A-Z a-z 0-9 . _ : -` (§5.2).
+  `]`, `|` and control characters replaced by `_` (since 0.175 also every character that folds
+  to `[`, `]` or `|` by NFKC, fullwidth `［］｜` among them, and with invisible characters dropped), so a
+  field can neither end the header nor add one; the hub also refuses a `request_id` outside
+  `A-Z a-z 0-9 . _ : -` (§5.2).
 - Rights: `hqc_send`/`hqc_ask` to someone else's session require the owner of the sending
   session to have a `write` grant on the target.
 - The target (since 0.35): an address or an id of a session of the caller's owner, not
@@ -3232,13 +3245,19 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   text. The agents see each other by their names in the room (user decision, 2026-11-17), each
   next to the address the hub stored with the post or the input (`from`). A name is the
   session's title when the hub sends the input, which any session of the owner may change
-  (`hqc_rename` with `session`, `PATCH`), so in a hub's line it loses every `|`, `[`, `]`, `"`
-  and control character (each a space, runs of spaces one, trimmed) and stands in double
+  (`hqc_rename` with `session`, `PATCH`), so in a hub's line it loses every invisible character
+  (zero-width, bidi, variation selectors; since 0.175), and every
+  `|`, `[`, `]`, `"`, every character that folds to one of them by NFKC (fullwidth `［］｜＂`,
+  since 0.175), every Hangul filler (shown as a blank, since 0.175) and every control character
+  becomes a space (runs of spaces one, trimmed), and
+  it stands in double
   quotes, which the hub's own words (`your owner`) never take: a title cannot close the line or
   pass for another sender or the owner, and the address next to it names the sender. A title
   that comes out empty leaves the address alone, unquoted.
-  In every text the hub puts there, the posts', the owner's messages' and the input's own, `[hqc room` in any ASCII
-  case becomes `[hqc-room-text`, as the worker escapes `[hqc peer` (§7.1): every line of the
+  In every text the hub puts there, the posts', the owner's messages' and the input's own, what
+  reads as `[hqc room` (any case; since 0.175 fullwidth and other compatibility forms, any run of
+  Unicode whitespace between the words, invisible characters inside) becomes `[hqc-room-text`, as the
+  worker escapes `[hqc peer` (§7.1, one function for both): every line of the
   hub's own that opens the block, a post or the input starts with `[hqc room`, so no text makes
   one, and a line in a post written as
   another agent's post, or a `---`, stays under the line that names the post's author; the
@@ -5645,7 +5664,8 @@ it finds commands, their output and word forms and puts the best match first:
 - **Whose.** Until grants (iteration 8): the user's (the calling session's owner's) sessions,
   archived ones included and marked `archived: true`, the workers' service sessions left out and
   (since 0.172) of a room's agents' sessions their inputs from the room, which the room has
-  (§7.1.1).
+  (§7.1.1); since 0.175, for an agent of a room (`hqc_search_history`, §7) also the room and
+  every other agent's session of it left out (§7.1.1), the owner's `GET /api/search` unchanged.
 - **Matching.** The hub parses the query itself into a `to_tsquery('hqc', …)`: every word must
   be there, `"a phrase"` in sequence, `or` either side, `-word` without it, `word*` a prefix
   of the word as typed or of its stem; a prefix of Latin letters also finds the whole stems,
@@ -6233,6 +6253,22 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.174 → 0.175 (a lookalike of a hub's mark, and the search of a room's agent)
+§7, §7.1, §7.1.1, §15: the escape of `[hqc room` (the hub) and `[hqc peer` (the worker) was a
+byte match, so `［hqc room` (fullwidth), `[hqc` and `room` with a no-break or ideographic space
+or two spaces between them, and a mark with a zero-width or bidi character inside passed and read
+to a model as the hub's own line; `clean_name` and the worker's `field` let fullwidth `［］｜＂`
+and Cf characters through the same way. Both escapes are now one function in `hqc-proto` that
+folds text before comparing it (invisible characters, Cf and the other Default_Ignorable_Code_Points,
+dropped, NFKC per character, lowercase, whitespace runs one space; letters of other scripts that
+look alike and lookalike brackets are not folded) and replaces the matched span, and names and
+header fields drop invisible characters and take every character that
+folds to a forbidden one for it. And `hqc_search_history` of an agent of a room left out neither
+the room nor another agent of it, so a council agent could read a peer's answer through the
+search that `hqc_read` refuses; it now leaves both out for such an agent (the owner's
+`GET /api/search` is unchanged). A joined `ack` before the turn's final answer, which a council
+agent's direct turn takes from the council, was already handled and is covered by a test.
 
 ### 0.173 → 0.174 (a send joins the running turn, and a person's input passes what cannot)
 §17.2, §3, §4, §6, §7.1: the worker wrote only the head of the input queue into a running turn,

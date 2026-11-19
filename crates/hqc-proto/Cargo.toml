@@ -10,3 +10,5 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+unicode-normalization = "0.1"
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }

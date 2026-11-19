@@ -59,6 +59,13 @@ pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's 
     when the user did not ask to see it; a path alone is not enough. hqc_attach takes only a file \
     inside the session's workspace, so copy a file you made elsewhere (a scratchpad in /tmp) into \
     .hqc/out/ of the workspace first, not elsewhere in it: hqc keeps .hqc/ out of git. \
+    Required as well: when the user's latest message asks for a task that is not part of the \
+    work of this session (not a question, a quick check or one small edit), ask the user before \
+    any work on it, with your tool for questions to the user (AskUserQuestion), \"Start this in \
+    its own session?\" with the options \"New session\" and \"Do it here\"; on \"New session\" \
+    start it with hqc_spawn as its description says and do not do it here, on \"Do it here\" do \
+    it here. Do not ask on a message from another session or a room (an `[hqc peer` or \
+    `[hqc room` header): that session or room gave the task and chose where it runs. \
     Other sessions: hqc_list_sessions, hqc_send, hqc_ask, hqc_spawn, hqc_room \
     (a room of several agents); history: hqc_search_history to find, hqc_read to read a \
     session or a room in full; later or recurring messages: hqc_schedule; moving this session to \
@@ -276,7 +283,14 @@ pub const TOOLS: &[Tool] = &[
             branch (hqc/<session-slug> unless `branch` is given), so it does not edit the \
             checkout you work in; the call then waits until the worktree is made and also \
             returns its `worktree` path and branch. The new agent's commits stay on that \
-            branch for your owner to merge; the worktree is not deleted automatically.",
+            branch for your owner to merge; the worktree is not deleted automatically. When \
+            the user chose \"New session\" for a task of their message: `project` is this \
+            session's project (the part before / of the address hqc_list_sessions marks \
+            `current: true`), `prompt` the brief: the task as the user would send it to a \
+            fresh session (the files or area, what done looks like) and, in a few sentences, \
+            what that session needs from this conversation; do not do the task here, and once \
+            this returns, say in one line that it runs in its own session, with its address, \
+            and end your turn.",
         input_schema: || {
             json!({
                 "type": "object",

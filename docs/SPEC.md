@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.183, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.184, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -6641,6 +6641,11 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
+### 0.183 → 0.184 (Fable 5.2 in the model menus)
+§6 client layout: the versions of the model menus have Fable 5.2 (`claude-fable-5-2`) first of its
+family; checked on 2026-11-19 to answer as itself on a subscription, and the `fable` alias
+resolves to it.
+
 ### 0.182 → 0.183 (a full worker makes a session wait, not fail)
 §8.1, §4: with `max_sessions` agents running, a start was `agent_start_failed` (retryable), the
 hub tried `max_start_failures` times 2 s apart and failed the input, and the session went to
@@ -7059,8 +7064,8 @@ Claude Code's own catalog of models (`initialize`, 2.1.312) gives a subscription
 default and the aliases, so a version could only be typed. §6 client layout: the model menus
 (the chat's "More", the new session's model chip) list, after the aliases, the versions a
 subscription answers as themselves, newest first per family: Opus 5.5, 5, 4.8, 4.7 and 4.6,
-Sonnet 5.5, 5 and 4.6, Haiku 5.5 and 4.5, Fable 5.1 and 5 (`claude-opus-4-1` is left out: it is
-served by Opus 5.5); a session on one of them shows it chosen, not as a typed name. §4: the
+Sonnet 5.5, 5 and 4.6, Haiku 5.5 and 4.5, Fable 5.2 (since 0.184), 5.1 and 5 (`claude-opus-4-1` is
+left out: it is served by Opus 5.5); a session on one of them shows it chosen, not as a typed name. §4: the
 runtime's reply to a model refusal is `agent.message` with `refusal: true` beside `runtime`;
 §8.1 and the mirror (§9) take it from `message.stop_reason: "refusal"` of the CLI's synthetic
 reply. The client offers "Switch model" under such a line while no message of the user stands

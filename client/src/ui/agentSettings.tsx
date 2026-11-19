@@ -26,6 +26,7 @@ export const MODEL_VERSIONS = [
   'claude-sonnet-4-6',
   'claude-haiku-5-5',
   'claude-haiku-4-5',
+  'claude-fable-5-2',
   'claude-fable-5-1',
   'claude-fable-5',
 ] as const;

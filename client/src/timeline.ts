@@ -563,8 +563,10 @@ function agentWork(e: HqcEvent): boolean {
  *  no `status` closing that same turn; one whose turn has not started stands at the bottom. In
  *  `seq` order a turn runs from an input that does not wait, or from the agent's work, to an
  *  event that `endsTurn`. A delivered input waited only if the first end of a turn after it is
- *  not its own. A `joined` input behind a waiting one went into one of the later turns: it
- *  stays right behind it. */
+ *  not its own. A `joined` input behind waiting ones went into one of the later turns after the
+ *  last of them that was delivered before it: it stays right behind that one; if each was still
+ *  pending when it was delivered it went past them all, into the turn running then, and stands
+ *  at its own `seq`. */
 function placeQueued(items: Item[]): Item[] {
   const nextEnd: (HqcEvent | undefined)[] = [];
   let end: HqcEvent | undefined;
@@ -587,8 +589,15 @@ function placeQueued(items: Item[]): Item[] {
     const e = it.event;
     if (isInput(e)) {
       if (joined(e) && waiting.length > 0) {
-        waiting.push(it);
-        return;
+        // Behind the last waiting input delivered before it (and the inputs that joined behind
+        // that one); it went past those delivered after it or still pending.
+        const k = anchorOf(e, waiting);
+        if (k >= 0) {
+          let at = k + 1;
+          while (at < waiting.length && joined(waiting[at].event)) at++;
+          waiting.splice(at, 0, it);
+          return;
+        }
       }
       const waited =
         e.delivery === "pending" || (nextEnd[i] !== undefined && endOf(nextEnd[i]) !== e.event_id);
@@ -619,23 +628,37 @@ function placeQueued(items: Item[]): Item[] {
   return out;
 }
 
+/** Where the joined input `e` stands in `waiting`: the index of the last waiting input delivered
+ *  at or before `e` was (it joined a turn after that one's start), -1 when it went past all of
+ *  them (each was still pending when `e` was delivered, or is now). Inputs that joined
+ *  themselves are not counted: they stand behind the input they follow. */
+function anchorOf(e: HqcEvent, waiting: Extract<Item, { kind: "event" }>[]): number {
+  if (!e.delivered_at) return waiting.length - 1;
+  const at = Date.parse(e.delivered_at);
+  for (let i = waiting.length - 1; i >= 0; i--) {
+    const w = waiting[i].event;
+    if (!joined(w) && w.delivery !== "pending" && w.delivered_at && Date.parse(w.delivered_at) <= at) return i;
+  }
+  return -1;
+}
+
 function seqOf(i: Item): number {
   if (i.kind === "event") return i.event.seq ?? Infinity;
   if (i.kind === "invalid") return i.invalid.seq ?? Infinity;
   return Infinity;
 }
 
-/** `payload.joined` of the user's message: the hub sets it when the runtime took the message
- *  into the turn already running (SPEC §17.2), the one change of a stored payload. */
+/** `payload.joined` of an input (a message of the user or of another session): the hub sets it
+ *  when the runtime took the message into the turn already running (SPEC §17.2), the one change
+ *  of a stored payload. */
 function joined(e: HqcEvent): boolean {
-  return e.type === "user.message" && e.payload.joined === true;
+  return (e.type === "user.message" || e.type === "peer.message") && e.payload.joined === true;
 }
 
 /** `e` with `payload.joined` set when `on`; it is never taken back. */
 function withJoined(e: HqcEvent, on: boolean): HqcEvent {
-  return on && e.type === "user.message" && !e.payload.joined
-    ? { ...e, payload: { ...e.payload, joined: true } }
-    : e;
+  if (!on || (e.type !== "user.message" && e.type !== "peer.message") || e.payload.joined) return e;
+  return { ...e, payload: { ...e.payload, joined: true } } as HqcEvent;
 }
 
 /** `ev` under `key` in `m` unless an earlier one (by `seq`) is there: an older page may load

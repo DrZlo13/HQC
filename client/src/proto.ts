@@ -291,6 +291,8 @@ export interface PeerMessage {
   artifact_ids: Uuid[];
   /** As `UserMessage.during_text`. */
   during_text?: boolean;
+  /** As `UserMessage.joined`: set on a `send` and on a room's input (SPEC §17.2). */
+  joined?: boolean;
 }
 export interface Usage {
   input_tokens: number;
@@ -563,6 +565,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     request_id: optStr(p, 'request_id'),
     artifact_ids: present(p, 'artifact_ids') ? strArr(p, 'artifact_ids') : [],
     during_text: optBool(p, 'during_text'),
+    joined: optBool(p, 'joined'),
   }),
   usage: (p) => ({
     input_tokens: num(p, 'input_tokens'),

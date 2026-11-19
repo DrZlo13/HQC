@@ -339,13 +339,15 @@ pub(crate) async fn link_files(
 type TurnInput = (Uuid, Option<Value>, Option<String>, Option<String>);
 
 /// The input that started the session's current turn (SPEC §7.1): the last input delivered
-/// to it. `None`: no turn yet.
+/// to it, by the time it was delivered (ties by `seq`): an input that joined the running
+/// turn past a waiting one has a higher `seq` than that one, which runs after it. `None`: no
+/// turn yet.
 async fn last_delivered(app: &AppState, session_id: Uuid) -> anyhow::Result<Option<TurnInput>> {
     Ok(sqlx::query_as(
         "SELECT e.event_id, e.chain, c.permission_cap, c.capped_by
          FROM events e LEFT JOIN input_caps c ON c.event_id = e.event_id
          WHERE e.session_id = $1 AND e.delivery = 'delivered'
-         ORDER BY e.seq DESC LIMIT 1",
+         ORDER BY COALESCE(e.delivered_at, e.ts) DESC, e.seq DESC LIMIT 1",
     )
     .bind(session_id)
     .fetch_optional(&app.db)
@@ -381,7 +383,8 @@ pub(crate) fn input_chain(
 
 /// The chain of call `c` of session `caller`: that of the input the worker says the turn
 /// runs on (`turn_input`), if it is an input of the session given to the agent or on its
-/// way, not older than the last delivered one; otherwise the last delivered input. A human's
+/// way, not delivered earlier than the last delivered one (a pending one is on its way);
+/// otherwise the last delivered input. A human's
 /// turn is a chain of its own with nothing in it yet (`depth` and `hops` 0), its id derived
 /// from the input, so every call of that turn shares it. The worker knows
 /// the turn before the hub does: the input's `ack` bypasses its outbox and is lost with a
@@ -412,9 +415,12 @@ async fn call_input(
              FROM events e LEFT JOIN input_caps c ON c.event_id = e.event_id
              WHERE e.event_id = $1 AND e.session_id = $2
                AND e.type IN ('user.message', 'peer.message')
-               AND e.delivery IN ('pending', 'delivered')
-               AND e.seq >= COALESCE((SELECT max(d.seq) FROM events d
-                                      WHERE d.session_id = $2 AND d.delivery = 'delivered'), 0)",
+               AND (e.delivery = 'pending'
+                    OR (e.delivery = 'delivered'
+                        AND COALESCE(e.delivered_at, e.ts) >=
+                            COALESCE((SELECT max(COALESCE(d.delivered_at, d.ts)) FROM events d
+                                      WHERE d.session_id = $2 AND d.delivery = 'delivered'),
+                                     '-infinity'::timestamptz)))",
         )
         .bind(input)
         .bind(caller.id)
@@ -1351,7 +1357,7 @@ pub async fn turn_stopped(app: &AppState, s: &SessionRow, input: Uuid) -> anyhow
 }
 
 /// Fails the open asks that input `input` of session `s` carried (`None`: its last delivered
-/// input), with `unavailable` and `message(to)`.
+/// input, by delivery time as [`last_delivered`]), with `unavailable` and `message(to)`.
 async fn fail_turn(
     app: &AppState,
     s: &SessionRow,
@@ -1366,7 +1372,8 @@ async fn fail_turn(
            AND payload ->> 'event_id' = COALESCE($3::text,
                                                  (SELECT event_id::text FROM events
                                                   WHERE session_id = $2 AND delivery = 'delivered'
-                                                  ORDER BY seq DESC LIMIT 1))"
+                                                  ORDER BY COALESCE(delivered_at, ts) DESC,
+                                                           seq DESC LIMIT 1))"
     ))
     .bind(s.id.to_string())
     .bind(s.id)

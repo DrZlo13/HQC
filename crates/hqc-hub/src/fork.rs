@@ -230,8 +230,16 @@ pub fn waited_place(marks: &[db::TurnMark], seq: i64) -> Option<i64> {
     for (i, m) in marks.iter().enumerate() {
         if is_input(m) {
             if joined(m) && !waiting.is_empty() {
-                waiting.push(i);
-                continue;
+                // Behind the last waiting input delivered before it (and the inputs that
+                // joined behind that one); it went past those delivered after it or still
+                // pending.
+                if let Some(k) = anchor_of(m, marks, &waiting) {
+                    let at = (k + 1..waiting.len())
+                        .find(|&j| !joined(&marks[waiting[j]]))
+                        .unwrap_or(waiting.len());
+                    waiting.insert(at, i);
+                    continue;
+                }
             }
             let id = m.event_id.to_string();
             let waited = m.delivery.as_deref() == Some("pending")
@@ -306,8 +314,24 @@ fn is_input(m: &db::TurnMark) -> bool {
     matches!(m.kind.as_str(), "user.message" | "peer.message") && m.delivery.is_some()
 }
 
+/// Where the joined input `m` stands in `waiting`: the index of the last waiting input delivered
+/// at or before `m` was (it joined a turn after that one's start), `None` when it went past all
+/// of them (each was still pending when `m` was delivered, or is now). Inputs that joined
+/// themselves are not counted: they stand behind the input they follow.
+fn anchor_of(m: &db::TurnMark, marks: &[db::TurnMark], waiting: &[usize]) -> Option<usize> {
+    let Some(at) = m.delivered_at else {
+        return waiting.len().checked_sub(1);
+    };
+    waiting.iter().rposition(|&w| {
+        let w = &marks[w];
+        !joined(w)
+            && w.delivery.as_deref() != Some("pending")
+            && w.delivered_at.is_some_and(|d| d <= at)
+    })
+}
+
 fn joined(m: &db::TurnMark) -> bool {
-    m.kind == "user.message" && m.joined
+    is_input(m) && m.joined
 }
 
 /// Come while a turn runs, it waits for a turn of its own: not `joined`, not failed, and not
@@ -443,6 +467,67 @@ mod tests {
             idle(6, 1),
             mark(7, "agent.thinking", "agent"),
             answer(8, 4),
+        ];
+        assert_eq!(waited_place(&m, 3), Some(7));
+        assert_eq!(waited_place(&m, 4), Some(7));
+    }
+
+    #[test]
+    fn a_joined_input_that_went_past_a_waiting_one_stays_at_its_own_place() {
+        // Input 3 waited for a turn of its own and was delivered at 7.1; 4 joined the running
+        // turn at 4.5.
+        let m = [
+            input(1, Some(1.2)),
+            work(2),
+            input(3, Some(7.1)),
+            joined(4, 4.5),
+            answer(5, 1),
+            idle(6, 1),
+            work(7),
+            answer(8, 3),
+        ];
+        assert_eq!(waited_place(&m, 4), None);
+        assert_eq!(waited_place(&m, 3), Some(7));
+    }
+
+    #[test]
+    fn a_joined_input_stands_behind_the_last_waiting_one_delivered_before_it() {
+        // 3 waits (delivered 7.1), then 4 (delivered 12.1); 5 joined at 8.5, in 3's turn, past 4.
+        let m = [
+            input(1, Some(1.2)),
+            work(2),
+            input(3, Some(7.1)),
+            input(4, Some(12.1)),
+            joined(5, 8.5),
+            answer(6, 1),
+            idle(7, 1),
+            work(8),
+            answer(9, 3),
+            idle(10, 3),
+            work(11),
+            answer(12, 4),
+        ];
+        assert_eq!(waited_place(&m, 3), Some(8));
+        assert_eq!(waited_place(&m, 5), Some(8));
+        assert_eq!(waited_place(&m, 4), Some(11));
+    }
+
+    #[test]
+    fn a_joined_send_behind_a_waiting_input_stays_behind_it() {
+        let m = [
+            input(1, Some(1.2)),
+            mark(2, "agent.thinking", "agent"),
+            input(3, Some(6.1)),
+            db::TurnMark {
+                joined: true,
+                delivery: Some("delivered".into()),
+                delivered_at: Some(at(7.1)),
+                ..mark(4, "peer.message", "agent")
+            },
+            answer(5, 1),
+            idle(6, 1),
+            mark(7, "agent.thinking", "agent"),
+            answer(8, 3),
         ];
         assert_eq!(waited_place(&m, 3), Some(7));
         assert_eq!(waited_place(&m, 4), Some(7));

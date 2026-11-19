@@ -27,10 +27,13 @@
 //!   adapter reports [`AdapterEvent::InputAccepted`] (SPEC §5.2). The queue lives in memory:
 //!   the hub's `pending` inputs are the source of truth and come again after `hello`, so an
 //!   input already queued or delivered is recognised by `event_id` and not run twice.
-//! - While a turn runs, the head of the queue goes into it when the runtime can take it
-//!   ([`Adapter::can_inject`]), neither it nor the turn is capped, the turn's own
-//!   input has no `peer`, and only a person's input (no `peer`, no `schedule_id`) that is no
-//!   slash command: as the VS Code tab does with what the user types meanwhile.
+//! - While a turn runs, the first waiting input that may join goes into it when the runtime
+//!   can take it ([`Adapter::can_inject`]) and the turn's own input is no `hqc_ask`: a
+//!   person's input (no `peer`, no `schedule_id`) that is no slash command and has no cap,
+//!   or a `send` of another session whose cap does not lower the session's mode and which
+//!   the runtime's confirmed mode is not above; it passes the waiting inputs before it that
+//!   are no person's and cannot join
+//!   ([`Session::inject_next`]), as the VS Code tab takes what the user types meanwhile.
 //!   Its acceptance is `ack {event_id, joined: true}`, also when it is resent; the first
 //!   input the turn carries to the next one becomes that turn, one the runtime will not take
 //!   goes back to the head of the queue, as does every one not taken when the process exits.
@@ -91,7 +94,7 @@ use std::time::Duration;
 
 use std::path::{Path, PathBuf};
 
-use hqc_proto::event::EventKind;
+use hqc_proto::event::{EventKind, PeerMode};
 use hqc_proto::frame::{
     error_code, worker_approval, Ack, Envelope, HeldBy, HubFrame, LockedBy, PermissionMode,
     ProcessState, RequestResult, ResultBody, Runtime, SecretOutcome, SecretPut, SecretPutResult,
@@ -1735,7 +1738,7 @@ impl Session {
     }
 
     /// Hands the next queued input to the adapter if no turn is running, or writes it into
-    /// the running turn ([`Session::inject_head`]). While a move waits the input is for the
+    /// the running turn ([`Session::inject_next`]). While a move waits the input is for the
     /// agent in the new folder: it waits as long as something holds the move, then the move
     /// goes first ([`Session::restart_for_move`]). A capped input first waits for the runtime
     /// to confirm its turn's mode, the lower of its cap and the session's own (T39); an
@@ -1743,7 +1746,7 @@ impl Session {
     async fn pump(&mut self) {
         while self.lowering.is_none() && self.state == ProcessState::Running {
             if self.turn.is_some() {
-                if !self.inject_head().await {
+                if !self.inject_next().await {
                     return;
                 }
                 continue;
@@ -1838,31 +1841,60 @@ impl Session {
         }
     }
 
-    /// Writes the head of the queue into the running turn (SPEC §17.2), as the VS Code tab
-    /// does with what the user types meanwhile: a person's input (no `peer`, no
-    /// `schedule_id`) that is no slash command, into a turn whose own input has no `peer`
-    /// (an `hqc_ask` is answered by its own turn alone), neither of them capped
-    /// (T39), the runtime asks nothing now and no move waits (the input is for the agent in
-    /// the new folder). Only the head goes, so `seq` order holds.
-    /// False: the head waits for the end of the turn.
-    async fn inject_head(&mut self) -> bool {
-        let fits = |q: &Queued| {
-            q.input.peer.is_none()
-                && q.input.schedule_id.is_none()
-                && !q.input.text.trim_start().starts_with('/')
-                && !capped(&q.input)
-        };
-        if !self.queue.front().is_some_and(fits)
-            || self.moving.is_some()
-            || self
-                .turn
-                .as_ref()
-                .is_some_and(|t| t.capped || t.input.peer.is_some())
+    /// Writes the first waiting input that may join into the running turn (SPEC §17.2), as
+    /// the VS Code tab does with what the user types meanwhile. May join: a person's input
+    /// (no `peer`, no `schedule_id`) that is no slash command and has no cap (T39), and a
+    /// `send` of another session (`peer.mode` `send`, no `schedule_id`) whose cap does not
+    /// lower the session's own mode, which would not hold the turn's mode down, and which the
+    /// runtime is confirmed at or below (as `pump` requires of a capped turn). It goes
+    /// past the waiting inputs in front of it that are no person's and cannot join (an
+    /// `hqc_ask`, a schedule run, a send with a lower cap), which keep their places for after
+    /// the turn; a person's input that cannot join (a slash command, a capped one) stops the
+    /// search, so a person's own inputs keep their order. The turn takes nothing if its own
+    /// input is an `hqc_ask` (its result is the answer to its sender), the runtime asks
+    /// nothing now and no move waits (the input is for the agent in the new folder).
+    /// False: nothing goes, what waits waits for the end of the turn.
+    async fn inject_next(&mut self) -> bool {
+        if self.moving.is_some()
+            || self.turn.as_ref().is_some_and(|t| {
+                t.input
+                    .peer
+                    .as_ref()
+                    .is_some_and(|p| p.mode != PeerMode::Send)
+            })
             || !self.adapter.can_inject()
         {
             return false;
         }
-        let Some(q) = self.queue.pop_front() else {
+        let own = self.spec.permission_mode;
+        // The runtime is confirmed at or below the input's cap, as `pump` requires of a capped
+        // turn: a switch it refused or has not confirmed yet leaves the turn above the cap.
+        let (asked, running) = (self.asked_mode, self.permission_mode);
+        let fits_cap =
+            |input: &SessionInput| asked <= cap(input) && running.is_some_and(|m| m <= cap(input));
+        let mut at = None;
+        for (i, q) in self.queue.iter().enumerate() {
+            let input = &q.input;
+            if input.schedule_id.is_some() {
+                continue;
+            }
+            match &input.peer {
+                None if input.text.trim_start().starts_with('/') || capped(input) => break,
+                None => {
+                    at = Some(i);
+                    break;
+                }
+                Some(p) if p.mode == PeerMode::Send && cap(input) >= own && fits_cap(input) => {
+                    at = Some(i);
+                    break;
+                }
+                Some(_) => {}
+            }
+        }
+        let Some(i) = at else {
+            return false;
+        };
+        let Some(q) = self.queue.remove(i) else {
             return false;
         };
         let Some((input, files)) = self.prepared(&q).await else {
@@ -1874,9 +1906,10 @@ impl Session {
                 self.injected.push(q);
                 true
             }
-            // The turn ended meanwhile: the input goes once its end is handled.
+            // The turn ended meanwhile: the input goes once its end is handled, from its
+            // own place.
             Ok(false) => {
-                self.queue.push_front(q);
+                self.queue.insert(i.min(self.queue.len()), q);
                 false
             }
             Err(e) => {
@@ -2005,12 +2038,35 @@ impl Session {
                 }
             }
             AdapterEvent::TurnEnded { carried, dropped } => {
-                let capped = self.turn.as_ref().is_some_and(|t| t.capped);
+                let before = self.turn.as_ref().map(|t| (t.input.event_id, t.capped));
                 self.end_turn(&carried, &dropped);
-                // A capped input the runtime carries is still the turn: its cap holds.
-                if capped && !self.turn.as_ref().is_some_and(|t| t.capped) {
-                    self.after_capped_turn().await;
-                    self.send_state();
+                let after = self
+                    .turn
+                    .as_ref()
+                    .map(|t| (t.input.event_id, t.capped, cap(&t.input)));
+                match (before, after) {
+                    // The same input is still the turn (a capped input the runtime carries
+                    // keeps its cap), or no turn before or after: nothing changes.
+                    (Some((was, _)), Some((is, _, _))) if was == is => {}
+                    // Another input became the turn, written into the one before: the runtime
+                    // already runs it, in the mode of the turn before, so no wait as in `pump`.
+                    // This usually raises the mode, which may lag a moment; after the owner
+                    // raised it during the turn before, it lowers the runtime to the send's cap,
+                    // again without waiting for the confirmation.
+                    (old, Some((_, now_capped, now_cap)))
+                        if now_capped || old.is_some_and(|(_, was_capped)| was_capped) =>
+                    {
+                        let own = self.spec.permission_mode;
+                        self.ask_runtime(if now_capped { own.min(now_cap) } else { own })
+                            .await;
+                        self.send_state();
+                    }
+                    // The capped turn is over (T39): the session's own mode again.
+                    (Some((_, true)), None) => {
+                        self.after_capped_turn().await;
+                        self.send_state();
+                    }
+                    _ => {}
                 }
                 self.restart_for_move().await;
                 self.pump().await;
@@ -2126,8 +2182,9 @@ impl Session {
     /// turn the runtime began by itself), stays the turn; else the first carried input written
     /// into the turn becomes it, the other carried ones stay written. The turn's own input
     /// neither accepted nor carried goes back to the head of the queue, as does a written one
-    /// in `dropped` (the runtime will not take it), in `seq` order, unless a Stop came since
-    /// the last end (then it fails: the person cancelled it). Any other written input
+    /// in `dropped` (the runtime will not take it), in the order they were written (an input
+    /// written past a waiting one stands before it), unless a Stop came since the last end
+    /// (then it fails: the person cancelled it). Any other written input
     /// stays written: it went into the turn the runtime runs next before this end reached
     /// the session.
     fn end_turn(&mut self, carried: &[Uuid], dropped: &[Uuid]) {
@@ -2158,12 +2215,14 @@ impl Session {
             } else if next.is_none() {
                 tracing::info!(session_id = %self.id, event_id = %q.input.event_id, "an input written during the turn starts the next one");
                 self.link.mcp().set_turn(self.id, q.input.event_id);
+                // A send written into the turn carries its cap: the owner's raise stays at it.
+                let capped = capped(&q.input);
                 next = Some(Turn {
                     frame_id: q.frame_id,
                     input: q.input,
                     accepted: false,
                     requeued: q.requeued,
-                    capped: false,
+                    capped,
                 });
             } else {
                 still.push(q);

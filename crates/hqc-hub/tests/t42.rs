@@ -337,8 +337,8 @@ async fn an_ask_that_gets_no_reply_buffers_its_joined_sends() {
     assert_eq!(a_buffer(&hub, &mut s).await, ["partial answer"]);
 }
 
-/// A `joined` ack on another session's message is the worker's mistake (SPEC §17.2): the
-/// message is not marked as joined and its turn opens.
+/// A `joined` ack on an `hqc_ask` is the worker's mistake (SPEC §17.2): the question is not
+/// marked as joined and its turn opens.
 #[tokio::test]
 async fn a_peer_message_acked_as_joined_opens_its_turn() {
     let hub = TestHub::start().await;

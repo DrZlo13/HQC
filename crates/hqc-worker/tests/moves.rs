@@ -1051,6 +1051,7 @@ async fn a_sessions_state_goes_after_the_holder_report_of_its_transcript() {
         subagents: 0,
         background_tasks: 0,
         foreground_calls: vec![],
+        activity: None,
     });
     let mut order = vec![];
     while order.len() < 2 {

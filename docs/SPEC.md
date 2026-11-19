@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.186, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
+Version 0.173, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -819,11 +819,11 @@ Worker → hub:
   without final text (only `status idle|error`) stays "in progress" until the next turn when
   its `ack` is late like this **[verify]**.
 - A session's `session.state` bypasses the outbox too, but since 0.75 the worker sends it only
-  after the outbox entries written before it (since 0.186 only up to the last one of its session
+  after the outbox entries written before it (since 0.173 only up to the last one of its session
   or its transcript), also in what it sends at once when it stops. The hub ends an open turn as lost on `stopped` (§17.3),
   and a stop right after a turn (a move, §5.3) used to reach it before that turn's final
   `agent.message` in a few restarts of a hundred. Since 0.171 so does the answer to a
-  `session.input` that names an `event_id`: the `ack`, the joined `ack`; since 0.186 also an
+  `session.input` that names an `event_id`: the `ack`, the joined `ack`; since 0.173 also an
   `error` answer (`locked_vscode`, an attachment or start failure, Stop, `unknown_session`),
   which matters for whoever reacts to a failed delivery relative to a turn's end. Each outbox
   entry carries its stream: the session's id for its events and its `mcp.call`s, the service
@@ -833,7 +833,7 @@ Worker → hub:
   was written before it, and before those written after it. The outbox is sent in order by one
   cursor, so the entries of other sessions written before that last entry still go first; a frame
   of a session with no entries (or only old ones) no longer waits for the rest of the outbox,
-  which before 0.186 it did, up to the last entry of every session (after a mirror import of tens
+  which before 0.173 it did, up to the last entry of every session (after a mirror import of tens
   of thousands of entries, the `ack` of one session's input waited for all of them, 256 un-acked
   at a time). The connection reads from the outbox only the entries up to that point, not every
   unsent row. A batch the connection is already sending still holds the whole direct channel
@@ -6202,7 +6202,7 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
-### 0.172 → 0.186 (a keep-place frame waits for its session's entries, not the whole outbox)
+### 0.172 → 0.173 (a keep-place frame waits for its session's entries, not the whole outbox)
 §5.2: a `session.state` and the answers to a `session.input` keep their place among the outbox
 entries (0.171), but the frame waited for the last entry of the whole outbox, the entries of every
 session, and each such frame made the connection load every unsent row to send a part of them.

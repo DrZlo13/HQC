@@ -830,7 +830,9 @@ async fn enroll_reports_the_replaced_worker() {
     );
 }
 
-// T9: at most `max_sessions` agents run; one more start is retryable `agent_start_failed`.
+// T9, #41: at most `max_sessions` agents run. One more waits for a slot instead of failing:
+// its start is taken, the feed says why it waits, its input waits on the worker, and it starts
+// with that input as soon as another agent stops.
 #[tokio::test]
 async fn max_sessions_limits_running_agents() {
     let env = Env::new();
@@ -845,12 +847,39 @@ async fn max_sessions_limits_running_agents() {
     let first = Uuid::now_v7();
     start_session(&mut c, &env, first).await;
     let second = Uuid::now_v7();
-    let id = c.frame("session.start", env.start_payload(second)).await;
-    let err = c.expect("error").await;
-    assert_eq!(err["id"], id.as_str());
-    assert_eq!(err["payload"]["code"], "agent_start_failed");
-    assert_eq!(err["payload"]["retryable"], true);
+    // Taken, not refused.
+    start_session(&mut c, &env, second).await;
+    let starts = || {
+        adapters
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, FakeCall::Start(_)))
+            .count()
+    };
+    assert_eq!(starts(), 1, "the second waits: {:?}", adapters.calls());
+    // The feed says why, once.
+    let line = loop {
+        let f = c.expect("event").await;
+        let ev = &f["payload"]["event"];
+        c.ack_event(&f, 1).await;
+        if ev["type"] == "system" && ev["payload"]["code"] == "waiting_for_slot" {
+            break ev.clone();
+        }
+    };
+    assert_eq!(line["session_id"], second.to_string());
+    assert!(line["payload"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("1 agents already run on this worker"));
+    // An input waits with it: no error, no start.
+    let eid = Uuid::now_v7();
+    c.frame("session.input", input(second, eid, "hi")).await;
+    while let Some(f) = c.try_recv(std::time::Duration::from_millis(300)).await {
+        assert_ne!(f["type"], "error", "{f}");
+    }
+    assert_eq!(starts(), 1);
 
+    // The first stops: the second starts at once and gets its input.
     let id = c.frame("session.kill", json!({"session_id": first})).await;
     loop {
         let f = c.expect("ack").await;
@@ -858,15 +887,12 @@ async fn max_sessions_limits_running_agents() {
             break;
         }
     }
-    start_session(&mut c, &env, second).await;
-    assert_eq!(
-        adapters
-            .calls()
-            .iter()
-            .filter(|c| matches!(c, FakeCall::Start(_)))
-            .count(),
-        2
-    );
+    let deadline = Instant::now() + WAIT;
+    while !adapters.calls().iter().any(|c| matches!(c, FakeCall::Input { session_id, event_id } if *session_id == second && *event_id == eid)) {
+        assert!(Instant::now() < deadline, "{:?}", adapters.calls());
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(adapters.calls().contains(&FakeCall::Start(second)));
     w.stop().await;
 }
 

@@ -1017,6 +1017,7 @@ impl Supervisor {
             slots: self.slots.clone(),
             max_sessions: self.cfg.max_sessions,
             slot: None,
+            waiting_slot: false,
             state: ProcessState::Stopped,
             runtime_session_id: None,
             title: None,
@@ -1184,6 +1185,9 @@ struct Session {
     max_sessions: usize,
     /// Held while the agent process runs.
     slot: Option<OwnedSemaphorePermit>,
+    /// The agent waits for a slot (#41): `max_sessions` agents run, so it starts when one of
+    /// them stops, its inputs held until then; nothing is stopped to make room.
+    waiting_slot: bool,
     state: ProcessState,
     runtime_session_id: Option<String>,
     /// The runtime's title of the session, repeated in every `session.state`.
@@ -1271,6 +1275,18 @@ impl Session {
                         None => self.events_open = false,
                     }
                 }
+                p = self.slots.clone().acquire_owned(), if self.waiting_slot => {
+                    if let Ok(p) = p {
+                        self.slot = Some(p);
+                        self.waiting_slot = false;
+                        tracing::info!(session_id = %self.id, "a slot freed up, starting the agent");
+                        match self.ensure_running().await {
+                            Ok(()) => self.pump().await,
+                            Err(e) if waits(&e) => {}
+                            Err(e) => self.fail_queue(&e),
+                        }
+                    }
+                }
                 _ = sleep_until_opt(idle_deadline), if idle_deadline.is_some() => {
                     tracing::info!(session_id = %self.id, "idle timeout, stopping the agent");
                     self.kill_process("idle timeout").await;
@@ -1341,6 +1357,8 @@ impl Session {
                         self.link.reply(&id, ack(None));
                         self.pump().await;
                     }
+                    // Taken: the agent starts when a slot frees up (#41).
+                    Err(e) if waits(&e) => self.link.reply(&id, ack(None)),
                     Err(e) => {
                         self.link.reply(&id, start_failed(&e));
                         self.fail_queue(&e);
@@ -1708,7 +1726,9 @@ impl Session {
         self.stop_asked = false;
         self.kill_process("moved to another folder").await;
         if let Err(e) = self.ensure_running().await {
-            self.fail_queue(&e);
+            if !waits(&e) {
+                self.fail_queue(&e);
+            }
         }
     }
 
@@ -1868,7 +1888,10 @@ impl Session {
         });
         if self.state == ProcessState::Stopped {
             if let Err(e) = self.ensure_running().await {
-                self.fail_queue(&e);
+                // Waiting for a slot, the input waits in the queue with it (#41).
+                if !waits(&e) {
+                    self.fail_queue(&e);
+                }
                 return;
             }
         }
@@ -2106,7 +2129,9 @@ impl Session {
         tracing::warn!(session_id = %self.id, "restarting the agent in the mode of a capped input: {why}");
         self.kill_process("permission cap").await;
         if let Err(e) = self.ensure_running().await {
-            self.fail_queue(&e);
+            if !waits(&e) {
+                self.fail_queue(&e);
+            }
         }
     }
 
@@ -2391,6 +2416,7 @@ impl Session {
                 if !self.queue.is_empty() {
                     match self.ensure_running().await {
                         Ok(()) => self.pump().await,
+                        Err(e) if waits(&e) => {}
                         Err(e) => self.fail_queue(&e),
                     }
                 }
@@ -2491,13 +2517,24 @@ impl Session {
 
     async fn ensure_running(&mut self) -> anyhow::Result<()> {
         if self.slot.is_none() {
-            // Retryable for the hub: a slot frees up when another agent stops.
             match self.slots.clone().try_acquire_owned() {
                 Ok(p) => self.slot = Some(p),
-                Err(_) => anyhow::bail!(
-                    "{} agents already run on this worker (max_sessions)",
-                    self.max_sessions
-                ),
+                // Not a failed start (#41): the session waits in the line for a slot and starts
+                // when another agent stops (`run`), its inputs held here meanwhile.
+                Err(_) => {
+                    if !self.waiting_slot {
+                        self.waiting_slot = true;
+                        tracing::info!(session_id = %self.id, max_sessions = self.max_sessions, "no free slot, the agent waits for one");
+                        self.system_event(
+                            &format!(
+                                "{} agents already run on this worker (max_sessions): this session starts when one of them stops",
+                                self.max_sessions
+                            ),
+                            WAITING_FOR_SLOT,
+                        );
+                    }
+                    return Err(anyhow::Error::new(NoSlot));
+                }
             }
         }
         self.take_move();
@@ -2553,6 +2590,15 @@ impl Session {
     /// branch nobody continues. Queued input stays `pending` in the hub, `session.state`
     /// says `locked_by: vscode`.
     async fn release(&mut self) {
+        // One that waits for a slot leaves the line: no agent of hqc starts on a transcript
+        // VS Code goes on with (#41).
+        if self.waiting_slot {
+            self.waiting_slot = false;
+            self.released = true;
+            self.queue.clear();
+            tracing::info!(session_id = %self.id, "the session continues elsewhere (VS Code); it no longer waits for a slot");
+            return;
+        }
         if self.state == ProcessState::Stopped {
             return;
         }
@@ -2563,6 +2609,9 @@ impl Session {
     }
 
     async fn kill_process(&mut self, why: &str) {
+        // A session that waits for a slot leaves the line: a restart that needs one again
+        // joins it at its end.
+        self.waiting_slot = false;
         if self.state == ProcessState::Stopped {
             return;
         }
@@ -2697,6 +2746,27 @@ impl Session {
             tracing::error!(session_id = %self.id, "outbox write failed: {e:#}");
         }
     }
+}
+
+/// `system.code` of a session that waits for a slot (#41, SPEC §17.3).
+pub const WAITING_FOR_SLOT: &str = "waiting_for_slot";
+
+/// [`Session::ensure_running`] found no free slot: the session waits for one, which is no
+/// failed start.
+#[derive(Debug)]
+struct NoSlot;
+
+impl std::fmt::Display for NoSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("waiting for a free slot (max_sessions)")
+    }
+}
+
+impl std::error::Error for NoSlot {}
+
+/// The session waits for a slot: not a failure to report.
+fn waits(e: &anyhow::Error) -> bool {
+    e.is::<NoSlot>()
 }
 
 fn start_failed(e: &anyhow::Error) -> WorkerFrame {

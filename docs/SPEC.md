@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.182, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
+Version 0.183, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -601,6 +601,7 @@ the client renders only them. The "source" column is the component that produces
 | `session_forked` | worker (mirror) | a fork in the transcript: the writer continued from an earlier record, and the other line's turns did not get into its context; fields `at_uuid` (the record with two lines), `branch_from` (`vscode` \| `hqc` — who started the new line), `orphaned_turns` (turns in the other line). The client draws it as a line with a warning (§9.3) |
 | `provider_refused` | worker (adapter) | since 0.144: `session.start.provider` names a provider this worker's `worker.toml` does not allow, or allows with another `base_url`; the agent starts on the runtime's own endpoint, and the text says which (§8.1, §14) |
 | `secret_given` | hub | since 0.147: a secret or an ssh key reached the session's agent (`POST /api/sessions/{id}/secrets`, `hqc_ssh_keygen`, §6, §7): the text names it and a key's fingerprint, never the value |
+| `waiting_for_slot` | worker | since 0.183: the worker already runs `max_sessions` agents, so the session waits for a slot and starts when one of them stops; its inputs wait with it (§8.1) |
 | `browser_refused` | worker (adapter) | since 0.148: `session.start.browser` asks for the browser this worker does not give (no `browser = true` in its `worker.toml`, a session not of its owner or restricted); the agent starts without it (`--no-chrome`), and the text says why (§8.1, §14) |
 | `turn_interrupted` | worker (adapter; since 0.162 mirror) | since 0.161: an interrupt ended the turn — Stop, or "No" to a permission request (Claude Code: `result` with a `terminal_reason` `aborted_*`, §8.1); `text` "Interrupted"; one per turn, at its end, after its `usage`. Since 0.162 the mirror gives it for the line "[Request interrupted by user]" or "[Request interrupted by user for tool use]" the CLI writes into the transcript (§9.1) |
 | `turn_ended_early` | worker (adapter) | since 0.161: the runtime ended the turn early for another reason — an error, the limit of turns or of budget, a hook (Claude Code: an error `result`, or a `terminal_reason` other than `completed`, `background_requested` and `tool_deferred`, §8.1); `text` "Turn ended early: " and the reason; one per turn, at its end, after its `usage` |
@@ -3827,8 +3828,15 @@ owner's gateway) passes unchanged. The session's title is still made by the work
 `claude` with the worker's environment (§8.1 titles), not by the provider. The worker
 stores the working directory in canonical form, requires it to exist and rechecks it before
 every process start (a symlink could have changed). At most `max_sessions`
-(local config, default 8) agent processes at once; the next start gets
-`error {agent_start_failed, retryable: true}`.
+(local config, default 8) agent processes at once. Since 0.183 (#41) one more does not fail: the
+worker takes its `session.start` (`ack`), writes `system waiting_for_slot` once ("N agents already
+run on this worker (max_sessions): this session starts when one of them stops"), holds its inputs
+(the hub shows it `queued`, §17.1, and counts no failed start) and starts it, with what it holds,
+as soon as another agent of the worker stops (an idle stop, an archive, a deletion, a crash),
+in the order the sessions began to wait; nothing is stopped to make room. A kill, a release to VS
+Code (§9.3) or a restart takes the session out of the line (a restart that needs a slot again
+waits at its end). Before 0.183 the start got `error {agent_start_failed, retryable: true}`,
+which failed the input after `max_start_failures`.
 
 Identifiers. Checked on 2.1.307: the `uuid` of `assistant` and `user` messages
 (including `tool_result`) in stream-json **equals** the `uuid` of the corresponding records
@@ -6632,6 +6640,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.182 → 0.183 (a full worker makes a session wait, not fail)
+§8.1, §4: with `max_sessions` agents running, a start was `agent_start_failed` (retryable), the
+hub tried `max_start_failures` times 2 s apart and failed the input, and the session went to
+"Needs you" (#41: two new sessions and an old one in four minutes). The worker now takes the
+start, writes `system waiting_for_slot` once, holds the inputs and starts the session as soon as
+another agent stops, in the order they began to wait; nothing is stopped to make room. A kill, a
+release to VS Code and a restart take the session out of the line.
 
 ### 0.181 → 0.182 (`hqc_read` reads a subagent's work)
 §5.3, §7, §8.1: an agent knew what its subagent did only from its final report, and nothing while

@@ -6,6 +6,7 @@
 
 pub mod adapter;
 pub mod capabilities;
+pub mod claude_auth;
 pub mod cleanup;
 pub mod config;
 pub mod connection;

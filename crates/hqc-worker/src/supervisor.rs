@@ -103,10 +103,11 @@ use std::path::{Path, PathBuf};
 
 use hqc_proto::event::{ArtifactKind, EventKind, PeerMode};
 use hqc_proto::frame::{
-    error_code, worker_approval, Ack, Envelope, HeldBy, HubFrame, LockedBy, PermissionMode,
-    ProcessState, RequestResult, ResultBody, Runtime, SecretOutcome, SecretPut, SecretPutResult,
-    SessionInput, SessionStart, StartMode, SubagentHistoryResult, TitleRequest, TitleResult,
-    WireError, WorkerApprovalRequest, WorkerFrame, WorkspaceKeyDeleteResult, WorkspaceKeysResult,
+    error_code, worker_approval, Ack, ClaudeAuthResult, ClaudeLoginDoneResult, ClaudeLoginResult,
+    Envelope, HeldBy, HubFrame, LockedBy, PermissionMode, ProcessState, RequestResult, ResultBody,
+    Runtime, SecretOutcome, SecretPut, SecretPutResult, SessionInput, SessionStart, StartMode,
+    SubagentHistoryResult, TitleRequest, TitleResult, WireError, WorkerApprovalRequest,
+    WorkerFrame, WorkspaceKeyDeleteResult, WorkspaceKeysResult,
 };
 
 /// Why `secret.put` and the workspace keys are refused on a worker without them (SPEC 0.147).
@@ -224,6 +225,8 @@ pub struct Supervisor {
     claude_dir: Option<PathBuf>,
     /// The folders it creates and deletes for workspaces (T45).
     workspaces: Arc<crate::workspaces::Workspaces>,
+    /// The sign-ins of the worker's Claude Code under way (SPEC 0.185).
+    logins: crate::claude_auth::Logins,
 }
 
 /// A confirmation asked for and the `session.start` frames that wait for it.
@@ -353,7 +356,16 @@ impl Supervisor {
             holders: HashMap::new(),
             folders: HashMap::new(),
             claude_dir: crate::adapter::claude_code::paths::default_config_dir(),
+            logins: crate::claude_auth::Logins::default(),
         }
+    }
+
+    /// The CLI the worker's agents run: `claude_bin`, else `claude` from `PATH`.
+    fn claude_bin(&self) -> PathBuf {
+        self.cfg
+            .claude_bin
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("claude"))
     }
 
     /// Serve `mirror.set` and `workspace.list_candidates` with this mirror.
@@ -780,6 +792,63 @@ impl Supervisor {
                     Ok(ResultBody::WorkspaceKeyDeleted(WorkspaceKeyDeleteResult {
                         key_deleted: deleted,
                     }))
+                });
+                return;
+            }
+            // SPEC 0.185: the worker's own Claude Code signed in from hqc. Off the loop: the CLI
+            // takes seconds, a sign-in minutes.
+            HubFrame::ClaudeAuth(r) => {
+                let (link, bin) = (self.link.clone(), self.claude_bin());
+                tokio::spawn(async move {
+                    let claude_auth = crate::claude_auth::status(&bin).await;
+                    link.reply(
+                        &id,
+                        WorkerFrame::Result(RequestResult {
+                            request_id: r.request_id,
+                            body: ResultBody::ClaudeAuth(ClaudeAuthResult { claude_auth }),
+                        }),
+                    );
+                });
+                return;
+            }
+            HubFrame::ClaudeLogin(r) => {
+                let (link, bin, logins) =
+                    (self.link.clone(), self.claude_bin(), self.logins.clone());
+                tokio::spawn(async move {
+                    let frame = match logins.start(&bin).await {
+                        Ok(login) => WorkerFrame::Result(RequestResult {
+                            request_id: r.request_id,
+                            body: ResultBody::ClaudeLogin(ClaudeLoginResult { login }),
+                        }),
+                        Err(e) => {
+                            tracing::warn!("Claude Code sign-in not started: {e:#}");
+                            wire_error(error_code::INVALID_FRAME, format!("{e:#}"), false)
+                        }
+                    };
+                    link.reply(&id, frame);
+                });
+                return;
+            }
+            HubFrame::ClaudeLoginCode(r) => {
+                let (link, bin, logins) =
+                    (self.link.clone(), self.claude_bin(), self.logins.clone());
+                tokio::spawn(async move {
+                    let frame = match logins.code(&bin, &r.login_id, &r.code.0).await {
+                        Ok(login_done) => WorkerFrame::Result(RequestResult {
+                            request_id: r.request_id,
+                            body: ResultBody::ClaudeLoginDone(ClaudeLoginDoneResult { login_done }),
+                        }),
+                        Err(e) => wire_error(error_code::INVALID_FRAME, format!("{e:#}"), false),
+                    };
+                    link.reply(&id, frame);
+                });
+                return;
+            }
+            HubFrame::ClaudeLoginCancel(r) => {
+                let (link, logins) = (self.link.clone(), self.logins.clone());
+                tokio::spawn(async move {
+                    logins.cancel(&r.login_id).await;
+                    link.reply(&id, ack(None));
                 });
                 return;
             }
@@ -2220,7 +2289,18 @@ impl Session {
 
     async fn on_event(&mut self, ev: AdapterEvent) {
         match ev {
-            AdapterEvent::Event(e) => self.send_event(e),
+            AdapterEvent::Event(e) => {
+                // The runtime's own reply that it is signed out (SPEC 0.185): the feed says how
+                // to sign it in again.
+                let signed_out = matches!(&e.kind, EventKind::AgentMessage { runtime: true, text, .. } if crate::claude_auth::says_signed_out(text));
+                self.send_event(e);
+                if signed_out {
+                    self.system_event(
+                        "Claude Code on this worker is signed out: sign it in again from Settings → Workers",
+                        CLAUDE_SIGNED_OUT,
+                    );
+                }
+            }
             AdapterEvent::ToolResult { mut event, files } => {
                 // Here, before the next event of the adapter: the feed keeps its order.
                 if event.session_id == self.id {
@@ -2747,6 +2827,10 @@ impl Session {
         }
     }
 }
+
+/// `system.code` of a turn that failed because the worker's Claude Code is signed out (SPEC
+/// 0.185).
+pub const CLAUDE_SIGNED_OUT: &str = "claude_signed_out";
 
 /// `system.code` of a session that waits for a slot (#41, SPEC §17.3).
 pub const WAITING_FOR_SLOT: &str = "waiting_for_slot";

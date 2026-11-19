@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.184, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.185, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -190,7 +190,7 @@ and the two differ.
 
 ### Worker
 `owner_id`, `name`, `os`, `token_hash`, `status` (online/offline), `last_seen`,
-`protocol_version`, `boot_id` (from the last `hello`, §5.2), `capabilities` (`claude_code: {version, sessions_registry?, moves?}`, `acp_agents[{name,
+`protocol_version`, `boot_id` (from the last `hello`, §5.2), `capabilities` (`claude_code: {version, sessions_registry?, moves?, login?}`, `acp_agents[{name,
 version, load_session, resume, image, isolation}]` — the result of each agent's `initialize`
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
 `environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?}}`,
@@ -602,6 +602,7 @@ the client renders only them. The "source" column is the component that produces
 | `provider_refused` | worker (adapter) | since 0.144: `session.start.provider` names a provider this worker's `worker.toml` does not allow, or allows with another `base_url`; the agent starts on the runtime's own endpoint, and the text says which (§8.1, §14) |
 | `secret_given` | hub | since 0.147: a secret or an ssh key reached the session's agent (`POST /api/sessions/{id}/secrets`, `hqc_ssh_keygen`, §6, §7): the text names it and a key's fingerprint, never the value |
 | `waiting_for_slot` | worker | since 0.183: the worker already runs `max_sessions` agents, so the session waits for a slot and starts when one of them stops; its inputs wait with it (§8.1) |
+| `claude_signed_out` | worker | since 0.185: the runtime answered that it is signed out ("OAuth session expired", "Not logged in", "Invalid API key", …); the line sends the owner to Settings → Workers to sign the worker's Claude Code in again (§6) |
 | `browser_refused` | worker (adapter) | since 0.148: `session.start.browser` asks for the browser this worker does not give (no `browser = true` in its `worker.toml`, a session not of its owner or restricted); the agent starts without it (`--no-chrome`), and the text says why (§8.1, §14) |
 | `turn_interrupted` | worker (adapter; since 0.162 mirror) | since 0.161: an interrupt ended the turn — Stop, or "No" to a permission request (Claude Code: `result` with a `terminal_reason` `aborted_*`, §8.1); `text` "Interrupted"; one per turn, at its end, after its `usage`. Since 0.162 the mirror gives it for the line "[Request interrupted by user]" or "[Request interrupted by user for tool use]" the CLI writes into the transcript (§9.1) |
 | `turn_ended_early` | worker (adapter) | since 0.161: the runtime ended the turn early for another reason — an error, the limit of turns or of budget, a hook (Claude Code: an error `result`, or a `terminal_reason` other than `completed`, `background_requested` and `tool_deferred`, §8.1); `text` "Turn ended early: " and the reason; one per turn, at its end, after its `usage` |
@@ -1275,6 +1276,20 @@ MCP calls (worker → hub → worker):
   0.147) — the ssh keys the worker keeps for the workspace at `path` (a folder inside
   `allowed_roots`, after resolving symlinks), with `session_secrets` only, else `error
   {invalid_frame}`. `key_deleted: false`: the workspace has no such key.
+- `claude.auth` {request_id} → `result {request_id, claude_auth {logged_in, auth_method?, email?,
+  org_name?, subscription_type?, expires_at?, error?}}` (since 0.185) — how the worker's own
+  Claude Code is signed in (`claude auth status`); `error` when it could not be read.
+  `claude.login` {request_id} → `result {request_id, login {login_id, url}}` — the worker runs
+  `claude auth login --claudeai` (with `BROWSER=true`, so nothing opens on the machine) and
+  answers with the sign-in page the CLI prints, only https on claude.com, claude.ai or their
+  subdomains; one sign-in at a time (`error {invalid_frame, "login_running: …"}`), dropped after
+  10 minutes. `claude.login_code` {request_id, login_id, code} → `result {request_id, login_done
+  {ok, message?, status}}` — the code the page gave, written to the CLI's input; `ok` once the
+  CLI says it signed in, `status` as `claude.auth` after it; an unknown `login_id` is `error
+  {invalid_frame, "no_login: …"}`. `claude.login_cancel` {request_id, login_id} → `ack` — stops
+  the CLI. The tokens stay where the CLI keeps them on the machine (the Keychain on macOS); the
+  hub never sees them. `code` is a secret used once: never logged, stored or put into an event,
+  on both sides. A worker that has these has `capabilities.claude_code.login: true`.
 - `workspace.list_candidates` {request_id} → `result {request_id, candidates[{path,
   sessions_count, last_active}]}` — folders with Claude Code transcripts (§9.1): `path` is the
   records' `cwd`, only inside `allowed_roots`, sorted by path; `last_active` is the modification
@@ -1716,6 +1731,16 @@ the rest is marked "later"):
   workspace's worker keeps for it (`workspace.keys`, `workspace.key_delete`, §5.3); the worker
   must be online (`409 worker_offline`). `GET /api/workers` has `session_secrets` in the worker
   object.
+  The worker's own Claude Code (since 0.185, only the worker's owner, the worker online with
+  `capabilities.claude_code.login`, else `409 worker_offline` or `422 unsupported`): `GET
+  /api/workers/{id}/claude` (`claude.auth`, §5.3); `POST /api/workers/{id}/claude/login` →
+  `{login_id, url}` (`409 login_running`; a page off claude.com and claude.ai is `422
+  login_failed` and the hub cancels the sign-in); `POST /api/workers/{id}/claude/login/{login_id}
+  {code}` → `{ok, message?, status}` (`404` for an unknown sign-in, waits up to 80 s); `DELETE
+  /api/workers/{id}/claude/login/{login_id}` → `204`. The code passes through in memory only.
+  Client: Settings → Workers shows under each such worker "Claude: <email> · <plan>" or "not
+  signed in" and "Sign in": "Open the sign-in page" (only an Anthropic https page), a field for
+  the code (cleared on send, kept in no draft or storage), "Send", "Cancel".
   `PATCH /api/sessions/{id} {browser}` (since 0.148, §14): `true` gives the session's agent the
   owner's Chrome on the worker's machine, only by the worker's owner for a session of theirs on
   a worker whose last `hello` had `browser` (else `422 browser_not_allowed`, another user `403`,
@@ -6640,6 +6665,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
+§5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine
+and running `claude` there (a login over ssh does not reach the macOS Keychain). The owner now
+signs it in from Settings → Workers: the worker runs `claude auth login`, the hub relays the
+sign-in page and the code the page gives, and the tokens stay on the machine (each machine has
+its own login, as refresh tokens rotate). Frames `claude.auth`, `claude.login`,
+`claude.login_code`, `claude.login_cancel`; `capabilities.claude_code.login`; REST under
+`/api/workers/{id}/claude`; `system claude_signed_out` after a turn the runtime ends signed out.
 
 ### 0.183 → 0.184 (Fable 5.2 in the model menus)
 §6 client layout: the versions of the model menus have Fable 5.2 (`claude-fable-5-2`) first of its

@@ -164,6 +164,34 @@ export interface WorkerInfo {
   /** `browser = true` in its `worker.toml` (SPEC 0.148): a session of its owner may run with
    *  the user's Chrome on that machine. */
   browser?: boolean;
+  /** Its `hello.capabilities`: `claude_code.login` (SPEC 0.185) — its Claude Code is signed
+   *  in from hqc. */
+  capabilities?: { claude_code?: { version?: string; login?: boolean } };
+}
+
+/** How a worker's own Claude Code is signed in (SPEC 0.185, `claude auth status`). */
+export interface ClaudeAuthStatus {
+  logged_in: boolean;
+  auth_method?: string;
+  email?: string;
+  org_name?: string;
+  subscription_type?: string;
+  expires_at?: string;
+  /** The status could not be read. */
+  error?: string;
+}
+
+/** A sign-in under way: the page to sign in on, which gives the code to send back. */
+export interface ClaudeLogin {
+  login_id: string;
+  url: string;
+}
+
+/** How a sign-in ended. */
+export interface ClaudeLoginDone {
+  ok: boolean;
+  message?: string;
+  status: ClaudeAuthStatus;
 }
 
 /** What `POST /api/sessions/{id}/secrets` sends (SPEC 0.147): never kept by the client. */
@@ -713,6 +741,25 @@ export class Api {
 
   async deleteWorkspaceKey(id: string, name: string): Promise<void> {
     await this.req('DELETE', `/api/workspaces/${enc(id)}/keys/${enc(name)}`);
+  }
+
+  /** How the worker's own Claude Code is signed in (SPEC 0.185). */
+  async claudeAuth(workerId: string): Promise<ClaudeAuthStatus> {
+    return (await this.req('GET', `/api/workers/${enc(workerId)}/claude`)) as ClaudeAuthStatus;
+  }
+
+  /** Starts a sign-in of the worker's Claude Code: the page to sign in on. */
+  async claudeLogin(workerId: string): Promise<ClaudeLogin> {
+    return (await this.req('POST', `/api/workers/${enc(workerId)}/claude/login`)) as ClaudeLogin;
+  }
+
+  /** The code the sign-in page gave; used once, kept nowhere. */
+  async claudeLoginCode(workerId: string, loginId: string, code: string): Promise<ClaudeLoginDone> {
+    return (await this.req('POST', `/api/workers/${enc(workerId)}/claude/login/${enc(loginId)}`, { code })) as ClaudeLoginDone;
+  }
+
+  async claudeLoginCancel(workerId: string, loginId: string): Promise<void> {
+    await this.req('DELETE', `/api/workers/${enc(workerId)}/claude/login/${enc(loginId)}`);
   }
 
   async workers(opts: { includeRevoked?: boolean } = {}): Promise<WorkerInfo[]> {

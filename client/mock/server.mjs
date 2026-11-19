@@ -1310,7 +1310,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   route('GET', '/api/mock/artifacts/:id', (p) => ({ artifact_id: p.id, note: 'mock artifact' }));
   // Workers as the hub lists them (SPEC §6): `revoked` only with `include_revoked=1`.
   const allWorkers = () =>
-    [{ id: workerId, name: 'home-mac', os: 'macos', status: 'online', session_secrets: true, browser: true }, ...enrolled].map((w) =>
+    [{ id: workerId, name: 'home-mac', os: 'macos', status: 'online', session_secrets: true, browser: true, capabilities: { claude_code: { version: '2.1.322', login: true } } }, ...enrolled].map((w) =>
       revoked.has(w.id) ? { ...w, status: 'revoked', revoked_at: new Date().toISOString() } : w,
     );
   route('GET', '/api/workers', (_, __, q) => ({
@@ -1336,6 +1336,56 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (i < 0) throw fail(404, 'not_found', 'unknown worker');
     enrolled.splice(i, 1);
     revoked.delete(p.id);
+    return withStatus(204, null);
+  });
+  // SPEC 0.185: the sign-in of a worker's own Claude Code. The mock's home-mac starts signed
+  // out; the code "ok" signs it in, any other is refused as the CLI would.
+  const claudeAuth = new Map();
+  const claudeLogins = new Map();
+  const claudeWorker = (id) => {
+    const w = allWorkers().find((x) => x.id === id);
+    if (!w) throw fail(404, 'not_found', 'unknown worker');
+    if (w.status !== 'online') throw fail(409, 'worker_offline', 'the worker is offline');
+    if (!w.capabilities?.claude_code?.login) throw fail(422, 'unsupported', 'the worker cannot sign Claude Code in');
+    return w;
+  };
+  const claudeStatus = (id) => claudeAuth.get(id) ?? { logged_in: false };
+  route('GET', '/api/workers/:id/claude', (p) => {
+    claudeWorker(p.id);
+    return claudeStatus(p.id);
+  });
+  route('POST', '/api/workers/:id/claude/login', (p, body) => {
+    claudeWorker(p.id);
+    const extra = Object.keys(body ?? {});
+    if (extra.length) throw fail(400, 'bad_request', `unknown field \`${extra[0]}\``);
+    if ([...claudeLogins.values()].some((l) => l.worker === p.id)) throw fail(409, 'login_running', 'a sign-in is already running');
+    const login_id = randomUUID();
+    claudeLogins.set(login_id, { worker: p.id });
+    return { login_id, url: `https://claude.com/cai/oauth/authorize?code=true&state=${login_id}` };
+  });
+  route('POST', '/api/workers/:id/claude/login/:login', (p, body) => {
+    claudeWorker(p.id);
+    const extra = Object.keys(body ?? {}).filter((k) => k !== 'code');
+    if (extra.length) throw fail(400, 'bad_request', `unknown field \`${extra[0]}\``);
+    if (typeof body?.code !== 'string' || !body.code) throw fail(400, 'bad_request', 'code is needed');
+    const l = claudeLogins.get(p.login);
+    if (!l || l.worker !== p.id) throw fail(404, 'not_found', 'unknown or expired sign-in');
+    if (body.code !== 'ok') return { ok: false, message: 'Invalid code: paste the code the page shows.', status: claudeStatus(p.id) };
+    claudeLogins.delete(p.login);
+    const status = {
+      logged_in: true,
+      auth_method: 'claude.ai',
+      email: 'owner@example.com',
+      org_name: "Owner's Organization",
+      subscription_type: 'max',
+      expires_at: new Date(Date.now() + 30 * 864e5).toISOString(),
+    };
+    claudeAuth.set(p.id, status);
+    return { ok: true, status };
+  });
+  route('DELETE', '/api/workers/:id/claude/login/:login', (p) => {
+    const l = claudeLogins.get(p.login);
+    if (l && l.worker === p.id) claudeLogins.delete(p.login);
     return withStatus(204, null);
   });
   route('GET', '/api/workers/enroll/:code', (p) => {

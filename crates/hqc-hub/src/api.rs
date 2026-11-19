@@ -447,7 +447,11 @@ pub(crate) async fn workspace_for(
 }
 
 /// The user's worker, not revoked.
-async fn own_worker(app: &AppState, user: &CurrentUser, id: Uuid) -> ApiResult<db::WorkerRow> {
+pub(crate) async fn own_worker(
+    app: &AppState,
+    user: &CurrentUser,
+    id: Uuid,
+) -> ApiResult<db::WorkerRow> {
     match db::worker(&app.db, id).await? {
         Some(w) if w.owner_id == user.id && w.revoked_at.is_none() => Ok(w),
         _ => Err(ApiError::BadRequest("unknown worker".into())),

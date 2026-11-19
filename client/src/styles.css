@@ -6645,6 +6645,38 @@ button.ps-look {
 .worker-revoked .worker-item-name {
   color: var(--muted);
 }
+/* SPEC 0.185: the worker's own Claude Code, a line under the worker with its sign-in. */
+.plain-list.worker-table li.worker-has-claude {
+  flex-wrap: wrap;
+}
+.worker-claude {
+  flex: 1 0 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.layout:not(.layout-phone) .worker-claude {
+  grid-column: 2 / -1;
+}
+.worker-claude-line,
+.worker-claude-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.worker-claude-status.is-signed-out {
+  color: var(--muted);
+}
+.worker-claude-error {
+  overflow-wrap: anywhere;
+}
+.worker-claude-form .claude-sign-in-code {
+  flex: 1 1 14em;
+  min-width: 0;
+}
 
 .tag {
   height: 20px;

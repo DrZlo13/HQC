@@ -17,6 +17,7 @@ pub mod api;
 pub mod app;
 pub mod artifacts;
 pub mod auth;
+pub mod claude_login;
 pub mod client_files;
 pub mod client_ws;
 pub mod config;
@@ -155,6 +156,12 @@ pub fn router(app: AppState) -> Router {
             put(api::favorite_session).delete(api::unfavorite_session),
         )
         .route("/api/workers", get(api::workers))
+        .route("/api/workers/{id}/claude", get(claude_login::status))
+        .route("/api/workers/{id}/claude/login", post(claude_login::login))
+        .route(
+            "/api/workers/{id}/claude/login/{login_id}",
+            post(claude_login::code).delete(claude_login::cancel),
+        )
         .route("/api/workers/enroll/confirm", post(api::enroll_confirm))
         .route("/api/workers/enroll/{code}", get(api::enroll_info))
         .route(

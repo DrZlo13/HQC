@@ -92,7 +92,7 @@ export const SYSTEM_CODE_LABELS: Record<string, string> = {
 };
 
 /** `system.code`s drawn as a warning, with an icon (SPEC §9.3). */
-export const SYSTEM_WARNING_CODES = new Set(['session_forked']);
+export const SYSTEM_WARNING_CODES = new Set(['session_forked', 'claude_signed_out']);
 
 /** `level` of a worker log line (`system {code: worker_log}`, SPEC §10.2). */
 export const LOG_LEVEL_LABELS: Record<string, string> = {

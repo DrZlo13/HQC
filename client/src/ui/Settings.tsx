@@ -8,6 +8,7 @@ import { pushStatus, subscribePush, type PushStatus } from '../push';
 import { BASES, LOOKS, THEMES } from '../theme';
 import { WEB_SEARCHES } from '../websearch';
 import { ProvidersSection } from './Providers';
+import { ClaudeSignIn, signsIn } from './ClaudeSignIn';
 
 const THEME_GROUPS = [
   { id: 'dark', label: 'Dark' },
@@ -210,7 +211,10 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
         {workers && workers.length > 0 && (
           <ul class="plain-list worker-table">
             {workers.map((w) => (
-              <li key={w.id} class={w.status === 'revoked' ? 'worker-revoked' : undefined}>
+              <li
+                key={w.id}
+                class={[w.status === 'revoked' && 'worker-revoked', signsIn(w) && 'worker-has-claude'].filter(Boolean).join(' ') || undefined}
+              >
                 <span class={`dot ${w.status === 'online' ? 'dot-online' : 'dot-offline'}`} aria-hidden="true" />
                 <span class="worker-item-name">{w.name}</span>
                 <span class="worker-item-meta">
@@ -225,6 +229,7 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
                     Revoke
                   </button>
                 )}
+                {signsIn(w) && <ClaudeSignIn app={app} worker={w} />}
               </li>
             ))}
           </ul>

@@ -1022,6 +1022,18 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     optStr(p, 'after');
     optStr(p, 'before');
   },
+  // SPEC 0.185: the sign-in of the worker's own Claude Code.
+  'claude.auth': (p) => void str(p, 'request_id'),
+  'claude.login': (p) => void str(p, 'request_id'),
+  'claude.login_code': (p) => {
+    str(p, 'request_id');
+    str(p, 'login_id');
+    str(p, 'code');
+  },
+  'claude.login_cancel': (p) => {
+    str(p, 'request_id');
+    str(p, 'login_id');
+  },
   'session.kill': (p) => void str(p, 'session_id'),
   'session.permission_mode': (p) => {
     str(p, 'session_id');

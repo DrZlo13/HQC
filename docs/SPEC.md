@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.185, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.188, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -5297,8 +5297,11 @@ but cannot answer it. Since 0.180 so does an MCP server's `clarify.request` (wit
 §8.1): the server runs with the worker owner's credentials (§11.1), and a collaborator's answer, say
 an accepted deploy confirmation, would be given in the owner's name; anyone else gets `403`. The
 agent's own questions are answered by anyone with `write`. The first answer wins: it closes the
-request, every device sees the `approval.response` event, and the client removes the buttons. A
-second answer (from another device) gets `409 request_closed`; no cancel event is written in that
+request, every device sees the `approval.response` event, and the client removes the buttons. The
+client that sent the answer shows the request as answered once the hub took it (the reply of the
+`POST`), without waiting for the event, which may reach it late; a permission, a question, an MCP
+server's request and a secret given are all answered so, and the session shows as running meanwhile.
+A second answer (from another device) gets `409 request_closed`; no cancel event is written in that
 case. Expiry, `POST /stop`, a worker restart and archiving produce `approval.cancel`, and the client
 removes the buttons. On expiry and archiving the hub writes the `approval.cancel` event and sends
 the worker an `approval.response` frame with the `canonical: deny` option, so the adapter closes the
@@ -6665,6 +6668,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.185 → 0.188 (a request answered from this client closes at once)
+§10.1: the card of a request closed only when the `approval.response` or `clarify.response` event
+came over the socket, and on our hub that took up to 10 s after the hub had taken the answer; the
+person pressed Answer again and got `409 request_closed`. The client now records the answer when
+the `POST` returns (also for a secret given) and shows the request as answered, with the session as
+running if the hub still says it waits; the hub's event, or a cancel, takes the record away when it
+comes. A `409 request_closed` makes the client fetch the newest events, so the card shows what became
+of the request. A button's action ignores a second press while its request is in flight. No hub
+change.
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

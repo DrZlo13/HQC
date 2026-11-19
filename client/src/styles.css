@@ -3586,6 +3586,29 @@ select.input {
   font-size: 12px;
 }
 
+/* A call's line and its result after it: when both do not fit, the result keeps three parts of
+   the width to the line's one, and the one shorter than its part leaves the rest to the other. */
+.tool-group-head > .tool-peek.mono,
+.tool-line {
+  flex: 1 1 0;
+  max-width: max-content;
+}
+.tool-result {
+  flex: 3 1 0;
+  min-width: 0;
+  max-width: max-content;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-result::before {
+  content: '→ ';
+  opacity: 0.6;
+}
+.tool-group-head > .tool-result {
+  font-size: 12px;
+}
+
 .mark {
   flex: none;
   display: inline-flex;
@@ -3643,12 +3666,22 @@ select.input {
   color: var(--muted);
 }
 
-.tool-line {
+.tool-text {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 8px;
+}
+
+.tool-line {
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* A call without arguments: the result right after the tool, not after a second gap. */
+.tool-line:empty {
+  display: none;
 }
 
 .tool-more,
@@ -3698,6 +3731,12 @@ select.input {
 }
 .thinking summary::-webkit-details-marker {
   display: none;
+}
+.thinking-peek {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .thinking-text {
   margin: 4px 0 2px;

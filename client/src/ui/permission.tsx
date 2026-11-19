@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { ApprovalOption, EventOf, RuleSuggestion } from '../proto';
 import { ruleError } from '../rules';
 import type { ChatActions, FolderActions } from './cards';
-import { callArgs, callLine, callPaths, fileChange, outsidePath } from './feed';
+import { callArgs, callLine, callPaths, fileChange, outsidePath, relativePaths, toolLabel } from './feed';
 import { CodeBlock } from './Markdown';
 import { useAction, useNow } from './hooks';
 import { IconCheck, IconCross, IconInfo, IconKey, IconShield } from './icons';
@@ -125,7 +125,12 @@ export function PermissionBlock({
           {outcome.ok ? <IconCheck /> : <IconCross />}
         </span>
         <span class="perm-done-what mono">
-          {v.worker ? WORKER_REQUEST_LABELS[event.payload.tool] ?? event.payload.tool : `${v.shell ? '$ ' : ''}${v.what || event.payload.tool}`}
+          {/* As the call's row in the feed: `$ command`, else the tool and its main argument. */}
+          {v.worker
+            ? WORKER_REQUEST_LABELS[event.payload.tool] ?? event.payload.tool
+            : v.shell
+              ? `$ ${relativePaths(v.what, actions.workspaceRoot)}`
+              : [toolLabel(event.payload.tool), relativePaths(v.what, actions.workspaceRoot)].filter(Boolean).join(' ')}
         </span>
         <span class="perm-done-outcome outcome">· {outcome.text}</span>
         <button type="button" class="btn-link" aria-expanded={again} onClick={() => setAgain(!again)}>
@@ -340,7 +345,7 @@ function PermissionCard({
         : 'The worker asks for permission'
     : sheet && p.tool === 'Bash'
       ? 'Run the command?'
-      : TITLES[p.tool] ?? `The agent wants to use ${p.tool}`;
+      : TITLES[p.tool] ?? `The agent wants to use ${toolLabel(p.tool)}`;
   const subtitle = v.worker
     ? WORKER_REQUEST_LABELS[p.tool] ?? p.tool
     : [p.tool, v.description].filter(Boolean).join(' · ');

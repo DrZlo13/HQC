@@ -744,7 +744,9 @@ export function Chat({
           {requestsOnly && items.length === 0 && <div class="empty">No requests</div>}
           {t.streaming && <StreamingMessage text={t.streaming} />}
           <FeedBlocks blocks={under} actions={actions} />
-          {!system && !room && <ActivityLine state={state} timeline={t} foreground={info?.foreground_calls} onBackground={toBackground} />}
+          {!system && !room && (
+            <ActivityLine state={state} timeline={t} root={path} foreground={info?.foreground_calls} onBackground={toBackground} />
+          )}
           {room &&
             members.map((m, i) => (
               <ActivityLine key={m.id} state={m.state} timeline={memberChats[i].timeline} name={m.title || m.slug} />

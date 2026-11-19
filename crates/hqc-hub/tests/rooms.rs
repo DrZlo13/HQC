@@ -3594,8 +3594,10 @@ async fn twenty_posts_then_stop(
         (speaker, next, input) = (next, speaker, woken[0].clone());
     }
     // The 21st post ends the round: the room's sender gets the notice, which is its one input.
-    let mut frames = answer(w, speaker, &input, "Tabs, 21.").await;
-    frames.extend(w.within(Duration::from_millis(300)).await);
+    let frames = answer(w, speaker, &input, "Tabs, 21.").await;
+    let frames = w
+        .until(frames, |fs| !fs.is_empty(), Duration::from_millis(300))
+        .await;
     assert_eq!(frames.len(), 1, "{frames:?}");
     assert_eq!(frames[0]["type"], "session.input", "{frames:?}");
     let events = hub.events(id(room)).await;
@@ -4350,12 +4352,16 @@ async fn an_author_with_an_empty_name_is_named_by_its_address() {
 }
 
 /// The one `session.input` of session `s` among `frames` and the ones that come within 300 ms.
-async fn notice_of(w: &mut FakeWorker, mut frames: Vec<Value>, s: &Value) -> Value {
-    frames.extend(w.within(Duration::from_millis(300)).await);
-    let mine: Vec<&Value> = frames
-        .iter()
-        .filter(|f| f["type"] == "session.input" && f["payload"]["session_id"] == s["id"])
-        .collect();
+async fn notice_of(w: &mut FakeWorker, frames: Vec<Value>, s: &Value) -> Value {
+    let is_mine = |f: &Value| f["type"] == "session.input" && f["payload"]["session_id"] == s["id"];
+    let frames = w
+        .until(
+            frames,
+            |fs| fs.iter().any(is_mine),
+            Duration::from_millis(300),
+        )
+        .await;
+    let mine: Vec<&Value> = frames.iter().filter(|f| is_mine(f)).collect();
     assert_eq!(mine.len(), 1, "{frames:?}");
     mine[0].clone()
 }

@@ -882,6 +882,27 @@ impl FakeWorker {
     }
 
     /// Every frame that comes, each within `d` of the one before.
+    /// `frames` and those that come until `done` holds for them (at most [`WAIT`]), then the
+    /// ones that come within `then`. Under load an expected frame comes late, and a fixed
+    /// window misses it (#123); `then` keeps a check that no second one comes.
+    pub async fn until(
+        &mut self,
+        mut frames: Vec<Value>,
+        done: impl Fn(&[Value]) -> bool,
+        then: Duration,
+    ) -> Vec<Value> {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while !done(&frames) {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match self.recv_within(left).await {
+                Some(f) => frames.push(f),
+                None => break,
+            }
+        }
+        frames.extend(self.within(then).await);
+        frames
+    }
+
     pub async fn within(&mut self, d: Duration) -> Vec<Value> {
         let mut out = Vec::new();
         while let Some(f) = self.recv_within(d).await {

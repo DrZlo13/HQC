@@ -54,7 +54,7 @@ pub const BROWSER_DISALLOWED: &[&str] = &[
 
 use anyhow::Context;
 use async_trait::async_trait;
-use hqc_proto::event::{Author, ClarifyAnswer, EventKind};
+use hqc_proto::event::{Author, ClarifyAction, ClarifyAnswer, EventKind};
 use hqc_proto::frame::{ForkFrom, Runtime, SessionInput};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
@@ -941,7 +941,10 @@ impl ClaudeCodeAdapter {
                     status: None,
                     task_id: None,
                     from_session_id: None,
+                    usage: None,
                     fork: None,
+                    compaction: None,
+                    model: None,
                 },
             );
             let _ = self.events.send(AdapterEvent::Event(ev)).await;
@@ -958,7 +961,10 @@ impl ClaudeCodeAdapter {
                     status: None,
                     task_id: None,
                     from_session_id: None,
+                    usage: None,
                     fork: None,
+                    compaction: None,
+                    model: None,
                 },
             );
             let _ = self.events.send(AdapterEvent::Event(ev)).await;
@@ -978,7 +984,10 @@ impl ClaudeCodeAdapter {
                     status: None,
                     task_id: None,
                     from_session_id: None,
+                    usage: None,
                     fork: None,
+                    compaction: None,
+                    model: None,
                 },
             );
             let _ = self.events.send(AdapterEvent::Event(ev)).await;
@@ -1246,6 +1255,20 @@ impl Adapter for ClaudeCodeAdapter {
         p.secrets.as_ref()?.upgrade()
     }
 
+    /// As the token rate reads it: `<CLI session id>/subagents` beside the session's
+    /// transcript, the id from the latest `system/init`.
+    fn subagent_transcript(&self, task_id: &str) -> Option<PathBuf> {
+        let p = self.proc.as_ref()?;
+        let session = lock(&p.core).cli_session()?.to_owned();
+        let transcript = p.io.transcript()?;
+        let dir = transcript.parent()?;
+        Some(
+            dir.join(session)
+                .join("subagents")
+                .join(format!("agent-{task_id}.jsonl")),
+        )
+    }
+
     async fn kill(&mut self) -> anyhow::Result<()> {
         let Some(mut p) = self.proc.take() else {
             return Ok(());
@@ -1324,9 +1347,10 @@ impl Adapter for ClaudeCodeAdapter {
         &mut self,
         request_id: &str,
         answers: &BTreeMap<String, ClarifyAnswer>,
+        action: Option<ClarifyAction>,
     ) -> anyhow::Result<()> {
         let p = self.running()?;
-        let actions = lock(&p.core).answer_clarify(request_id, answers)?;
+        let actions = lock(&p.core).answer_clarify(request_id, answers, action)?;
         p.io.run(actions).await
     }
 }

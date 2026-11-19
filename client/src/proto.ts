@@ -37,8 +37,12 @@ export type ApprovalCanonical = (typeof CANONICALS)[number] | Unknown;
 export const POLICY_HINTS = ['allow', 'deny'] as const;
 export type PolicyHint = (typeof POLICY_HINTS)[number] | Unknown;
 
-export const CANCEL_REASONS = ['timeout', 'stopped', 'worker_restart', 'archived'] as const;
+export const CANCEL_REASONS = ['timeout', 'stopped', 'worker_restart', 'archived', 'withdrawn'] as const;
 export type CancelReason = (typeof CANCEL_REASONS)[number] | Unknown;
+
+/** What the person did with an MCP server's request (`clarify.response.action`, since 0.180). */
+export const CLARIFY_ACTIONS = ['accept', 'decline'] as const;
+export type ClarifyAction = (typeof CLARIFY_ACTIONS)[number] | Unknown;
 
 export const PEER_MODES = ['send', 'ask'] as const;
 export type PeerMode = (typeof PEER_MODES)[number] | Unknown;
@@ -154,11 +158,28 @@ export interface LiveSubagent {
   /** On a `wakeup` or `cron` row (since 0.169): milliseconds until it fires when the list was
    *  sent, 0 once due; absent on a cron job whose next fire is not known. */
   due_in_ms?: number;
+  /** Its request to the model API failed and will be retried (since SPEC 0.179). */
+  retry?: ApiRetry;
 }
 /** `monitor` (a watcher, a command to the client), `wakeup` and `cron` (what the agent armed)
  *  since 0.169. */
 export const LIVE_KINDS = ['agent', 'command', 'monitor', 'wakeup', 'cron'] as const;
 export type LiveKind = (typeof LIVE_KINDS)[number];
+/** A request to the model API that failed and will be retried (SPEC 0.179). */
+export interface ApiRetry {
+  attempt: number;
+  max_retries: number;
+  /** How long the runtime waits before the next attempt. */
+  retry_delay_ms: number;
+  /** The HTTP status of the failed attempt; absent: it got no response. */
+  error_status?: number;
+}
+/** What the agent waits on now, shown in the activity line instead of "Agent is working"
+ *  (`activity` of the session and its summary, SPEC 0.179). */
+export type Activity =
+  | ({ kind: 'retrying' } & ApiRetry)
+  | { kind: 'compacting' }
+  | { kind: 'thinking'; estimated_tokens: number };
 /** The whole list: the subagents in the order they started, then (since 0.127) the agent's
  *  background commands, and (since 0.169) its watchers, wakeup and cron jobs; empty: none.
  *  Transport only. */
@@ -214,7 +235,10 @@ export interface ToolResult {
   error: boolean;
   error_text?: string;
   duration_ms?: number;
+  /** A diff, or the whole text of a result longer than `result_preview` (since SPEC 0.180). */
   artifact_id?: Uuid;
+  /** The result's images, in order (since SPEC 0.180); empty when none. */
+  artifact_ids: Uuid[];
 }
 export interface ApprovalOption {
   id: string;
@@ -233,11 +257,24 @@ export interface ApprovalRequest {
   rule_suggestions?: RuleSuggestion[];
   /** The hub's card of an agent's `hqc_secret` (SPEC 0.147): what it asks for. */
   secret?: SecretAsked;
+  /** Why the runtime asks (since 0.180). */
+  reason?: string;
+  /** The runtime's name of the tool (since 0.180). */
+  display_name?: string;
+  /** Only a person may answer it: no rule, no `auto_approve` (since 0.180). Absent = false. */
+  human_only?: boolean;
+  /** The subagent whose call it is (since 0.181); absent for the agent itself. */
+  subagent?: RequestSubagent;
 }
 /** The secret an `hqc_secret` card asks for: its name and kind are the agent's, fixed. */
 export interface SecretAsked {
   name: string;
   kind: 'secret' | 'ssh_key';
+}
+/** The subagent that asks: its `task_id`, as `subagents.live` names it, and its task. */
+export interface RequestSubagent {
+  task_id: string;
+  description: string;
 }
 /** A simple part of a command and the hqc rule suggested for it (none: no pattern). */
 export interface RuleSuggestion {
@@ -264,15 +301,32 @@ export interface ClarifyQuestion {
   /** A description per option, in the order of `options`; "" where an option has none. */
   option_descriptions?: string[];
   multi?: boolean;
+  /** A field an MCP server's form requires (since 0.180). */
+  required?: boolean;
+  /** What the free-text answer of an MCP server's form field must read as (since 0.180);
+   *  absent for text, a boolean, an enum, and a kind this client does not know. */
+  input?: AnswerInput;
 }
+export const ANSWER_INPUTS = ['integer', 'number'] as const;
+export type AnswerInput = (typeof ANSWER_INPUTS)[number];
 export interface ClarifyRequest {
   request_id: string;
   questions: ClarifyQuestion[];
+  /** The MCP server that asks (since 0.180); absent: the agent asks. */
+  server?: string;
+  /** The server's text above the questions. */
+  message?: string;
+  /** The page the server sends the person to, with no questions. */
+  url?: string;
+  /** As in `approval.request` (since 0.181). */
+  subagent?: RequestSubagent;
 }
 export type ClarifyAnswer = string | string[];
 export interface ClarifyResponse {
   request_id: string;
   answers: Record<string, ClarifyAnswer>;
+  /** Only for an MCP server's request (since 0.180). */
+  action?: ClarifyAction;
 }
 export interface Attachment {
   artifact_id: Uuid;
@@ -322,6 +376,24 @@ export interface SystemNote {
   call_id?: string;
   status?: string;
   task_id?: string;
+  /** For `code: context_compacted` when the runtime said (SPEC 0.179): `auto` | `manual`,
+   *  and the context's tokens before and after. */
+  trigger?: string;
+  pre_tokens?: number;
+  post_tokens?: number;
+  /** For `code: model_not_switched` (SPEC 0.179): the model the runtime kept. */
+  model?: string;
+  /** For `code: task_notification` (since 0.181): what the task spent, when the runtime says. */
+  usage?: TaskUsage;
+}
+export interface TaskUsage {
+  total_tokens: number;
+  tool_uses: number;
+  duration_ms: number;
+}
+/** Events of the session the runtime took back (SPEC 0.179): not shown. */
+export interface Retraction {
+  event_ids: string[];
 }
 
 export interface PayloadByType {
@@ -345,6 +417,7 @@ export interface PayloadByType {
   usage: Usage;
   status: Status;
   system: SystemNote;
+  retraction: Retraction;
 }
 export type EventType = keyof PayloadByType;
 
@@ -469,6 +542,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
         kind: oneOf(a, 'kind', LIVE_KINDS),
         stoppable: optBool(a, 'stoppable'),
         due_in_ms: optNum(a, 'due_in_ms'),
+        retry: present(a, 'retry') ? parseApiRetry(obj(a.retry, 'retry')) : undefined,
       };
     }),
   }),
@@ -507,6 +581,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     error_text: optStr(p, 'error_text'),
     duration_ms: optNum(p, 'duration_ms'),
     artifact_id: optStr(p, 'artifact_id'),
+    artifact_ids: present(p, 'artifact_ids') ? strArr(p, 'artifact_ids') : [],
   }),
   'approval.request': (p) => ({
     request_id: str(p, 'request_id'),
@@ -524,6 +599,10 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     policy_hint: present(p, 'policy_hint') ? tolerantEnum(p, 'policy_hint', POLICY_HINTS) : undefined,
     rule_suggestions: present(p, 'rule_suggestions') ? parseSuggestions(p, 'rule_suggestions') : undefined,
     secret: present(p, 'secret') ? parseSecretAsked(obj(p.secret, 'secret')) : undefined,
+    reason: optStr(p, 'reason'),
+    display_name: optStr(p, 'display_name'),
+    human_only: optBool(p, 'human_only'),
+    subagent: parseSubagent(p),
   }),
   'approval.response': (p) => ({
     request_id: str(p, 'request_id'),
@@ -543,12 +622,19 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
         options: present(q, 'options') ? strArr(q, 'options') : undefined,
         option_descriptions: optStrArr(q, 'option_descriptions'),
         multi: optBool(q, 'multi'),
+        required: optBool(q, 'required'),
+        input: oneOf(q, 'input', ANSWER_INPUTS),
       };
     }),
+    server: optStr(p, 'server'),
+    message: optStr(p, 'message'),
+    url: optStr(p, 'url'),
+    subagent: parseSubagent(p),
   }),
   'clarify.response': (p) => ({
     request_id: str(p, 'request_id'),
     answers: parseAnswers(p),
+    action: present(p, 'action') ? tolerantEnum(p, 'action', CLARIFY_ACTIONS) : undefined,
   }),
   'clarify.cancel': cancel,
   attachment: (p) => ({
@@ -588,8 +674,49 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     call_id: optStr(p, 'call_id'),
     status: optStr(p, 'status'),
     task_id: optStr(p, 'task_id'),
+    trigger: optStr(p, 'trigger'),
+    pre_tokens: optNum(p, 'pre_tokens'),
+    post_tokens: optNum(p, 'post_tokens'),
+    model: optStr(p, 'model'),
+    usage: present(p, 'usage') ? parseTaskUsage(obj(p.usage, 'usage')) : undefined,
   }),
+  retraction: (p) => ({ event_ids: strArr(p, 'event_ids') }),
 };
+
+function parseApiRetry(o: Obj): ApiRetry {
+  return {
+    attempt: num(o, 'attempt'),
+    max_retries: num(o, 'max_retries'),
+    retry_delay_ms: num(o, 'retry_delay_ms'),
+    error_status: optNum(o, 'error_status'),
+  };
+}
+
+/** `activity` of a session or its summary; absent, or a `kind` this build does not know: none. */
+function optActivity(o: Obj): Activity | undefined {
+  if (!present(o, 'activity')) return undefined;
+  const a = obj(o.activity, 'activity');
+  switch (str(a, 'kind')) {
+    case 'retrying':
+      return { kind: 'retrying', ...parseApiRetry(a) };
+    case 'compacting':
+      return { kind: 'compacting' };
+    case 'thinking':
+      return { kind: 'thinking', estimated_tokens: num(a, 'estimated_tokens') };
+    default:
+      return undefined;
+  }
+}
+
+function parseSubagent(p: Obj): RequestSubagent | undefined {
+  if (!present(p, 'subagent')) return undefined;
+  const s = obj(p.subagent, 'subagent');
+  return { task_id: str(s, 'task_id'), description: str(s, 'description') };
+}
+
+function parseTaskUsage(u: Obj): TaskUsage {
+  return { total_tokens: num(u, 'total_tokens'), tool_uses: num(u, 'tool_uses'), duration_ms: num(u, 'duration_ms') };
+}
 
 function parseAnswers(p: Obj): Record<string, ClarifyAnswer> {
   const a = obj(p.answers, 'answers');
@@ -777,6 +904,9 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
       num(w, 'utilization');
       num(w, 'resets_at');
     }
+    optStr(p, 'status');
+    optStr(p, 'rate_limit_type');
+    optNum(p, 'resets_at');
   },
   'workspace.inspect': (p) => {
     str(p, 'request_id');
@@ -885,6 +1015,13 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'session_id');
     str(p, 'task_id');
   },
+  'session.subagent_history': (p) => {
+    str(p, 'request_id');
+    str(p, 'session_id');
+    str(p, 'task_id');
+    optStr(p, 'after');
+    optStr(p, 'before');
+  },
   'session.kill': (p) => void str(p, 'session_id'),
   'session.permission_mode': (p) => {
     str(p, 'session_id');
@@ -909,6 +1046,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'session_id');
     str(p, 'request_id');
     parseAnswers(p);
+    if (present(p, 'action')) strictEnum(p, 'action', CLARIFY_ACTIONS);
   },
   'worker.approval.request': (p) => {
     str(p, 'request_id');
@@ -991,6 +1129,8 @@ export interface SessionSummary {
   output_per_s?: number;
   /** Calls the agent runs in the foreground now and can move to the background; absent: none. */
   foreground_calls?: string[];
+  /** What the agent waits on now; absent: none. */
+  activity?: Activity;
   /** When the user made it a favorite; absent: not one. */
   favorite_at?: string;
   /** When it was paused, then when the hub stopped its agent for the pause; absent: not paused. */
@@ -1095,6 +1235,7 @@ export function parseSummary(v: unknown): SessionSummary {
     background_tasks: optNum(s, 'background_tasks'),
     output_per_s: optNum(s, 'output_per_s'),
     foreground_calls: optStrArr(s, 'foreground_calls'),
+    activity: optActivity(s),
     favorite_at: optStr(s, 'favorite_at'),
     paused_at: optStr(s, 'paused_at'),
   };
@@ -1227,6 +1368,9 @@ export interface SessionInfo {
   /** The calls (`call_id`) the agent runs in the foreground now and can move to the background
    *  ("Run in background"), as its worker last reported; absent: none. */
   foreground_calls?: string[];
+  /** What the agent waits on now ("Retrying 3/10 (529), next in 8 s" in the activity line), as
+   *  its worker last reported; absent: none. */
+  activity?: Activity;
   /** When the user made it a favorite (favorites are per user); absent: not one. */
   favorite_at?: string;
   /** When it was paused (SPEC §17.3), then, once the hub itself stopped its agent for the
@@ -1388,6 +1532,7 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     background_tasks: optNum(o, 'background_tasks'),
     output_per_s: optNum(o, 'output_per_s'),
     foreground_calls: optStrArr(o, 'foreground_calls'),
+    activity: optActivity(o),
     favorite_at: optStr(o, 'favorite_at'),
     paused_at: optStr(o, 'paused_at'),
     model: optStr(agent, 'model'),
@@ -1715,6 +1860,25 @@ export function parseWorkspaceConflict(v: unknown): WorkspaceConflict | null {
     existing_workspace_id: str(o, 'existing_workspace_id'),
     existing_project_id: str(o, 'existing_project_id'),
     existing_path: str(o, 'existing_path'),
+  };
+}
+
+/** `GET /api/sessions/{id}/subagents/{task_id}/history` (since 0.181): what a subagent has
+ *  done, from its transcript on the worker: its last 200 events, oldest first, without `seq`;
+ *  `truncated` when it did more. `continues`: asked with `?after=`, the events are only the
+ *  ones after that event, to append to the page shown; absent, the whole page. */
+export interface SubagentHistory {
+  events: HqcEvent[];
+  truncated: boolean;
+  continues?: boolean;
+}
+
+export function parseSubagentHistory(v: unknown): SubagentHistory {
+  const o = obj(v, 'subagent history');
+  return {
+    events: arr(o, 'events').map(parseEvent),
+    truncated: bool(o, 'truncated'),
+    continues: optBool(o, 'continues'),
   };
 }
 

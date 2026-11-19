@@ -73,6 +73,9 @@ pub struct Inner {
     /// Session -> the calls its agent runs in the foreground, as its worker last reported
     /// them (`session.state.foreground_calls`), unless none ([`AppState::foreground_calls`]).
     foreground_calls: Mutex<HashMap<Uuid, Vec<String>>>,
+    /// Session -> what its agent waits on, as its worker last reported it
+    /// (`session.state.activity`), until the turn ends ([`AppState::activity`]).
+    activity: Mutex<HashMap<Uuid, hqc_proto::frame::Activity>>,
 }
 
 /// A session's `agent.delta` text since its last `agent.message` or `status` other than
@@ -165,6 +168,7 @@ impl AppState {
             live_agents: Mutex::default(),
             token_rates: Mutex::default(),
             foreground_calls: Mutex::default(),
+            activity: Mutex::default(),
             config,
         }))
     }
@@ -363,6 +367,28 @@ impl AppState {
             .get(&session_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// The session's activity as its worker reported it in `session.state`; none drops it. In
+    /// memory: a worker that comes back reports it again.
+    pub fn set_activity(&self, session_id: Uuid, activity: Option<hqc_proto::frame::Activity>) {
+        let mut all = self.activity.lock().unwrap();
+        // A kind this hub does not know (a newer worker's) is none to its clients.
+        match activity.filter(|a| *a != hqc_proto::frame::Activity::Unknown) {
+            Some(a) => all.insert(session_id, a),
+            None => all.remove(&session_id),
+        };
+    }
+
+    /// The session's agent waits on nothing any more: its turn ended, its process stopped,
+    /// its worker went or said `hello` again, or the session was deleted. Whether it did.
+    pub fn drop_activity(&self, session_id: Uuid) -> bool {
+        self.activity.lock().unwrap().remove(&session_id).is_some()
+    }
+
+    /// What the session's agent waits on now.
+    pub fn activity(&self, session_id: Uuid) -> Option<hqc_proto::frame::Activity> {
+        self.activity.lock().unwrap().get(&session_id).cloned()
     }
 
     /// The worker sent something for the session (any event, `agent.delta` included).

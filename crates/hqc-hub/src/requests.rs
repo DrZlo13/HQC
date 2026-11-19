@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::Utc;
 use hqc_proto::{
     api::{OpenRequest, WaitingSession},
-    event::{ApprovalOption, CancelReason, ClarifyAnswer},
+    event::{ApprovalOption, CancelReason, ClarifyAction, ClarifyAnswer},
     frame::{worker_approval, WorkerApprovalRequest},
 };
 use serde::Deserialize;
@@ -48,6 +48,8 @@ pub struct AnswerBody {
     pub answers: Option<BTreeMap<String, ClarifyAnswer>>,
     /// Text instead of the call (T26): only with a deny option of an in-session approval.
     pub message: Option<String>,
+    /// The person's choice on an MCP server's clarify request (SPEC §6, since 0.180).
+    pub action: Option<ClarifyAction>,
 }
 
 /// Longest `message` of an approval answer, in bytes.
@@ -94,6 +96,15 @@ fn deny_option(payload: &Value) -> Option<String> {
         .map(|o| o.id.clone())
 }
 
+/// The owner of the session's worker, `None` without one: who answers its approvals and an MCP
+/// server's request (SPEC §10.1, §11).
+async fn worker_owner(app: &AppState, s: &SessionRow) -> ApiResult<Option<Uuid>> {
+    Ok(match s.worker_id {
+        Some(w) => db::worker(&app.db, w).await?.map(|w| w.owner_id),
+        None => None,
+    })
+}
+
 /// `POST /api/sessions/{id}/requests/{request_id}`.
 pub async fn answer(
     app: &AppState,
@@ -112,11 +123,7 @@ pub async fn answer(
     let (frame, ev_type, ev_payload) = match p.kind.as_str() {
         "approval" => {
             // Approvals go to the worker owner only (SPEC §10.1, §11).
-            let owner = match s.worker_id {
-                Some(w) => db::worker(&app.db, w).await?.map(|w| w.owner_id),
-                None => None,
-            };
-            if owner != Some(user.id) {
+            if worker_owner(app, s).await? != Some(user.id) {
                 return Err(ApiError::Forbidden(
                     "only the worker owner answers approvals".into(),
                 ));
@@ -229,25 +236,61 @@ pub async fn answer(
             )
         }
         "clarify" => {
+            // An MCP server runs with the worker owner's credentials: only the worker owner
+            // answers its request; the agent's own question, anyone with `write` (SPEC §10.1, §11).
+            let from_server = p.payload.get("server").is_some_and(|v| !v.is_null());
+            if from_server && worker_owner(app, s).await? != Some(user.id) {
+                return Err(ApiError::Forbidden(
+                    "only the worker owner answers an MCP server's request".into(),
+                ));
+            }
             if body.message.is_some() {
                 return Err(ApiError::BadRequest(
                     "a clarify request takes answers, not a message".into(),
                 ));
             }
-            let answers = body
-                .answers
-                .ok_or_else(|| ApiError::BadRequest("answers is required".into()))?;
-            // Empty answers mean "cancelled by the hub" on the wire (SPEC §5.3).
-            if answers.is_empty() {
+            // `action` only on an MCP server's request, which `accept` answers with no answers
+            // too, and `decline` with none (SPEC §6).
+            let action = match body.action {
+                None => None,
+                Some(_) if !from_server => {
+                    return Err(ApiError::BadRequest(
+                        "action goes only with an MCP server's request".into(),
+                    ));
+                }
+                Some(ClarifyAction::Unknown) => {
+                    return Err(ApiError::BadRequest("unknown action".into()));
+                }
+                Some(a) => Some(a),
+            };
+            let answers = match (action, body.answers) {
+                (None, None) => {
+                    return Err(ApiError::BadRequest("answers is required".into()));
+                }
+                (Some(ClarifyAction::Decline), Some(a)) if !a.is_empty() => {
+                    return Err(ApiError::BadRequest(
+                        "a declined request takes no answers".into(),
+                    ));
+                }
+                (_, a) => a.unwrap_or_default(),
+            };
+            // Empty answers without `action` mean "cancelled by the hub" on the wire (SPEC §5.3).
+            if answers.is_empty() && action.is_none() {
                 return Err(ApiError::BadRequest("answers must not be empty".into()));
             }
             let mut answers = serde_json::to_value(answers).map_err(anyhow::Error::from)?;
             hqc_proto::replace_nul_json(&mut answers);
+            let mut frame =
+                json!({"session_id": s.id, "request_id": request_id, "answers": answers});
+            let mut event = json!({"request_id": request_id, "answers": answers});
+            if let Some(a) = action {
+                frame["action"] = json!(a);
+                event["action"] = json!(a);
+            }
             (
-                Some(json!({"type": "clarify.response",
-                       "payload": {"session_id": s.id, "request_id": request_id, "answers": answers}})),
+                Some(json!({"type": "clarify.response", "payload": frame})),
                 "clarify.response",
-                json!({"request_id": request_id, "answers": answers}),
+                event,
             )
         }
         _ => return Err(ApiError::NotFound),
@@ -398,11 +441,12 @@ pub async fn cancel_open_of_session(
 }
 
 /// `auto_approve`: answer with the first `canonical: once` option, `by: auto` (SPEC §10.1);
-/// only the runtime's own approvals, never a move of the session (SPEC §7).
+/// only the runtime's own approvals, never a move of the session (SPEC §7) nor one only a
+/// person may answer (`human_only`).
 pub async fn auto_approve(app: &AppState, s: &SessionRow, request_id: &str) -> anyhow::Result<()> {
     let Some(p) = db::find_open_request(&app.db, s.id, request_id)
         .await?
-        .filter(|p| p.kind == "approval")
+        .filter(|p| p.kind == "approval" && p.payload["human_only"] != true)
     else {
         return Ok(());
     };

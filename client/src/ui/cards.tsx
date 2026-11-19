@@ -8,7 +8,7 @@
 import type { SecretFields } from '../api';
 import type { ComponentChildren } from 'preact';
 import { useMemo, useState } from 'preact/hooks';
-import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, ModelProvider, SessionState } from '../proto';
+import type { Activity, ClarifyAction, ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, ModelProvider, SessionState } from '../proto';
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import type { ArtifactStore } from '../artifacts';
 import { modelMenuItems, type ModelChoice } from './agentSettings';
@@ -16,6 +16,7 @@ import { AttachmentView, PendingAttachments, type ViewedArtifact } from './attac
 import { ContextMenu } from './ContextMenu';
 import {
   argsText,
+  artifactPage,
   askTarget,
   between,
   buildFeed,
@@ -58,6 +59,8 @@ import {
   STATE_LABELS,
   SYSTEM_CODE_LABELS,
   SYSTEM_WARNING_CODES,
+  activityLabel,
+  compactionNote,
   formatClock,
   formatCost,
   formatDay,
@@ -70,8 +73,8 @@ import {
   count,
 } from './labels';
 import { elapsed, stats } from './LiveSubagents';
-import { CodeBlock, CopyButton, Markdown, markdownLine } from './Markdown';
-import { PermissionBlock } from './permission';
+import { CodeBlock, CopyButton, Markdown, markdownLine, safeHref } from './Markdown';
+import { asker, PermissionBlock } from './permission';
 import { PeerMessageBlock, ReplyFromBlock, ReplyToBlock, SentBlock } from './relay';
 
 /** The session's model, for the offer under the runtime's reply to a model refusal (SPEC
@@ -106,7 +109,8 @@ export interface RoomAgent {
 export interface ChatActions {
   timeline: Timeline;
   approve(requestId: string, optionId: string, message?: string): Promise<void>;
-  answer(requestId: string, answers: Record<string, ClarifyAnswer>): Promise<void>;
+  /** `action`: the person's choice on an MCP server's request. */
+  answer(requestId: string, answers: Record<string, ClarifyAnswer>, action?: ClarifyAction): Promise<void>;
   /** Sends `text` to the session as the user's message; absent where the card is shown away
    *  from its session and where the session takes no input. */
   send?(text: string): void;
@@ -333,8 +337,9 @@ const CALL_SHOWN_AFTER_MS = 2000;
 /** The last line of the feed while a turn is on or input waits (SPEC §17.1): the running
  *  command with its timer, or what the session is doing. A command or subagent the runtime
  *  runs in the foreground (`foreground`, the session's `foreground_calls`) gets "Run in
- *  background", which calls `onBackground` with its `call_id`. In a room each working agent
- *  has a line of its own, led by its `name`. */
+ *  background", which calls `onBackground` with its `call_id`. With no command running, what
+ *  the agent waits on (`activity`, the session's) stands instead of "Agent is working". In a
+ *  room each working agent has a line of its own, led by its `name`. */
 export function ActivityLine({
   state,
   timeline,
@@ -342,6 +347,7 @@ export function ActivityLine({
   now,
   root,
   foreground,
+  activity,
   onBackground,
 }: {
   state: SessionState;
@@ -351,6 +357,7 @@ export function ActivityLine({
   /** The session's folder: paths under it are shown relative to it, as in the feed. */
   root?: string;
   foreground?: string[];
+  activity?: Activity;
   onBackground?: (callId: string) => void;
 }) {
   const call = state === 'running' ? timeline.runningCall() : undefined;
@@ -389,7 +396,7 @@ export function ActivityLine({
     );
   }
   let label: string | null = null;
-  if (state === 'running') label = name ? `${name} is working` : 'Agent is working';
+  if (state === 'running') label = activity ? activityLabel(activity) : name ? `${name} is working` : 'Agent is working';
   else if (state === 'queued') label = 'Input queued';
   else if (state === 'waiting' && timeline.openRequests().length === 0) label = 'Waiting for approval';
   if (!label) return null;
@@ -493,12 +500,18 @@ export function EventView({ event, actions, queued }: { event: HqcEvent; actions
 function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => number }) {
   const p = event.payload;
   if (p.code === 'worker_log') return <WorkerLogLine event={event} />;
-  if (p.code === 'task_notification') return <TaskNotification text={p.text} />;
+  if (p.code === 'task_notification') return <TaskNotification note={p} />;
   // A compaction with the runtime's summary folds it; one without (older events carry the
-  // fixed text) is text as is.
+  // fixed text) is text as is. Either says how it came and what it freed when the runtime did.
   if (p.code === 'context_compacted') {
-    if (p.text && p.text !== 'Context compacted') return <CompactionSummary text={p.text} />;
-    return <Line kind={`system line-system-${p.code}`}>{p.text || 'Context compacted'}</Line>;
+    const note = compactionNote(p);
+    if (p.text && p.text !== 'Context compacted') return <CompactionSummary text={p.text} note={note} />;
+    return (
+      <Line kind={`system line-system-${p.code}`}>
+        {p.text || 'Context compacted'}
+        {note}
+      </Line>
+    );
   }
   const caption = SYSTEM_CODE_LABELS[p.code];
   const warning = SYSTEM_WARNING_CODES.has(p.code);
@@ -524,11 +537,21 @@ function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => numb
   );
 }
 
-/** A background task's notification, folded: "Background task ·" and its whole text on one
- *  line, without Markdown marks, cut where the line ends (a first line alone, often a heading
- *  like "### Summary", read as the whole message), dimmed in italics like the Thinking line's
- *  start of its text; open, the text as Markdown. */
-function TaskNotification({ text }: { text: string }) {
+/** How a background task ended, in its line's label (SPEC §6, since 0.181): `status` as the
+ *  runtime says it; a task that completed, or says nothing, is only "Background task". */
+const TASK_END_LABELS = new Map([
+  ['failed', 'Background task failed ·'],
+  ['stopped', 'Background task stopped ·'],
+]);
+
+/** A background task's notification, folded: "Background task ·" ("Background task failed ·",
+ *  "… stopped ·" by its `status`) and its whole text on one line, without Markdown marks, cut
+ *  where the line ends (a first line alone, often a heading like "### Summary", read as the
+ *  whole message), dimmed in italics like the Thinking line's start of its text, then what it
+ *  spent, when the runtime says, as the subagents' row above the input has it; open, the text
+ *  as Markdown. */
+function TaskNotification({ note }: { note: EventOf<'system'>['payload'] }) {
+  const { text, usage } = note;
   // The feed renders again on every streamed piece; the text is parsed once. A report runs to
   // tens of KB, and its first 2000 characters are wider than any window.
   const peek = useMemo(() => markdownLine(text.slice(0, 2000)), [text]);
@@ -536,22 +559,23 @@ function TaskNotification({ text }: { text: string }) {
     <details class="line-fold line-system-task_notification">
       <summary>
         <IconChevron size={12} />
-        <span class="fold-label">Background task ·</span>
+        <span class="fold-label">{TASK_END_LABELS.get(note.status ?? '') ?? 'Background task ·'}</span>
         <span class="fold-peek">{peek}</span>
+        {usage && <span class="fold-stats">· {stats(usage, usage.duration_ms)}</span>}
       </summary>
       <Markdown class="fold-text" text={text} />
     </details>
   );
 }
 
-/** A compaction of the context, folded like a background task: "Context compacted"; open, the
- *  summary the runtime wrote, as Markdown. */
-function CompactionSummary({ text }: { text: string }) {
+/** A compaction of the context, folded like a background task: "Context compacted" and `note`
+ *  (` · auto · 153k tokens freed`); open, the summary the runtime wrote, as Markdown. */
+function CompactionSummary({ text, note }: { text: string; note: string }) {
   return (
     <details class="line-fold line-system-context_compacted">
       <summary>
         <IconChevron size={12} />
-        <span class="fold-label">Context compacted</span>
+        <span class="fold-label">Context compacted{note}</span>
       </summary>
       <Markdown class="fold-text" text={text} />
     </details>
@@ -583,17 +607,31 @@ function RefusalLine({ event, actions }: { event: EventOf<'agent.message'>; acti
   const ms = actions.modelSwitch;
   const phone = useIsPhone();
   const [open, setOpen] = useState<{ x: number; y: number; anchor: HTMLElement; custom?: boolean } | null>(null);
-  const [switched, setSwitched] = useState<string | null>(null);
+  // The model switched to, and the last `seq` in the feed when it was picked.
+  const [switched, setSwitched] = useState<{ to: string; after: number } | null>(null);
   // By the place in the feed, not by `seq`: an input that waited through this turn stands under
   // the line though it came before it.
   const items = actions.timeline.items();
   const at = items.findIndex((i) => i.kind === 'event' && i.event.seq === event.seq);
   const answered = items.slice(at + 1).some((i) => i.kind === 'event' && i.event.type === 'user.message');
+  // A switch the runtime then refused (SPEC 0.179: `system model_not_switched`) offers again.
+  const shown =
+    switched &&
+    !items.some(
+      (i) =>
+        i.kind === 'event' &&
+        i.event.type === 'system' &&
+        i.event.payload.code === 'model_not_switched' &&
+        (i.event.seq ?? 0) > switched.after,
+    )
+      ? switched.to
+      : null;
   if (!ms || answered) return <Line kind="system line-runtime">{event.payload.text}</Line>;
   const pick = (c: ModelChoice) => {
     if ('provider' in c ? c.provider === ms.provider : !ms.provider && c.model === ms.model) return;
     const to = 'provider' in c ? ms.providers.find((p) => p.id === c.provider)!.label : modelName(c.model!);
-    void ms.to(c).then((ok) => ok && setSwitched(to));
+    const after = items.reduce((m, i) => (i.kind === 'event' && (i.event.seq ?? 0) > m ? i.event.seq! : m), 0);
+    void ms.to(c).then((ok) => ok && setSwitched({ to, after }));
   };
   let menu: ComponentChildren = null;
   if (open) {
@@ -638,8 +676,8 @@ function RefusalLine({ event, actions }: { event: EventOf<'agent.message'>; acti
       <Line kind="system line-runtime line-refusal">
         {event.payload.text}
         <span class="refusal-offer" role="status">
-          {switched ? (
-            `Switched to ${switched}. Send the message again.`
+          {shown ? (
+            `Switched to ${shown}. Send the message again.`
           ) : (
             <button
               type="button"
@@ -908,7 +946,7 @@ function Thinking({ event }: { event: EventOf<'agent.thinking'> }) {
 
 /** A run of tool calls, collapsed: "N tool calls · time", then the call's line and its result
  *  when it is one, else the tools it called, each once, in the order first called; open, a row
- *  per call (T26). */
+ *  per call (T26). Under it, a line with the page each of its `Artifact` calls published. */
 function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }>; actions: ChatActions }) {
   const [open, setOpen] = useState(false);
   const calls = callRows(block.rows);
@@ -926,31 +964,50 @@ function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }
       (actions.timeline.resultFor(one.payload.call_id) ?? calls[0].result)?.payload,
     );
   const kinds = [...new Set(calls.flatMap((r) => (r.call ? [toolKind(r.call.payload.tool)] : [])))];
+  // The pages its `Artifact` calls published: a line each under the run, folded or not.
+  const pages = calls.flatMap(({ call, result }) => {
+    const r = call ? (actions.timeline.resultFor(call.payload.call_id) ?? result) : undefined;
+    const page = call && artifactPage(call.payload.tool, r?.payload);
+    const href = page && safeHref(page);
+    return href ? [href] : [];
+  });
+  // One page opened twice in the run is one line.
+  const unique = [...new Set(pages)];
   return (
-    <div class={`tool-group tool-${state} ${open ? 'is-open' : ''}`}>
-      <button type="button" class="tool-group-head" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <span class="chevron">
-          <IconChevron />
-        </span>
-        <StateMark state={state} />
-        <span class="tool-stats">{stats}</span>
-        {peek ? (
-          <>
-            <span class="tool-peek mono">{peek}</span>
-            {peekResult && <span class="tool-result mono">{relativePaths(peekResult, actions.workspaceRoot)}</span>}
-          </>
-        ) : (
-          calls.length > 1 && kinds.length > 0 && <span class="tool-peek tool-kinds">({kinds.join(', ')})</span>
+    <>
+      <div class={`tool-group tool-${state} ${open ? 'is-open' : ''}`}>
+        <button type="button" class="tool-group-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+          <span class="chevron">
+            <IconChevron />
+          </span>
+          <StateMark state={state} />
+          <span class="tool-stats">{stats}</span>
+          {peek ? (
+            <>
+              <span class="tool-peek mono">{peek}</span>
+              {peekResult && <span class="tool-result mono">{relativePaths(peekResult, actions.workspaceRoot)}</span>}
+            </>
+          ) : (
+            calls.length > 1 && kinds.length > 0 && <span class="tool-peek tool-kinds">({kinds.join(', ')})</span>
+          )}
+        </button>
+        {open && (
+          <div class="tool-group-body">
+            {block.rows.map((r) => (
+              <ToolRowView key={r.key} row={r} actions={actions} />
+            ))}
+          </div>
         )}
-      </button>
-      {open && (
-        <div class="tool-group-body">
-          {block.rows.map((r) => (
-            <ToolRowView key={r.key} row={r} actions={actions} />
-          ))}
+      </div>
+      {unique.map((href) => (
+        <div key={href} class="tool-artifact">
+          <span class="tool-artifact-label">Artifact</span>{' '}
+          <a href={href} target="_blank" rel="noopener noreferrer">
+            {href}
+          </a>
         </div>
-      )}
-    </div>
+      ))}
+    </>
   );
 }
 
@@ -1013,7 +1070,8 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
 }
 
 /** An opened call, in its row of a group or on a subagent's card: the change of an Edit, a
- *  MultiEdit or a Write (its result only if it failed), else the arguments and the result. */
+ *  MultiEdit or a Write (its result only if it failed), else the arguments and the result, its
+ *  addresses as links and its images as thumbnails. */
 function ToolCallBody({
   call,
   result,
@@ -1050,7 +1108,14 @@ function ToolCallBody({
         <>
           <div class="label">{r.error ? 'Error' : 'Result'}</div>
           {r.error_text && <div class="error-text">{r.error_text}</div>}
-          {r.result_preview && <pre class="pre">{r.result_preview}</pre>}
+          {r.result_preview && <pre class="pre">{withLinks(r.result_preview)}</pre>}
+          {r.artifact_ids.length > 0 && (
+            <div class="attachments tool-images">
+              {r.artifact_ids.map((id) => (
+                <AttachmentView key={id} id={id} kind="image" actions={actions} />
+              ))}
+            </div>
+          )}
           {r.artifact_id && (
             <button type="button" class="btn btn-small" onClick={() => actions.openArtifact(r.artifact_id!)}>
               Full result
@@ -1060,6 +1125,42 @@ function ToolCallBody({
       )}
     </div>
   );
+}
+
+/** An address found in text without what closes the sentence around it: trailing punctuation,
+ *  and a closing bracket only when the address has no opening one for it, so
+ *  `…/wiki/Rust_(programming_language)` keeps its `)` and `[x](https://a.b/c)` loses it. */
+function trimUrl(found: string): string {
+  const pairs: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
+  let url = found;
+  for (;;) {
+    const t = url.replace(/[.,;:!?]+$/, '');
+    const close = t.at(-1) ?? '';
+    const open = pairs[close];
+    if (open && t.split(open).length < t.split(close).length) url = t.slice(0, -1);
+    else return t;
+  }
+}
+
+/** `text` with its http and https addresses as links that open in a new tab (SPEC §6). */
+function withLinks(text: string): ComponentChildren {
+  const out: ComponentChildren[] = [];
+  let last = 0;
+  for (const m of text.matchAll(/https?:\/\/[^\s<>"'`]+/g)) {
+    const url = trimUrl(m[0]);
+    const href = safeHref(url);
+    if (!href) continue;
+    out.push(
+      text.slice(last, m.index),
+      // Labelled with the address it opens: a look-alike host shows in its punycode form.
+      <a key={m.index} href={href} target="_blank" rel="noopener noreferrer">
+        {href}
+      </a>,
+    );
+    last = m.index + url.length;
+  }
+  out.push(text.slice(last));
+  return out;
 }
 
 /** A subagent the agent started (its `Agent` call): a card of its own in the project's colour,
@@ -1142,12 +1243,14 @@ function SubagentCard({ block, actions }: { block: Extract<Block, { kind: 'subag
 
 /** Where a subagent ended (its notification, or the result of one that ran in the
  *  foreground): a lighter card of the start card's family, two lines that never wrap. The
- *  head: the state's mark, "Agent finished:", the task, "done", "failed" or "stopped" and, on
- *  the call's first end, the run time from the call; under it the end's text on one line,
- *  without Markdown marks; the head opens the whole text as Markdown. */
+ *  head: the state's mark, "Agent finished:", the task, "done", "failed" or "stopped", the
+ *  tokens and tool calls its notification's `usage` says (since 0.181) and, on the call's first
+ *  end, the run time from the call; under it the end's text on one line, without Markdown
+ *  marks; the head opens the whole text as Markdown. */
 function SubagentEndCard({ block }: { block: Extract<Block, { kind: 'subagent-end' }> }) {
   const [open, setOpen] = useState(false);
   const e = subagentEnd(block.call, block.end);
+  const spent = stats((block.end.type === 'system' && block.end.payload.usage) || {}, block.first ? e.ms : undefined);
   const args = callArgs(block.call.payload.args_preview);
   const task = typeof args.description === 'string' ? args.description : '';
   // A report runs to tens of KB; its first 2000 characters are wider than any window.
@@ -1167,7 +1270,7 @@ function SubagentEndCard({ block }: { block: Extract<Block, { kind: 'subagent-en
         <span class="subagent-label">Agent finished:</span>
         {task && <span class="subagent-task">{task}</span>}
         <span class="subagent-state">{e.state}</span>
-        {block.first && e.ms !== undefined && <span class="subagent-stats">{elapsed(e.ms)}</span>}
+        {spent && <span class="subagent-stats">{spent}</span>}
         <span class="chevron">
           <IconChevron />
         </span>
@@ -1185,7 +1288,9 @@ interface OtherAnswer {
 
 /** The agent's questions (AskUserQuestion), as the tab asks them: a question's header, each
  *  option's description under its label, checkboxes for a multi question, and "Other" whose
- *  text is the answer (with multi, beside the checked labels). */
+ *  text is the answer (with multi, beside the checked labels). An MCP server's request
+ *  (`server`) is headed by the server, has its text above the questions, its link with Done in
+ *  place of questions, no "Other", its required fields marked, and Decline. */
 export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.request'>; actions: ChatActions }) {
   const p = event.payload;
   const fate = actions.timeline.requestFate(p.request_id);
@@ -1193,8 +1298,11 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
   // offers an earlier question again (`web:161989`), until a message of the user stands after
   // the cancel: that message, when it is the answer (`web:162093`), says what was chosen; any
   // other closes the card. Any other cancel closes it at once.
+  // An MCP server's request is not: a message goes to the agent, not to the server.
   const earlier =
-    !fate.response && (fate.cancel?.reason === 'worker_restart' || fate.cancel?.reason === 'stopped');
+    p.server === undefined &&
+    !fate.response &&
+    (fate.cancel?.reason === 'worker_restart' || fate.cancel?.reason === 'stopped');
   const after = earlier ? actions.timeline.userMessageAfter(fate.cancelSeq!) : undefined;
   const replayed = after && earlierAnswers(after.text.trim(), p.questions);
   // An answer whose message failed to be sent is not given yet.
@@ -1205,6 +1313,8 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
   const [others, setOthers] = useState<Record<string, OtherAnswer>>({});
   const { busy, error, run } = useAction();
   const given = fate.response && 'answers' in fate.response ? fate.response.answers : replayed;
+  const declined = !!fate.response && 'action' in fate.response && fate.response.action === 'decline';
+  const href = p.url ? safeHref(p.url) : null;
 
   const set = (q: ClarifyQuestion, v: string, checked: boolean) => {
     setAnswers((a) => {
@@ -1245,6 +1355,18 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
     const v = toSend[q.id];
     return Array.isArray(v) ? v.length > 0 : v !== undefined && v.trim() !== '';
   });
+  // An MCP server's form waits for what its schema says, which a server on the MCP SDK checks
+  // the answer against: every required field answered, an integer or a number that reads as one
+  // to the worker too (a safe integer; a decimal number, not `0x10`).
+  const fits = p.questions.every((q) => {
+    const v = toSend[q.id];
+    const t = (Array.isArray(v) ? v.join(', ') : (v ?? '')).trim();
+    if (t === '') return !q.required;
+    if (q.input === 'integer') return /^-?\d+$/.test(t) && Number.isSafeInteger(Number(t));
+    if (q.input === 'number') return /^-?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t) && Number.isFinite(Number(t));
+    return true;
+  });
+  const ready = p.server === undefined ? complete : fits;
   // What a question shows: the options picked and Other; once answered, what was sent, an
   // answer that is not an option being the text of Other.
   const shown = (q: ClarifyQuestion): { picked: string[]; other: OtherAnswer } => {
@@ -1267,10 +1389,24 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
         if (later) {
           const text = earlierAnswer(p.questions, collect());
           if (complete && text !== undefined) actions.send!(text);
-        } else if (open && complete) run(() => actions.answer(p.request_id, toSend));
+        } else if (open && ready) {
+          run(() => (p.server === undefined ? actions.answer(p.request_id, toSend) : actions.answer(p.request_id, toSend, 'accept')));
+        }
       }}
     >
-      <div class="card-title">Agent asks</div>
+      <div class="card-title">{p.server === undefined ? `${asker(p.subagent, 'Agent')} asks` : `${p.server} asks`}</div>
+      {p.message && <div class="clarify-message">{p.message}</div>}
+      {p.url && (
+        <div class="clarify-link">
+          {href ? (
+            <a href={href} target="_blank" rel="noopener noreferrer">
+              {href}
+            </a>
+          ) : (
+            p.url
+          )}
+        </div>
+      )}
       {p.questions.map((q) => {
         const s = shown(q);
         const name = `${p.request_id}-${q.id}`;
@@ -1283,7 +1419,9 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
         return (
           <fieldset key={q.id} class="question" disabled={!open || busy}>
             <legend>
-              {q.header && <span class="question-header">{q.header}</span>}
+              {(q.header || q.required) && (
+                <span class="question-header">{[q.header, q.required && 'required'].filter(Boolean).join(' · ')}</span>
+              )}
               <span class="question-text">{q.text}</span>
             </legend>
             {q.options?.map((o, i) => {
@@ -1304,7 +1442,7 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
                 </label>
               );
             })}
-            {!!q.options?.length && (
+            {!!q.options?.length && p.server === undefined && (
               <div class="choice choice-other">
                 {q.multi ? <input type="checkbox" {...other} /> : <input type="radio" {...other} />}
                 {/* Typing into the field chooses Other, as in the tab. */}
@@ -1337,13 +1475,18 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
           <button
             type="submit"
             class="btn btn-primary"
-            disabled={busy || (later && earlierAnswer(p.questions, collect()) === undefined) || !complete}
+            disabled={busy || (later && earlierAnswer(p.questions, collect()) === undefined) || !ready}
           >
-            Answer
+            {p.url ? 'Done' : 'Answer'}
           </button>
+          {p.server !== undefined && (
+            <button type="button" class="btn btn-ghost" disabled={busy} onClick={() => run(() => actions.answer(p.request_id, {}, 'decline'))}>
+              Decline
+            </button>
+          )}
         </div>
       )}
-      {(fate.response || answeredLater) && <div class="outcome">Answers sent</div>}
+      {(fate.response || answeredLater) && <div class="outcome">{declined ? 'Declined' : p.url ? 'Done' : 'Answers sent'}</div>}
       {fate.cancel && !answeredLater && <div class="outcome">Cancelled: {CANCEL_LABELS[fate.cancel.reason]}</div>}
       {error && <div class="error-text">{error}</div>}
     </form>

@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::event::{ClarifyAnswer, Event};
+use crate::event::{ClarifyAction, ClarifyAnswer, Event};
 
 /// `{id, type, payload}`; `body` supplies `type` and `payload`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,6 +67,23 @@ pub struct Ack {
 /// `skip_serializing_if` of a count whose absence means 0.
 pub(crate) fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+/// `session.state.activity` (since SPEC 0.179): what the agent waits on now, shown in the
+/// chat's activity line instead of "Agent is working" (SPEC §5.4, §17.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Activity {
+    /// A request to the model API failed and will be retried.
+    Retrying(crate::event::ApiRetry),
+    /// The runtime compacts the conversation.
+    Compacting,
+    /// The model thinks, `estimated_tokens` so far by the runtime's estimate.
+    Thinking { estimated_tokens: u64 },
+    /// A kind this hub does not know (a newer worker's): the rest of `session.state` still
+    /// reads, and clients show none.
+    #[serde(other)]
+    Unknown,
 }
 
 /// `error {code, message, retryable, details?}` (SPEC §5).
@@ -162,6 +179,11 @@ pub enum WorkerFrame {
         /// stopped. Absent — none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         foreground_calls: Vec<String>,
+        /// What the agent waits on now that its output does not show (since SPEC 0.179,
+        /// Claude Code: SPEC §8.1). Repeated in every following `session.state`, none when
+        /// the agent is stopped. Absent — none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activity: Option<Activity>,
     },
     /// Reply to a hub request (`fs.stat`, `fs.list_dirs`, `title.request`, ...): same `id` as
     /// the request.
@@ -482,6 +504,10 @@ pub enum HubFrame {
     /// `ack`, also when no agent runs; what the runtime answers is the worker's log.
     #[serde(rename = "session.stop_task")]
     SessionStopTask { session_id: Uuid, task_id: String },
+    /// What subagent `task_id` of the session has done, read from its transcript on demand
+    /// (since SPEC 0.181): answered with `result` [`SubagentHistoryResult`].
+    #[serde(rename = "session.subagent_history")]
+    SessionSubagentHistory(SubagentHistory),
     /// Terminate the agent process.
     #[serde(rename = "session.kill")]
     SessionKill { session_id: Uuid },
@@ -512,13 +538,16 @@ pub enum HubFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
-    /// Empty `answers` means the hub cancelled the request; the adapter answers the
-    /// runtime with `deny` and the turn goes on without answers.
+    /// Empty `answers` without `action` means the hub cancelled the request; the adapter
+    /// answers the runtime with `deny` and the turn goes on without answers.
     #[serde(rename = "clarify.response")]
     ClarifyResponse {
         session_id: Uuid,
         request_id: String,
         answers: BTreeMap<String, ClarifyAnswer>,
+        /// The person's choice on an MCP server's request (since SPEC 0.180).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<ClarifyAction>,
     },
     /// Check a folder before it becomes a workspace (SPEC §5.3, §13.1).
     #[serde(rename = "fs.stat")]
@@ -830,6 +859,7 @@ pub enum ResultBody {
     Secret(SecretPutResult),
     WorkspaceKeys(WorkspaceKeysResult),
     WorkspaceKeyDeleted(WorkspaceKeyDeleteResult),
+    SubagentHistory(SubagentHistoryResult),
 }
 
 /// A value that is never printed: `Debug` shows its length only, so a frame that is logged
@@ -1293,6 +1323,16 @@ pub struct Limits {
     /// The 7-day window of all models ("Current week").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seven_day: Option<LimitWindow>,
+    /// The state of the limit the account is nearest to (since SPEC 0.179): `allowed`,
+    /// `allowed_warning` or `rejected` (Claude Code: `rate_limit_info.status`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Which limit that is: `five_hour`, `seven_day`, `seven_day_opus`, … (`rateLimitType`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_type: Option<String>,
+    /// When it resets, Unix seconds (`resetsAt`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1334,6 +1374,55 @@ pub struct PermissionsInspect {
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
+}
+
+/// `session.subagent_history {request_id, session_id, task_id, after?, before?}` -> `result`
+/// [`SubagentHistoryResult`] (since SPEC 0.181): `task_id` is a subagent's of `subagents.live`,
+/// `request_id` equals the frame `id`. A `task_id` that is not [`valid_history_task_id`] is
+/// answered with `error {invalid_frame}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentHistory {
+    pub request_id: String,
+    pub session_id: Uuid,
+    pub task_id: String,
+    /// The `event_id` of the last event the client shows: when it is among the events of the
+    /// page, the result holds only the ones after it, with `continues`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Uuid>,
+    /// The `event_id` of the first event the reader has: the page is the newest events before
+    /// it. An event that is not among the events read gives no events, with `truncated`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<Uuid>,
+}
+
+/// Result of `session.subagent_history`: the newest events of the subagent's transcript, at most
+/// [`MAX_SUBAGENT_HISTORY`] and [`MAX_SUBAGENT_HISTORY_BYTES`], oldest first, without `seq`;
+/// `truncated` when any was left out. No transcript: no events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubagentHistoryResult {
+    pub events: Vec<Event>,
+    pub truncated: bool,
+    /// The events are only the ones of the page after the request's `after`, for the client to
+    /// append to the page it shows; `truncated` is then false. Absent: the whole page.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continues: bool,
+}
+
+/// Most events of a [`SubagentHistoryResult`].
+pub const MAX_SUBAGENT_HISTORY: usize = 200;
+/// Most bytes the events of a [`SubagentHistoryResult`] take as JSON together: the reply stays
+/// well under the hub's limit of 1 MiB for a message from a worker, past which it drops the link.
+pub const MAX_SUBAGENT_HISTORY_BYTES: usize = 512 * 1024;
+/// Longest `task_id` of `session.subagent_history`, in bytes.
+pub const MAX_HISTORY_TASK_ID: usize = 64;
+
+/// A `task_id` of `session.subagent_history`: 1 to [`MAX_HISTORY_TASK_ID`] bytes of
+/// `[A-Za-z0-9_-]` (Claude Code: `a52af2b436ded4cea`). The worker reads a file by it.
+pub fn valid_history_task_id(id: &str) -> bool {
+    (1..=MAX_HISTORY_TASK_ID).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// Where a rule comes from (`InspectResult.sources[].source`, `CheckResult.source`).
@@ -1473,6 +1562,15 @@ mod tests {
     use serde::de::DeserializeOwned;
     use serde_json::{json, Value};
 
+    /// SPEC 0.179: an `activity` of a kind this hub does not know reads as `Unknown`, so the rest
+    /// of a newer worker's `session.state` still reads.
+    #[test]
+    fn an_unknown_activity_reads() {
+        let a: Activity =
+            serde_json::from_value(json!({"kind": "waiting_hook", "hook": "PreToolUse"})).unwrap();
+        assert_eq!(a, Activity::Unknown);
+    }
+
     /// Frame `type` values of iteration 1, as written in SPEC §5.3 / §5.4.
     const SPEC_HUB_TYPES: &[&str] = &[
         "hello.ack",
@@ -1481,6 +1579,7 @@ mod tests {
         "session.stop",
         "session.background",
         "session.stop_task",
+        "session.subagent_history",
         "session.kill",
         "session.permission_mode",
         "session.model",
@@ -1555,6 +1654,14 @@ mod tests {
             include_str!("../examples/wire/hub.session.stop_task.json"),
         ),
         (
+            "session.subagent_history",
+            include_str!("../examples/wire/hub.session.subagent_history.json"),
+        ),
+        (
+            "session.subagent_history",
+            include_str!("../examples/wire/hub.session.subagent_history.before.json"),
+        ),
+        (
             "session.kill",
             include_str!("../examples/wire/hub.session.kill.json"),
         ),
@@ -1585,6 +1692,10 @@ mod tests {
         (
             "clarify.response",
             include_str!("../examples/wire/hub.clarify.response.cancel.json"),
+        ),
+        (
+            "clarify.response",
+            include_str!("../examples/wire/hub.clarify.response.decline.json"),
         ),
         ("fs.stat", include_str!("../examples/wire/hub.fs.stat.json")),
         (
@@ -1750,6 +1861,10 @@ mod tests {
             include_str!("../examples/wire/worker.result.workspace.key_delete.json"),
         ),
         (
+            "result",
+            include_str!("../examples/wire/worker.result.subagent_history.json"),
+        ),
+        (
             "worker.approval.request",
             include_str!("../examples/wire/worker.worker.approval.request.json"),
         ),
@@ -1798,6 +1913,7 @@ mod tests {
             HubFrame::SessionStop { .. } => "session.stop",
             HubFrame::SessionBackground { .. } => "session.background",
             HubFrame::SessionStopTask { .. } => "session.stop_task",
+            HubFrame::SessionSubagentHistory(_) => "session.subagent_history",
             HubFrame::SessionKill { .. } => "session.kill",
             HubFrame::SessionPermissionMode { .. } => "session.permission_mode",
             HubFrame::SessionModel { .. } => "session.model",
@@ -2177,6 +2293,10 @@ mod tests {
                 include_str!("../examples/wire/hub.workspace.key_delete.json"),
                 include_str!("../examples/wire/worker.result.workspace.key_delete.json"),
             ),
+            (
+                include_str!("../examples/wire/hub.session.subagent_history.json"),
+                include_str!("../examples/wire/worker.result.subagent_history.json"),
+            ),
         ];
         for (req, res) in pairs {
             let req: Envelope<HubFrame> = serde_json::from_str(req).unwrap();
@@ -2192,6 +2312,7 @@ mod tests {
                 HubFrame::SecretPut(r) => (&r.request_id, 7),
                 HubFrame::WorkspaceKeys(r) => (&r.request_id, 8),
                 HubFrame::WorkspaceKeyDelete(r) => (&r.request_id, 9),
+                HubFrame::SessionSubagentHistory(r) => (&r.request_id, 10),
                 other => panic!("not a request: {other:?}"),
             };
             assert_eq!(&req.id, request_id, "request_id is the frame id");
@@ -2210,6 +2331,7 @@ mod tests {
                 ResultBody::Secret(_) => 7,
                 ResultBody::WorkspaceKeys(_) => 8,
                 ResultBody::WorkspaceKeyDeleted(_) => 9,
+                ResultBody::SubagentHistory(_) => 10,
             };
             assert_eq!(got, kind);
         }
@@ -2414,6 +2536,21 @@ mod tests {
         };
         assert_eq!(background_tasks(&old), 1);
         assert_eq!(background_tasks(&held), 0);
+        // `activity` (SPEC 0.179): absent is none.
+        let activity = |f: &Envelope<WorkerFrame>| match &f.body {
+            WorkerFrame::SessionState { activity, .. } => activity.clone(),
+            other => panic!("not session.state: {other:?}"),
+        };
+        assert_eq!(
+            activity(&old),
+            Some(Activity::Retrying(crate::event::ApiRetry {
+                attempt: 3,
+                max_retries: 10,
+                retry_delay_ms: 8000,
+                error_status: Some(529),
+            }))
+        );
+        assert_eq!(activity(&held), None);
         assert_eq!(
             of(&held),
             Some(Some(HeldBy {

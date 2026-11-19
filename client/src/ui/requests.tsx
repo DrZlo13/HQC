@@ -19,7 +19,7 @@ function requestActions(app: AppState, r: OpenRequest, timeline: Timeline): Chat
   return {
     timeline,
     approve: (_id, o, m) => app.approveRequest(r, o, m),
-    answer: (_id, a) => app.answerRequest(r, a),
+    answer: (_id, a, x) => app.answerRequest(r, a, x),
     resend: () => {},
     discard: () => {},
     openArtifact: () => {},

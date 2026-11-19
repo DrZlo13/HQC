@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use hqc_proto::event::{Author, ClarifyAnswer, Event, EventKind};
+use hqc_proto::event::{Author, ClarifyAction, ClarifyAnswer, Event, EventKind};
 use hqc_proto::frame::{PermissionMode, Runtime, SessionInput};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -30,6 +30,11 @@ use claude_code::ClaudeCodeAdapters;
 pub enum AdapterEvent {
     /// An event for the hub. Everything except `agent.delta` goes through the outbox.
     Event(Event),
+    /// A `tool.result` with files of the result to upload first (Claude Code, SPEC §8.1): the
+    /// supervisor uploads them as artifacts of the session, names them in `artifact_id` and
+    /// `artifact_ids`, then sends the event as [`AdapterEvent::Event`]; a failed upload leaves
+    /// its field out.
+    ToolResult { event: Event, files: ResultFiles },
     /// The runtime has taken the input `event_id` (Claude Code: the `--replay-user-messages`
     /// echo; ACP: `session/prompt` sent). Only now does the hub get `ack {event_id}`
     /// (SPEC §5.2).
@@ -70,9 +75,24 @@ pub enum AdapterEvent {
     /// subagents of `system/task_started` with `is_backgrounded: false`, SPEC §8.1); sent as
     /// `session.state.foreground_calls`. Reported when they change.
     ForegroundCalls(Vec<String>),
+    /// What the agent waits on now that its output does not show, `None` once it does not
+    /// (Claude Code: `system/api_retry`, `system/status`, `system/thinking_tokens`, SPEC
+    /// §8.1); sent as `session.state.activity`. Reported when it changes.
+    Activity(Option<hqc_proto::frame::Activity>),
+    /// A long call of the agent is still running (Claude Code: `tool_progress` with
+    /// `heartbeat: true`, every 30 s); `tokens.rate` goes again, which keeps the hub's turn
+    /// watchdog off a silent call (SPEC §17.3).
+    Heartbeat,
+    /// The runtime refused a model switch and kept this model (Claude Code: the `error`
+    /// answer to `set_model`, its `model`): the session's model from now on.
+    ModelKept(String),
     /// The usage limits of the account the runtime runs on (Claude Code: `rate_limit_event`,
     /// SPEC §8.1); sent as `worker.limits`, the account being the worker's.
     Limits(hqc_proto::frame::Limits),
+    /// The file a background task that ended wrote its output to (Claude Code: `output_file`
+    /// of its `task_notification`, SPEC §8.1), right after its `system task_notification`: the
+    /// worker uploads it as an `attachment` of the session.
+    TaskOutput(std::path::PathBuf),
     /// The runtime reported its own session id (ACP), or the session goes on under another
     /// one (Claude Code: after `/clear`, the new transcript, SPEC §8.1); sent in
     /// `session.state`, and later starts continue it.
@@ -98,6 +118,26 @@ pub enum AdapterEvent {
     /// The process ended by itself. Not required after `kill`.
     Exited { error: Option<String> },
 }
+
+/// What a tool result carries beyond its `result_preview` ([`AdapterEvent::ToolResult`]).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ResultFiles {
+    /// The whole text of a result longer than its preview, at most its first
+    /// [`FULL_RESULT_LIMIT`] bytes: a `text` artifact, `artifact_id`.
+    pub text: Option<String>,
+    /// The result's images in order: `image` artifacts, `artifact_ids`.
+    pub images: Vec<ResultImage>,
+}
+
+/// An image block of a tool result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResultImage {
+    pub media_type: String,
+    pub data: Vec<u8>,
+}
+
+/// The most of a result's text uploaded: what "Open" of a text shows in the client (2 MiB).
+pub const FULL_RESULT_LIMIT: usize = 2 * 1024 * 1024;
 
 pub type EventSink = mpsc::Sender<AdapterEvent>;
 
@@ -206,6 +246,13 @@ pub trait Adapter: Send {
         let _ = task_id;
         anyhow::bail!("this runtime cannot stop a task alone")
     }
+    /// The transcript of subagent `task_id` of [`AdapterEvent::LiveSubagents`], for
+    /// `session.subagent_history` (Claude Code: `subagents/agent-<task_id>.jsonl` beside the
+    /// session's transcript, SPEC §8.1); the file may not be there. By default none.
+    fn subagent_transcript(&self, task_id: &str) -> Option<std::path::PathBuf> {
+        let _ = task_id;
+        None
+    }
     /// `message`: the user's text with a deny option (T26), the reason the runtime sees.
     async fn answer_approval(
         &mut self,
@@ -213,11 +260,12 @@ pub trait Adapter: Send {
         option_id: &str,
         message: Option<&str>,
     ) -> anyhow::Result<()>;
-    /// Empty `answers`: the hub cancelled the request (SPEC §5.3).
+    /// Empty `answers` without `action`: the hub cancelled the request (SPEC §5.3).
     async fn answer_clarify(
         &mut self,
         request_id: &str,
         answers: &BTreeMap<String, ClarifyAnswer>,
+        action: Option<ClarifyAction>,
     ) -> anyhow::Result<()>;
 }
 

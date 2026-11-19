@@ -3479,6 +3479,12 @@ select.input {
   font-style: italic;
   color: color-mix(in srgb, var(--muted) 60%, transparent);
 }
+/* What a task spent, after its text: never cut. */
+.fold-stats {
+  flex: none;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 .fold-text {
   margin: 6px 0 0 6px;
   padding-left: 12px;
@@ -3667,6 +3673,26 @@ select.input {
 
 .tool-row-body {
   padding: 6px 0 4px;
+}
+
+/* A result's images: thumbnails in a row, each opens in the viewer (SPEC §6). */
+.tool-images > .attachment {
+  flex: none;
+}
+
+.tool-images .attachment-image img {
+  max-width: 160px;
+  max-height: 120px;
+}
+
+/* The page an `Artifact` call published: a line under its run of calls (SPEC §6). */
+.tool-artifact {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.tool-artifact-label {
+  color: var(--muted);
 }
 
 .label {
@@ -4097,6 +4123,14 @@ a.relay-peer {
   font-size: 14px;
   font-weight: 600;
   color: var(--text);
+}
+.card-clarify .clarify-message {
+  margin-top: 6px;
+  white-space: pre-wrap;
+}
+.card-clarify .clarify-link {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
 }
 
 .question {
@@ -4716,6 +4750,51 @@ a.relay-peer {
 
 .chat-phone .live-agents {
   padding: 6px 12px 4px;
+}
+
+/* A subagent's line opens what it has done under it, as wide as the block, with the feed's rows;
+   while it is open the list does not cut it. The opener is all of the line but its stop button. */
+.live-agents-opens {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.live-agents-opens:hover .live-agents-task,
+.live-agents-opens[aria-expanded='true'] .live-agents-task {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.live-agents-list-open {
+  max-height: none;
+}
+.live-agents-history {
+  max-height: 40dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 4px 0 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.live-agents-history > .feed.live-agents-feed {
+  max-width: none;
+  gap: 12px;
+}
+.live-agents-note {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .composer-wrap {
@@ -7972,4 +8051,16 @@ button.ps-look {
 .phone-tile-wrap.has-browser > .phone-tile {
   outline: 2px dashed var(--browser);
   outline-offset: 2px;
+}
+/* Above the input: a window of the account's usage at 70 % or more, and a limit hit (SPEC §6). */
+.limit-notice {
+  flex: none;
+  padding: 6px 28px;
+  border-top: 1px solid var(--border);
+  color: var(--waiting);
+  font-size: 13px;
+  text-align: center;
+}
+.limit-notice-hit {
+  color: var(--danger);
 }

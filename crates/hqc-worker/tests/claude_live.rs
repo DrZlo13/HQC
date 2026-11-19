@@ -41,6 +41,7 @@ fn label(ev: &AdapterEvent) -> String {
                 _ => ty,
             }
         }
+        AdapterEvent::ToolResult { .. } => "tool.result".into(),
         AdapterEvent::InputAccepted { .. } => "accepted".into(),
         AdapterEvent::TurnEnded { .. } => "turn_ended".into(),
         AdapterEvent::Exited { error } => format!("exited:{error:?}"),
@@ -50,11 +51,15 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::Wakeup(at) => format!("wakeup:{at:?}"),
         AdapterEvent::PermissionMode(m) => format!("permission_mode:{}", m.as_str()),
         AdapterEvent::Limits(_) => "limits".into(),
+        AdapterEvent::TaskOutput(p) => format!("task_output:{}", p.display()),
         AdapterEvent::Subagents(n) => format!("subagents:{n}"),
         AdapterEvent::LiveSubagents(l) => format!("live_subagents:{}", l.len()),
         AdapterEvent::BackgroundTasks(n) => format!("background_tasks:{n}"),
         AdapterEvent::TokenRate(n) => format!("token_rate:{n}"),
         AdapterEvent::ForegroundCalls(c) => format!("foreground_calls:{}", c.len()),
+        AdapterEvent::Activity(a) => format!("activity:{a:?}"),
+        AdapterEvent::Heartbeat => "heartbeat".into(),
+        AdapterEvent::ModelKept(m) => format!("model_kept:{m}"),
     }
 }
 

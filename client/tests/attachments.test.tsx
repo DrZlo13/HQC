@@ -706,6 +706,25 @@ describe('rendering attachments', () => {
     expect(el.querySelector<HTMLImageElement>('.msg-pending img')!.alt).toBe('a.png');
     expect(el.querySelector('.msg-pending .attachment-chip')!.textContent).toBe('b.txt 2.0 KB');
   });
+
+  it("a tool result's images are thumbnails in its row that open in the viewer (SPEC 0.180)", async () => {
+    const store = new ArtifactStore(fakeSource([meta('shot', 'image', 'image.png')]) as never);
+    const viewArtifact = vi.fn();
+    const { el } = chatWith(
+      [
+        ev('event.tool.call', (e) => (e.payload = { call_id: 'toolu_02', tool: 'mcp__curator__screenshot', args_preview: '{}' })),
+        ev('event.tool.result.images', (e) => (e.payload.artifact_ids = ['shot'])),
+      ],
+      store,
+      { viewArtifact },
+    );
+    await act(async () => el.querySelector<HTMLButtonElement>('.tool-group-head')!.click());
+    await flush();
+    const thumb = el.querySelector<HTMLButtonElement>('.tool-row .tool-images .attachment-image')!;
+    expect(thumb.querySelector('img')!.getAttribute('src')).toBe('/artifacts/shot?exp=1&sig=s1');
+    await act(async () => thumb.click());
+    expect(viewArtifact).toHaveBeenCalledWith({ id: 'shot', name: 'image.png', kind: 'image' });
+  });
 });
 
 describe('the viewer over the chat (SPEC §12)', () => {

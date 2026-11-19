@@ -5,6 +5,7 @@
 
 import { Api, ApiError, type NewRoom, type NewSessionOptions, type ProviderFields, type SessionPatch } from './api';
 import type {
+  ClarifyAction,
   ClarifyAnswer,
   ListMode,
   LookName,
@@ -267,6 +268,11 @@ export class AppState {
       c.onStored = (text) => {
         if (/^\/model\s+\S/.test(text.trim())) void this.refreshSession(id);
       };
+      // So does a switch the runtime refused, after which the hub has the model it kept
+      // (SPEC 0.179).
+      c.onEvent = (ev) => {
+        if (ev.type === 'system' && ev.payload.code === 'model_not_switched') void this.refreshSession(id);
+      };
     }
     this.chats.set(id, c);
     for (const [old, o] of this.chats) {
@@ -445,6 +451,7 @@ export class AppState {
         background_tasks: s.background_tasks,
         output_per_s: s.output_per_s,
         foreground_calls: s.foreground_calls,
+        activity: s.activity,
         favorite_at: s.favorite_at,
         paused_at: s.paused_at,
       });
@@ -475,8 +482,8 @@ export class AppState {
     return this.closing(r, this.api.approve(r.session_id, r.request_id, optionId, message));
   }
 
-  answerRequest(r: OpenRequest, answers: Record<string, ClarifyAnswer>): Promise<void> {
-    return this.closing(r, this.api.clarify(r.session_id, r.request_id, answers));
+  answerRequest(r: OpenRequest, answers: Record<string, ClarifyAnswer>, action?: ClarifyAction): Promise<void> {
+    return this.closing(r, this.api.clarify(r.session_id, r.request_id, answers, action));
   }
 
   /** An answer taken, or the request closed elsewhere first (`409 request_closed`): it is

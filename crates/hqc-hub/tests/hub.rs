@@ -703,6 +703,200 @@ async fn clarify_answer_and_cancel_after_stop() {
     hub.finish().await;
 }
 
+/// SPEC 0.180: `auto_approve` leaves a request only a person may answer (`human_only`) open
+/// for the owner, and answers an ordinary one as before.
+#[tokio::test]
+async fn auto_approve_leaves_a_request_only_a_person_may_answer() {
+    let hub = TestHub::start().await;
+    let (_, me) = hub.get("/api/me").await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("human only").await;
+    ack_start(&mut w, &sid).await;
+    let (s, r) = hub
+        .patch(
+            &format!("/api/sessions/{sid}"),
+            json!({"auto_approve": true}),
+        )
+        .await;
+    assert_eq!(s, 200, "{r}");
+
+    let mut only = approval_payload("req-h", "2099-01-01T00:00:00Z");
+    only["human_only"] = json!(true);
+    w.event(agent_event(&sid, "approval.request", only)).await;
+    w.expect_silence(Duration::from_millis(300)).await;
+    hub.wait_session(&sid, "waiting", |v| v["state"] == "waiting")
+        .await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/req-h"),
+            json!({"option_id": "allow"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{r}");
+    let f = w.expect("approval.response").await;
+    assert_eq!(f["payload"]["request_id"], "req-h");
+    w.reply(&f["id"], "ack", json!({})).await;
+    let events = hub.events(&sid).await;
+    assert_eq!(events.last().unwrap()["payload"]["by"], me["id"]);
+
+    // An ordinary request: answered by the hub before the event's `ack`.
+    w.send(
+        "event",
+        json!({"event": agent_event(
+            &sid,
+            "approval.request",
+            approval_payload("req-a", "2099-01-01T00:00:00Z"),
+        )}),
+    )
+    .await;
+    let mut frames = [w.recv().await, w.recv().await];
+    frames.sort_by_key(|f| f["type"].as_str().unwrap_or("").to_string());
+    assert_eq!(frames[0]["type"], "ack");
+    assert_eq!(frames[1]["type"], "approval.response");
+    assert_eq!(frames[1]["payload"]["option_id"], "allow");
+    w.reply(&frames[1]["id"], "ack", json!({})).await;
+    let events = hub.events(&sid).await;
+    assert_eq!(events.last().unwrap()["payload"]["by"], "auto");
+    hub.finish().await;
+}
+
+/// SPEC 0.180: an MCP server's request takes `action`: `decline` with no answers, `accept`
+/// with none (a link's Done) or with answers; the frame and the event carry it. The agent's own
+/// question takes none.
+#[tokio::test]
+async fn an_mcp_servers_request_is_declined_or_done() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("mcp server asks").await;
+    ack_start(&mut w, &sid).await;
+    let path = |r: &str| format!("/api/sessions/{sid}/requests/{r}");
+
+    let q = json!({"request_id": "c-1", "questions": [{"id": "q1", "text": "Which?", "options": ["Hub", "Worker"]}]});
+    w.event(agent_event(&sid, "clarify.request", q)).await;
+    for bad in [
+        json!({"answers": {"q1": "Hub"}, "action": "accept"}),
+        json!({"action": "decline"}),
+    ] {
+        let (s, r) = hub.post(&path("c-1"), bad).await;
+        assert_eq!(s, 400, "{r}");
+    }
+
+    let link = |r: &str| {
+        json!({"request_id": r, "questions": [], "server": "github",
+               "message": "Sign in to GitHub", "url": "https://github.com/login/device"})
+    };
+    w.event(agent_event(&sid, "clarify.request", link("c-2")))
+        .await;
+    for bad in [
+        json!({"action": "decline", "answers": {"1": "x"}}),
+        json!({"action": "snooze"}),
+        json!({"answers": {}}),
+    ] {
+        let (s, r) = hub.post(&path("c-2"), bad).await;
+        assert_eq!(s, 400, "{r}");
+    }
+    let (s, r) = hub.post(&path("c-2"), json!({"action": "decline"})).await;
+    assert_eq!(s, 200, "{r}");
+    let f = w.expect("clarify.response").await;
+    assert_eq!(
+        f["payload"],
+        json!({"session_id": sid, "request_id": "c-2", "answers": {}, "action": "decline"})
+    );
+    w.reply(&f["id"], "ack", json!({})).await;
+    let events = hub.events(&sid).await;
+    let resp = events.last().unwrap();
+    assert_eq!(resp["type"], "clarify.response");
+    assert_eq!(
+        resp["payload"],
+        json!({"request_id": "c-2", "answers": {}, "action": "decline"})
+    );
+
+    w.event(agent_event(&sid, "clarify.request", link("c-3")))
+        .await;
+    let (s, r) = hub.post(&path("c-3"), json!({"action": "accept"})).await;
+    assert_eq!(s, 200, "{r}");
+    let f = w.expect("clarify.response").await;
+    assert_eq!(
+        f["payload"],
+        json!({"session_id": sid, "request_id": "c-3", "answers": {}, "action": "accept"})
+    );
+    w.reply(&f["id"], "ack", json!({})).await;
+    hub.finish().await;
+}
+
+/// SPEC 0.180: an MCP server runs with the worker owner's credentials, so only the worker owner
+/// answers its request: anyone else with `write` gets `403` and the request stays open; the
+/// owner's answer goes through. (Over HTTP another user does not see the session at all, `404`:
+/// there are no grants yet, SPEC §11.)
+#[tokio::test]
+async fn only_the_worker_owner_answers_an_mcp_servers_request() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("mcp server asks").await;
+    ack_start(&mut w, &sid).await;
+    let q = json!({"request_id": "c-1", "server": "deploy", "message": "Deploy the release?",
+        "questions": [{"id": "1", "text": "To production?", "options": ["Yes", "No"]}]});
+    w.event(agent_event(&sid, "clarify.request", q)).await;
+
+    let other = hqc_hub::db::ensure_user(&hub.app.db, "other@example.com")
+        .await
+        .unwrap();
+    let user = hqc_hub::auth::CurrentUser {
+        id: other.id,
+        email: other.email,
+        display_name: other.display_name,
+        timezone: other.timezone,
+        personal_project_id: other.personal_project_id.unwrap(),
+        theme: Default::default(),
+        look: Default::default(),
+        project_sort: Default::default(),
+    };
+    let s = hqc_hub::db::session(&hub.app.db, sid.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let body = hqc_hub::requests::AnswerBody {
+        option_id: None,
+        answers: Some(
+            [(
+                "1".to_string(),
+                hqc_proto::event::ClarifyAnswer::One("Yes".into()),
+            )]
+            .into(),
+        ),
+        message: None,
+        action: Some(hqc_proto::event::ClarifyAction::Accept),
+    };
+    let r = hqc_hub::requests::answer(&hub.app, &user, &s, "c-1", body).await;
+    assert!(
+        matches!(r, Err(hqc_hub::error::ApiError::Forbidden(_))),
+        "{r:?}"
+    );
+    w.expect_silence(Duration::from_millis(300)).await;
+    assert!(hqc_hub::db::find_open_request(&hub.app.db, s.id, "c-1")
+        .await
+        .unwrap()
+        .is_some());
+
+    let (st, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/c-1"),
+            json!({"answers": {"1": "Yes"}, "action": "accept"}),
+        )
+        .await;
+    assert_eq!(st, 200, "{r}");
+    let f = w.expect("clarify.response").await;
+    assert_eq!(
+        f["payload"],
+        json!({"session_id": sid, "request_id": "c-1", "answers": {"1": "Yes"}, "action": "accept"})
+    );
+    w.reply(&f["id"], "ack", json!({})).await;
+    hub.finish().await;
+}
+
 /// A worker's cancel (the Claude Code adapter's for a request still open when the turn ends)
 /// closes its request; sent again, it gets its `seq`. One for a request the hub closed already
 /// (a stopped process's, which the hub cancels) is not stored a second time.
@@ -1383,6 +1577,87 @@ async fn a_reset_delta_drops_the_text_so_far() {
     let events = hub.events(&sid).await;
     let stored = events.iter().find(|e| e["event_id"] == input).unwrap();
     assert!(stored["payload"].get("during_text").is_none(), "{stored}");
+    hub.finish().await;
+}
+
+/// SPEC §6 (0.179): a `retraction` ends the text being written, as a stored answer does: the
+/// runtime took back the answer it was streaming, and no `agent.message` comes for it.
+#[tokio::test]
+async fn a_retraction_ends_the_answer_text() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("retracted").await;
+    ack_start(&mut w, &sid).await;
+    w.event(agent_event(
+        &sid,
+        "agent.delta",
+        json!({"text": "I can't help"}),
+    ))
+    .await;
+    w.event(agent_event(
+        &sid,
+        "retraction",
+        json!({"event_ids": [Uuid::now_v7()]}),
+    ))
+    .await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "after"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    assert!(r["event"]["payload"].get("during_text").is_none(), "{r}");
+    hub.finish().await;
+}
+
+/// SPEC §4 (0.179): a `retraction` hides only the agent's own output in its session: of the ids
+/// it names, the hub keeps that of its session's `agent.message` and drops those of a person's
+/// message, of another session's answer and of no event.
+#[tokio::test]
+async fn a_retraction_hides_only_the_agents_output() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let other = hub.create_session("other").await;
+    ack_start(&mut w, &other).await;
+    let theirs = agent_event(
+        &other,
+        "agent.message",
+        json!({"text": "theirs", "final": true}),
+    );
+    w.event(theirs.clone()).await;
+    let sid = hub.create_session("retracted").await;
+    ack_start(&mut w, &sid).await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "mine"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let input = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    w.reply(&si["id"], "ack", json!({"event_id": input})).await;
+    let refused = agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "refused", "final": true}),
+    );
+    w.event(refused.clone()).await;
+    w.event(agent_event(
+        &sid,
+        "retraction",
+        json!({"event_ids": [input, theirs["event_id"], refused["event_id"], Uuid::now_v7()]}),
+    ))
+    .await;
+    let events = hub.events(&sid).await;
+    let retraction = events.iter().find(|e| e["type"] == "retraction").unwrap();
+    assert_eq!(
+        retraction["payload"],
+        json!({"event_ids": [refused["event_id"]]})
+    );
     hub.finish().await;
 }
 
@@ -2929,6 +3204,258 @@ async fn a_task_is_stopped_alone() {
         .await;
     let (s, r) = hub.post(&path(&sid, task), json!({})).await;
     assert_eq!((s, r["sent"].as_bool()), (200, Some(false)), "{r}");
+    hub.finish().await;
+}
+
+/// SPEC §4, §8.1: `system model_not_switched` from the worker names the model the runtime
+/// kept, and the session's model becomes it; a name hqc would not take from the user stays a
+/// line. A `retraction` is stored like any event, without the ids of no event of its session.
+#[tokio::test]
+async fn a_refused_model_switch_corrects_the_session() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Model").await;
+    ack_start(&mut w, &sid).await;
+    let (s, v) = hub
+        .patch(
+            &format!("/api/sessions/{sid}"),
+            json!({"model": "claude-nope"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    w.expect("session.model").await;
+    assert_eq!(hub.session(&sid).await["agent"]["model"], "claude-nope");
+    let line = |model: &str| {
+        let mut e = agent_event(
+            &sid,
+            "system",
+            json!({"code": "model_not_switched", "model": model,
+                "text": "Model not switched: not available. The agent stays on claude-opus-5-5"}),
+        );
+        e["author"] = json!({"kind": "system"});
+        e
+    };
+    w.event(line("claude opus")).await;
+    assert_eq!(hub.session(&sid).await["agent"]["model"], "claude-nope");
+    w.event(line("claude-opus-5-5")).await;
+    assert_eq!(hub.session(&sid).await["agent"]["model"], "claude-opus-5-5");
+    let gone = Uuid::now_v7();
+    w.event(agent_event(
+        &sid,
+        "retraction",
+        json!({"event_ids": [gone]}),
+    ))
+    .await;
+    let (_, page) = hub.get(&format!("/api/sessions/{sid}/events")).await;
+    let last = page["events"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["type"], "retraction", "{page}");
+    assert_eq!(last["payload"]["event_ids"], json!([]), "{gone}");
+    hub.finish().await;
+}
+
+/// SPEC §5.4, §6: `session.state.activity` is kept on the session, in the session object and
+/// its summary; a report without it, the end of the turn, the agent's stop, the worker's new
+/// `hello` and its disconnect drop it.
+#[tokio::test]
+async fn the_activity_lasts_until_the_turn_ends() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Activity").await;
+    ack_start(&mut w, &sid).await;
+    assert!(hub.session(&sid).await.get("activity").is_none());
+    let mut c = FakeClient::connect(&hub).await;
+    c.send(json!({"type": "subscribe_summary"})).await;
+    c.until("summary").await;
+
+    let retrying = json!({"kind": "retrying", "attempt": 3, "max_retries": 10,
+        "retry_delay_ms": 8000, "error_status": 529});
+    let thinking = json!({"kind": "thinking", "estimated_tokens": 1200});
+    let with = |a: &Value| json!({"session_id": sid, "process_state": "running", "locked_by": "hqc", "activity": a});
+    w.send("session.state", with(&retrying)).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["activity"], retrying);
+    loop {
+        let u = c.until("session.summary").await;
+        if u["session"]["activity"] == retrying {
+            break;
+        }
+    }
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "running", "locked_by": "hqc"}),
+    )
+    .await;
+    w.expect("ack").await;
+    assert!(hub.session(&sid).await.get("activity").is_none());
+
+    // The end of the turn.
+    w.send("session.state", with(&json!({"kind": "compacting"})))
+        .await;
+    w.expect("ack").await;
+    assert_eq!(
+        hub.session(&sid).await["activity"],
+        json!({"kind": "compacting"})
+    );
+    w.event(agent_event(&sid, "status", json!({"state": "idle"})))
+        .await;
+    assert!(hub.session(&sid).await.get("activity").is_none());
+
+    // The agent's stop.
+    w.send("session.state", with(&thinking)).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["activity"], thinking);
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "stopped", "locked_by": "none",
+            "activity": thinking}),
+    )
+    .await;
+    w.expect("ack").await;
+    assert!(hub.session(&sid).await.get("activity").is_none());
+
+    // A new `hello` of the worker: it reports the activity again.
+    w.send("session.state", with(&thinking)).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["activity"], thinking);
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    assert!(hub.session(&sid).await.get("activity").is_none());
+
+    // Its disconnect.
+    w.send("session.state", with(&thinking)).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["activity"], thinking);
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline, no activity", |v| {
+        v["state"] == "worker_offline" && v.get("activity").is_none()
+    })
+    .await;
+    hub.finish().await;
+}
+
+/// SPEC §17.3: a long call that prints nothing keeps its turn past the watchdog's limit while
+/// the worker sends the session's `tokens.rate` again, unchanged, on each beat of the call
+/// (§8.1).
+#[tokio::test]
+async fn a_silent_call_with_heartbeats_keeps_its_turn() {
+    let limit = Duration::from_millis(2500);
+    let hub = TestHub::start_timing(hqc_hub::config::Timing {
+        expiry_interval: Duration::from_millis(50),
+        turn_watchdog: Some(limit),
+        ..test_timing()
+    })
+    .await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("silent call").await;
+    ack_start(&mut w, &sid).await;
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": "go"}))
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let si = w.expect("session.input").await;
+    w.reply(
+        &si["id"],
+        "ack",
+        json!({"event_id": r["event"]["event_id"]}),
+    )
+    .await;
+    hub.wait_session(&sid, "running", |v| v["state"] == "running")
+        .await;
+    for _ in 0..5 {
+        tokio::time::sleep(limit / 2).await;
+        w.event(agent_event(&sid, "tokens.rate", json!({"output_per_s": 0})))
+            .await;
+    }
+    assert_eq!(hub.session(&sid).await["state"], "running");
+    assert!(hub
+        .events(&sid)
+        .await
+        .iter()
+        .all(|e| e["payload"]["code"] != "turn_lost"));
+    hub.finish().await;
+}
+
+/// SPEC §5.3, §6 (since 0.181): `GET .../subagents/{task_id}/history` asks the session's worker
+/// with `session.subagent_history` and answers with its `result` without `request_id`; `?after=`
+/// goes into the frame; a `task_id` that is not 1 to 64 bytes of `[A-Za-z0-9_-]`, or an `after`
+/// that is not a UUID, is refused and the worker not asked; the worker offline:
+/// `409 worker_offline`.
+#[tokio::test]
+async fn a_subagents_history_comes_from_the_worker() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Subagent history").await;
+    ack_start(&mut w, &sid).await;
+    let task = "a52af2b436ded4cea";
+    let url = format!("/api/sessions/{sid}/subagents/{task}/history");
+    let call = agent_event(
+        &sid,
+        "tool.call",
+        json!({"call_id": "toolu_02", "tool": "Bash", "args_preview": "{\"command\":\"cargo test\"}"}),
+    );
+    let answer = async {
+        let f = w.expect("session.subagent_history").await;
+        assert_eq!(
+            f["payload"],
+            json!({"request_id": f["id"], "session_id": sid, "task_id": task})
+        );
+        let result = json!({"request_id": f["id"], "events": [call], "truncated": true});
+        w.reply(&f["id"], "result", result).await;
+        w
+    };
+    let ((s, v), mut w) = tokio::join!(hub.get(&url), answer);
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v, json!({"events": [call], "truncated": true}));
+
+    // `?after=` goes to the worker, and its `continues` to the client.
+    let after = call["event_id"].as_str().unwrap();
+    let answer = async {
+        let f = w.expect("session.subagent_history").await;
+        assert_eq!(
+            f["payload"],
+            json!({"request_id": f["id"], "session_id": sid, "task_id": task, "after": after})
+        );
+        let result =
+            json!({"request_id": f["id"], "events": [], "truncated": false, "continues": true});
+        w.reply(&f["id"], "result", result).await;
+        w
+    };
+    let next = format!("{url}?after={after}");
+    let ((s, v), mut w) = tokio::join!(hub.get(&next), answer);
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        v,
+        json!({"events": [], "truncated": false, "continues": true})
+    );
+
+    let long = "a".repeat(65);
+    for bad in ["a.b", "a%2Fb", "a%20b", long.as_str()] {
+        let (s, v) = hub
+            .get(&format!("/api/sessions/{sid}/subagents/{bad}/history"))
+            .await;
+        assert_eq!(s, 400, "{bad:?}: {v}");
+    }
+    let (s, v) = hub.get(&format!("{url}?after=toolu_02")).await;
+    assert_eq!(s, 400, "{v}");
+    w.expect_silence(Duration::from_millis(200)).await;
+
+    w.close().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (s, v) = hub.get(&url).await;
+        if s == 409 {
+            assert_eq!(v["error"], "worker_offline");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "still online: {s} {v}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     hub.finish().await;
 }
 

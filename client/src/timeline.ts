@@ -63,6 +63,8 @@ export class Timeline {
   /** The first `system task_notification` by its `call_id`, and by its `task_id`. */
   private readonly endsByCall = new Map<string, EventOf<"system">>();
   private readonly endsByTask = new Map<string, EventOf<"system">>();
+  /** Event ids a `retraction` took back (SPEC 0.179): not shown, also when they load later. */
+  private readonly retracted = new Set<string>();
   private readonly requests = new Map<
     string,
     EventOf<"approval.request" | "clarify.request">
@@ -208,6 +210,11 @@ export class Timeline {
         f.cancelSeq = ev.seq;
         break;
       }
+      case "retraction":
+        for (const id of ev.payload.event_ids) this.retracted.add(id);
+        // The answer being written was taken back too: no message ends it (SPEC 0.179).
+        if (fresh) this.streaming = "";
+        break;
     }
   }
 
@@ -434,9 +441,12 @@ export class Timeline {
     this.changed();
   }
 
+  /** The stored events in `seq` order, without the retracted ones and the retractions. */
   events(): HqcEvent[] {
     if (!this.sorted)
-      this.sorted = [...this.bySeq.values()].sort((a, b) => a.seq! - b.seq!);
+      this.sorted = [...this.bySeq.values()]
+        .filter((e) => e.type !== "retraction" && !this.retracted.has(e.event_id))
+        .sort((a, b) => a.seq! - b.seq!);
     return this.sorted;
   }
 

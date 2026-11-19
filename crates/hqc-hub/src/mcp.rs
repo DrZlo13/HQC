@@ -16,11 +16,11 @@
 //!   nothing, a repeat writes the same title again.
 //! - A deferred tool (`hqc_ask`) answers [`Answer::Later`]: the hub acks the call frame and
 //!   sends `mcp.result` on its own later.
-//! - A tool that waits for the worker (`hqc_spawn` with a worktree, T47; `hqc_move`) answers
-//!   [`Answer::Wait`]: the connection goes on reading frames, and the result goes under the
-//!   call's frame id once the wait is over, or the call is deferred then (an `hqc_move` that
-//!   asks the owner): `ack {}` and `mcp.result` later; if the connection closes first, nothing
-//!   is sent and the worker sends the call again after its next `hello`.
+//! - A tool that waits for the worker (`hqc_spawn` with a worktree, T47; `hqc_move`; `hqc_read`
+//!   of a subagent) answers [`Answer::Wait`]: the connection goes on reading frames, and the
+//!   result goes under the call's frame id once the wait is over, or the call is deferred then
+//!   (an `hqc_move` that asks the owner): `ack {}` and `mcp.result` later; if the connection
+//!   closes first, nothing is sent and the worker sends the call again after its next `hello`.
 //!
 //! [`REGISTRY`] is the hub's half of [`hqc_proto::mcp::TOOLS`]: a tool lands in both at once.
 
@@ -28,7 +28,10 @@ use std::collections::HashMap;
 
 use futures_util::future::BoxFuture;
 use hqc_proto::{
-    frame::{McpCall, McpError, McpResult},
+    event::{Event, EventKind},
+    frame::{
+        HubFrame, McpCall, McpError, McpResult, ResultBody, SubagentHistory, SubagentHistoryResult,
+    },
     mcp::{error_code, AttachCall, MAX_ARGS},
 };
 use serde::{de::DeserializeOwned, Deserialize};
@@ -39,6 +42,7 @@ use crate::{
     app::AppState,
     auth::hash_secret,
     db::{self, SessionRow},
+    error::ApiError,
 };
 
 type ToolResult = Result<Value, McpError>;
@@ -105,7 +109,7 @@ pub const REGISTRY: &[HubTool] = &[
     },
     HubTool {
         name: hqc_proto::mcp::READ,
-        run: |app, caller, c| Box::pin(now(read(app, caller, c.args.clone()))),
+        run: |app, caller, c| Box::pin(read(app, caller, c.args.clone())),
     },
     HubTool {
         name: hqc_proto::mcp::SPAWN,
@@ -438,13 +442,50 @@ async fn search_history(app: &AppState, caller: &SessionRow, v: Value) -> ToolRe
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReadArgs {
-    session: String,
+    session: Option<String>,
+    subagent: Option<String>,
     before_seq: Option<i64>,
     after_seq: Option<i64>,
+    before_event: Option<Uuid>,
+    after_event: Option<Uuid>,
+    #[serde(default)]
+    thinking: bool,
+}
+
+impl ReadArgs {
+    /// The combinations of arguments a read takes: a session by `seq`, a subagent by event.
+    fn check(&self) -> Result<(), McpError> {
+        let bad = |m: &str| Err(err(error_code::INVALID_ARGS, m));
+        if self.before_seq.is_some() && self.after_seq.is_some() {
+            return bad("before_seq and after_seq cannot be given together");
+        }
+        let Some(id) = &self.subagent else {
+            if self.session.is_none() {
+                return bad("give `session`, or `subagent`");
+            }
+            if self.before_event.is_some() || self.after_event.is_some() || self.thinking {
+                return bad("before_event, after_event and thinking go with `subagent`");
+            }
+            return Ok(());
+        };
+        if self.before_seq.is_some() || self.after_seq.is_some() {
+            return bad("a subagent is paged with before_event and after_event, not by seq");
+        }
+        if self.before_event.is_some() && self.after_event.is_some() {
+            return bad("before_event and after_event cannot be given together");
+        }
+        if !hqc_proto::frame::valid_history_task_id(id) {
+            return bad(&format!(
+                "subagent must be 1 to {} bytes of [A-Za-z0-9_-]",
+                hqc_proto::frame::MAX_HISTORY_TASK_ID
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Most events of one `hqc_read` answer.
-const READ_EVENTS: i64 = 100;
+const READ_EVENTS: usize = 100;
 
 /// How many of the events whose serialized sizes `sizes` lists, nearest first, fit
 /// [`hqc_proto::mcp::MAX_ARGS`] bytes together; at least one if there is any.
@@ -461,25 +502,167 @@ fn events_within_budget(sizes: impl Iterator<Item = usize>) -> usize {
     keep
 }
 
+/// `hqc_read(session?, subagent?, before_seq?, after_seq?, before_event?, after_event?,
+/// thinking?)` (SPEC §7): a session of the calling session's owner, or one of its subagents.
+async fn read(app: &AppState, caller: &SessionRow, v: Value) -> Result<Answer, McpError> {
+    let a: ReadArgs = args(v)?;
+    a.check()?;
+    let Some(subagent) = a.subagent.clone() else {
+        return read_session(app, caller, a).await.map(Answer::Now);
+    };
+    // The caller's own subagents without `session`, by the same rights as any session.
+    let own = caller.id.to_string();
+    let (s, address) =
+        crate::peers::readable(app, caller, a.session.as_deref().unwrap_or(&own)).await?;
+    let Some(worker) = s.worker_id else {
+        return Err(err(
+            error_code::UNAVAILABLE,
+            format!("{address} has no worker: its subagents cannot be read"),
+        ));
+    };
+    // An idle-stopped session stays in the worker's list, with no process to read from.
+    if s.process_state == "stopped" {
+        return Err(err(
+            error_code::UNAVAILABLE,
+            format!(
+                "{address} is not running now; a subagent is read from its worker while the \
+                 session runs"
+            ),
+        ));
+    }
+    // Off the connection's loop: the worker may answer on the connection the call came by, and
+    // a slow one would hold it for up to 10 s.
+    let app = app.clone();
+    Ok(Answer::Wait(Box::pin(async move {
+        let asked = crate::api::ask_worker(&app, worker, |request_id| {
+            HubFrame::SessionSubagentHistory(SubagentHistory {
+                request_id,
+                session_id: s.id,
+                task_id: subagent.clone(),
+                after: a.after_event,
+                before: a.before_event,
+            })
+        })
+        .await;
+        let w = match asked {
+            Ok(ResultBody::SubagentHistory(w)) => w,
+            Ok(other) => return Err(internal(format!("subagent_history answered {other:?}"))),
+            Err(ApiError::Invalid(_, m)) => {
+                // The worker's words are for the hub (`unknown_session`), not for the agent.
+                tracing::info!(%worker, session_id = %s.id, "subagent_history refused: {m}");
+                return Err(err(
+                    error_code::UNAVAILABLE,
+                    format!(
+                        "{address} is not running now; a subagent is read from its worker \
+                         while the session runs"
+                    ),
+                ));
+            }
+            Err(ApiError::Conflict(_, m) | ApiError::Limited(_, m)) => {
+                return Err(err(error_code::UNAVAILABLE, m))
+            }
+            Err(ApiError::WorkerTimeout) => {
+                return Err(err(
+                    error_code::UNAVAILABLE,
+                    format!("the worker of {address} did not answer in time"),
+                ))
+            }
+            Err(e) => return Err(internal(e)),
+        };
+        let page = subagent_page(&w, a.before_event.is_some(), a.after_event, a.thinking);
+        let mut out = json!({ "address": address, "subagent": subagent });
+        out.as_object_mut().expect("an object").extend(page);
+        Ok(Some(out))
+    })))
+}
+
+/// The page of a subagent's events `w` (the worker's answer for one request) that goes to the
+/// agent: `{events, earlier?, later?, gap?}`. `agent.thinking` is left out unless `thinking`, at
+/// no cost to the page. The page walks a run of `w` from its newest end back (a read with no
+/// cursor, `before_event`, or `after_event` the worker did not find) or from its oldest end on
+/// (`after_event` found: `w.continues`), up to [`READ_EVENTS`] events and
+/// [`hqc_proto::mcp::MAX_ARGS`] bytes, one event always staying. `earlier` and `later` are the
+/// events to pass as `before_event` and `after_event` for the page before and after it; `gap`:
+/// `after_event` was not found, the page is the newest events instead. `later`, on every page
+/// but a `before_event` one (`before_given`, whose newer events the agent has read already), is
+/// the newest event of the page, or `after_event` itself when `w` has none after it, so the
+/// agent can keep polling a subagent that works.
+fn subagent_page(
+    w: &SubagentHistoryResult,
+    before_given: bool,
+    after_given: Option<Uuid>,
+    thinking: bool,
+) -> serde_json::Map<String, Value> {
+    let shown = |e: &Event| thinking || !matches!(e.kind, EventKind::AgentThinking { .. });
+    let sizes: Vec<usize> = w
+        .events
+        .iter()
+        .map(|e| {
+            if shown(e) {
+                serde_json::to_string(e).map_or(usize::MAX, |s| s.len())
+            } else {
+                0
+            }
+        })
+        .collect();
+    let forward = w.continues;
+    let (mut count, mut bytes) = (0usize, 0usize);
+    // Whether the event at `i` still fits; one that does not ends the walk.
+    let mut takes = |i: usize| {
+        if !shown(&w.events[i]) {
+            return true;
+        }
+        if count > 0
+            && (count == READ_EVENTS || bytes.saturating_add(sizes[i]) > hqc_proto::mcp::MAX_ARGS)
+        {
+            return false;
+        }
+        count += 1;
+        bytes += sizes[i];
+        true
+    };
+    let len = w.events.len();
+    let (lo, hi) = if forward {
+        let n = (0..len).take_while(|&i| takes(i)).count();
+        (0, n)
+    } else {
+        let n = (0..len).rev().take_while(|&i| takes(i)).count();
+        (len - n, len)
+    };
+    let mut out = serde_json::Map::new();
+    let events: Vec<Value> = w.events[lo..hi]
+        .iter()
+        .filter(|e| shown(e))
+        .map(|e| json!(e))
+        .collect();
+    out.insert("events".into(), Value::Array(events));
+    if len > 0 && (lo > 0 || w.truncated || forward) {
+        out.insert("earlier".into(), json!(w.events[lo].event_id));
+    }
+    if !before_given {
+        let newest = (hi > 0).then(|| w.events[hi - 1].event_id);
+        if let Some(id) = newest.or(after_given.filter(|_| forward)) {
+            out.insert("later".into(), json!(id));
+        }
+    }
+    if after_given.is_some() && !forward {
+        out.insert("gap".into(), json!(true));
+    }
+    out
+}
+
 /// `hqc_read(session, before_seq?, after_seq?)` (SPEC §7): the events of one session of the
 /// calling session's owner, as `GET /api/sessions/{id}/events` returns them, in pages of at
 /// most [`READ_EVENTS`] events and [`hqc_proto::mcp::MAX_ARGS`] bytes: `{address, title,
 /// events (oldest first), last_seq, earlier?, later?}`. No side effects.
-async fn read(app: &AppState, caller: &SessionRow, v: Value) -> ToolResult {
-    let a: ReadArgs = args(v)?;
-    if a.before_seq.is_some() && a.after_seq.is_some() {
-        return Err(err(
-            error_code::INVALID_ARGS,
-            "before_seq and after_seq cannot be given together",
-        ));
-    }
-    let (s, address) = crate::peers::readable(app, caller, &a.session).await?;
+async fn read_session(app: &AppState, caller: &SessionRow, a: ReadArgs) -> ToolResult {
+    let session = a.session.as_deref().expect("checked");
+    let (s, address) = crate::peers::readable(app, caller, session).await?;
     let forward = a.after_seq.is_some();
+    let limit = READ_EVENTS as i64;
     let rows = match a.after_seq {
-        Some(n) => db::events_after(&app.db, s.id, n, READ_EVENTS).await,
-        None => {
-            db::events_before(&app.db, s.id, a.before_seq.unwrap_or(i64::MAX), READ_EVENTS).await
-        }
+        Some(n) => db::events_after(&app.db, s.id, n, limit).await,
+        None => db::events_before(&app.db, s.id, a.before_seq.unwrap_or(i64::MAX), limit).await,
     }
     .map_err(internal)?;
     let mut events = db::events_for_clients(&app.db, &rows)

@@ -11,7 +11,8 @@
 //!   ([`Core::live_text`]);
 //! - `assistant` text → `agent.message`, held until the next element: another assistant
 //!   block or a tool result makes it `final: false`, `result` makes it `final: true`; an
-//!   input written during a turn the CLI started by itself leaves it held;
+//!   input written during a turn the CLI started by itself leaves it held; a text that is the
+//!   CLI's [`NO_CONTENT`] gives none;
 //! - `assistant` `tool_use` → `tool.call` ([`args_preview`]: an `Agent` call's `prompt`
 //!   last); non-empty `thinking` → `agent.thinking`;
 //! - `assistant` text with `model` `<synthetic>` (the CLI's own reply: an API error, "Credit
@@ -20,16 +21,31 @@
 //! - `assistant` text with `aborted: true` (an interrupt cut it off) → `agent.message` with
 //!   `interrupted: true`, held and flushed as any;
 //! - `system` `task_notification` (a background task ended) → `system task_notification`
-//!   with its `status`, its `task_id` and the task's `tool_use_id` as `call_id`, except for a
+//!   with its `status`, its `task_id`, its `usage` and the task's `tool_use_id` as
+//!   `call_id`, then its `output_file` as
+//!   [`AdapterEvent::TaskOutput`], except for a task with `skip_transcript: true`, a
 //!   task that a subagent started or whose `task_started` said it runs in the foreground,
 //!   until a `task_updated` moves it to the background; one without the subagent's report
 //!   (`handback`) while the latest `background_tasks_changed` still holds the subagent, or a
 //!   task of it, is no end: the latest one is handled when the subagent stops counting
 //!   (below); a task gives one line, a later notification of it none;
-//!   `system` `compact_boundary` → `system context_compacted`, held until the summary the CLI
+//!   `system` `compact_boundary` → `system context_compacted` with the `trigger`, `pre_tokens`
+//!   and `post_tokens` of its `compact_metadata`, held until the summary the CLI
 //!   writes after it, the main agent's `user` line with `isSynthetic: true`, which gives its
 //!   text; another main agent's `user`, `assistant`, `stream_event` or `result` line first, or
 //!   the process's end, gives it "Context compacted";
+//! - `system` `status` with `compact_result: failed` → `system compaction_failed` with its
+//!   `compact_error`;
+//! - [`AdapterEvent::Activity`] when it changes, a new estimate of the thinking at most once
+//!   per 2 s: `system` `api_retry` → retrying, `system` `status` `compacting` → compacting,
+//!   `system` `thinking_tokens` → thinking with its `estimated_tokens`; any other `system`
+//!   `status` that does not report the permission mode (`requesting`, `null` at a
+//!   compaction's end), a main agent's `stream_event` `message_start`, `content_block_start`
+//!   or `content_block_stop`, its `assistant` line and `result` → none ([`activity_of`]);
+//! - `tool_progress` with `heartbeat: true` (a long call of the main agent, every 30 s) →
+//!   [`AdapterEvent::Heartbeat`]; with `subagent_retry` → `retry` of the subagent's row of
+//!   [`AdapterEvent::LiveSubagents`] (`agent_id` is its `task_id`), until a `tool_progress` of
+//!   the same `parent_tool_use_id` without it, which says the retry resolved;
 //! - `system` `task_started` with `task_type: local_agent` (a subagent, in the background or
 //!   not, a subagent's own too) until `task_notification` or a `task_updated` status other
 //!   than `running` of the same `task_id`, a foreground one at the latest until the `result`,
@@ -55,6 +71,8 @@
 //! - `system` `background_tasks_changed` (`tasks`: the CLI's list of the session's running
 //!   background tasks, subagents and commands, its subagents' too) →
 //!   [`AdapterEvent::BackgroundTasks`] with the number of those not `ambient` when it changes;
+//!   a task with `ambient: true` there or in its `task_started` is none of the above (no
+//!   activity, the SDK says), nor a subagent as the `parent_task_id` of another task;
 //! - `system` `task_started` with `is_backgrounded: false`, `task_type` `local_bash` or
 //!   `local_agent`, a `tool_use_id`, no `skip_transcript: true`, no `owned_by_subagent:
 //!   true` and no `parent_task_id` (a Bash call or a subagent of the agent itself in the
@@ -63,8 +81,20 @@
 //!   `failed` or `killed`, or its `task_notification` → [`AdapterEvent::ForegroundCalls`]
 //!   with their `tool_use_id`s when they change (the rule of the VS Code tab's "Run in background", extension 2.1.319);
 //! - `rate_limit_event` → [`AdapterEvent::Limits`] with the 5-hour and 7-day windows of its
-//!   `rate_limit_info.unifiedWindows` (2.1.310: one before each turn's answer);
-//! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
+//!   `rate_limit_info.unifiedWindows` (2.1.310: one before each turn's answer), its `status`,
+//!   `rateLimitType` and `resetsAt`;
+//! - `system` `informational` of a level other than `info` and `system` `notification` →
+//!   `system runtime_notice` with the text; `model_fallback` and `model_consent_fallback` →
+//!   `system model_fallback` "<model> → <fallback>: <content>", the fallback the model of this
+//!   turn's `usage`; `model_refusal_no_fallback` → `system model_refusal`; an `assistant` with
+//!   `supersedes` and `model_refusal_fallback` (its `retracted_message_uuids`) → `retraction`
+//!   of the events of those records of this turn not retracted yet ([`Core::retract`]), the
+//!   latter then `system model_refusal_fallback`, its fallback the model of this turn's `usage`
+//!   unless its `scope` is `local`;
+//! - `user` `tool_result` → `tool.result`, its text the report of a subagent that completed
+//!   when the record's `tool_use_result` has one ([`agent_report`]); a text longer than the
+//!   preview and the result's images go with it to be uploaded ([`AdapterEvent::ToolResult`]);
+//!   `user` with `isReplay: true` → input accepted;
 //!   every user message written to stdin gets a fresh v4 `uuid`, which its echo and its
 //!   `command_lifecycle` lines name (2.1.312);
 //! - `result` → `usage` (one with no tokens and no `compact_boundary` in it gives none, or,
@@ -90,7 +120,9 @@
 //!   their descriptions and argument hints, else the names of `slash_commands`, without
 //!   `terminal_slash_commands` ([`Core::report_commands`]); the answer and
 //!   `commands_changed` report them too; one `init` while no turn of ours runs (a turn the CLI
-//!   starts by itself) → `status running` first;
+//!   starts by itself) → `status running` first; its MCP servers neither `connected` nor
+//!   `disabled` → `system mcp_not_connected`, its `plugin_errors` → `system plugin_errors`, each
+//!   when it differs from the one given last;
 //! - `conversation_reset` (`/clear`) → `system conversation_cleared`, and the cost baseline,
 //!   token sums with it, starts from 0 again; the next `system` `init` with another
 //!   `session_id` → [`AdapterEvent::RuntimeSessionId`] with it, the transcript the CLI writes
@@ -100,16 +132,25 @@
 //! - the result of the main agent's `ScheduleWakeup` call → [`AdapterEvent::Wakeup`] with its
 //!   `scheduledFor`, none for 0; a `command_lifecycle` `started` with `wakeup_source:
 //!   loop_wakeup` and that `scheduled_for` → [`AdapterEvent::Wakeup`] with none;
-//! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint` and the hqc
-//!   rules suggested for the call) / `clarify.request`, an immediate allow by a `session`
+//! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint`, the hqc
+//!   rules suggested for the call and the subagent whose `agent_id` it names) /
+//!   `clarify.request` (with that subagent too), an immediate allow by a `session`
 //!   rule or by the folder's hqc rules (T48), or an immediate deny plus `system
-//!   policy_denied` when a deny rule of `[permissions]` matches (checked first);
+//!   policy_denied` when a deny rule of `[permissions]` matches (checked first); a request
+//!   only a person may answer gets no allow by a rule and only `once` / `deny`;
+//! - `control_request` `elicitation` (an MCP server asks the person) → `clarify.request` with
+//!   `server`, or `cancel` plus `system elicitation_unsupported` for a form it cannot ask or
+//!   one too large;
+//! - `control_cancel_request` (the CLI withdrew its request) → `approval.cancel` /
+//!   `clarify.cancel` `withdrawn`;
 //! - `system` `permission_denied` (the CLI refused a call by its rules, no request) →
 //!   `system policy_denied`;
 //! - `permissionMode` of `system` `init` and `system` `status`, and the CLI's answer to our
 //!   `set_permission_mode` → [`AdapterEvent::PermissionMode`] when it changes (T38), and
 //!   on every success of our `set_permission_mode` (T39);
-//! - the CLI's answers to our `set_model`, `background_tasks` and `stop_task` are only logged;
+//! - an `error` answer to our latest `set_model` → `system model_not_switched` with the reason
+//!   and the model the CLI kept, and [`AdapterEvent::ModelKept`]; the other answers to our
+//!   `set_model`, and those to `background_tasks` and `stop_task`, are only logged;
 //! - the other `control_response` lines, the CLI's echo of ours, are skipped.
 //!
 //! U+0000 in any text taken from the CLI (binary tool output) becomes U+FFFD ([`text`],
@@ -125,15 +166,16 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail};
 use hqc_claude_jsonl::{model_usage_tokens, CostState, TokenSums};
 use hqc_proto::event::{
-    ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAnswer, ClarifyQuestion, Event,
-    EventKind, LiveKind, LiveSubagent, SessionState,
+    AnswerInput, ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
+    ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, LiveKind, LiveSubagent,
+    RequestSubagent, SessionState, TaskUsage, MODEL_NOT_SWITCHED,
 };
-use hqc_proto::frame::{PermissionMode, SessionInput, SlashCommand};
+use hqc_proto::frame::{Activity, PermissionMode, SessionInput, SlashCommand};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::rules::SessionRules;
-use crate::adapter::{new_event, AdapterEvent};
+use crate::adapter::{new_event, AdapterEvent, ResultFiles, ResultImage, FULL_RESULT_LIMIT};
 use crate::permissions::{FolderRules, Policy};
 
 /// `*_preview` limit (SPEC §4).
@@ -194,10 +236,44 @@ pub const COMMAND_TEXT_LIMIT: usize = 200;
 /// [`COMMAND_NAME_LIMIT`] characters: what the hub keeps (SPEC §5.4).
 pub const COMMANDS_LIMIT: usize = 500;
 pub const COMMAND_NAME_LIMIT: usize = 100;
+/// `system.code` of stream-json `system` `status` with `compact_result: failed` (SPEC §4, §8.1).
+pub const COMPACTION_FAILED: &str = "compaction_failed";
+/// `system.code` of a `system/informational` of a level other than `info` and of a
+/// `system/notification` (SPEC §4, §8.1): the CLI's or a hook's message, as text.
+pub const RUNTIME_NOTICE: &str = "runtime_notice";
+/// `system.code` of `system/model_fallback` and `system/model_consent_fallback`: the CLI went
+/// on with another model.
+pub const MODEL_FALLBACK: &str = "model_fallback";
+/// `system.code` of `system/model_refusal_fallback`: the model refused, another one answered.
+pub const MODEL_REFUSAL_FALLBACK: &str = "model_refusal_fallback";
+/// `system.code` of `system/model_refusal_no_fallback`: the model refused, none answered.
+pub const MODEL_REFUSAL: &str = "model_refusal";
+/// `system.code` of the MCP servers of `system/init` that are not connected.
+pub const MCP_NOT_CONNECTED: &str = "mcp_not_connected";
+/// `system.code` of the `plugin_errors` of `system/init`.
+pub const PLUGIN_ERRORS: &str = "plugin_errors";
+/// How often a new estimate of the thinking goes as [`AdapterEvent::Activity`], as the token
+/// rate (SPEC §8.1).
+const THINKING_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+/// `system.code` of an MCP server's request for input the card cannot ask (SPEC §4, §8.1).
+pub const ELICITATION_UNSUPPORTED: &str = "elicitation_unsupported";
+/// `approval.request.reason` and `display_name` limits, in bytes (SPEC §4).
+pub const REASON_LIMIT: usize = 1024;
+pub const DISPLAY_NAME_LIMIT: usize = 256;
+/// An MCP server's request (SPEC §8.1): its `server` and each question's text and header are
+/// cut to these many bytes; one whose `clarify.request` is over [`ELICITATION_LIMIT`] bytes of
+/// JSON is cancelled, as the hub drops a worker's connection on a frame over 1 MiB.
+pub const SERVER_NAME_LIMIT: usize = 256;
+pub const QUESTION_TEXT_LIMIT: usize = 1024;
+pub const ELICITATION_LIMIT: usize = 256 * 1024;
 /// `message.model` of a reply the CLI wrote itself instead of the model ("Credit balance is
 /// too low", API errors; 2.1.312, stream-json and transcript alike): `agent.message` with
 /// `runtime: true`.
 pub const SYNTHETIC_MODEL: &str = "<synthetic>";
+/// The CLI's text for a reply without text (2.1.312): a non-streaming reply whose blocks it
+/// all dropped, a message of its own with empty text. No `agent.message`, as the VS Code tab
+/// draws none (extension 2.1.319).
+pub const NO_CONTENT: &str = "(no content)";
 /// `request_id` prefix of our `initialize` control request.
 const INIT_REQUEST: &str = "hqc-init-";
 /// `message.stop_reason` of the CLI's own reply to a model refusal (2.1.312, stream-json and
@@ -242,7 +318,21 @@ enum Pending {
         /// The subagent that asked ([`agent_of`]); `None`: the main agent.
         agent_id: Option<String>,
     },
+    /// An MCP server's request (`elicitation`): its properties by position, as the questions.
+    Elicitation { fields: Fields },
 }
+
+/// The type of a property of an MCP server's form, by which its answer goes back.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Field {
+    Text,
+    Integer,
+    Number,
+    Boolean,
+}
+
+/// The properties of an MCP server's form by position: each one's name and type.
+type Fields = Vec<(String, Field)>;
 
 /// A user message written to stdin whose `--replay-user-messages` echo has not come yet.
 #[derive(Debug)]
@@ -279,6 +369,9 @@ struct LiveAgent {
     tool_uses: Option<u64>,
     /// `tool_use_id` of its latest `task_started` ([`Core::task_calls`]); none before that.
     call_id: Option<String>,
+    /// Its API retry of a `tool_progress` `subagent_retry`, with that line's
+    /// `parent_tool_use_id`, until the line of the same call that says it resolved.
+    retry: Option<(String, ApiRetry)>,
 }
 
 impl LiveAgent {
@@ -292,6 +385,7 @@ impl LiveAgent {
             total_tokens: None,
             tool_uses: None,
             call_id: call_id.map(str::to_owned),
+            retry: None,
         }
     }
 }
@@ -318,6 +412,7 @@ impl Pending {
             Pending::Approval { agent_id, .. } | Pending::Clarify { agent_id, .. } => {
                 agent_id.as_deref()
             }
+            Pending::Elicitation { .. } => None,
         }
     }
 }
@@ -329,9 +424,12 @@ pub struct Core {
     /// The last assistant text: event id, text, whether the CLI wrote it itself, whether an
     /// interrupt cut it off, and whether it is the CLI's reply to a model refusal.
     held: Option<(Uuid, String, bool, bool, bool)>,
-    /// Event id of the `context_compacted` of a `compact_boundary`, held for the summary that
-    /// follows it ([`Core::release_compaction`]).
-    compaction: Option<Uuid>,
+    /// Event id of the `context_compacted` of a `compact_boundary`, and its `compact_metadata`,
+    /// held for the summary that follows it ([`Core::release_compaction`]).
+    compaction: Option<(Uuid, Option<ContextCompacted>)>,
+    /// What the main agent waits on, as last reported ([`AdapterEvent::Activity`]), and when.
+    activity: Option<Activity>,
+    activity_at: Option<Instant>,
     /// `event_id` of the input of the turn: `in_reply_to` of agent messages once its echo has
     /// come ([`Core::reply_to`]).
     last_input: Option<Uuid>,
@@ -382,12 +480,22 @@ pub struct Core {
     /// A `background_tasks_changed` lowered [`Core::running_subagents`] below the count last
     /// reported: the next line of another kind reports it.
     recount: bool,
-    /// `tasks` of the latest `system` `background_tasks_changed`.
+    /// `tasks` of the latest `system` `background_tasks_changed`, without the `ambient` ones.
     background: Vec<Value>,
+    /// The `task_id`s the CLI marked `ambient: true`, in a `task_started` or the list: none is
+    /// a subagent, also as the `parent_task_id` of a task ([`Core::parent`]; 2.1.312 runs a
+    /// skill with `context: fork` as such a `local_agent`, and its commands name it).
+    ambient: HashSet<String>,
     in_turn: bool,
     /// A turn the CLI started by itself (`system/init` while no turn of ours runs, e.g. after
     /// a background task's `task_notification`), until its `result`: Stop interrupts it too.
     self_turn: bool,
+    /// The turn is being ended on purpose, by Stop ([`Core::interrupt`]) or by "No" that
+    /// interrupts, until the turn ends — its `result`, a carried input's `cancelled` that ends
+    /// it with none ([`Core::on_lifecycle`]), or the process's exit: the
+    /// `control_cancel_request` the CLI then writes for each request of the turn is the turn's
+    /// end, not a withdrawal ([`Core::on_cancel_request`]).
+    stopping: bool,
     turn: u64,
     pending: HashMap<String, Pending>,
     rules: SessionRules,
@@ -397,6 +505,9 @@ pub struct Core {
     /// hqc's allow rules of the session's workspace and its path (T48); `None` without one.
     folder: Option<(FolderRules, std::path::PathBuf)>,
     model: Option<String>,
+    /// `request_id` of the latest `set_model` sent ([`Core::set_model`]), and its model.
+    model_request: Option<String>,
+    model_requested: Option<String>,
     /// The session's cumulative cost and `modelUsage` token sums as of the last `usage` with a
     /// `cost_usd` (or the transcript's last `cost-state` when resumed, none after `/clear`):
     /// the baseline of the next turn's cost and of a compaction's tokens, one value so that
@@ -422,6 +533,14 @@ pub struct Core {
     /// The conversation is new (a new session, `/clear`) and its first model turn has not
     /// ended: the CLI writes its `ai-title` then.
     fresh: bool,
+    /// The lines last given for `system/init`'s MCP servers that are not connected and its
+    /// plugin errors ([`Core::on_init_problems`]): a later `init` with the same gives none.
+    init_problems: (Option<String>, Option<String>),
+    /// The main agent's records of this turn and how many content blocks each had: the
+    /// events a retraction names come from them ([`Core::retract`]).
+    turn_records: HashMap<Uuid, usize>,
+    /// Events retracted in this turn.
+    retracted: HashSet<Uuid>,
     /// The permission mode last reported by this process.
     permission_mode: Option<PermissionMode>,
     /// Message uuids read since the last [`Core::take_seen`].
@@ -493,6 +612,8 @@ impl Core {
             restricted,
             held: None,
             compaction: None,
+            activity: None,
+            activity_at: None,
             last_input: None,
             awaiting_echo: VecDeque::new(),
             wrote: false,
@@ -513,14 +634,18 @@ impl Core {
             live_changed: false,
             recount: false,
             background: Vec::new(),
+            ambient: HashSet::new(),
             in_turn: false,
             self_turn: false,
+            stopping: false,
             turn: 0,
             pending: HashMap::new(),
             rules: SessionRules::default(),
             policy: Arc::default(),
             folder: None,
             model: None,
+            model_request: None,
+            model_requested: None,
             cost_base: None,
             compacted: false,
             commands: None,
@@ -530,6 +655,9 @@ impl Core {
             cleared: false,
             clearing: false,
             fresh: false,
+            init_problems: (None, None),
+            turn_records: HashMap::new(),
+            retracted: HashSet::new(),
             permission_mode: None,
             seen: Vec::new(),
             quiet_tasks: HashMap::new(),
@@ -727,6 +855,7 @@ impl Core {
         if !self.in_turn && !self.self_turn {
             return None;
         }
+        self.stopping = true;
         let req = json!({
             "type": "control_request",
             "request_id": format!("hqc-interrupt-{}", Uuid::now_v7()),
@@ -756,10 +885,13 @@ impl Core {
     /// Switch the running process to `model`: `control_request {subtype: set_model}`. The CLI
     /// answers `success` with the model it resolved the name to, and its next model call uses
     /// it, the next one of a running turn too (checked on 2.1.312).
-    pub fn set_model(&self, model: &str) -> Action {
+    pub fn set_model(&mut self, model: &str) -> Action {
+        let id = format!("{MODEL_REQUEST}{}", Uuid::now_v7());
+        self.model_request = Some(id.clone());
+        self.model_requested = Some(model.to_owned());
         Action::Write(json!({
             "type": "control_request",
-            "request_id": format!("{MODEL_REQUEST}{}", Uuid::now_v7()),
+            "request_id": id,
             "request": {"subtype": "set_model", "model": model},
         }))
     }
@@ -820,22 +952,23 @@ impl Core {
                     CLARIFY_CANCEL_MESSAGE,
                 ))]);
             }
-            p @ Pending::Clarify { .. } => {
+            p @ (Pending::Clarify { .. } | Pending::Elicitation { .. }) => {
                 self.pending.insert(request_id.into(), p);
                 bail!("request {request_id} is a clarify request");
             }
         };
         // A background subagent's request outlives the main turn's `result` (`on_result`): its
         // "No" must not interrupt a turn that runs by then for something else.
-        let foreground = agent_id
-            .as_deref()
-            .is_none_or(|a| self.quiet_tasks.get(a) == Some(&false));
+        let foreground = ends_with_main_turn(&self.quiet_tasks, agent_id.as_deref());
         let resp = match option_id {
             "once" => allow(request_id, &input, None),
             // As the VS Code tab: "No" stops the turn, a text answer lets it go on.
             "deny" => match message {
                 Some(m) => deny_with(request_id, &format!("{DENY_WITH_TEXT}{m}"), false),
-                None => deny_with(request_id, DENY_MESSAGE, foreground),
+                None => {
+                    self.stopping |= foreground;
+                    deny_with(request_id, DENY_MESSAGE, foreground)
+                }
             },
             "always" if !self.restricted && !local_rules.is_empty() => {
                 allow(request_id, &input, Some(local_rules))
@@ -865,15 +998,22 @@ impl Core {
     }
 
     /// Empty `answers`: the hub cancelled the request; the tool call is denied (SPEC §5.3).
+    /// `action`: the person's choice on an MCP server's request.
     pub fn answer_clarify(
         &mut self,
         request_id: &str,
         answers: &BTreeMap<String, ClarifyAnswer>,
+        action: Option<ClarifyAction>,
     ) -> anyhow::Result<Vec<Action>> {
         let (input, questions) = match self.pending.remove(request_id) {
             Some(Pending::Clarify {
                 input, questions, ..
             }) => (input, questions),
+            Some(Pending::Elicitation { fields }) => {
+                return Ok(vec![
+                    self.answer_elicitation(request_id, &fields, answers, action)
+                ]);
+            }
             Some(p) => {
                 self.pending.insert(request_id.into(), p);
                 bail!("request {request_id} is an approval request");
@@ -910,6 +1050,32 @@ impl Core {
         Ok(vec![Action::Write(allow(request_id, &updated, None))])
     }
 
+    /// The answer to an MCP server's request: `accept` with the answers typed by its schema (a
+    /// Yes/No as a boolean, a number's text as a number when it reads as one, an empty answer
+    /// left out; no `content` without questions, as for a link), `decline`, or, for empty
+    /// `answers` without `action` (the hub cancelled the card), `cancel`.
+    fn answer_elicitation(
+        &self,
+        request_id: &str,
+        fields: &[(String, Field)],
+        answers: &BTreeMap<String, ClarifyAnswer>,
+        action: Option<ClarifyAction>,
+    ) -> Action {
+        let accept = match action {
+            Some(ClarifyAction::Accept) => true,
+            None => !answers.is_empty(),
+            Some(_) => false,
+        };
+        let response = match action {
+            Some(ClarifyAction::Decline) => json!({"action": "decline"}),
+            _ if accept && fields.is_empty() => json!({"action": "accept"}),
+            _ if accept => json!({"action": "accept", "content": content(fields, answers)}),
+            _ => json!({"action": "cancel"}),
+        };
+        tracing::info!(session_id = %self.session_id, action = %response["action"], "elicitation answered");
+        Action::Write(control_response(request_id, response))
+    }
+
     /// The process is gone: a held compaction and a held text are sent as they are, open
     /// requests are dropped.
     pub fn on_exit(&mut self) -> Vec<Action> {
@@ -917,6 +1083,7 @@ impl Core {
         self.awaiting_echo.clear();
         self.in_turn = false;
         self.self_turn = false;
+        self.stopping = false;
         let mut out: Vec<Action> = self.release_compaction(None).into_iter().collect();
         out.extend(self.flush(false));
         // A subagent end held while the subagent still counted ([`Core::held_ends`]) is its
@@ -949,6 +1116,7 @@ impl Core {
         if matches!(ty, "user" | "assistant") && !sub {
             if let Some(u) = record_uuid(&v) {
                 self.seen.push(u);
+                self.turn_records.insert(u, blocks(&v).len());
             }
         }
         // A Monitor's task is listed as a command ([`Core::bash_tasks`]), a subagent's too. A
@@ -999,18 +1167,24 @@ impl Core {
         }
         .into_iter()
         .collect();
+        // What the agent waited on ends with its next output, before that output's events.
+        if let Some(a) = activity_of(ty, sub, &v) {
+            out.extend(self.set_activity(a));
+        }
         out.extend(match ty {
+            "tool_progress" => self.on_tool_progress(&v),
             "stream_event" if !sub => self.on_stream_event(&v),
             "assistant" if !sub => self.on_assistant(&v),
             "user" if v["isReplay"] == true => self.on_echo(&v),
             "user" if !sub => self.on_user(&v),
             "command_lifecycle" => self.on_lifecycle(&v),
-            "rate_limit_event" => limits(&v["rate_limit_info"]["unifiedWindows"])
+            "rate_limit_event" => limits(&v["rate_limit_info"])
                 .map(|l| Action::Emit(AdapterEvent::Limits(l)))
                 .into_iter()
                 .collect(),
             "result" => self.on_result(&v),
             "control_request" => self.on_control_request(&v),
+            "control_cancel_request" => self.on_cancel_request(&v),
             "control_response" => self.on_control_response(&v),
             // `/clear` (2.1.312): the CLI goes on in a new conversation, whose transcript the
             // next `system/init` names, and counts `total_cost_usd` from 0 again.
@@ -1052,9 +1226,22 @@ impl Core {
                     self.cli_session = id.map(str::to_owned);
                     out.extend(self.on_mode(&v["permissionMode"], false));
                     out.extend(self.on_init(&v));
+                    out.extend(self.on_init_problems(&v));
                     out
                 }
-                Some("status") => self.on_mode(&v["permissionMode"], false),
+                Some("status") => {
+                    let mut out = self.on_mode(&v["permissionMode"], false);
+                    if v["compact_result"] == "failed" {
+                        // After a text held before it, as the other lines of a turn.
+                        out.extend(self.flush(false));
+                        let t = match v["compact_error"].as_str() {
+                            Some(e) => format!("Compaction failed: {}", text(e)),
+                            None => "Compaction failed".into(),
+                        };
+                        out.push(self.emit_system(COMPACTION_FAILED, t));
+                    }
+                    out
+                }
                 Some("permission_denied") => {
                     let mut out: Vec<Action> = self.flush(false).into_iter().collect();
                     out.extend(self.on_permission_denied(&v));
@@ -1072,7 +1259,11 @@ impl Core {
                     if let (Some(id), Some(call)) = (v["task_id"].as_str(), call) {
                         self.task_calls.insert(id.to_owned(), call.to_owned());
                     }
-                    let agent = v["task_type"] == "local_agent";
+                    // An `ambient` one is no activity (the SDK): no running subagent.
+                    if let Some(id) = v["task_id"].as_str().filter(|_| v["ambient"] == true) {
+                        self.ambient.insert(id.to_owned());
+                    }
+                    let agent = v["task_type"] == "local_agent" && v["ambient"] != true;
                     if let Some(id) = v["task_id"].as_str().filter(|_| agent) {
                         self.reported.remove(id);
                         self.live_started(id, v["description"].as_str().unwrap_or(""), call);
@@ -1136,9 +1327,10 @@ impl Core {
                 Some("compact_boundary") => {
                     self.compacted = true;
                     tracing::info!(session_id = %self.session_id, trigger = ?v["compact_metadata"]["trigger"].as_str(), "context compacted");
-                    self.compaction = Some(
+                    self.compaction = Some((
                         record_uuid(&v).map_or_else(Uuid::now_v7, |u| record_event_id(&u, 0)),
-                    );
+                        compact_metadata(&v["compact_metadata"]),
+                    ));
                     vec![]
                 }
                 // A person gave the session a title (`/rename`), at once. The CLI's own title
@@ -1159,6 +1351,38 @@ impl Core {
                     }
                     None => vec![],
                 },
+                Some("informational") => match v["content"].as_str() {
+                    Some(t) if v["level"] != "info" && !t.trim().is_empty() => {
+                        vec![self.emit_system(RUNTIME_NOTICE, text(t))]
+                    }
+                    _ => vec![],
+                },
+                Some("notification") => match v["text"].as_str() {
+                    Some(t) if !t.trim().is_empty() => vec![self.emit_system(RUNTIME_NOTICE, text(t))],
+                    _ => vec![],
+                },
+                Some("model_fallback" | "model_consent_fallback") => {
+                    // The model of this turn's `usage` from now on.
+                    if let Some(m) = v["fallback_model"].as_str() {
+                        self.model = Some(m.to_owned());
+                    }
+                    vec![self.emit_system(MODEL_FALLBACK, switch_line(&v))]
+                }
+                Some("model_refusal_fallback") => {
+                    // `scope` `session` (or none): the session's model is swapped; `local`:
+                    // only a subagent's or a side question's answer came from it (2.1.312).
+                    if v["scope"] != "local" {
+                        if let Some(m) = v["fallback_model"].as_str() {
+                            self.model = Some(m.to_owned());
+                        }
+                    }
+                    let mut out = self.retract(&v["retracted_message_uuids"]);
+                    out.push(self.emit_system(MODEL_REFUSAL_FALLBACK, switch_line(&v)));
+                    out
+                }
+                Some("model_refusal_no_fallback") => {
+                    vec![self.emit_system(MODEL_REFUSAL, refusal_line(&v))]
+                }
                 _ => vec![],
             },
             _ => vec![],
@@ -1194,9 +1418,10 @@ impl Core {
     }
 
     /// The CLI's answer to our `initialize` (its slash commands with their descriptions, its
-    /// models and account, or an error), `set_permission_mode`, `set_model`,
-    /// `background_tasks` or `stop_task` (the latter three logged); every other
-    /// `control_response`, the echo of one of ours, is skipped.
+    /// models and account, or an error), `set_permission_mode`, `set_model` (a refusal of the
+    /// latest one is a line and the model kept, another answer logged), `background_tasks` or
+    /// `stop_task` (both logged); every other `control_response`, the echo of one of ours, is
+    /// skipped.
     fn on_control_response(&mut self, v: &Value) -> Vec<Action> {
         let r = &v["response"];
         let id = r["request_id"].as_str().unwrap_or("");
@@ -1229,10 +1454,43 @@ impl Core {
         if id.starts_with(MODEL_REQUEST) {
             if r["subtype"] == "success" {
                 tracing::info!(session_id = %self.session_id, model = ?r["response"]["model"].as_str(), "model switched");
-            } else {
-                tracing::warn!(session_id = %self.session_id, error = %r["error"], "claude refused the model switch");
+                return vec![];
             }
-            return vec![];
+            tracing::warn!(session_id = %self.session_id, error = %r["error"], "claude refused the model switch");
+            // A refusal of a switch the user made again since: the model it names is not the
+            // one asked for last, so it gives neither a line nor the model kept.
+            if self
+                .model_request
+                .as_deref()
+                .is_some_and(|latest| latest != id)
+            {
+                return vec![];
+            }
+            // The error names the model the CLI kept (2.1.312): the session's again. The fixed
+            // "set_model failed" can follow a switch that applied, naming the model asked for.
+            let kept = r["model"].as_str().map(text);
+            if kept.is_some() && kept == self.model_requested {
+                return vec![];
+            }
+            let why = r["error"].as_str().map_or_else(|| "refused".into(), text);
+            let t = match &kept {
+                Some(m) => format!("Model not switched: {why}. The agent stays on {m}"),
+                None => format!("Model not switched: {why}"),
+            };
+            let mut out = vec![self.emit_new(EventKind::System {
+                text: t,
+                code: MODEL_NOT_SWITCHED.into(),
+                call_id: None,
+                status: None,
+                task_id: None,
+                from_session_id: None,
+                usage: None,
+                fork: None,
+                compaction: None,
+                model: kept.clone(),
+            })];
+            out.extend(kept.map(|m| Action::Emit(AdapterEvent::ModelKept(m))));
+            return out;
         }
         if !id.starts_with(MODE_REQUEST) {
             return vec![];
@@ -1388,7 +1646,8 @@ impl Core {
         // Cut off by an interrupt before the stream completed (2.1.312).
         let aborted = v["aborted"] == true;
         let refusal = synthetic && v["message"]["stop_reason"] == REFUSAL;
-        let mut out = Vec::new();
+        // Another model's answer in place of a refused one: what it replaces goes first.
+        let mut out = self.retract(&v["supersedes"]);
         // A response other than the one streamed while that one's text stands: the CLI gave up
         // the stream and asked again without one ("Error streaming, falling back to
         // non-streaming mode", 2.1.312), which brings no `message_start`; as the VS Code tab
@@ -1406,7 +1665,7 @@ impl Core {
             match block["type"].as_str() {
                 Some("text") => {
                     let t = block["text"].as_str().unwrap_or("");
-                    if t.is_empty() {
+                    if t.is_empty() || t == NO_CONTENT {
                         continue;
                     }
                     out.extend(self.flush(false));
@@ -1523,7 +1782,8 @@ impl Core {
             .filter(|w| w.carried)
             .map(|w| w.event_id)
             .collect();
-        // As at `result`: the CLI goes on with the other carried inputs.
+        // As at `result`: the CLI goes on with the other carried inputs, in a turn nobody stops.
+        self.stopping = false;
         self.in_turn = !carried.is_empty();
         if self.in_turn {
             self.turn += 1;
@@ -1558,7 +1818,19 @@ impl Core {
     /// inferred from a capture where a second task of the subagent kept the list non-empty).
     fn on_background_tasks(&mut self, v: &Value) -> Vec<Action> {
         let before = self.background_work();
-        self.background = v["tasks"].as_array().cloned().unwrap_or_default();
+        // An `ambient` task is no activity (the SDK): not counted, no row, no subagent, nor the
+        // parent of one of its tasks.
+        let (ambient, tasks): (Vec<&Value>, Vec<&Value>) = v["tasks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .partition(|t| t["ambient"] == true);
+        self.ambient.extend(
+            ambient
+                .iter()
+                .filter_map(|t| t["task_id"].as_str().map(str::to_owned)),
+        );
+        self.background = tasks.into_iter().cloned().collect();
         let mut out = Vec::new();
         let n = self.background_work();
         if n != before {
@@ -1631,19 +1903,15 @@ impl Core {
         self.running_subagent_ids().len()
     }
 
-    /// The tasks of the latest `background_tasks_changed` list that are work: those without
+    /// The tasks of the latest `background_tasks_changed` list that are work: those of
+    /// [`Core::background`], which [`Core::on_background_tasks`] keeps without the ones marked
     /// `ambient: true`. 2.1.312 sets it on tasks that are no activity: its own housekeeping
     /// (`skip_transcript`) and every live-update watcher, such as the one that follows the
     /// comments on a page the agent published with the Artifact tool (`monitor_ws`,
     /// `persistent`, no timeout, so it stays for the whole process). The SDK tells hosts to
     /// leave them out of activity, and the VS Code tab does.
     fn background_work(&self) -> u32 {
-        let n = self
-            .background
-            .iter()
-            .filter(|t| t["ambient"] != true)
-            .count();
-        u32::try_from(n).unwrap_or(u32::MAX)
+        u32::try_from(self.background.len()).unwrap_or(u32::MAX)
     }
 
     /// The `task_id`s of [`Core::running_subagents`].
@@ -1658,17 +1926,16 @@ impl Core {
         ids
     }
 
-    /// The subagent listed task `t` belongs to, unless that subagent has reported or `t` is
-    /// marked `ambient`: 2.1.312 gives the comment watcher of a page a subagent published the
-    /// subagent as `parent_task_id`, and the watcher stays for the whole process, so it would
-    /// keep a subagent that ended counted for good ([`Core::background_work`]).
+    /// The subagent listed task `t` belongs to, unless that subagent has reported or is one of
+    /// [`Core::ambient`] (no subagent: its task is the agent's own). A task marked `ambient` is
+    /// none of the list ([`Core::on_background_tasks`]): 2.1.312 gives the comment watcher of a
+    /// page a subagent published the subagent as `parent_task_id`, and the watcher stays for
+    /// the whole process, so it would keep a subagent that ended counted for good
+    /// ([`Core::background_work`]).
     fn parent<'a>(&self, t: &'a Value) -> Option<&'a str> {
-        if t["ambient"] == true {
-            return None;
-        }
         t["parent_task_id"]
             .as_str()
-            .filter(|p| !self.reported.contains(*p))
+            .filter(|p| !self.reported.contains(*p) && !self.ambient.contains(*p))
     }
 
     /// The latest `background_tasks_changed` list holds subagent `id` or a task of it.
@@ -1737,20 +2004,18 @@ impl Core {
     }
 
     /// Brings [`Core::live_commands`] to the main agent's background shell commands and
-    /// Monitor watchers of the latest `background_tasks_changed` list: `task_type:
-    /// local_bash`, not `ambient` (no activity, the SDK says), its `task_started` come (a task
-    /// joins the list before it, and only that tells a Monitor's task from a command's,
-    /// [`Core::bash_tasks`]), and no subagent of [`Core::parent`] (none, or one that has
-    /// reported): a subagent that counts stands for its commands with its own row. A new one
-    /// goes last, a changed `description` replaces its row's, one that no longer qualifies
-    /// goes. Whether anything changed.
+    /// Monitor watchers of the latest `background_tasks_changed` list ([`Core::background`]:
+    /// none is `ambient`, no activity, the SDK says): `task_type: local_bash`, its
+    /// `task_started` come (a task joins the list before it, and only that tells a Monitor's
+    /// task from a command's, [`Core::bash_tasks`]), and no subagent of [`Core::parent`] (none,
+    /// an `ambient` task, or one that has reported): a subagent that counts stands for its
+    /// commands with its own row. A new one goes last, a changed `description` replaces its
+    /// row's, one that no longer qualifies goes. Whether anything changed.
     fn update_live_commands(&mut self) -> bool {
         let listed: Vec<(String, String, Instant, LiveKind)> = self
             .background
             .iter()
-            .filter(|t| {
-                t["task_type"] == "local_bash" && t["ambient"] != true && self.parent(t).is_none()
-            })
+            .filter(|t| t["task_type"] == "local_bash" && self.parent(t).is_none())
             .filter_map(|t| {
                 let id = t["task_id"].as_str()?;
                 let (monitor, started) = self.bash_tasks.get(id)?;
@@ -1836,6 +2101,114 @@ impl Core {
         vec![self.live_list()]
     }
 
+    /// `tool_progress` (2.1.312): `heartbeat: true` comes every 30 s of a long call of the main
+    /// agent (its `parent_tool_use_id` is the call's own id, not a subagent's) →
+    /// [`AdapterEvent::Heartbeat`]; `subagent_retry` (`agent_id`, `attempt`, `max_retries`,
+    /// `retry_delay_ms`, `error_status`) is an API retry of a subagent of [`Core::live`], whose
+    /// row carries it until a line of the same `parent_tool_use_id` (the subagent's `Agent`
+    /// call) without it says the retry resolved: the list again.
+    fn on_tool_progress(&mut self, v: &Value) -> Vec<Action> {
+        if v["heartbeat"] == true {
+            return vec![Action::Emit(AdapterEvent::Heartbeat)];
+        }
+        let call = v["parent_tool_use_id"].as_str().unwrap_or("");
+        let r = &v["subagent_retry"];
+        let mut changed = false;
+        for a in &mut self.live {
+            if r.is_object() && r["agent_id"] == a.task_id.as_str() {
+                a.retry = Some((call.to_owned(), api_retry(r)));
+                changed = true;
+            } else if !r.is_object() && a.retry.as_ref().is_some_and(|(c, _)| c == call) {
+                a.retry = None;
+                changed = true;
+            }
+        }
+        if changed {
+            vec![self.live_list()]
+        } else {
+            vec![]
+        }
+    }
+
+    /// [`AdapterEvent::Activity`] when `a` differs from what was reported last. A new
+    /// estimate of the thinking reported goes at most once per [`THINKING_EVERY`]: the CLI
+    /// sends one with every piece of a thinking, and each report is a `session.state`.
+    fn set_activity(&mut self, a: Option<Activity>) -> Option<Action> {
+        if self.activity == a {
+            return None;
+        }
+        let thinking = |a: &Option<Activity>| matches!(a, Some(Activity::Thinking { .. }));
+        if thinking(&self.activity)
+            && thinking(&a)
+            && self
+                .activity_at
+                .is_some_and(|t| t.elapsed() < THINKING_EVERY)
+        {
+            return None;
+        }
+        self.activity = a.clone();
+        self.activity_at = Some(Instant::now());
+        Some(Action::Emit(AdapterEvent::Activity(a)))
+    }
+
+    /// `retraction` of the events of this turn's records named in `uuids` (the CLI's wire
+    /// uuids of `supersedes` and `retracted_message_uuids`) not retracted yet; a held text
+    /// among them is dropped. Nothing for none.
+    fn retract(&mut self, uuids: &Value) -> Vec<Action> {
+        let mut ids = Vec::new();
+        for u in uuids.as_array().into_iter().flatten() {
+            let Some(u) = u.as_str().and_then(|u| u.parse::<Uuid>().ok()) else {
+                continue;
+            };
+            let n = self.turn_records.get(&u).copied().unwrap_or(0);
+            for i in 0..n {
+                let id = record_event_id(&u, i);
+                if self.retracted.insert(id) {
+                    ids.push(id);
+                }
+            }
+        }
+        if ids.is_empty() {
+            return vec![];
+        }
+        if self.held.as_ref().is_some_and(|(id, ..)| ids.contains(id)) {
+            self.held = None;
+        }
+        tracing::info!(session_id = %self.session_id, events = ids.len(), "events retracted");
+        vec![self.emit_new(EventKind::Retraction { event_ids: ids })]
+    }
+
+    /// A line for `system/init`'s MCP servers whose `status` is not `connected` nor `disabled`
+    /// (turned off by the user) and one for its `plugin_errors`, each when it differs from the
+    /// one given last: the CLI sends `init` before every turn.
+    fn on_init_problems(&mut self, v: &Value) -> Vec<Action> {
+        let list = |k: &str| v[k].as_array().cloned().unwrap_or_default();
+        let s = |x: &Value| text(x.as_str().unwrap_or(""));
+        let servers: Vec<String> = list("mcp_servers")
+            .iter()
+            .filter(|m| !matches!(m["status"].as_str(), Some("connected" | "disabled")))
+            .map(|m| format!("{} ({})", s(&m["name"]), s(&m["status"])))
+            .collect();
+        let plugins: Vec<String> = list("plugin_errors")
+            .iter()
+            .map(|e| format!("{}: {}", s(&e["plugin"]), s(&e["message"])))
+            .collect();
+        let mcp = (!servers.is_empty())
+            .then(|| format!("MCP servers not connected: {}", servers.join(", ")));
+        let plugin =
+            (!plugins.is_empty()).then(|| format!("Plugin errors: {}", plugins.join("; ")));
+        let mut out = Vec::new();
+        if mcp != self.init_problems.0 {
+            out.extend(mcp.clone().map(|t| self.emit_system(MCP_NOT_CONNECTED, t)));
+            self.init_problems.0 = mcp;
+        }
+        if plugin != self.init_problems.1 {
+            out.extend(plugin.clone().map(|t| self.emit_system(PLUGIN_ERRORS, t)));
+            self.init_problems.1 = plugin;
+        }
+        out
+    }
+
     /// [`Core::live`], [`Core::live_commands`], [`Core::wakeup_row`], then [`Core::cron_jobs`],
     /// as sent: the run time of each, and the time to the fire of a wakeup and a job, counted
     /// now; a subagent, a command and a Monitor are `stoppable` ([`Core::stop_task`]), a wakeup
@@ -1865,6 +2238,7 @@ impl Core {
                         a.kind,
                         LiveKind::Agent | LiveKind::Command | LiveKind::Monitor
                     ),
+                    retry: a.retry.as_ref().map(|(_, r)| r.clone()),
                 })
                 .collect(),
         ))
@@ -1959,13 +2333,22 @@ impl Core {
         let Some(uuid) = record_uuid(v) else {
             return vec![];
         };
+        let blocks = blocks(v);
+        // The record's `tool_use_result` is its `tool_result`'s only when it has one, as the VS
+        // Code tab reads it (extension 2.1.319).
+        let single = blocks.iter().filter(|b| b["type"] == "tool_result").count() == 1;
         let mut out = Vec::new();
-        for (i, block) in blocks(v).iter().enumerate() {
+        for (i, block) in blocks.iter().enumerate() {
             if block["type"] != "tool_result" {
                 continue;
             }
             out.extend(self.flush(false));
-            let text = result_text(&block["content"]);
+            let whole = text(
+                &single
+                    .then(|| agent_report(&v["tool_use_result"]))
+                    .flatten()
+                    .unwrap_or_else(|| result_text(&block["content"])),
+            );
             let error = block["is_error"] == true;
             // The wakeup a `ScheduleWakeup` call armed, `scheduledFor: 0` for none (`stopped`);
             // a failed call changed nothing. Likewise a job a `CronCreate` call made and one a
@@ -1991,23 +2374,34 @@ impl Core {
             if self.cron_deletes.remove(call) && !error {
                 out.extend(self.cron_deleted(result));
             }
-            out.push(self.emit(
-                record_event_id(&uuid, i),
-                EventKind::ToolResult {
-                    call_id: block["tool_use_id"].as_str().unwrap_or("").into(),
-                    result_preview: preview(&text, PREVIEW_LIMIT),
-                    error,
-                    error_text: error.then(|| preview(&text, ERROR_TEXT_LIMIT)),
-                    duration_ms: None,
-                    artifact_id: None,
-                },
-            ));
+            let kind = EventKind::ToolResult {
+                call_id: block["tool_use_id"].as_str().unwrap_or("").into(),
+                result_preview: preview(&whole, PREVIEW_LIMIT),
+                error,
+                error_text: error.then(|| preview(&whole, ERROR_TEXT_LIMIT)),
+                duration_ms: None,
+                artifact_id: None,
+                artifact_ids: vec![],
+            };
+            let files = ResultFiles {
+                text: (whole.len() > PREVIEW_LIMIT).then(|| preview(&whole, FULL_RESULT_LIMIT)),
+                images: result_images(&block["content"]),
+            };
+            let id = record_event_id(&uuid, i);
+            out.push(if files == ResultFiles::default() {
+                self.emit(id, kind)
+            } else {
+                let mut event = self.emit_event(kind);
+                event.event_id = id;
+                Action::Emit(AdapterEvent::ToolResult { event, files })
+            });
         }
         out
     }
 
     fn on_result(&mut self, v: &Value) -> Vec<Action> {
         self.self_turn = false;
+        self.stopping = false;
         // The turn of `/clear` ended without an `init` naming the new transcript: the folder is
         // not held for it any longer.
         self.clearing = false;
@@ -2015,6 +2409,8 @@ impl Core {
         if v["local_command"].is_null() {
             self.fresh = false;
         }
+        self.turn_records.clear();
+        self.retracted.clear();
         let mut out: Vec<Action> = self.flush(true).into_iter().collect();
         // A request the CLI no longer waits for: after "No" to one of two parallel calls it
         // ends the turn and drops the other. Without the cancel the hub keeps its card open
@@ -2022,12 +2418,10 @@ impl Core {
         // That is a request of the main agent or of a foreground subagent (in `quiet_tasks`
         // with `false`), which cannot outlive the main turn. Any other subagent's request stays
         // open: a background subagent's outlives the main turn's `result`, and the CLI still
-        // waits for its answer (checked live on 2.1.312).
+        // waits for its answer (checked live on 2.1.312). An MCP server's request names no
+        // agent: it stays open until answered or withdrawn.
         let quiet = self.quiet_tasks.clone();
-        let cancels = self.cancel_pending(|p| match p.agent_id() {
-            None => true,
-            Some(agent) => quiet.get(agent) == Some(&false),
-        });
+        let cancels = self.cancel_pending(|p| ends_with_main_turn_request(&quiet, p));
         if !cancels.is_empty() {
             tracing::info!(session_id = %self.session_id, open = cancels.len(), "turn ended with open requests; cancelled");
         }
@@ -2181,6 +2575,7 @@ impl Core {
         let req = &v["request"];
         match req["subtype"].as_str() {
             Some("can_use_tool") => self.can_use_tool(request_id, req),
+            Some("elicitation") => self.elicitation(request_id, req),
             other => {
                 tracing::warn!(session_id = %self.session_id, subtype = ?other, "unsupported control_request");
                 vec![Action::Write(json!({
@@ -2213,6 +2608,10 @@ impl Core {
                 return vec![self.emit_new(EventKind::ClarifyRequest {
                     request_id,
                     questions,
+                    server: None,
+                    message: None,
+                    url: None,
+                    subagent: self.subagent_of(req),
                 })];
             }
             tracing::warn!(session_id = %self.session_id, "AskUserQuestion without questions; asking as an approval");
@@ -2239,13 +2638,18 @@ impl Core {
             ];
         }
 
-        if self.rules.matches(&tool, &input) {
+        // Only a person may answer (SPEC §8.1): the CLI says no stored grant or automatic
+        // approval may, a user's ask rule forced the prompt, or no standing rule may be offered.
+        let human_only = req["requires_user_interaction"] == true
+            || !req["matched_ask_rule"].is_null()
+            || req["suppress_always_allow_rule"] == true;
+        if !human_only && self.rules.matches(&tool, &input) {
             tracing::info!(session_id = %self.session_id, %tool, "allowed by a session rule");
             return vec![Action::Write(allow(&request_id, &input, None))];
         }
         // hqc's rules of the folder (T48), read at every call, so a change reaches a running
         // session at once; every part of a compound command must be covered.
-        if let Some((rules, root)) = &self.folder {
+        if let Some((rules, root)) = self.folder.as_ref().filter(|_| !human_only) {
             if let Some(rule) = self.policy.folder_allows(rules, root, &tool, &input) {
                 tracing::info!(session_id = %self.session_id, %tool, %rule, "allowed by a folder rule");
                 return vec![Action::Write(allow(&request_id, &input, None))];
@@ -2255,6 +2659,7 @@ impl Core {
         let rule_suggestions = self
             .folder
             .as_ref()
+            .filter(|_| !human_only)
             .and_then(|(_, root)| crate::permissions::suggest(&tool, &input, root));
 
         let suggestions = req["permission_suggestions"]
@@ -2273,21 +2678,27 @@ impl Core {
             .flat_map(|s| s["rules"].as_array().cloned().unwrap_or_default())
             .collect();
 
-        let mut options = vec![
-            option("once", "Allow once", ApprovalCanonical::Once),
-            option(
+        let mut options = vec![option("once", "Allow once", ApprovalCanonical::Once)];
+        if !human_only {
+            options.push(option(
                 "session",
                 "Allow for this session",
                 ApprovalCanonical::Session,
-            ),
-        ];
-        if !local_rules.is_empty() && !self.restricted {
+            ));
+        }
+        if !human_only && !local_rules.is_empty() && !self.restricted {
             options.push(option("always", "Always allow", ApprovalCanonical::Always));
         }
         options.push(option("deny", "Deny", ApprovalCanonical::Deny));
 
         let description = describe(req, &input, &tool);
-        tracing::info!(session_id = %self.session_id, %tool, "approval requested");
+        let field = |k: &str, limit: usize| {
+            req[k]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| preview(s, limit))
+        };
+        tracing::info!(session_id = %self.session_id, %tool, human_only, "approval requested");
         self.pending.insert(
             request_id.clone(),
             Pending::Approval {
@@ -2307,7 +2718,116 @@ impl Core {
             policy_hint,
             rule_suggestions,
             secret: None,
+            reason: field("decision_reason", REASON_LIMIT),
+            display_name: field("display_name", DISPLAY_NAME_LIMIT),
+            human_only,
+            subagent: self.subagent_of(req),
         })]
+    }
+
+    /// `control_request` `elicitation`: an MCP server asks the person for input (SPEC §8.1) →
+    /// `clarify.request` with `server` and `message`, the questions of its form or, with `mode:
+    /// url`, its `url` and none. A form the card cannot ask, a link without a URL, or a
+    /// request over [`ELICITATION_LIMIT`] is answered `cancel` at once, with a `system` line.
+    fn elicitation(&mut self, request_id: String, req: &Value) -> Vec<Action> {
+        let server = preview(
+            req["mcp_server_name"].as_str().unwrap_or(""),
+            SERVER_NAME_LIMIT,
+        );
+        let link = req["mode"] == "url";
+        let url = req["url"]
+            .as_str()
+            .filter(|u| link && !u.is_empty())
+            .map(text);
+        let form = if link {
+            url.is_some().then(|| (vec![], vec![]))
+        } else {
+            form_fields(req)
+        };
+        let Some((questions, fields)) = form else {
+            tracing::warn!(session_id = %self.session_id, %server, "MCP server's request the card cannot ask; cancelled");
+            return self.elicitation_cancelled(
+                &request_id,
+                format!("The MCP server {server} asked for input that hqc cannot show; its request was cancelled."),
+            );
+        };
+        let count = questions.len();
+        let kind = EventKind::ClarifyRequest {
+            request_id: request_id.clone(),
+            questions,
+            server: Some(server.clone()),
+            message: req["message"]
+                .as_str()
+                .filter(|m| !m.trim().is_empty())
+                .map(|m| {
+                    // The person answers in their own name: a cut text says it was cut.
+                    let shown = preview(m, PREVIEW_LIMIT);
+                    if shown.len() < hqc_proto::replace_nul(m).len() {
+                        format!("{shown}…")
+                    } else {
+                        shown
+                    }
+                }),
+            url,
+            subagent: None,
+        };
+        let size = serde_json::to_vec(&kind).map_or(0, |v| v.len());
+        if size > ELICITATION_LIMIT {
+            tracing::warn!(session_id = %self.session_id, %server, size, "MCP server's request too large; cancelled");
+            return self.elicitation_cancelled(
+                &request_id,
+                format!("The MCP server {server} asked for input too large for hqc to show; its request was cancelled."),
+            );
+        }
+        tracing::info!(session_id = %self.session_id, %server, questions = count, link, "MCP server's request");
+        self.pending
+            .insert(request_id, Pending::Elicitation { fields });
+        vec![self.emit_new(kind)]
+    }
+
+    /// An MCP server's request answered `cancel` at once, with a `system
+    /// elicitation_unsupported` line of `text` ([`Self::elicitation`]).
+    fn elicitation_cancelled(&self, request_id: &str, text: String) -> Vec<Action> {
+        vec![
+            Action::Write(control_response(request_id, json!({"action": "cancel"}))),
+            self.emit_system(ELICITATION_UNSUPPORTED, text),
+        ]
+    }
+
+    /// `control_cancel_request {request_id}`: the CLI withdrew a request of its own (it stopped
+    /// waiting, SPEC §8.1). An open one is forgotten, so a later answer writes nothing, and its
+    /// card is closed `withdrawn`. While the turn is being ended on purpose ([`Core::stopping`])
+    /// the CLI writes it for every request of the turn it aborts: one the turn's `result` would
+    /// cancel is closed `stopped`, as that cancel would, so that a question can be answered by
+    /// a message (SPEC §10.1).
+    fn on_cancel_request(&mut self, v: &Value) -> Vec<Action> {
+        let id = v["request_id"].as_str().unwrap_or("");
+        let Some(p) = self.pending.remove(id) else {
+            return vec![];
+        };
+        let reason = if self.stopping && ends_with_main_turn_request(&self.quiet_tasks, &p) {
+            CancelReason::Stopped
+        } else {
+            CancelReason::Withdrawn
+        };
+        tracing::info!(session_id = %self.session_id, request_id = id, ?reason, "the CLI withdrew its request");
+        vec![self.cancel_event(id.to_owned(), &p, reason)]
+    }
+
+    /// The subagent request `req` comes from: its `agent_id` is the subagent's `task_id`
+    /// (2.1.312: a `local_agent` task's id is its `agentId`), one of [`Core::live`] with the
+    /// title of its `task_started`, cut to [`PREVIEW_LIMIT`]; `None` for the agent itself and
+    /// a subagent not known so.
+    fn subagent_of(&self, req: &Value) -> Option<RequestSubagent> {
+        let id = req["agent_id"].as_str()?;
+        let a = self
+            .live
+            .iter()
+            .find(|a| a.task_id == id && !a.title.is_empty())?;
+        Some(RequestSubagent {
+            task_id: a.task_id.clone(),
+            description: preview(&a.title, PREVIEW_LIMIT),
+        })
     }
 
     /// `system/permission_denied`: the CLI refused a call without asking. In this adapter's
@@ -2361,8 +2881,9 @@ impl Core {
 
     /// The end of the task of `task_notification` `v` ([`Core::on_task_notification`]). The
     /// line carries the task's `tool_use_id` (the notification's, else that of its
-    /// `task_started`, [`Core::task_calls`]) as `call_id`, and the notification's `status` and
-    /// `task_id`.
+    /// `task_started`, [`Core::task_calls`]) as `call_id`, and the notification's `status`,
+    /// `task_id` and `usage`; its `output_file` follows it as [`AdapterEvent::TaskOutput`].
+    /// One with `skip_transcript: true` gives no line.
     fn on_task_ended(&mut self, v: &Value) -> Vec<Action> {
         let id = v["task_id"].as_str();
         let started = id.and_then(|id| self.task_calls.remove(id));
@@ -2373,6 +2894,10 @@ impl Core {
             None => vec![],
         };
         if id.is_some_and(|id| self.quiet_tasks.remove(id).is_some()) {
+            return out;
+        }
+        // A task the CLI keeps out of the transcript is no activity (the SDK): no line.
+        if v["skip_transcript"] == true {
             return out;
         }
         if id.is_some_and(|id| !self.announced.insert(id.to_owned())) {
@@ -2398,9 +2923,15 @@ impl Core {
                 status: v["status"].as_str().map(str::to_owned),
                 task_id: id.map(str::to_owned),
                 from_session_id: None,
+                usage: task_usage(&v["usage"]),
                 fork: None,
+                compaction: None,
+                model: None,
             },
         ))));
+        if let Some(path) = v["output_file"].as_str().filter(|p| !p.is_empty()) {
+            out.push(Action::Emit(AdapterEvent::TaskOutput(path.into())));
+        }
         out
     }
 
@@ -2412,19 +2943,23 @@ impl Core {
         self.pending.extend(kept);
         open.sort_by(|a, b| a.0.cmp(&b.0));
         open.into_iter()
-            .map(|(request_id, p)| {
-                let reason = CancelReason::Stopped;
-                let kind = match p {
-                    Pending::Approval { .. } => EventKind::ApprovalCancel { request_id, reason },
-                    Pending::Clarify { .. } => EventKind::ClarifyCancel { request_id, reason },
-                };
-                Action::Emit(AdapterEvent::Event(new_event(
-                    self.session_id,
-                    Author::System,
-                    kind,
-                )))
-            })
+            .map(|(request_id, p)| self.cancel_event(request_id, &p, CancelReason::Stopped))
             .collect()
+    }
+
+    /// `approval.cancel` or `clarify.cancel` of `request_id`, so the hub closes its card.
+    fn cancel_event(&self, request_id: String, p: &Pending, reason: CancelReason) -> Action {
+        let kind = match p {
+            Pending::Approval { .. } => EventKind::ApprovalCancel { request_id, reason },
+            Pending::Clarify { .. } | Pending::Elicitation { .. } => {
+                EventKind::ClarifyCancel { request_id, reason }
+            }
+        };
+        Action::Emit(AdapterEvent::Event(new_event(
+            self.session_id,
+            Author::System,
+            kind,
+        )))
     }
 
     // ---- helpers -----------------------------------------------------------------------
@@ -2448,7 +2983,7 @@ impl Core {
     /// `message.content` (a string, or the text blocks of an array), "Context compacted"
     /// without one.
     fn release_compaction(&mut self, summary: Option<&Value>) -> Option<Action> {
-        let id = self.compaction.take()?;
+        let (id, compaction) = self.compaction.take()?;
         let t = match summary {
             Some(Value::String(s)) => text(s),
             Some(c) => text(
@@ -2462,7 +2997,7 @@ impl Core {
             ),
             None => CONTEXT_COMPACTED_TEXT.into(),
         };
-        Some(self.emit_system_as(Some(id), CONTEXT_COMPACTED, t))
+        Some(self.emit_system_as(Some(id), CONTEXT_COMPACTED, t, compaction))
     }
 
     /// The input the running turn answers ([`Core::last_input`]), once its echo has come. Until
@@ -2487,11 +3022,17 @@ impl Core {
 
     /// `system {code, text}` authored by the worker (SPEC §4), fresh v7 id.
     fn emit_system(&self, code: &str, text: String) -> Action {
-        self.emit_system_as(None, code, text)
+        self.emit_system_as(None, code, text, None)
     }
 
-    /// [`Self::emit_system`] with `event_id`, when given.
-    fn emit_system_as(&self, event_id: Option<Uuid>, code: &str, text: String) -> Action {
+    /// [`Self::emit_system`] with `event_id`, when given, and a compaction's fields.
+    fn emit_system_as(
+        &self,
+        event_id: Option<Uuid>,
+        code: &str,
+        text: String,
+        compaction: Option<ContextCompacted>,
+    ) -> Action {
         let mut e = new_event(
             self.session_id,
             Author::System,
@@ -2502,7 +3043,10 @@ impl Core {
                 status: None,
                 task_id: None,
                 from_session_id: None,
+                usage: None,
                 fork: None,
+                compaction,
+                model: None,
             },
         );
         if let Some(id) = event_id {
@@ -2525,9 +3069,10 @@ impl Core {
 /// Event id of content block `index` of a jsonl record. Claude Code writes one block per
 /// record, so this is `Event::id_from_claude_record(uuid)`; a further block of the same
 /// record (not seen on 2.1.307/2.1.308) gets v5 of `"<uuid>/<index>"`.
-/// The 5-hour and 7-day windows of a `rate_limit_event`'s `unifiedWindows`; `None` when it
-/// names neither.
-fn limits(w: &Value) -> Option<hqc_proto::frame::Limits> {
+/// The 5-hour and 7-day windows of a `rate_limit_event`'s `rate_limit_info.unifiedWindows`,
+/// with its `status`, `rateLimitType` and `resetsAt`; `None` when it names neither window.
+fn limits(info: &Value) -> Option<hqc_proto::frame::Limits> {
+    let w = &info["unifiedWindows"];
     let window = |name: &str| {
         let v = &w[name];
         Some(hqc_proto::frame::LimitWindow {
@@ -2538,6 +3083,9 @@ fn limits(w: &Value) -> Option<hqc_proto::frame::Limits> {
     let l = hqc_proto::frame::Limits {
         five_hour: window("five_hour"),
         seven_day: window("seven_day"),
+        status: info["status"].as_str().map(text),
+        rate_limit_type: info["rateLimitType"].as_str().map(text),
+        resets_at: info["resetsAt"].as_i64(),
     };
     (l.five_hour.is_some() || l.seven_day.is_some()).then_some(l)
 }
@@ -2629,6 +3177,91 @@ fn command_list(v: &Value) -> Option<Vec<SlashCommand>> {
     )
 }
 
+/// What the main agent waits on after stdout line `v` of type `ty` (`sub`: it has a
+/// `parent_tool_use_id`), `None` when the line changes nothing: `system` `api_retry` (2.1.312:
+/// `attempt`, `max_retries`, `retry_delay_ms`, `error_status`, `null` without a response) →
+/// retrying; `system` `status` `compacting` → compacting; `system` `thinking_tokens` → thinking
+/// with its `estimated_tokens`, the estimate of the thinking block being written. It ends with
+/// any other `system` `status` that does not report the permission mode (`requesting` before a
+/// request, `null` at a compaction's end), with a main agent's `stream_event` `message_start`
+/// (a response begins: a retry went through), `content_block_start` or `content_block_stop` (a
+/// thinking block ends, another block begins), with its `assistant` line and with `result`.
+/// The deltas of a block and `ping` leave it: the CLI sends `thinking_tokens` before each
+/// thinking delta.
+fn activity_of(ty: &str, sub: bool, v: &Value) -> Option<Option<Activity>> {
+    match (ty, v["subtype"].as_str()) {
+        ("system", Some("api_retry")) => Some(Some(Activity::Retrying(api_retry(v)))),
+        ("system", Some("status")) if v["permissionMode"].is_null() => {
+            Some((v["status"] == "compacting").then_some(Activity::Compacting))
+        }
+        ("system", Some("thinking_tokens")) => Some(Some(Activity::Thinking {
+            estimated_tokens: v["estimated_tokens"].as_u64().unwrap_or(0),
+        })),
+        ("stream_event", _)
+            if !sub
+                && matches!(
+                    v["event"]["type"].as_str(),
+                    Some("message_start" | "content_block_start" | "content_block_stop")
+                ) =>
+        {
+            Some(None)
+        }
+        ("assistant", _) if !sub => Some(None),
+        ("result", _) => Some(None),
+        _ => None,
+    }
+}
+
+/// `<original model> → <fallback model>` of a `model_*fallback` line, with its `content`, the
+/// CLI's own words, after a colon.
+fn switch_line(v: &Value) -> String {
+    let s = |k: &str| text(v[k].as_str().unwrap_or(""));
+    let line = format!("{} → {}", s("original_model"), s("fallback_model"));
+    match v["content"].as_str().filter(|c| !c.trim().is_empty()) {
+        Some(c) => format!("{line}: {}", text(c)),
+        None => line,
+    }
+}
+
+/// The text of `model_refusal_no_fallback`: its `content`; the CLI sends it empty, then the
+/// model that refused and the API's explanation.
+fn refusal_line(v: &Value) -> String {
+    if let Some(c) = v["content"].as_str().filter(|c| !c.trim().is_empty()) {
+        return text(c);
+    }
+    let line = format!(
+        "{} refused to answer",
+        text(v["original_model"].as_str().unwrap_or("The model"))
+    );
+    match v["api_refusal_explanation"].as_str() {
+        Some(e) => format!("{line}: {}", text(e)),
+        None => line,
+    }
+}
+
+/// An `api_retry` line or a `subagent_retry` object.
+fn api_retry(v: &Value) -> ApiRetry {
+    let n = |k: &str| v[k].as_u64().unwrap_or(0);
+    ApiRetry {
+        attempt: u32::try_from(n("attempt")).unwrap_or(u32::MAX),
+        max_retries: u32::try_from(n("max_retries")).unwrap_or(u32::MAX),
+        retry_delay_ms: n("retry_delay_ms"),
+        error_status: v["error_status"]
+            .as_u64()
+            .and_then(|s| u16::try_from(s).ok()),
+    }
+}
+
+/// `compact_metadata` of `compact_boundary` (2.1.312: `trigger` `auto` | `manual`,
+/// `pre_tokens`, `post_tokens?`); `None` without `trigger` or `pre_tokens`.
+fn compact_metadata(m: &Value) -> Option<ContextCompacted> {
+    Some(ContextCompacted {
+        trigger: text(m["trigger"].as_str()?),
+        pre_tokens: m["pre_tokens"].as_u64()?,
+        post_tokens: m["post_tokens"].as_u64(),
+    })
+}
+
 /// The subagent a `can_use_tool` request comes from: its `agent_id`, the `task_id` of the
 /// subagent's `task_started`; the main agent's request has none (checked live on 2.1.312 with
 /// a `run_in_background` subagent's Bash call).
@@ -2642,6 +3275,19 @@ fn allow(request_id: &str, input: &Value, permissions: Option<Vec<Value>>) -> Va
         r["updatedPermissions"] = Value::Array(p);
     }
     control_response(request_id, r)
+}
+
+/// An agent's request ends with the main turn when it is the main agent's or a foreground
+/// subagent's (in `quiet_tasks` with `false`): a background subagent's outlives the turn.
+fn ends_with_main_turn(quiet_tasks: &HashMap<String, bool>, agent_id: Option<&str>) -> bool {
+    agent_id.is_none_or(|a| quiet_tasks.get(a) == Some(&false))
+}
+
+/// Whether the main turn's end, or its being ended, cancels `p`: an agent's request that
+/// [`ends_with_main_turn`]. An MCP server's request names no agent and stays open until
+/// answered or withdrawn.
+fn ends_with_main_turn_request(quiet_tasks: &HashMap<String, bool>, p: &Pending) -> bool {
+    !matches!(p, Pending::Elicitation { .. }) && ends_with_main_turn(quiet_tasks, p.agent_id())
 }
 
 fn deny(request_id: &str, message: &str) -> Value {
@@ -2718,10 +3364,113 @@ pub(crate) fn parse_questions(input: &Value) -> Option<(Vec<ClarifyQuestion>, Ve
             options: (!options.is_empty()).then_some(options),
             option_descriptions: described.then_some(descriptions),
             multi: q["multiSelect"].as_bool(),
+            required: false,
+            input: None,
         });
         texts.push(raw.to_owned());
     }
     Some((questions, texts))
+}
+
+/// The questions of an MCP server's form (`elicitation` `requested_schema.properties`, in
+/// `property_order`, then any it leaves out), with each one's type: an `enum` gives its values
+/// as options, a boolean Yes and No, a string, number or integer free text (an integer's and a
+/// number's with that `input`); a property the schema's `required` lists is `required`; `title`
+/// is the question's header and `description` its text (the title, or the name, without one),
+/// each cut to [`QUESTION_TEXT_LIMIT`]; names and values are kept whole. `None`:
+/// a property of another type (an object, an array), which the card cannot ask.
+fn form_fields(req: &Value) -> Option<(Vec<ClarifyQuestion>, Fields)> {
+    let props = match &req["requested_schema"]["properties"] {
+        Value::Null => return Some((vec![], vec![])),
+        Value::Object(p) => p,
+        _ => return None,
+    };
+    let required: Vec<&str> = req["requested_schema"]["required"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut names: Vec<&str> = req["property_order"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|n| props.contains_key(*n))
+        .collect();
+    for n in props.keys() {
+        if !names.contains(&n.as_str()) {
+            names.push(n);
+        }
+    }
+    let mut questions = Vec::new();
+    let mut fields = Vec::new();
+    for (i, name) in names.into_iter().enumerate() {
+        let p = &props[name];
+        let (field, options) = match p["type"].as_str()? {
+            "boolean" => (Field::Boolean, Some(vec!["Yes".into(), "No".into()])),
+            "integer" => (Field::Integer, None),
+            "number" => (Field::Number, None),
+            "string" if p["enum"].is_null() => (Field::Text, None),
+            "string" => {
+                let values = p["enum"].as_array()?.iter().map(|v| v.as_str().map(text));
+                (Field::Text, Some(values.collect::<Option<Vec<_>>>()?))
+            }
+            _ => return None,
+        };
+        let title = p["title"].as_str().filter(|s| !s.trim().is_empty());
+        let description = p["description"].as_str().filter(|s| !s.trim().is_empty());
+        questions.push(ClarifyQuestion {
+            id: (i + 1).to_string(),
+            text: preview(description.or(title).unwrap_or(name), QUESTION_TEXT_LIMIT),
+            header: title
+                .filter(|_| description.is_some())
+                .map(|t| preview(t, QUESTION_TEXT_LIMIT)),
+            options,
+            option_descriptions: None,
+            multi: None,
+            required: required.contains(&name),
+            input: match field {
+                Field::Integer => Some(AnswerInput::Integer),
+                Field::Number => Some(AnswerInput::Number),
+                Field::Text | Field::Boolean => None,
+            },
+        });
+        fields.push((name.to_owned(), field));
+    }
+    Some((questions, fields))
+}
+
+/// `content` of an accepted MCP server's request ([`Core::answer_elicitation`]).
+fn content(
+    fields: &[(String, Field)],
+    answers: &BTreeMap<String, ClarifyAnswer>,
+) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    for (i, (name, field)) in fields.iter().enumerate() {
+        let s = match answers.get(&(i + 1).to_string()) {
+            Some(ClarifyAnswer::One(s)) => s.clone(),
+            Some(ClarifyAnswer::Many(v)) => v.join(", "),
+            None => continue,
+        };
+        let t = s.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let v = match field {
+            Field::Boolean if t == "Yes" => Value::Bool(true),
+            Field::Boolean if t == "No" => Value::Bool(false),
+            Field::Integer => t.parse::<i64>().map_or(Value::String(s), Value::from),
+            Field::Number => t
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map_or(Value::String(s), Value::Number),
+            _ => Value::String(s),
+        };
+        out.insert(name.clone(), v);
+    }
+    out
 }
 
 /// The text of a `tool_result` block's `content` (a string or text parts).
@@ -2740,6 +3489,51 @@ pub fn result_text(content: &Value) -> String {
         Value::Null => String::new(),
         other => compact(other),
     }
+}
+
+/// The report of a subagent that completed, from the `tool_use_result` of its `Agent` (`Task`)
+/// call, `{status: completed, agentId, content: [text blocks], …}`: the report without the
+/// trailer with `agentId` and `<usage>` that the CLI adds to the `tool_result` for the model
+/// (2.1.312; "render from it instead of parsing the tool_result text", SDK 0.3.312).
+fn agent_report(r: &Value) -> Option<String> {
+    if r["status"] != "completed" || !r["agentId"].is_string() {
+        return None;
+    }
+    let parts = r["content"].as_array()?;
+    Some(
+        parts
+            .iter()
+            .filter(|p| p["type"] == "text")
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// The images of a `tool_result` block's `content`, decoded: `{type: image, source: {type:
+/// base64, media_type, data}}` (a screenshot, a `Read` of a picture); one that does not decode
+/// is left out.
+fn result_images(content: &Value) -> Vec<ResultImage> {
+    use base64::Engine;
+    let Some(parts) = content.as_array() else {
+        return vec![];
+    };
+    parts
+        .iter()
+        .filter(|p| p["type"] == "image" && p["source"]["type"] == "base64")
+        .filter_map(|p| {
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(p["source"]["data"].as_str()?)
+                .ok()?;
+            Some(ResultImage {
+                media_type: p["source"]["media_type"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                data,
+            })
+        })
+        .collect()
 }
 
 fn compact(v: &Value) -> String {
@@ -2775,6 +3569,16 @@ pub fn args_preview(tool: &str, input: &Value) -> String {
         None => compact(input),
     };
     preview(&json, PREVIEW_LIMIT)
+}
+
+/// The `usage` of a `task_notification` (`total_tokens`, `tool_uses`, `duration_ms`); `None`
+/// unless it has all three.
+fn task_usage(u: &Value) -> Option<TaskUsage> {
+    Some(TaskUsage {
+        total_tokens: u["total_tokens"].as_u64()?,
+        tool_uses: u["tool_uses"].as_u64()?,
+        duration_ms: u["duration_ms"].as_u64()?,
+    })
 }
 
 /// Event text: U+0000 (binary tool output) becomes U+FFFD, which the hub can store

@@ -130,10 +130,59 @@ impl ArtifactClient {
         name: &str,
         kind: Option<ArtifactKind>,
     ) -> Result<Uuid, hqc_proto::frame::McpError> {
-        use hqc_proto::frame::McpError;
-        use hqc_proto::mcp::error_code;
         use tokio::io::AsyncReadExt;
         let body = tokio::fs::File::from_std(file).take(size);
+        let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(body));
+        self.put(session_id, body, size, name, kind, None, None)
+            .await
+    }
+
+    /// `data` to `PUT /worker/artifacts` for `session_id` with `Content-Type: mime` (a tool
+    /// result's whole text or image, SPEC §8.1); the artifact's id. Over
+    /// [`Self::max_artifact`] it is refused without a request; the whole request may take 30 s,
+    /// since the session waits for it.
+    pub async fn upload_bytes(
+        &self,
+        session_id: Uuid,
+        data: Vec<u8>,
+        name: &str,
+        mime: &str,
+        kind: ArtifactKind,
+    ) -> Result<Uuid, hqc_proto::frame::McpError> {
+        use hqc_proto::frame::McpError;
+        use hqc_proto::mcp::error_code;
+        let size = data.len() as u64;
+        if size > self.max_artifact {
+            return Err(McpError::new(
+                error_code::INVALID_ARGS,
+                format!("{name} is {size} bytes, more than {}", self.max_artifact),
+            ));
+        }
+        self.put(
+            session_id,
+            data.into(),
+            size,
+            name,
+            Some(kind),
+            Some(mime),
+            Some(Duration::from_secs(30)),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn put(
+        &self,
+        session_id: Uuid,
+        body: reqwest::Body,
+        size: u64,
+        name: &str,
+        kind: Option<ArtifactKind>,
+        mime: Option<&str>,
+        timeout: Option<Duration>,
+    ) -> Result<Uuid, hqc_proto::frame::McpError> {
+        use hqc_proto::frame::McpError;
+        use hqc_proto::mcp::error_code;
         let mut req = self
             .http
             .put(format!("{}/worker/artifacts", self.hub_url))
@@ -141,9 +190,13 @@ impl ArtifactClient {
             .header("x-hqc-session-id", session_id.to_string())
             .header("x-hqc-artifact-name", pct_encode(name))
             .header(reqwest::header::CONTENT_LENGTH, size)
-            .body(reqwest::Body::wrap_stream(
-                tokio_util::io::ReaderStream::new(body),
-            ));
+            .body(body);
+        if let Some(m) = mime {
+            req = req.header(reqwest::header::CONTENT_TYPE, m);
+        }
+        if let Some(t) = timeout {
+            req = req.timeout(t);
+        }
         if let Some(k) = kind {
             if let Some(k) = serde_json::to_value(k)
                 .ok()
@@ -788,6 +841,26 @@ mod tests {
             "{:?}",
             entries(d.path())
         );
+    }
+
+    /// A tool result's text or image over the artifact limit is refused before any request
+    /// (SPEC §8.1).
+    #[tokio::test]
+    async fn bytes_over_the_limit_are_not_uploaded() {
+        let client =
+            ArtifactClient::new("http://127.0.0.1:9", Secret::new("hqcw_test")).with_limits(4, 4);
+        let e = client
+            .upload_bytes(
+                Uuid::nil(),
+                b"12345".to_vec(),
+                "image.png",
+                "image/png",
+                ArtifactKind::Image,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "invalid_args");
+        assert!(e.message.contains("more than 4"), "{}", e.message);
     }
 
     #[test]

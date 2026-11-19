@@ -102,6 +102,11 @@ pub struct Session {
     /// (`session.state.foreground_calls`, since SPEC 0.125). Absent — none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreground_calls: Vec<String>,
+    /// What the session's agent waits on now, as its worker last reported it
+    /// (`session.state.activity`, since SPEC 0.179), kept in the hub's memory until the turn
+    /// ends. Absent — none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::frame::Activity>,
     /// When the requesting user made the session a favorite (`PUT .../favorite`); favorites
     /// are per user. Absent — not a favorite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,6 +180,7 @@ impl Session {
             background_tasks: self.background_tasks,
             output_per_s: self.output_per_s,
             foreground_calls: self.foreground_calls.clone(),
+            activity: self.activity.clone(),
             favorite_at: self.favorite_at,
             paused_at: self.paused_at,
         }
@@ -840,6 +846,10 @@ pub struct EventPage {
     pub last_seq: u64,
 }
 
+/// `GET /api/sessions/{id}/subagents/{task_id}/history` (since SPEC 0.181): the worker's
+/// `session.subagent_history`.
+pub type SubagentHistoryPage = crate::frame::SubagentHistoryResult;
+
 /// `GET /api/search` (SPEC §15): hits best first; `next_cursor` fetches the next page
 /// (`&cursor=`), absent on the last one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1321,6 +1331,9 @@ mod tests {
         assert_eq!(summary.favorite_at, s.favorite_at);
         assert!(s.favorite_at.is_some() && held.favorite_at.is_none());
         roundtrip::<EventPage>(include_str!("../examples/wire/api.events.json"));
+        let h: SubagentHistoryPage =
+            roundtrip(include_str!("../examples/wire/api.subagent_history.json"));
+        assert!(h.events.iter().all(|e| e.seq.is_none()) && !h.truncated && h.continues);
         let sp: SearchPage = roundtrip(include_str!("../examples/wire/api.search.json"));
         assert!(sp.results[0].seq.is_some() && sp.results[1].seq.is_none());
         assert!(sp.results[1].archived && sp.next_cursor.is_some());

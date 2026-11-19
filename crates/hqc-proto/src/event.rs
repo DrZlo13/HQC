@@ -127,6 +127,21 @@ pub enum CancelReason {
     Stopped,
     WorkerRestart,
     Archived,
+    /// The runtime withdrew its request (Claude Code: `control_cancel_request`, since SPEC
+    /// 0.180).
+    Withdrawn,
+    #[serde(other)]
+    Unknown,
+}
+
+/// `clarify.response.action` (since SPEC 0.180): what the person did with an MCP server's
+/// request (`clarify.request.server`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClarifyAction {
+    /// The answers are the input, also none (the link's Done).
+    Accept,
+    Decline,
     #[serde(other)]
     Unknown,
 }
@@ -169,6 +184,23 @@ pub struct ClarifyQuestion {
     pub option_descriptions: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi: Option<bool>,
+    /// A field an MCP server's form requires (its schema's `required`, since SPEC 0.180).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub required: bool,
+    /// What the free-text answer of an MCP server's form field must read as (since SPEC 0.180);
+    /// absent for text, a boolean, an enum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<AnswerInput>,
+}
+
+/// The kind of a free-text answer of an MCP server's form field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerInput {
+    Integer,
+    Number,
+    #[serde(other)]
+    Unknown,
 }
 
 /// The secret an `hqc_secret` card asks for (SPEC §4, since 0.147).
@@ -217,6 +249,11 @@ pub struct LiveSubagent {
     /// its next fire is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_in_ms: Option<u64>,
+    /// Its request to the model API failed and will be retried (since SPEC 0.179; Claude
+    /// Code: the `subagent_retry` of its `tool_progress`, until the one that says the retry
+    /// resolved); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<ApiRetry>,
 }
 
 /// One schedule of `schedules.live` (SPEC §4, since 0.169): an enabled schedule of the session
@@ -250,6 +287,36 @@ pub enum LiveKind {
     Cron,
     #[serde(other)]
     Unknown,
+}
+
+/// A request to the model API that failed and will be retried (SPEC §4, §5.4; Claude Code:
+/// `system/api_retry`, a subagent's `subagent_retry`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiRetry {
+    pub attempt: u32,
+    pub max_retries: u32,
+    /// How long the runtime waits before the next attempt.
+    pub retry_delay_ms: u64,
+    /// The HTTP status of the failed attempt; absent when it got no response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_status: Option<u16>,
+}
+
+/// The subagent that asks in `approval.request` and `clarify.request` (SPEC §4, since 0.181):
+/// its `task_id` as `subagents.live` names it, and its task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestSubagent {
+    pub task_id: String,
+    pub description: String,
+}
+
+/// What a background task spent, in `system task_notification` (SPEC §4, since 0.181; Claude
+/// Code: the `usage` of its `task_notification`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskUsage {
+    pub total_tokens: u64,
+    pub tool_uses: u64,
+    pub duration_ms: u64,
 }
 
 /// An answer in `clarify.response.answers`: one string, or several for `multi` questions.
@@ -345,8 +412,13 @@ pub enum EventKind {
         error_text: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
+        /// A diff, or the whole text of a result longer than `result_preview` (Claude Code,
+        /// since SPEC 0.180: its first 2 MiB).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         artifact_id: Option<Uuid>,
+        /// The result's images, in order (since SPEC 0.180); absent when none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        artifact_ids: Vec<Uuid>,
     },
     #[serde(rename = "approval.request")]
     ApprovalRequest {
@@ -370,6 +442,20 @@ pub enum EventKind {
         /// the owner for a secret.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secret: Option<SecretAsk>,
+        /// Why the runtime asks (Claude Code: `decision_reason`, since SPEC 0.180).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// The runtime's name of the tool (Claude Code: `display_name`, since SPEC 0.180).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        /// Only a person may answer it (since SPEC 0.180): no stored rule and no
+        /// `auto_approve`; absent when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        human_only: bool,
+        /// The subagent whose call it is (since SPEC 0.181); absent for the agent itself and
+        /// for a subagent the worker does not know.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent: Option<RequestSubagent>,
     },
     #[serde(rename = "approval.response")]
     ApprovalResponse {
@@ -391,12 +477,28 @@ pub enum EventKind {
     ClarifyRequest {
         request_id: String,
         questions: Vec<ClarifyQuestion>,
+        /// The MCP server that asks (Claude Code: `elicitation`, since SPEC 0.180); absent: the
+        /// agent asks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server: Option<String>,
+        /// The server's text above the questions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        /// The page the server sends the person to, with no questions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        /// As in `approval.request` (since SPEC 0.181).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent: Option<RequestSubagent>,
     },
     /// `answers` is keyed by `ClarifyQuestion::id`.
     #[serde(rename = "clarify.response")]
     ClarifyResponse {
         request_id: String,
         answers: BTreeMap<String, ClarifyAnswer>,
+        /// Only for an MCP server's request (since SPEC 0.180).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<ClarifyAction>,
     },
     #[serde(rename = "clarify.cancel")]
     ClarifyCancel {
@@ -479,10 +581,27 @@ pub enum EventKind {
         /// 0.172, §7.1.1).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from_session_id: Option<Uuid>,
+        /// Only with `task_notification`: what the task spent, when the runtime says it
+        /// (since SPEC 0.181).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<TaskUsage>,
         /// Only with [`SESSION_FORKED`]: its fields sit next to `text` and `code`.
         #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
         fork: Option<SessionForked>,
+        /// Only with `context_compacted`, when the runtime said (since SPEC 0.179): its fields
+        /// sit next to `text` and `code`.
+        #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
+        compaction: Option<ContextCompacted>,
+        /// Only with `model_not_switched` (since SPEC 0.179): the model the runtime kept, which
+        /// the hub makes the session's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
+    /// Events of the session the runtime took back (since SPEC 0.179; Claude Code: the
+    /// answer of a model that refused, replaced by another model's): clients do not show
+    /// them. Nothing is deleted.
+    #[serde(rename = "retraction")]
+    Retraction { event_ids: Vec<Uuid> },
     /// An event type this build does not know; stored and passed on as is, not rendered.
     /// Never matches a known type: a known type with a bad payload is an error.
     #[serde(untagged)]
@@ -517,6 +636,7 @@ impl EventKind {
         "usage",
         "status",
         "system",
+        "retraction",
     ];
 }
 
@@ -566,6 +686,10 @@ pub struct Event {
 /// besides `text` and `code`, the fields of [`SessionForked`].
 pub const SESSION_FORKED: &str = "session_forked";
 
+/// `system.code` of a model switch the runtime refused (SPEC §4, since 0.179). The payload
+/// carries `model`, the model the runtime kept, which the hub makes the session's.
+pub const MODEL_NOT_SWITCHED: &str = "model_not_switched";
+
 /// Extra payload of `system session_forked` (SPEC §4, §9.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionForked {
@@ -575,6 +699,19 @@ pub struct SessionForked {
     pub branch_from: String,
     /// Turns (prompts) of the other line, missing from the context of the new one.
     pub orphaned_turns: u32,
+}
+
+/// Extra payload of `system context_compacted` (SPEC §4, since 0.179; Claude Code: the
+/// `compact_metadata` of `system/compact_boundary`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCompacted {
+    /// `auto` | `manual` (`/compact`).
+    pub trigger: String,
+    /// The context's tokens before the compaction.
+    pub pre_tokens: u64,
+    /// And after it; absent when the runtime did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_tokens: Option<u64>,
 }
 
 impl Event {
@@ -642,6 +779,7 @@ mod tests {
         "usage",
         "status",
         "system",
+        "retraction",
     ];
 
     /// Wire examples shared with the TS client (`examples/wire/event.<type>.json`).
@@ -717,6 +855,10 @@ mod tests {
         ("usage", include_str!("../examples/wire/event.usage.json")),
         ("status", include_str!("../examples/wire/event.status.json")),
         ("system", include_str!("../examples/wire/event.system.json")),
+        (
+            "retraction",
+            include_str!("../examples/wire/event.retraction.json"),
+        ),
     ];
 
     const UNKNOWN_EXAMPLE: &str = include_str!("../examples/wire/event.unknown.json");
@@ -744,6 +886,7 @@ mod tests {
             EventKind::Usage { .. } => "usage",
             EventKind::Status { .. } => "status",
             EventKind::System { .. } => "system",
+            EventKind::Retraction { .. } => "retraction",
             EventKind::Unknown { .. } => return None,
         })
     }
@@ -762,6 +905,72 @@ mod tests {
             Some("Leave the root alone, look only at ~/work/hqc")
         );
         assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+    }
+
+    /// SPEC 0.180: a request only a person may answer, with the runtime's reason and tool
+    /// name; an MCP server's form (a question `required`, one with `input`) and link; a declined
+    /// one. Without the fields they are absent.
+    #[test]
+    fn request_variants_roundtrip() {
+        for src in [
+            include_str!("../examples/wire/event.approval.request.human_only.json"),
+            include_str!("../examples/wire/event.clarify.request.elicitation.json"),
+            include_str!("../examples/wire/event.clarify.request.elicitation_url.json"),
+            include_str!("../examples/wire/event.clarify.response.decline.json"),
+        ] {
+            let wire: Value = serde_json::from_str(src).unwrap();
+            let e: Event = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        }
+        let e: Event = serde_json::from_str(include_str!(
+            "../examples/wire/event.approval.request.human_only.json"
+        ))
+        .unwrap();
+        let EventKind::ApprovalRequest {
+            reason,
+            display_name,
+            human_only,
+            ..
+        } = &e.kind
+        else {
+            panic!("{:?}", e.kind);
+        };
+        assert!(*human_only);
+        assert_eq!(display_name.as_deref(), Some("Fetch"));
+        assert!(reason.is_some());
+        let e: Event = serde_json::from_str(include_str!(
+            "../examples/wire/event.clarify.response.decline.json"
+        ))
+        .unwrap();
+        assert!(matches!(
+            e.kind,
+            EventKind::ClarifyResponse {
+                action: Some(ClarifyAction::Decline),
+                ..
+            }
+        ));
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.approval.request.json"))
+                .unwrap();
+        let p = &serde_json::to_value(&plain).unwrap()["payload"];
+        assert!(p.get("human_only").is_none() && p.get("reason").is_none());
+    }
+
+    /// SPEC 0.180: a tool result's images; without them the field is absent.
+    #[test]
+    fn tool_result_images_roundtrip() {
+        let src = include_str!("../examples/wire/event.tool.result.images.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::ToolResult { artifact_ids, .. } = &e.kind else {
+            panic!("{:?}", e.kind);
+        };
+        assert_eq!(artifact_ids.len(), 1);
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.tool.result.json")).unwrap();
+        let p = &serde_json::to_value(&plain).unwrap()["payload"];
+        assert!(p.get("artifact_ids").is_none());
     }
 
     #[test]
@@ -797,6 +1006,39 @@ mod tests {
             assert_eq!(back["type"], *name);
             assert_eq!(serde_json::from_value::<Event>(back).unwrap(), e);
         }
+    }
+
+    /// SPEC 0.181: the end of a background task with what it spent, and a request a subagent
+    /// makes, naming it.
+    #[test]
+    fn task_usage_and_request_subagent_roundtrip() {
+        let src = include_str!("../examples/wire/event.system.task_notification.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::System { usage, .. } = &e.kind else {
+            panic!("not system: {:?}", e.kind);
+        };
+        assert_eq!(
+            *usage,
+            Some(TaskUsage {
+                total_tokens: 155300,
+                tool_uses: 188,
+                duration_ms: 253000
+            })
+        );
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+
+        let src = include_str!("../examples/wire/event.approval.request.subagent.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::ApprovalRequest { subagent, .. } = &e.kind else {
+            panic!("not approval.request: {:?}", e.kind);
+        };
+        assert_eq!(
+            subagent.as_ref().map(|s| s.task_id.as_str()),
+            Some("a52af2b436ded4cea")
+        );
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
     }
 
     #[test]
@@ -898,6 +1140,65 @@ mod tests {
             .is_none());
     }
 
+    /// SPEC 0.179: a subagent's row carries its API retry, `error_status` absent without a
+    /// response; a row without one has none.
+    #[test]
+    fn a_subagent_retry_roundtrips() {
+        let src = include_str!("../examples/wire/event.subagents.live.retry.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::SubagentsLive { agents } = &e.kind else {
+            panic!("not subagents.live: {:?}", e.kind);
+        };
+        assert_eq!(
+            agents[0].retry,
+            Some(ApiRetry {
+                attempt: 2,
+                max_retries: 10,
+                retry_delay_ms: 4000,
+                error_status: None,
+            })
+        );
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.subagents.live.json"))
+                .unwrap();
+        let EventKind::SubagentsLive { agents } = &plain.kind else {
+            panic!("not subagents.live");
+        };
+        assert!(agents.iter().all(|a| a.retry.is_none()));
+    }
+
+    /// SPEC 0.179: a compaction carries its `trigger`, `pre_tokens` and `post_tokens` next to
+    /// `text` and `code`; a `system` event without them has none.
+    #[test]
+    fn a_compaction_carries_its_tokens() {
+        let src = include_str!("../examples/wire/event.system.context_compacted.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::System { compaction, .. } = &e.kind else {
+            panic!("not system: {:?}", e.kind);
+        };
+        assert_eq!(
+            compaction,
+            &Some(ContextCompacted {
+                trigger: "auto".into(),
+                pre_tokens: 165000,
+                post_tokens: Some(12400),
+            })
+        );
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.system.json")).unwrap();
+        assert!(matches!(
+            plain.kind,
+            EventKind::System {
+                compaction: None,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn unknown_type_is_kept_as_is() {
         let wire: Value = serde_json::from_str(UNKNOWN_EXAMPLE).unwrap();
@@ -938,6 +1239,10 @@ mod tests {
             CancelReason::Unknown
         );
         assert_eq!(
+            serde_json::from_value::<ClarifyAction>(v("snooze")).unwrap(),
+            ClarifyAction::Unknown
+        );
+        assert_eq!(
             serde_json::from_value::<PeerMode>(v("broadcast")).unwrap(),
             PeerMode::Unknown
         );
@@ -948,6 +1253,10 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<LiveKind>(v("workflow")).unwrap(),
             LiveKind::Unknown
+        );
+        assert_eq!(
+            serde_json::from_value::<AnswerInput>(v("date")).unwrap(),
+            AnswerInput::Unknown
         );
     }
 
@@ -972,9 +1281,16 @@ mod tests {
             (CancelReason::Stopped, "stopped"),
             (CancelReason::WorkerRestart, "worker_restart"),
             (CancelReason::Archived, "archived"),
+            (CancelReason::Withdrawn, "withdrawn"),
         ];
         for (r, n) in reasons {
             assert_eq!(serde_json::to_value(r).unwrap(), n);
+        }
+        for (a, n) in [
+            (ClarifyAction::Accept, "accept"),
+            (ClarifyAction::Decline, "decline"),
+        ] {
+            assert_eq!(serde_json::to_value(a).unwrap(), n);
         }
         let canon = [
             (ApprovalCanonical::Once, "once"),
@@ -1038,9 +1354,30 @@ mod tests {
                 status: None,
                 task_id: None,
                 from_session_id: None,
-                fork: None
+                usage: None,
+                fork: None,
+                compaction: None,
+                model: None
             }
         );
+    }
+
+    /// SPEC §4 (0.179): `system model_not_switched` names the model the runtime kept; other
+    /// lines name none.
+    #[test]
+    fn a_refused_model_switch_names_the_model() {
+        let src = include_str!("../examples/wire/event.system.model_not_switched.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::System { code, model, .. } = &e.kind else {
+            panic!("not system: {:?}", e.kind);
+        };
+        assert_eq!(code, MODEL_NOT_SWITCHED);
+        assert_eq!(model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.system.json")).unwrap();
+        assert!(matches!(plain.kind, EventKind::System { model: None, .. }));
     }
 
     #[test]

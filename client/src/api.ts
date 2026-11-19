@@ -21,6 +21,7 @@ import {
   parseSessionInfo,
   parseSessionList,
   parseSessionOrder,
+  parseSubagentHistory,
   parseVapidKey,
   parseWorkspace,
   parseWorkspaceInspection,
@@ -31,6 +32,7 @@ import {
   type ArtifactKind,
   type ArtifactUrl,
   type Candidate,
+  type ClarifyAction,
   type ClarifyAnswer,
   type DirEntry,
   type EnrollConfirmed,
@@ -51,6 +53,7 @@ import {
   type RoomMode,
   type SessionInfo,
   type SessionOrder,
+  type SubagentHistory,
   type Theme,
   type Workspace,
   type WorkspaceInspection,
@@ -198,6 +201,11 @@ export interface WorkerLimits {
   five_hour?: LimitWindow | null;
   /** The 7-day window of all models. */
   seven_day?: LimitWindow | null;
+  /** The state of the limit nearest (since SPEC 0.179): `allowed`, `allowed_warning`,
+   *  `rejected`; which limit it is (`five_hour`, `seven_day`, …) and when it resets. */
+  status?: string | null;
+  rate_limit_type?: string | null;
+  resets_at?: number | null;
   reported_at: string;
 }
 
@@ -592,6 +600,14 @@ export class Api {
     await this.req('POST', `/api/sessions/${enc(id)}/tasks/${enc(taskId)}/stop`);
   }
 
+  /** What subagent `taskId` (a `task_id` of `subagents.live`) has done, read from its
+   *  transcript on the worker; `after`: the `event_id` of the last event shown, for only the
+   *  ones after it (`continues`); `409 worker_offline`, `504 worker_timeout`. */
+  async subagentHistory(id: string, taskId: string, after?: string): Promise<SubagentHistory> {
+    const q = after ? `?${new URLSearchParams({ after })}` : '';
+    return parseSubagentHistory(await this.req('GET', `/api/sessions/${enc(id)}/subagents/${enc(taskId)}/history${q}`));
+  }
+
   async retry(id: string): Promise<void> {
     await this.req('POST', `/api/sessions/${enc(id)}/retry`);
   }
@@ -618,8 +634,12 @@ export class Api {
     });
   }
 
-  async clarify(id: string, requestId: string, answers: Record<string, ClarifyAnswer>) {
-    await this.req('POST', `/api/sessions/${enc(id)}/requests/${enc(requestId)}`, { answers });
+  /** `action`: the person's choice on an MCP server's request (SPEC §6). */
+  async clarify(id: string, requestId: string, answers: Record<string, ClarifyAnswer>, action?: ClarifyAction) {
+    await this.req('POST', `/api/sessions/${enc(id)}/requests/${enc(requestId)}`, {
+      answers,
+      ...(action !== undefined ? { action } : {}),
+    });
   }
 
   async readCursor(id: string, lastReadSeq: number): Promise<void> {

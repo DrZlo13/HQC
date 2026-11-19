@@ -39,15 +39,21 @@
 //!   goes back to the head of the queue, as does every one not taken when the process exits.
 //! - `subagents` (Claude Code: [`AdapterEvent::Subagents`]) and `background_tasks`
 //!   ([`AdapterEvent::BackgroundTasks`]) are repeated in every `session.state` like `title`,
-//!   0 when the agent is stopped; so is `foreground_calls` ([`AdapterEvent::ForegroundCalls`]),
-//!   empty then. `session.background` moves one of those calls to the background
-//!   ([`Adapter::background`]); it is acked, also with no agent running. The subagents' list
-//!   ([`AdapterEvent::LiveSubagents`]) goes as `subagents.live`, empty when the agent is
-//!   stopped; the last one sent is sent again on every connect, its run times counted then, an
-//!   empty one only when it followed a non-empty one and the process has not stopped since.
-//!   `session.stop_task` stops one of its tasks alone ([`Adapter::stop_task`]); it is acked,
-//!   also with no agent running. The token rate ([`AdapterEvent::TokenRate`]) goes as
-//!   `tokens.rate` when it changes, 0 once when the agent stops.
+//!   0 when the agent is stopped; so are `foreground_calls` ([`AdapterEvent::ForegroundCalls`]),
+//!   empty then, and `activity` ([`AdapterEvent::Activity`]), none then. `session.background`
+//!   moves one of those calls to the background ([`Adapter::background`]); it is acked, also
+//!   with no agent running. The subagents' list ([`AdapterEvent::LiveSubagents`]) goes as
+//!   `subagents.live`, empty when the agent is stopped; the last one sent is sent again on
+//!   every connect, its run times counted then, an empty one only when it followed a non-empty
+//!   one and the process has not stopped since. `session.stop_task` stops one of its tasks
+//!   alone ([`Adapter::stop_task`]); it is acked, also with no agent running. The token rate
+//!   ([`AdapterEvent::TokenRate`]) goes as `tokens.rate` when it changes, 0 once when the agent
+//!   stops, and again as it is on every [`AdapterEvent::Heartbeat`]. The output file of a
+//!   background task that ended ([`AdapterEvent::TaskOutput`]) is uploaded and becomes an
+//!   `attachment` of the session.
+//! - A tool result with files ([`AdapterEvent::ToolResult`]: its whole text, its images) goes to
+//!   the hub once they are uploaded with `PUT /worker/artifacts`, before the adapter's next
+//!   event (SPEC §8.1).
 //! - Every change of `process_state` is sent as `session.state`; all states are sent again
 //!   on every connect.
 //! - Permission mode (T38): `session.start.permission_mode` and `session.permission_mode`
@@ -69,8 +75,9 @@
 //! - Model: `session.model` switches a running agent at once, mid-turn too
 //!   ([`Adapter::set_model`]); `null` (the runtime's default) reaches it at its next start,
 //!   as any model reaches a stopped one. A `session.start` for a running agent with another
-//!   model does the same. A session on a provider (SPEC 0.144) keeps the provider's model:
-//!   the hub changes a provider with a restart.
+//!   model does the same. A switch the runtime refuses leaves the model it kept
+//!   ([`AdapterEvent::ModelKept`]). A session on a provider (SPEC 0.144) keeps the provider's
+//!   model: the hub changes a provider with a restart.
 //! - `idle_timeout` (SPEC §17.3): an idle process (no turn, no subagent running, no
 //!   background task the runtime lists: [`AdapterEvent::BackgroundTasks`]) is killed, the
 //!   next input resumes it; one whose agent armed a wakeup ([`AdapterEvent::Wakeup`]) is idle
@@ -94,12 +101,12 @@ use std::time::Duration;
 
 use std::path::{Path, PathBuf};
 
-use hqc_proto::event::{EventKind, PeerMode};
+use hqc_proto::event::{ArtifactKind, EventKind, PeerMode};
 use hqc_proto::frame::{
     error_code, worker_approval, Ack, Envelope, HeldBy, HubFrame, LockedBy, PermissionMode,
     ProcessState, RequestResult, ResultBody, Runtime, SecretOutcome, SecretPut, SecretPutResult,
-    SessionInput, SessionStart, StartMode, TitleRequest, TitleResult, WireError,
-    WorkerApprovalRequest, WorkerFrame, WorkspaceKeyDeleteResult, WorkspaceKeysResult,
+    SessionInput, SessionStart, StartMode, SubagentHistoryResult, TitleRequest, TitleResult,
+    WireError, WorkerApprovalRequest, WorkerFrame, WorkspaceKeyDeleteResult, WorkspaceKeysResult,
 };
 
 /// Why `secret.put` and the workspace keys are refused on a worker without them (SPEC 0.147).
@@ -110,7 +117,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::adapter::{Adapter, AdapterEvent, AdapterFactory};
+use crate::adapter::{Adapter, AdapterEvent, AdapterFactory, ResultFiles};
 use crate::config::{Config, StartSpec};
 use crate::inbox::{self, ArtifactClient, InboxFile};
 use crate::known_paths::KnownPaths;
@@ -262,6 +269,15 @@ enum Cmd {
         id: String,
         task_id: String,
     },
+    /// `session.subagent_history`: what subagent `task_id` has done, after event `after` and
+    /// before event `before`.
+    SubagentHistory {
+        id: String,
+        request_id: String,
+        task_id: String,
+        after: Option<Uuid>,
+        before: Option<Uuid>,
+    },
     Kill {
         id: String,
     },
@@ -286,6 +302,7 @@ enum Cmd {
         id: String,
         request_id: String,
         answers: std::collections::BTreeMap<String, hqc_proto::event::ClarifyAnswer>,
+        action: Option<hqc_proto::event::ClarifyAction>,
     },
     /// A secret or a key for the running agent (SPEC 0.147).
     Secret {
@@ -511,6 +528,31 @@ impl Supervisor {
                 }
                 (session_id, Cmd::StopTask { id, task_id })
             }
+            HubFrame::SessionSubagentHistory(r) => {
+                // The id names a file: the hub is not trusted with paths (SPEC §2.1).
+                if !hqc_proto::frame::valid_history_task_id(&r.task_id) {
+                    let max = hqc_proto::frame::MAX_HISTORY_TASK_ID;
+                    self.link.reply(
+                        &id,
+                        wire_error(
+                            error_code::INVALID_FRAME,
+                            format!("task_id must be 1 to {max} bytes of [A-Za-z0-9_-]"),
+                            false,
+                        ),
+                    );
+                    return;
+                }
+                (
+                    r.session_id,
+                    Cmd::SubagentHistory {
+                        id,
+                        request_id: r.request_id,
+                        task_id: r.task_id,
+                        after: r.after,
+                        before: r.before,
+                    },
+                )
+            }
             HubFrame::SessionKill { session_id } => {
                 if !self.sessions.contains_key(&session_id) {
                     // Nothing runs, nothing to kill.
@@ -565,12 +607,14 @@ impl Supervisor {
                 session_id,
                 request_id,
                 answers,
+                action,
             } => (
                 session_id,
                 Cmd::Clarify {
                     id,
                     request_id,
                     answers,
+                    action,
                 },
             ),
             HubFrame::WorkerApprovalResponse {
@@ -994,6 +1038,7 @@ impl Supervisor {
             background_tasks: 0,
             token_rate: 0,
             foreground_calls: Vec::new(),
+            activity: None,
             stop_asked: false,
             stopped_by_move: 0,
             delivered: VecDeque::new(),
@@ -1014,6 +1059,7 @@ fn id_of(c: &Cmd) -> String {
         | Cmd::Stop { id }
         | Cmd::Background { id, .. }
         | Cmd::StopTask { id, .. }
+        | Cmd::SubagentHistory { id, .. }
         | Cmd::Kill { id }
         | Cmd::PermissionMode { id, .. }
         | Cmd::Model { id, .. }
@@ -1021,6 +1067,63 @@ fn id_of(c: &Cmd) -> String {
         | Cmd::Clarify { id, .. }
         | Cmd::Secret { id, .. } => id.clone(),
         Cmd::Resync | Cmd::Release { .. } | Cmd::Held { .. } | Cmd::Shutdown => String::new(),
+    }
+}
+
+/// The most of a subagent's transcript `session.subagent_history` reads, from its end: one runs
+/// to 100 MB, and the client asks every 2 s while the history is open.
+const SUBAGENT_TRANSCRIPT_TAIL: u64 = 4 * 1024 * 1024;
+
+/// The answer to `session.subagent_history` from the subagent's transcript at `path`, its
+/// events in session `session` ([`crate::mirror::map::subagent_events`]). The file is opened as
+/// `hqc_attach` opens one (no symlink in its last component, a regular file: a FIFO would hang
+/// the blocking thread), and only its last [`SUBAGENT_TRANSCRIPT_TAIL`] bytes are read, the
+/// line cut at their start left out and `truncated` set. No such file, no events. Only the events
+/// before event `before` are taken, none and `truncated` when it is not among them. When event
+/// `after` is among the events taken, only the ones after it, with `continues` and not
+/// `truncated`.
+fn subagent_history(
+    path: Option<PathBuf>,
+    session: Uuid,
+    after: Option<Uuid>,
+    before: Option<Uuid>,
+) -> SubagentHistoryResult {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut bytes = Vec::new();
+    let mut cut = false;
+    if let Some(Ok((mut f, size))) = path.map(|p| crate::mcp::attach::open_regular(&p, u64::MAX)) {
+        cut = size > SUBAGENT_TRANSCRIPT_TAIL;
+        let read = f
+            .seek(SeekFrom::Start(
+                size.saturating_sub(SUBAGENT_TRANSCRIPT_TAIL),
+            ))
+            .and_then(|_| f.take(SUBAGENT_TRANSCRIPT_TAIL).read_to_end(&mut bytes));
+        if read.is_err() {
+            bytes.clear();
+        } else if cut {
+            let start = bytes
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(bytes.len(), |i| i + 1);
+            bytes.drain(..start);
+        }
+    }
+    let (mut events, truncated) =
+        crate::mirror::map::subagent_events(&String::from_utf8_lossy(&bytes), before);
+    // The client holds the page up to `after`; the ids come from the records' uuids, so the
+    // same event has the same id in every read.
+    let at = after.and_then(|a| events.iter().rposition(|e| e.event_id == a));
+    if let Some(i) = at {
+        events.drain(..=i);
+    }
+    for e in &mut events {
+        e.session_id = session;
+        e.author = hqc_proto::event::Author::Agent { id: session };
+    }
+    SubagentHistoryResult {
+        events,
+        truncated: at.is_none() && (truncated || cut),
+        continues: at.is_some(),
     }
 }
 
@@ -1127,6 +1230,8 @@ struct Session {
     /// The calls the runtime runs in the foreground ([`AdapterEvent::ForegroundCalls`]),
     /// repeated in every `session.state`.
     foreground_calls: Vec<String>,
+    /// What the agent waits on ([`AdapterEvent::Activity`]), repeated in every `session.state`.
+    activity: Option<hqc_proto::frame::Activity>,
     /// A `session.stop` came since the last end of a turn: an input the runtime drops then
     /// was cancelled by the person, not lost ([`Session::end_turn`]).
     stop_asked: bool,
@@ -1285,6 +1390,35 @@ impl Session {
                 }
                 self.link.reply(&id, ack(None));
             }
+            Cmd::SubagentHistory {
+                id,
+                request_id,
+                task_id,
+                after,
+                before,
+            } => {
+                // Off the session's loop: a subagent's transcript runs to megabytes.
+                let path = self.adapter.subagent_transcript(&task_id);
+                let (link, session) = (self.link.clone(), self.id);
+                tokio::spawn(async move {
+                    let history = tokio::task::spawn_blocking(move || {
+                        subagent_history(path, session, after, before)
+                    })
+                    .await
+                    .unwrap_or_else(|_| SubagentHistoryResult {
+                        events: vec![],
+                        truncated: false,
+                        continues: false,
+                    });
+                    link.reply(
+                        &id,
+                        WorkerFrame::Result(RequestResult {
+                            request_id,
+                            body: ResultBody::SubagentHistory(history),
+                        }),
+                    );
+                });
+            }
             Cmd::Kill { id } => {
                 // Queued inputs stay `pending` in the hub and come again after `hello`.
                 self.queue.clear();
@@ -1317,8 +1451,12 @@ impl Session {
                 id,
                 request_id,
                 answers,
+                action,
             } => {
-                let r = self.adapter.answer_clarify(&request_id, &answers).await;
+                let r = self
+                    .adapter
+                    .answer_clarify(&request_id, &answers, action)
+                    .await;
                 self.reply_result(&id, r);
                 self.pump().await;
             }
@@ -1991,16 +2129,79 @@ impl Session {
         self.ask_runtime(own).await;
     }
 
+    fn send_event(&self, e: hqc_proto::event::Event) {
+        if e.session_id != self.id {
+            tracing::warn!(session_id = %self.id, other = %e.session_id, "adapter event for another session dropped");
+            return;
+        }
+        if let Err(err) = self.link.event(e) {
+            tracing::error!(session_id = %self.id, "outbox write failed, event lost: {err:#}");
+        }
+    }
+
+    /// Uploads what a tool result carries beyond its preview as artifacts of the session (SPEC
+    /// §8.1): its whole text into `artifact_id`, its images into `artifact_ids`. One that fails
+    /// is logged and left out.
+    async fn upload_result(&mut self, event: &mut hqc_proto::event::Event, files: ResultFiles) {
+        let EventKind::ToolResult {
+            artifact_id,
+            artifact_ids,
+            ..
+        } = &mut event.kind
+        else {
+            return;
+        };
+        if let Some(text) = files.text {
+            match self
+                .artifacts
+                .upload_bytes(
+                    self.id,
+                    text.into_bytes(),
+                    "result.txt",
+                    "text/plain; charset=utf-8",
+                    ArtifactKind::Text,
+                )
+                .await
+            {
+                Ok(id) => *artifact_id = Some(id),
+                Err(e) => {
+                    tracing::warn!(session_id = %self.id, code = %e.code, "upload of a tool result: {}", e.message)
+                }
+            }
+        }
+        for img in files.images {
+            let name = format!(
+                "image.{}",
+                img.media_type.rsplit('/').next().unwrap_or_default()
+            );
+            match self
+                .artifacts
+                .upload_bytes(
+                    self.id,
+                    img.data,
+                    &name,
+                    &img.media_type,
+                    ArtifactKind::Image,
+                )
+                .await
+            {
+                Ok(id) => artifact_ids.push(id),
+                Err(e) => {
+                    tracing::warn!(session_id = %self.id, code = %e.code, "upload of a tool result's image: {}", e.message)
+                }
+            }
+        }
+    }
+
     async fn on_event(&mut self, ev: AdapterEvent) {
         match ev {
-            AdapterEvent::Event(e) => {
-                if e.session_id != self.id {
-                    tracing::warn!(session_id = %self.id, other = %e.session_id, "adapter event for another session dropped");
-                    return;
+            AdapterEvent::Event(e) => self.send_event(e),
+            AdapterEvent::ToolResult { mut event, files } => {
+                // Here, before the next event of the adapter: the feed keeps its order.
+                if event.session_id == self.id {
+                    self.upload_result(&mut event, files).await;
                 }
-                if let Err(err) = self.link.event(e) {
-                    tracing::error!(session_id = %self.id, "outbox write failed, event lost: {err:#}");
-                }
+                self.send_event(event);
             }
             AdapterEvent::InputAccepted { event_id } => {
                 let transcript = self.transcript();
@@ -2106,7 +2307,27 @@ impl Session {
                     self.send_state();
                 }
             }
+            AdapterEvent::Activity(a) => {
+                if self.state != ProcessState::Stopped && self.activity != a {
+                    self.activity = a;
+                    self.send_state();
+                }
+            }
+            // The rate as it is: any event keeps the hub's turn watchdog off (SPEC §17.3).
+            AdapterEvent::Heartbeat => {
+                if self.state != ProcessState::Stopped {
+                    self.tokens_rate(self.token_rate);
+                }
+            }
+            // The hub makes it the session's model too, by the `system model_not_switched`
+            // the adapter sends with it (SPEC §8.1).
+            AdapterEvent::ModelKept(m) => self.spec.model = Some(m),
             AdapterEvent::Limits(l) => self.link.send(WorkerFrame::WorkerLimits(l)),
+            // Uploaded beside the session's loop, which goes on meanwhile.
+            AdapterEvent::TaskOutput(path) => {
+                let (link, artifacts, id) = (self.link.clone(), self.artifacts.clone(), self.id);
+                tokio::spawn(async move { attach_task_output(&link, &artifacts, id, &path).await });
+            }
             AdapterEvent::RuntimeSessionId(r) => {
                 // A start of this task resumes it, as the hub's next `session.start` will
                 // (after `/clear` the transcript is another one, SPEC §8.1).
@@ -2387,6 +2608,7 @@ impl Session {
                 self.tokens_rate(0);
             }
             self.foreground_calls.clear();
+            self.activity = None;
         }
         if self.state != s {
             self.state = s;
@@ -2418,6 +2640,7 @@ impl Session {
             subagents: self.subagents,
             background_tasks: self.background_tasks,
             foreground_calls: self.foreground_calls.clone(),
+            activity: self.activity.clone(),
         });
     }
 
@@ -2464,7 +2687,10 @@ impl Session {
                 status: None,
                 task_id: None,
                 from_session_id: None,
+                usage: None,
                 fork: None,
+                compaction: None,
+                model: None,
             },
         );
         if let Err(e) = self.link.event(ev) {
@@ -2475,6 +2701,66 @@ impl Session {
 
 fn start_failed(e: &anyhow::Error) -> WorkerFrame {
     wire_error(error_code::AGENT_START_FAILED, format!("{e:#}"), true)
+}
+
+/// The most of a background task's output uploaded: 2 MB, what "Open" of a text shows in the
+/// client (SPEC §8.1).
+const MAX_TASK_OUTPUT: u64 = 2 * 1024 * 1024;
+
+/// The output file `path` of a background task that ended ([`AdapterEvent::TaskOutput`]) as an
+/// `attachment` of session `id` (SPEC §8.1): a regular file, opened as `hqc_attach` opens one
+/// (no symlink in its last component), is uploaded as `hqc_attach` uploads, its last
+/// [`MAX_TASK_OUTPUT`] bytes when it is larger (where a failed build says why; the CLI gives
+/// the model the tail too), which the caption then says; the event is the agent's, `text`,
+/// named as the file. A file that is not there, not regular or empty, or an upload the hub
+/// refuses, gives no event.
+async fn attach_task_output(link: &HubLink, artifacts: &ArtifactClient, id: Uuid, path: &Path) {
+    use hqc_proto::event::{ArtifactKind, Author};
+    use std::io::{Seek, SeekFrom};
+    let (mut file, size) = match crate::mcp::attach::open_regular(path, u64::MAX) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::info!(session_id = %id, path = %path.display(), "task output not attached: {}", e.message);
+            return;
+        }
+    };
+    if size == 0 {
+        tracing::info!(session_id = %id, path = %path.display(), "task output empty, not attached");
+        return;
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let sent = size.min(MAX_TASK_OUTPUT);
+    if let Err(e) = file.seek(SeekFrom::Start(size - sent)) {
+        tracing::warn!(session_id = %id, path = %path.display(), "task output not attached: {e}");
+        return;
+    }
+    let artifact_id = match artifacts
+        .upload(id, file, sent, &name, Some(ArtifactKind::Text))
+        .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(session_id = %id, path = %path.display(), code = %e.code, "task output upload: {}", e.message);
+            return;
+        }
+    };
+    tracing::info!(session_id = %id, path = %path.display(), %artifact_id, size, "task output attached");
+    let ev = crate::adapter::new_event(
+        id,
+        Author::Agent { id },
+        EventKind::Attachment {
+            artifact_id,
+            kind: ArtifactKind::Text,
+            name,
+            caption: (sent < size).then(|| format!("The last 2 MB of {size} bytes")),
+        },
+    );
+    if let Err(e) = link.event(ev) {
+        tracing::error!(session_id = %id, "outbox write failed: {e:#}");
+    }
 }
 
 async fn sleep_until_opt(t: Option<Instant>) {

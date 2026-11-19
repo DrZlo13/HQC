@@ -9,6 +9,9 @@
     "seven_day": {
       "utilization": 0.23,
       "resets_at": 1794283200
-    }
+    },
+    "status": "allowed",
+    "rate_limit_type": "five_hour",
+    "resets_at": 1794150000
   }
 }

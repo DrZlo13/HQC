@@ -23,6 +23,7 @@ import {
   parseServerFrame,
   parseSessionInfo,
   parseSessionOrder,
+  parseSubagentHistory,
   parseVapidKey,
   parseWorkspace,
   parseWorkspaceConflict,
@@ -88,6 +89,13 @@ describe('examples/wire', () => {
       expect.objectContaining({ due_in_ms: 754000, at: '2026-10-22T10:12:34Z', cron: undefined, timezone: 'Europe/Moscow' }),
       expect.objectContaining({ due_in_ms: 82800000, cron: '0 9 * * *', at: undefined }),
     ]);
+  });
+
+  it('reads the images of tool.result (SPEC 0.180), none when absent', () => {
+    const r = parseEvent(load('event.tool.result.images.json'));
+    expect(r.type === 'tool.result' && r.payload.artifact_ids).toEqual(['0199f3a2-7c10-7000-8000-0000000000f3']);
+    const plain = parseEvent(load('event.tool.result.json'));
+    expect(plain.type === 'tool.result' && plain.payload.artifact_ids).toEqual([]);
   });
 
   it('reads the text answer of approval.response (T26)', () => {
@@ -201,6 +209,31 @@ describe('examples/wire', () => {
     expect(s.foreground_calls).toEqual(['toolu_01FoCFY4DmUbVxXAembc44PX']);
     expect(sys.foreground_calls).toBeUndefined();
     expect(one.type === 'session.summary' && one.session.foreground_calls).toEqual(['toolu_01FoCFY4DmUbVxXAembc44PX']);
+    // SPEC 0.179: what the agent waits on, in the session and its summary; an unknown kind is none.
+    const retrying = { kind: 'retrying', attempt: 3, max_retries: 10, retry_delay_ms: 8000, error_status: 529 };
+    expect(s.activity).toEqual(retrying);
+    expect(sys.activity).toBeUndefined();
+    expect(one.type === 'session.summary' && one.session.activity).toEqual(retrying);
+    expect(parseSessionInfo({ ...(load('api.session.json') as object), activity: { kind: 'dreaming' } }).activity).toBeUndefined();
+    expect(parseSessionInfo({ ...(load('api.session.json') as object), activity: { kind: 'thinking', estimated_tokens: 40 } }).activity).toEqual({
+      kind: 'thinking',
+      estimated_tokens: 40,
+    });
+    const retry = parseEvent(load('event.subagents.live.retry.json'));
+    expect(retry.type === 'subagents.live' && retry.payload.agents[0].retry).toEqual({ attempt: 2, max_retries: 10, retry_delay_ms: 4000 });
+    const kept = parseEvent(load('event.system.model_not_switched.json'));
+    expect(kept.type === 'system' && kept.payload.model).toBe('claude-opus-5-5');
+    const retraction = parseEvent(load('event.retraction.json'));
+    expect(retraction.type === 'retraction' && retraction.payload.event_ids).toEqual([
+      '0199f3a2-7c10-7000-8000-000000000113',
+      '0199f3a2-7c10-7000-8000-000000000114',
+    ]);
+    const compacted = parseEvent(load('event.system.context_compacted.json'));
+    expect(compacted.type === 'system' && [compacted.payload.trigger, compacted.payload.pre_tokens, compacted.payload.post_tokens]).toEqual([
+      'auto',
+      165000,
+      12400,
+    ]);
     // Favorites: the user's, in the session and its summary; absent is not a favorite.
     expect(s.favorite_at).toBe('2026-10-22T09:30:00Z');
     expect(sys.favorite_at).toBeUndefined();
@@ -232,6 +265,13 @@ describe('examples/wire', () => {
 
   it('reads the other REST bodies', () => {
     expect(parseEventPage(load('api.events.json')).last_seq).toBe(43);
+    const h = parseSubagentHistory(load('api.subagent_history.json'));
+    expect(h.events.map((e) => [e.type, e.seq])).toEqual([
+      ['tool.call', undefined],
+      ['tool.result', undefined],
+    ]);
+    expect(h.truncated).toBe(false);
+    expect(h.continues).toBe(true);
     const sp = parseSearchPage(load('api.search.json'));
     expect(sp.results.map((h) => [h.address, h.seq, h.archived])).toEqual([
       ['hqc/hqc-run-the-tests', 42, false],

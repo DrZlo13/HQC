@@ -1,0 +1,13 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000124",
+  "seq": 42,
+  "ts": "2026-10-22T10:00:00Z",
+  "author": { "kind": "agent", "id": "0199f3a2-7c10-7000-8000-000000000001" },
+  "type": "approval.request",
+  "payload": { "request_id": "req-3", "tool": "Bash", "description": "cargo test", "options": [
+    { "id": "allow", "label": "Allow once", "canonical": "once" },
+    { "id": "allow_session", "label": "Allow for this session", "canonical": "session" },
+    { "id": "deny", "label": "Deny", "canonical": "deny" }
+  ], "subagent": { "task_id": "a52af2b436ded4cea", "description": "Fix schematic power nets in import" } }
+}

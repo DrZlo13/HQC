@@ -15,6 +15,7 @@
     "subagents": 2,
     "background_tasks": 1,
     "foreground_calls": ["toolu_01FoCFY4DmUbVxXAembc44PX"],
+    "activity": {"kind": "retrying", "attempt": 3, "max_retries": 10, "retry_delay_ms": 8000, "error_status": 529},
     "favorite_at": "2026-10-22T09:30:00Z",
     "paused_at": "2026-10-22T10:00:01Z"
   }

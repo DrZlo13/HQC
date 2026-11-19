@@ -242,6 +242,7 @@ async fn build(
                 background_tasks: s.background_tasks.max(0) as u32,
                 output_per_s: app.token_rate(s.id),
                 foreground_calls: app.foreground_calls(s.id),
+                activity: app.activity(s.id),
                 spawned_by: s.spawned_by.zip(a.spawned_by_address.clone()).map(
                     |(session_id, address)| SpawnedBy {
                         session_id,

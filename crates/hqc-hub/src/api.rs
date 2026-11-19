@@ -22,7 +22,7 @@ use hqc_proto::{
     event::CancelReason,
     frame::{
         FsListDirs, FsStat, FsStatResult, HubFrame, ListCandidates, PermissionMode, ResultBody,
-        SessionCleanup,
+        SessionCleanup, SubagentHistory,
     },
 };
 use serde::Deserialize;
@@ -388,6 +388,7 @@ pub async fn delete_project(
         app.drop_live_agents(*session_id);
         app.token_rate_changed(*session_id, 0);
         app.drop_foreground_calls(*session_id);
+        app.drop_activity(*session_id);
         app.session_changed(*session_id);
     }
     for (worker_id, f) in cleanups {
@@ -1602,6 +1603,7 @@ async fn remove_session(app: &AppState, s: &SessionRow) -> ApiResult<()> {
     app.drop_live_agents(id);
     app.token_rate_changed(id, 0);
     app.drop_foreground_calls(id);
+    app.drop_activity(id);
     app.session_changed(id);
     Ok(())
 }
@@ -2042,6 +2044,48 @@ pub async fn stop_task(
     Ok(Json(json!({ "sent": sent })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SubagentHistoryQuery {
+    /// The `event_id` of the last event the client shows, passed on to the worker.
+    pub after: Option<Uuid>,
+}
+
+/// What subagent `task_id` of the session has done (since SPEC 0.181): the worker's
+/// `session.subagent_history`, read from the subagent's transcript when asked and stored
+/// nowhere; `?after=` goes with it. A `task_id` that is not 1 to 64 bytes of `[A-Za-z0-9_-]`, or
+/// an `after` that is not a UUID: `400`; the session's worker offline `409 worker_offline`, no
+/// answer `504 worker_timeout`.
+pub async fn subagent_history(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path((id, task_id)): Path<(Uuid, String)>,
+    Query(q): Query<SubagentHistoryQuery>,
+) -> ApiResult<Json<api::SubagentHistoryPage>> {
+    let s = session_for(&app, &user, id, Action::Read).await?;
+    if !hqc_proto::frame::valid_history_task_id(&task_id) {
+        return Err(ApiError::BadRequest(format!(
+            "task_id must be 1 to {} bytes of [A-Za-z0-9_-]",
+            hqc_proto::frame::MAX_HISTORY_TASK_ID
+        )));
+    }
+    let offline = || ApiError::Conflict("worker_offline", "the worker is offline".into());
+    let worker = s.worker_id.ok_or_else(offline)?;
+    match ask_worker(&app, worker, |request_id| {
+        HubFrame::SessionSubagentHistory(SubagentHistory {
+            request_id,
+            session_id: id,
+            task_id,
+            after: q.after,
+            before: None,
+        })
+    })
+    .await?
+    {
+        ResultBody::SubagentHistory(r) => Ok(Json(r)),
+        other => Err(anyhow::anyhow!("session.subagent_history answered with {other:?}").into()),
+    }
+}
+
 pub async fn retry(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -2224,9 +2268,11 @@ pub async fn workers(
         .into_iter()
         .map(|w| {
             // The account's usage limits as the worker last reported them (SPEC §6).
-            let limits = limits
-                .get(&w.id)
-                .map(|(l, at)| json!({"five_hour": l.five_hour, "seven_day": l.seven_day, "reported_at": at}));
+            let limits = limits.get(&w.id).map(|(l, at)| {
+                json!({"five_hour": l.five_hour, "seven_day": l.seven_day,
+                    "status": l.status, "rate_limit_type": l.rate_limit_type,
+                    "resets_at": l.resets_at, "reported_at": at})
+            });
             json!({
                 "limits": limits,
                 "id": w.id,

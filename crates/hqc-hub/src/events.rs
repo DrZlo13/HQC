@@ -56,6 +56,9 @@ pub enum Ingested {
     Refused(String),
 }
 
+/// Most events one `retraction` hides: the runtime takes back the records of one answer.
+const MAX_RETRACTED: usize = 1024;
+
 /// Event types only the hub writes (SPEC §4): input of users, answers to requests and
 /// messages between sessions, and `schedules.live`. A worker sending one is refused.
 fn hub_only(kind: &EventKind) -> bool {
@@ -86,6 +89,8 @@ fn ends_turn(kind: &EventKind) -> bool {
 fn ends_live_text(kind: &EventKind) -> bool {
     match kind {
         EventKind::AgentMessage { .. } => true,
+        // The runtime took the answer being written back (SPEC 0.179): no message ends it.
+        EventKind::Retraction { .. } => true,
         EventKind::Status { state, .. } => *state != SessionState::Running,
         _ => false,
     }
@@ -167,6 +172,17 @@ pub async fn ingest_worker_event(
                 tracing::warn!(session_id = %s.id, "a worker's approval.request carried `secret`: dropped");
             }
         }
+    }
+    // A retraction hides events in every client and in forks (SPEC 0.179): it may name only the
+    // agent's own output in this session, at most MAX_RETRACTED events; other ids are left out
+    // of what is stored (the worker also names records that gave no event).
+    if let EventKind::Retraction { event_ids } = &ev.kind {
+        let named = &event_ids[..event_ids.len().min(MAX_RETRACTED)];
+        let kept = db::retractable(&app.db, s.id, named).await?;
+        if kept.len() != event_ids.len() {
+            tracing::info!(session_id = %s.id, named = event_ids.len(), kept = kept.len(), "retraction: ids it may not hide left out");
+        }
+        payload = json!({ "event_ids": kept });
     }
     let new = NewEvent {
         event_id: ev.event_id,
@@ -438,6 +454,22 @@ async fn after_store(
     kind: &EventKind,
     source: Source,
 ) -> anyhow::Result<()> {
+    // The runtime refused a model switch and kept this model: the session's again (SPEC §4,
+    // §8.1), before the event goes out, since a client reads the session again on it. A name
+    // hqc would not take from the user is not taken from it.
+    if let EventKind::System {
+        code,
+        model: Some(m),
+        ..
+    } = kind
+    {
+        if source == Source::Worker
+            && code == hqc_proto::event::MODEL_NOT_SWITCHED
+            && crate::api::valid_model(m)
+        {
+            db::set_model(&app.db, s.id, Some(m)).await?;
+        }
+    }
     // Publish first so that clients see events in seq order even when side effects below
     // store further events.
     app.notify(Notice::Event {
@@ -549,6 +581,10 @@ async fn after_store(
     if source != Source::Mirror {
         push::on_event(app, s, row, kind);
     }
+    // What the agent waited on in the turn is over with it (SPEC §5.4).
+    if ends_turn(kind) {
+        app.drop_activity(s.id);
+    }
     app.session_changed(s.id);
     if matches!(
         kind,
@@ -595,6 +631,7 @@ pub async fn turn_timed_out(
         requests::cancel(app, &p, hqc_proto::event::CancelReason::Timeout).await?;
     }
     db::set_turn(&app.db, session_id, false, true).await?;
+    app.drop_activity(session_id);
     let why = format!("no events for {} s", idle.as_secs());
     system(app, &s, "turn_lost", &why).await?;
     // The speaker of a conversation room: the room stops (SPEC §7.1.1).
@@ -612,6 +649,7 @@ pub async fn turn_lost(app: &AppState, session_id: Uuid) -> anyhow::Result<()> {
         return Ok(());
     }
     db::set_turn(&app.db, session_id, false, false).await?;
+    app.drop_activity(session_id);
     system(
         app,
         &s,

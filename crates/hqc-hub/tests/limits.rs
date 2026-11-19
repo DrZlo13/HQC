@@ -39,3 +39,24 @@ async fn a_workers_limits_are_listed_with_it() {
     assert!(l["reported_at"].is_string(), "{l}");
     hub.finish().await;
 }
+
+/// SPEC §5.4, §6 (since 0.179): the state of the limit nearest, which one it is and when it
+/// resets are listed with the windows.
+#[tokio::test]
+async fn a_rejected_limit_is_listed_with_its_type_and_reset() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    w.send(
+        "worker.limits",
+        json!({"five_hour": {"utilization": 1.0, "resets_at": 1794150000},
+               "status": "rejected", "rate_limit_type": "five_hour", "resets_at": 1794150000}),
+    )
+    .await;
+    w.expect("ack").await;
+    let l = limits(&hub).await;
+    assert_eq!(l["status"], "rejected", "{l}");
+    assert_eq!(l["rate_limit_type"], "five_hour");
+    assert_eq!(l["resets_at"], 1794150000);
+    hub.finish().await;
+}

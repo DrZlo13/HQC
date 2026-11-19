@@ -1,0 +1,41 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000111",
+  "seq": 42,
+  "ts": "2026-10-22T10:00:00Z",
+  "author": {
+    "kind": "agent",
+    "id": "0199f3a2-7c10-7000-8000-000000000001"
+  },
+  "type": "clarify.request",
+  "payload": {
+    "request_id": "req-4",
+    "questions": [
+      {
+        "id": "1",
+        "text": "The region to deploy to",
+        "header": "Region",
+        "options": [
+          "eu-west",
+          "us-east"
+        ],
+        "required": true
+      },
+      {
+        "id": "2",
+        "text": "Replicas",
+        "input": "integer"
+      },
+      {
+        "id": "3",
+        "text": "Keep the old release",
+        "options": [
+          "Yes",
+          "No"
+        ]
+      }
+    ],
+    "server": "deploy",
+    "message": "Where should the release go?"
+  }
+}

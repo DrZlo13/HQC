@@ -339,6 +339,7 @@ async fn quiet_import_and_live_release() {
         json!({"text": "typed in vscode", "artifact_ids": []}),
         true,
     );
+    let foreign_id = foreign["event_id"].clone();
     mirror_event(&mut w, &runtime, foreign, None, true).await;
     let s = hub.session(&sid).await;
     assert_eq!(s["locked_by"], "vscode");
@@ -346,6 +347,17 @@ async fn quiet_import_and_live_release() {
     assert!(evs
         .iter()
         .any(|e| e["payload"]["code"] == "session_released"));
+
+    // A retraction is the adapter's alone (SPEC §4): from the mirror it is dropped, and the
+    // person's message it names is not hidden.
+    let retraction = record_event("retraction", json!({ "event_ids": [foreign_id] }), false);
+    let ack = mirror_event(&mut w, &runtime, retraction, None, true).await;
+    assert!(ack["payload"]["seq"].is_null(), "{ack}");
+    assert!(!hub
+        .events(&sid)
+        .await
+        .iter()
+        .any(|e| e["type"] == "retraction"));
 
     // Outside the workspace, or not mirrored: dropped (ack without seq).
     let mut p = json!({"workspace_path": "/w/other", "runtime_session_id": runtime,

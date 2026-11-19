@@ -21,8 +21,10 @@ import {
   type SessionState,
   type SlashCommand,
   type SpawnedBy,
+  type SubagentHistory,
 } from '../src/proto';
 import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, modelName, shownModel } from '../src/ui/labels';
+import { limitNotice } from '../src/ui/limits';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
 import { Chat, withQuote } from '../src/ui/Chat';
 import { LiveSubagents } from '../src/ui/LiveSubagents';
@@ -126,6 +128,10 @@ function setup(
     stopTask: vi.fn(async () => {}),
     // POST /api/sessions/{id}/stop.
     stop: vi.fn(async () => {}),
+    // GET /api/sessions/{id}/subagents/{task_id}/history: nothing done yet unless a test says.
+    subagentHistory: vi.fn(
+      async (_id: string, _task: string, _after?: string): Promise<SubagentHistory> => ({ events: [], truncated: false }),
+    ),
     sessions: vi.fn(async () => []),
     projects: vi.fn(async () => []),
     workspaces: vi.fn(async () => [
@@ -537,6 +543,21 @@ describe('model', () => {
     expect(modelName('qwen3.8-27b:q4_K')).toBe('qwen3.8-27b:q4_K');
   });
 
+  it('shows the model the runtime kept once it refused a switch (SPEC 0.179)', async () => {
+    const { app, api } = setup('idle', { model: 'claude-nope' });
+    await mount(app);
+    expect($('.chat-model')!.textContent).toBe('claude-nope');
+    // GET /api/sessions/{id}: the model the hub took from the line.
+    api.session.mockImplementation(async () => ({ ...app.sessions.get('s1')!, model: 'claude-opus-5-5', commands: undefined }));
+    const fetched = api.session.mock.calls.length;
+    await act(async () => {
+      subscriber!.onEvent(ev('event.system.model_not_switched', 8));
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(api.session).toHaveBeenCalledTimes(fetched + 1);
+    expect($('.chat-model')!.textContent).toBe('Opus 5.5');
+  });
+
   it('shows the usage limits of the session\'s worker under the model', async () => {
     const { app, api } = setup('idle');
     const soon = Math.floor(Date.now() / 1000) + 2 * 3600;
@@ -575,6 +596,65 @@ describe('model', () => {
     await open();
     await act(async () => new Promise((r) => setTimeout(r, 10)));
     expect(root.querySelector('.limits')).toBeNull();
+  });
+
+  it('shows a bar above the input at 70 % of a window and when a limit is hit (SPEC 0.179)', async () => {
+    const { app, api } = setup('idle');
+    const soon = Math.floor(Date.now() / 1000) + 2 * 3600;
+    let limits: object = { five_hour: { utilization: 0.39, resets_at: soon }, reported_at: '' };
+    (api as any).workers = vi.fn(async () => [{ id: 'wk1', name: 'drzlo-mac', limits }]);
+    await mount(app);
+    expect($('.limit-notice')).toBeNull();
+    // Each change of the session's state reads the limits again.
+    const state = async (s: SessionState) => {
+      const info = app.sessions.get('s1')!;
+      await act(async () =>
+        app.mergeSummary([
+          { session_id: 's1', project_id: 'p1', title: info.title, state: s, queue_len: 0, unread: 0, last_seq: 7, last_read_seq: 7 },
+        ]),
+      );
+      await act(async () => new Promise((r) => setTimeout(r, 10)));
+    };
+    limits = {
+      five_hour: { utilization: 0.72, resets_at: soon },
+      seven_day: { utilization: 0.934, resets_at: soon + 3 * 86400 },
+      reported_at: '',
+    };
+    await state('running');
+    expect($('.limit-notice')!.textContent).toMatch(/^You've used 93% of your weekly limit · resets \S+ \d/);
+    limits = { ...limits, status: 'rejected', rate_limit_type: 'five_hour', resets_at: soon };
+    await state('idle');
+    expect($('.limit-notice')!.textContent).toMatch(/^You've hit your 5-hour limit · resets \d/);
+    expect($('.limit-notice-hit')).not.toBeNull();
+    // Above the subagents, which stay right above the input.
+    expect($('.limit-notice + .composer-wrap')).not.toBeNull();
+  });
+
+  it('shows no limit bar in a session on a provider, whose model is not on the subscription (SPEC 0.179)', async () => {
+    const { app, api } = setup('idle');
+    const soon = Math.floor(Date.now() / 1000) + 2 * 3600;
+    const limits = { status: 'rejected', rate_limit_type: 'five_hour', resets_at: soon, reported_at: '' };
+    (api as any).workers = vi.fn(async () => [{ id: 'wk1', name: 'drzlo-mac', limits }]);
+    // On the session object the hub serves too: the chat fetches it again on opening.
+    app.sessions.get('s1')!.provider = { id: 'pr1', label: 'GLM' };
+    await mount(app);
+    await act(async () => new Promise((r) => setTimeout(r, 10)));
+    expect($('.limit-notice')).toBeNull();
+  });
+
+  it('says nothing of a limit or a window that has reset since it was reported (SPEC 0.179)', () => {
+    const now = Date.UTC(2026, 10, 13, 12);
+    const past = now / 1000 - 60;
+    const soon = now / 1000 + 3600;
+    expect(limitNotice({ status: 'rejected', rate_limit_type: 'five_hour', resets_at: past, reported_at: '' }, now)).toBeUndefined();
+    expect(limitNotice({ five_hour: { utilization: 0.95, resets_at: past }, reported_at: '' }, now)).toBeUndefined();
+    expect(
+      limitNotice({ five_hour: { utilization: 0.95, resets_at: past }, seven_day: { utilization: 0.8, resets_at: soon }, reported_at: '' }, now),
+    ).toMatch(/^You've used 80% of your weekly limit · resets /);
+    // Without a reset time the limit is as current as its report.
+    expect(limitNotice({ status: 'rejected', rate_limit_type: 'seven_day_overage_included', reported_at: '' }, now)).toBe(
+      "You've hit your Fable limit",
+    );
   });
 
   // SPEC 0.168: the versions under "Versions"; a name the menu does not list is typed.
@@ -641,6 +721,23 @@ describe('a refusal of the model', () => {
     expect($('.ctx-menu')).toBeNull();
     expect(offer()).toBeNull();
     expect($('.line-refusal .refusal-offer')!.textContent).toBe('Switched to Opus 4.8. Send the message again.');
+  });
+
+  it('a switch the runtime refused brings the offer back (SPEC 0.179)', async () => {
+    const { app } = setup('idle', { history: [HISTORY[0], reply(2)] });
+    await mount(app);
+    await act(async () => offer()!.click());
+    await act(async () => {
+      root.querySelector<HTMLButtonElement>('.ctx-menu .btn-model-claude-opus-4-8')!.click();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect($('.line-refusal .refusal-offer')!.textContent).toBe('Switched to Opus 4.8. Send the message again.');
+    // The CLI kept its model: the line says so, and the refusal offers another one again.
+    await act(async () => {
+      subscriber!.onEvent(ev('event.system.model_not_switched', 3));
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(offer()).not.toBeNull();
   });
 
   it('a refused switch keeps the offer', async () => {
@@ -835,6 +932,23 @@ describe('header', () => {
       ]),
     );
     expect(button('Run in background')).toBeUndefined();
+  });
+
+  it("shows what the agent waits on from the session's summary, until a summary without it", async () => {
+    // SPEC 0.179: `activity` comes and goes with the summaries the hub pushes.
+    const { app } = setup('running', { history: [] });
+    await mount(app);
+    expect($('.activity')!.textContent).toBe('Agent is working');
+    const s = app.sessions.get('s1')!;
+    const summary = { session_id: 's1', project_id: 'p1', title: s.title, state: 'running' as const, queue_len: 0, unread: 0, last_seq: 7, last_read_seq: 7 };
+    await act(async () =>
+      app.mergeSummary([
+        { ...summary, activity: { kind: 'retrying', attempt: 2, max_retries: 10, retry_delay_ms: 4000, error_status: 529 } },
+      ]),
+    );
+    expect($('.activity')!.textContent).toBe('Retrying 2/10 (529), next in 4 s');
+    await act(async () => app.mergeSummary([summary]));
+    expect($('.activity')!.textContent).toBe('Agent is working');
   });
 
   it('shows the state, worker, path, model and cost of the session, "Stop" and "More"', async () => {
@@ -1234,6 +1348,8 @@ describe('live subagents', () => {
     // The watcher is a task the CLI stops alone; a timer is none.
     const stops = [...root.querySelectorAll('.live-agents-row')].map((r) => r.querySelector('.live-agents-stop') !== null);
     expect(stops).toEqual([true, false, false]);
+    // Only a subagent's row opens its history: these are none.
+    expect(root.querySelectorAll('button.live-agents-opens')).toHaveLength(0);
   });
 
   it('shows the block for the session\'s schedules alone: "Scheduled:", the message, the countdown; a click opens the schedules', async () => {
@@ -1252,6 +1368,7 @@ describe('live subagents', () => {
     await act(async () => $('.live-agents-open')!.click());
     expect($('.schedules')).not.toBeNull();
     expect(api.schedules).toHaveBeenCalledWith('s1');
+    expect(api.subagentHistory).not.toHaveBeenCalled();
     // The list emptied: the block goes.
     await act(async () => subscriber!.onEvent(schedulesLive((e) => (e.payload.schedules = []))));
     expect($('.live-agents')).toBeNull();
@@ -1279,6 +1396,219 @@ describe('live subagents', () => {
     expect(await at(0)).toEqual(['in 4m 30s', '', '1s', 'in 41s']);
     expect(await at(41_000)).toEqual(['in 3m 49s', '', '42s', 'due']);
     expect(await at(300_000)).toEqual(['due', '', '5m 1s', 'due']);
+  });
+
+  it('says on its row that a subagent retries a request to the model API (SPEC 0.179)', async () => {
+    const { app } = setup('running', { subagents: 1 });
+    await mount(app);
+    await act(async () => subscriber!.onEvent(ev('event.subagents.live.retry', 0, (e) => delete e.seq)));
+    expect(rows()).toEqual([['Reply with number: Retrying 2/10 (no response), next in 4 s', '9s']]);
+  });
+
+  it('says a subagent waits for permission while a request names it', async () => {
+    const { app } = setup('waiting', {
+      subagents: 2,
+      history: [...HISTORY.slice(0, 3), ev('event.approval.request.subagent', 4)],
+    });
+    await mount(app);
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = e.payload.agents.slice(0, 2)))));
+    expect(rows().map((r) => r[0])).toEqual([
+      'Agent: Fix schematic power nets in import: waiting for permission',
+      'Agent: Reply with number',
+    ]);
+    await act(async () =>
+      subscriber!.onEvent(ev('event.approval.response', 5, (e) => (e.payload.request_id = 'req-3'))),
+    );
+    expect(rows().map((r) => r[0])).toEqual([
+      'Agent: Fix schematic power nets in import: Running Verify the final sample runs are byte-identical',
+      'Agent: Reply with number',
+    ]);
+  });
+
+  // Since 0.181: what the subagent has done, under its line, as the feed draws it.
+  it("opens a subagent's history under its line, fetches it again, closes it, and it goes with the line", async () => {
+    // Its `Agent` call is not among the loaded events (a subagent's subagent, or one started
+    // long ago): its line opens all the same.
+    const { api, app } = setup('running', { subagents: 1, background_tasks: 1, history: HISTORY.slice(0, 3) });
+    await mount(app);
+    const step = (name: string, id: string, payload: unknown) =>
+      ev(name, 0, (e) => {
+        delete e.seq;
+        e.event_id = `0199f3a2-7c10-7000-8000-0000000002${id}`;
+        e.payload = payload;
+      });
+    const page = {
+      events: [
+        step('event.agent.thinking', 'e1', { text: 'The nets come from the netlist.' }),
+        step('event.tool.call', 'e2', { call_id: 'toolu_s1', tool: 'Bash', args_preview: '{"command":"cargo test -p import"}' }),
+        step('event.tool.result', 'e3', { call_id: 'toolu_s1', result_preview: 'test result: ok', error: false }),
+      ],
+      truncated: false,
+    };
+    // A new body each time, as parsed from the hub's answer.
+    api.subagentHistory.mockImplementation(async () => ({ ...page }));
+    const subagent = { task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000, call_id: 'toolu_ag' };
+    const command = { task_id: 'b2st7oc3z', description: 'Full run over 1000 boards', duration_ms: 65_000, call_id: 'toolu_bg', kind: 'command' as const };
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [subagent, command]))));
+    // The subagent's line opens; the command's is no button.
+    const opens = [...root.querySelectorAll<HTMLButtonElement>('button.live-agents-opens')];
+    expect(opens.map((b) => b.querySelector('.live-agents-task')!.textContent)).toEqual(['Fix the nets']);
+    expect(rows()).toHaveLength(2);
+    const panel = () => $('.live-agents li .live-agents-history');
+    const flush = () => act(async () => void (await vi.advanceTimersByTimeAsync(0)));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await act(async () => opens[0].click());
+      await flush();
+      expect(api.subagentHistory).toHaveBeenCalledWith('s1', 'a52af2b436ded4cea', undefined);
+      expect(opens[0].getAttribute('aria-expanded')).toBe('true');
+      expect(panel()!.querySelector('.thinking summary')!.textContent).toContain('The nets come from the netlist.');
+      expect(panel()!.querySelector('.tool-group.tool-ok .tool-peek')!.textContent).toContain('cargo test -p import');
+      expect(panel()!.querySelector('.msg-agent')).toBeNull();
+
+      // Fetched again 2 s after the answer, the new step at the bottom.
+      page.events = [...page.events, step('event.agent.message', 'e4', { text: 'The import keeps the power nets.', final: false })];
+      await act(async () => void (await vi.advanceTimersByTimeAsync(2000)));
+      expect(api.subagentHistory).toHaveBeenCalledTimes(2);
+      expect(panel()!.querySelector('.feed-block:last-child .msg-agent')!.textContent).toContain('The import keeps the power nets.');
+
+      // A second click closes it, and nothing is fetched any more.
+      await act(async () => opens[0].click());
+      expect(panel()).toBeNull();
+      await act(async () => void (await vi.advanceTimersByTimeAsync(6000)));
+      expect(api.subagentHistory).toHaveBeenCalledTimes(2);
+
+      // Open again: the subagent ends, its line goes and the history with it.
+      await act(async () => opens[0].click());
+      await flush();
+      expect(panel()).not.toBeNull();
+      await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [command]))));
+      expect(panel()).toBeNull();
+      expect(rows().map((r) => r[0])).toEqual(['Command: Full run over 1000 boards']);
+      const calls = api.subagentHistory.mock.calls.length;
+      await act(async () => void (await vi.advanceTimersByTimeAsync(6000)));
+      expect(api.subagentHistory).toHaveBeenCalledTimes(calls);
+      // Continued later under the same id, its line comes back closed.
+      await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [subagent, command]))));
+      expect(root.querySelector('button.live-agents-opens')!.getAttribute('aria-expanded')).toBe('false');
+      expect(panel()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fetches an open history again after its last event, appends what came since, and takes a whole page in its place', async () => {
+    const { api, app } = setup('running', { subagents: 1 });
+    await mount(app);
+    const said = (id: string, text: string) =>
+      ev('event.agent.message', 0, (e) => {
+        delete e.seq;
+        e.event_id = `0199f3a2-7c10-7000-8000-0000000002${id}`;
+        e.payload = { text, final: false };
+      });
+    const replies: SubagentHistory[] = [
+      { events: [said('e1', 'One.'), said('e2', 'Two.')], truncated: false },
+      // What came after e2, with e2 again.
+      { events: [said('e2', 'Two.'), said('e3', 'Three.')], truncated: false, continues: true },
+      // Nothing new.
+      { events: [], truncated: false, continues: true },
+      // e3 is no longer in the worker's page: the whole page.
+      { events: [said('e8', 'Eight.'), said('e9', 'Nine.')], truncated: true },
+    ];
+    api.subagentHistory.mockImplementation(async () => replies.shift()!);
+    const subagent = { task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000 };
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [subagent]))));
+    const panel = () => $('.live-agents li .live-agents-history')!;
+    const texts = () => [...panel().querySelectorAll('.msg-agent > .text')].map((m) => m.textContent!.trim());
+    const tick = (ms: number) => act(async () => void (await vi.advanceTimersByTimeAsync(ms)));
+    // The `after` of the latest fetch.
+    const after = () => api.subagentHistory.mock.lastCall![2];
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await act(async () => root.querySelector<HTMLButtonElement>('button.live-agents-opens')!.click());
+      await tick(0);
+      expect(after()).toBeUndefined();
+      expect(texts()).toEqual(['One.', 'Two.']);
+      await tick(2000);
+      expect(after()).toBe('0199f3a2-7c10-7000-8000-0000000002e2');
+      expect(texts()).toEqual(['One.', 'Two.', 'Three.']);
+      const shown = panel().innerHTML;
+      await tick(2000);
+      expect(after()).toBe('0199f3a2-7c10-7000-8000-0000000002e3');
+      expect(panel().innerHTML).toBe(shown);
+      await tick(2000);
+      expect(after()).toBe('0199f3a2-7c10-7000-8000-0000000002e3');
+      expect(texts()).toEqual(['Eight.', 'Nine.']);
+      expect(panel().querySelector('.live-agents-note')!.textContent).toBe('Earlier steps are not shown.');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the newest 200 steps of an open history and says earlier ones are not shown', async () => {
+    const { api, app } = setup('running', { subagents: 1 });
+    await mount(app);
+    const said = (n: number) =>
+      ev('event.agent.message', 0, (e) => {
+        delete e.seq;
+        e.event_id = `0199f3a2-7c10-7000-8000-${n.toString().padStart(12, '0')}`;
+        e.payload = { text: `Step ${n}.`, final: false };
+      });
+    const replies: SubagentHistory[] = [
+      { events: Array.from({ length: 199 }, (_, i) => said(i + 1)), truncated: false },
+      { events: [said(200), said(201), said(202)], truncated: false, continues: true },
+    ];
+    api.subagentHistory.mockImplementation(async () => replies.shift() ?? { events: [], truncated: false, continues: true });
+    const subagent = { task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000 };
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [subagent]))));
+    const panel = () => $('.live-agents li .live-agents-history')!;
+    const texts = () => [...panel().querySelectorAll('.msg-agent > .text')].map((m) => m.textContent!.trim());
+    const tick = (ms: number) => act(async () => void (await vi.advanceTimersByTimeAsync(ms)));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await act(async () => root.querySelector<HTMLButtonElement>('button.live-agents-opens')!.click());
+      await tick(0);
+      expect(texts()).toHaveLength(199);
+      expect(panel().querySelector('.live-agents-note')).toBeNull();
+      await tick(2000);
+      expect(texts()).toHaveLength(200);
+      expect([texts()[0], texts()[199]]).toEqual(['Step 3.', 'Step 202.']);
+      expect(panel().querySelector('.live-agents-note')!.textContent).toBe('Earlier steps are not shown.');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fetches an open history again only while the page is shown, and at once when it is shown again', async () => {
+    const { api, app } = setup('running', { subagents: 1 });
+    await mount(app);
+    api.subagentHistory.mockImplementation(async () => ({ events: [], truncated: false }));
+    const subagent = { task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000 };
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [subagent]))));
+    let hidden = false;
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+    const visibility = (h: boolean) => {
+      hidden = h;
+      document.dispatchEvent(new Event('visibilitychange'));
+    };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await act(async () => root.querySelector<HTMLButtonElement>('button.live-agents-opens')!.click());
+      await act(async () => void (await vi.advanceTimersByTimeAsync(0)));
+      expect(api.subagentHistory).toHaveBeenCalledTimes(1);
+      await act(async () => visibility(true));
+      await act(async () => void (await vi.advanceTimersByTimeAsync(10_000)));
+      expect(api.subagentHistory).toHaveBeenCalledTimes(1);
+      await act(async () => visibility(false));
+      await act(async () => void (await vi.advanceTimersByTimeAsync(0)));
+      expect(api.subagentHistory).toHaveBeenCalledTimes(2);
+      // And on every 2 s again.
+      await act(async () => void (await vi.advanceTimersByTimeAsync(2000)));
+      expect(api.subagentHistory).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+      delete (document as { hidden?: boolean }).hidden;
+    }
   });
 });
 

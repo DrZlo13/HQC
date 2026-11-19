@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use hqc_proto::event::{Author, ClarifyAnswer, Event, EventKind};
+use hqc_proto::event::{Author, ClarifyAction, ClarifyAnswer, Event, EventKind};
 use hqc_proto::frame::{PermissionMode, Runtime, SessionInput};
 use uuid::Uuid;
 
@@ -64,6 +64,8 @@ struct State {
     injectable: bool,
     /// What [`Adapter::runs_own_turn`] answers; false by default.
     own_turn: bool,
+    /// The folder of [`Adapter::subagent_transcript`]; none by default.
+    subagents: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Default)]
@@ -97,6 +99,11 @@ impl FakeAdapters {
     /// does after a background task's end, until the test ends it with [`Self::end_turn`].
     pub fn set_own_turn(&self, own: bool) {
         self.lock().own_turn = own;
+    }
+
+    /// The agents' subagent transcripts are `agent-<task_id>.jsonl` in `dir` from now on.
+    pub fn set_subagents_dir(&self, dir: std::path::PathBuf) {
+        self.lock().subagents = Some(dir);
     }
 
     /// Make every following `start`/`resume` fail.
@@ -326,6 +333,11 @@ impl Adapter for FakeAdapter {
         self.shared.lock().pid.unwrap_or(Some(std::process::id()))
     }
 
+    fn subagent_transcript(&self, task_id: &str) -> Option<std::path::PathBuf> {
+        let dir = self.shared.lock().subagents.clone()?;
+        Some(dir.join(format!("agent-{task_id}.jsonl")))
+    }
+
     async fn answer_approval(
         &mut self,
         request_id: &str,
@@ -344,6 +356,7 @@ impl Adapter for FakeAdapter {
         &mut self,
         request_id: &str,
         answers: &BTreeMap<String, ClarifyAnswer>,
+        _action: Option<ClarifyAction>,
     ) -> anyhow::Result<()> {
         self.record(FakeCall::Clarify {
             request_id: request_id.into(),

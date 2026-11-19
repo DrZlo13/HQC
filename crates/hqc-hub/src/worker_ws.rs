@@ -329,9 +329,10 @@ async fn run(app: AppState, worker_id: Uuid, owner_id: Uuid, socket: WebSocket) 
         if let Ok(ids) = db::sessions_of_worker(&app.db, worker_id).await {
             for id in ids {
                 // Its deltas stopped with it, and its rate: a 0 sent while it was going is lost,
-                // a rate above 0 it sends again on connect.
+                // a rate above 0 it sends again on connect. So does its activity.
                 app.end_live_text(id);
                 app.token_rate_changed(id, 0);
+                app.drop_activity(id);
                 app.session_changed(id);
             }
         }
@@ -464,6 +465,7 @@ async fn handle_text(
             subagents,
             background_tasks,
             foreground_calls,
+            activity,
         } => {
             let st = StateFrame {
                 session_id,
@@ -479,6 +481,7 @@ async fn handle_text(
                 subagents,
                 background_tasks,
                 foreground_calls,
+                activity,
             };
             on_session_state(app, conn, &id, st).await
         }
@@ -629,9 +632,12 @@ async fn on_hello(
         app.session_changed(sid);
     }
     // Its rates go with the connection this one replaces, which the hub may still hold: a 0
-    // sent meanwhile is lost; a rate above 0 the worker sends again after `hello.ack`.
+    // sent meanwhile is lost; a rate above 0 the worker sends again after `hello.ack`, and an
+    // activity in the `session.state` it sends then.
     for sid in db::sessions_of_worker(&app.db, conn.worker_id).await? {
-        if app.token_rate_changed(sid, 0) {
+        let rate = app.token_rate_changed(sid, 0);
+        let activity = app.drop_activity(sid);
+        if rate || activity {
             app.session_changed(sid);
         }
     }
@@ -729,6 +735,7 @@ struct StateFrame {
     subagents: u32,
     background_tasks: u32,
     foreground_calls: Vec<String>,
+    activity: Option<hqc_proto::frame::Activity>,
 }
 
 async fn on_session_state(
@@ -751,6 +758,7 @@ async fn on_session_state(
         subagents,
         background_tasks,
         foreground_calls,
+        activity,
     } = st;
     if session_id.is_nil() {
         // A holder report (SPEC §5.4, §9.3): only `held_by` counts.
@@ -826,11 +834,14 @@ async fn on_session_state(
         app.drop_ended_live_agents(session_id);
     }
     db::set_background_tasks(&app.db, session_id, background_tasks).await?;
-    // Every report carries the list, in memory only; a stopped agent runs none.
+    // Every report carries the list and the activity, in memory only; a stopped agent runs and
+    // waits on nothing.
     if process_state == ProcessState::Stopped {
         app.drop_foreground_calls(session_id);
+        app.drop_activity(session_id);
     } else {
         app.set_foreground_calls(session_id, runtime_calls(foreground_calls));
+        app.set_activity(session_id, activity);
     }
     conn.reply(id, HubFrame::Ack(Ack::default()));
 

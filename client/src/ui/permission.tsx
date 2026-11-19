@@ -5,7 +5,7 @@
 // request is a bottom sheet in place of the composer.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { ApprovalOption, EventOf, RuleSuggestion } from '../proto';
+import type { ApprovalOption, EventOf, RequestSubagent, RuleSuggestion } from '../proto';
 import { ruleError } from '../rules';
 import type { ChatActions, FolderActions } from './cards';
 import { callArgs, callLine, callPaths, fileChange, outsidePath, relativePaths, toolLabel } from './feed';
@@ -23,16 +23,22 @@ import {
   optionLabel,
 } from './labels';
 
+/** What the card says the agent, or (since 0.181) the subagent that asks, wants to do. */
 const TITLES: Record<string, string> = {
-  Bash: 'The agent wants to run a command',
-  Edit: 'The agent wants to edit a file',
-  MultiEdit: 'The agent wants to edit a file',
-  Write: 'The agent wants to write a file',
-  NotebookEdit: 'The agent wants to edit a notebook',
-  Read: 'The agent wants to read a file',
-  WebFetch: 'The agent wants to open a page',
-  WebSearch: 'The agent wants to search the web',
+  Bash: 'wants to run a command',
+  Edit: 'wants to edit a file',
+  MultiEdit: 'wants to edit a file',
+  Write: 'wants to write a file',
+  NotebookEdit: 'wants to edit a notebook',
+  Read: 'wants to read a file',
+  WebFetch: 'wants to open a page',
+  WebSearch: 'wants to search the web',
 };
+
+/** Who asks, as a card names it: the agent, or the subagent the request names. */
+export function asker(subagent: RequestSubagent | undefined, agent: string): string {
+  return subagent ? `Subagent “${subagent.description}”` : agent;
+}
 
 /** What a request is about: the command or path, the CLI's description, the paths touched. */
 export function requestView(event: EventOf<'approval.request'>, call?: EventOf<'tool.call'>) {
@@ -130,7 +136,9 @@ export function PermissionBlock({
             ? WORKER_REQUEST_LABELS[event.payload.tool] ?? event.payload.tool
             : v.shell
               ? `$ ${relativePaths(v.what, actions.workspaceRoot)}`
-              : [toolLabel(event.payload.tool), relativePaths(v.what, actions.workspaceRoot)].filter(Boolean).join(' ')}
+              : [toolName(event.payload.tool, event.payload.display_name), relativePaths(v.what, actions.workspaceRoot)]
+                  .filter(Boolean)
+                  .join(' ')}
         </span>
         <span class="perm-done-outcome outcome">· {outcome.text}</span>
         <button type="button" class="btn-link" aria-expanded={again} onClick={() => setAgain(!again)}>
@@ -297,6 +305,7 @@ function PermissionCard({
     if (replying) field.current?.focus();
   }, [replying]);
   const v = requestView(event, call);
+  const name = toolName(p.tool, p.display_name);
   // What an edit or a write changes, from the call's arguments (cut at 4 KB, SPEC §4).
   const change = call && !v.worker ? fileChange(p.tool, call.payload.args_preview) : undefined;
   const outside = outsidePath(v.paths, actions.workspaceRoot);
@@ -344,11 +353,13 @@ function PermissionCard({
         ? 'Move this session after its transcript?'
         : 'The worker asks for permission'
     : sheet && p.tool === 'Bash'
-      ? 'Run the command?'
-      : TITLES[p.tool] ?? `The agent wants to use ${toolLabel(p.tool)}`;
+      ? p.subagent
+        ? `${asker(p.subagent, '')}: run the command?`
+        : 'Run the command?'
+      : `${asker(p.subagent, 'The agent')} ${TITLES[p.tool] ?? `wants to use ${name}`}`;
   const subtitle = v.worker
     ? WORKER_REQUEST_LABELS[p.tool] ?? p.tool
-    : [p.tool, v.description].filter(Boolean).join(' · ');
+    : [name, v.description].filter(Boolean).join(' · ');
   const outcome = outcomeText(event, actions);
   const others = p.options.filter((o) => o !== once && o !== deny);
   const sendReply = () => {
@@ -396,6 +407,8 @@ function PermissionCard({
         <div class="perm-titles">
           <div class="perm-title">{title}</div>
           <div class="perm-sub">{subtitle}</div>
+          {/* Why the runtime asks. */}
+          {p.reason && !v.worker && <div class="perm-sub perm-reason">{p.reason}</div>}
         </div>
         {live && (
           <span class="perm-timer" title="How long it has been waiting">
@@ -603,4 +616,11 @@ function SecretCard({ event, actions, sheet }: { event: EventOf<'approval.reques
       {error && <div class="error-text">{error}</div>}
     </section>
   );
+}
+
+/** The tool as the runtime names it (`display_name`), an MCP server's tool as `<tool> (<server>)`:
+ *  the CLI's `display_name` of one drops its server, so `mcp__prod-db__query` and
+ *  `mcp__staging-db__query` would both be "Query". */
+function toolName(tool: string, displayName?: string): string {
+  return tool.startsWith('mcp__') ? toolLabel(tool) : (displayName ?? tool);
 }

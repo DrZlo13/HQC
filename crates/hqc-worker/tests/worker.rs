@@ -3719,6 +3719,7 @@ async fn live_subagents_are_sent_again_on_connect() {
         kind: None,
         stoppable: true,
         due_in_ms: None,
+        retry: None,
     };
     let wakeup = LiveSubagent {
         task_id: "toolu_01Wake".into(),
@@ -3794,6 +3795,257 @@ async fn live_agents(c: &mut HubConn) -> Value {
             return f["payload"]["event"]["payload"]["agents"].clone();
         }
     }
+}
+
+// SPEC 0.181: the output file of a background task that ended is uploaded for its session as
+// `hqc_attach` uploads a file, its last 2 MB when it is larger, and comes as an `attachment`
+// of the agent, `text`, named as the file, whose caption says it was cut. A symlink in its
+// place is not followed and gives nothing.
+#[tokio::test]
+async fn a_task_output_becomes_an_attachment() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let dir = env.dir.path().join("tasks");
+    std::fs::create_dir_all(&dir).unwrap();
+    let small = dir.join("bnx80r4bg.output");
+    std::fs::write(&small, "make: *** [all] Error 2\n").unwrap();
+    let big = dir.join("b2st7oc3z.output");
+    // 10 bytes more than 2 MB: the first 10 go, the error at the end stays.
+    let mut output = b"make all\n\n".to_vec();
+    output.extend(vec![b'x'; 2 * 1024 * 1024 - 6]);
+    output.extend(b"Error\n");
+    std::fs::write(&big, &output).unwrap();
+    let linked = dir.join("a52af2b436ded4cea.output");
+    std::os::unix::fs::symlink(&small, &linked).unwrap();
+    let empty = dir.join("bq4m1t0ys.output");
+    std::fs::write(&empty, "").unwrap();
+    for p in [&linked, &empty, &small, &big] {
+        adapters
+            .emit(sid, AdapterEvent::TaskOutput(p.clone()))
+            .await;
+    }
+    let mut attached = Vec::new();
+    while attached.len() < 2 {
+        let f = c.expect("event").await;
+        let e = &f["payload"]["event"];
+        if e["type"] == "attachment" {
+            assert_eq!(e["author"], json!({"kind": "agent", "id": sid}), "{e}");
+            attached.push(e["payload"].clone());
+        }
+    }
+    attached.sort_by_key(|p| p["name"].as_str().unwrap().to_owned());
+    let mut uploads = hub.artifacts.uploads();
+    uploads.sort_by_key(|u| u.headers["x-hqc-artifact-name"].clone());
+    assert_eq!(uploads.len(), 2);
+    for u in &uploads {
+        assert_eq!(u.headers["x-hqc-session-id"], sid.to_string());
+        assert_eq!(u.headers["x-hqc-artifact-kind"], "text");
+    }
+    assert!(uploads[0].body == output[10..], "not the last 2 MB");
+    assert_eq!(uploads[1].body, b"make: *** [all] Error 2\n");
+    assert_eq!(
+        attached,
+        [
+            json!({"artifact_id": uploads[0].id, "kind": "text", "name": "b2st7oc3z.output",
+                   "caption": "The last 2 MB of 2097162 bytes"}),
+            json!({"artifact_id": uploads[1].id, "kind": "text", "name": "bnx80r4bg.output"}),
+        ]
+    );
+    while let Some(f) = c.maybe("event", Duration::from_millis(300)).await {
+        assert_ne!(f["payload"]["event"]["type"], "attachment", "{f}");
+    }
+    assert_eq!(hub.artifacts.uploads().len(), 2);
+    w.stop().await;
+}
+
+// SPEC 0.181: `session.subagent_history` answers with the events of the subagent's transcript,
+// in the session and by its agent, after `after` only the later ones when it holds it; a
+// subagent without a transcript has none; a `task_id` that could name another file is refused.
+#[tokio::test]
+async fn a_subagents_history_comes_from_its_transcript() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let dir = env.dir.path().join("subagents");
+    std::fs::create_dir_all(&dir).unwrap();
+    adapters.set_subagents_dir(dir.clone());
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let record = |kind: &str, content: Value| {
+        json!({"parentUuid": Uuid::new_v4(), "isSidechain": true, "agentId": "a52af2b436ded4cea",
+            "type": kind, "uuid": Uuid::new_v4(), "timestamp": "2026-11-13T10:00:00.000Z",
+            "message": {"role": kind, "content": content}})
+        .to_string()
+    };
+    let transcript = [
+        record("user", json!("Fix the power nets of the import")),
+        record(
+            "assistant",
+            json!([{"type": "tool_use", "id": "toolu_02", "name": "Bash",
+                "input": {"command": "cargo test"}}]),
+        ),
+        record(
+            "user",
+            json!([{"type": "tool_result", "tool_use_id": "toolu_02", "content": "ok"}]),
+        ),
+    ];
+    std::fs::write(
+        dir.join("agent-a52af2b436ded4cea.jsonl"),
+        transcript.join("\n"),
+    )
+    .unwrap();
+    // Outside the folder, where `../` would lead.
+    std::fs::write(env.dir.path().join("agent-x.jsonl"), &transcript[1]).unwrap();
+
+    let ask = |task_id: &str| json!({"request_id": "r-1", "session_id": sid, "task_id": task_id});
+    let id = c
+        .frame("session.subagent_history", ask("a52af2b436ded4cea"))
+        .await;
+    let f = c.expect("result").await;
+    assert_eq!(f["id"], id.as_str());
+    let events = f["payload"]["events"].as_array().unwrap();
+    assert_eq!(
+        events.iter().map(|e| e["type"].clone()).collect::<Vec<_>>(),
+        ["tool.call", "tool.result"]
+    );
+    for e in events {
+        assert_eq!(e["session_id"], json!(sid));
+        assert_eq!(e["author"], json!({"kind": "agent", "id": sid}));
+        assert!(e.get("seq").is_none(), "{e}");
+    }
+    assert_eq!(f["payload"]["truncated"], false);
+    assert!(f["payload"].get("continues").is_none(), "{f}");
+
+    // After an event of the page: only the later ones, to append; after one it does not hold:
+    // the whole page.
+    let page = events.clone();
+    let mut again = ask("a52af2b436ded4cea");
+    again["after"] = page[0]["event_id"].clone();
+    c.frame("session.subagent_history", again.clone()).await;
+    let f = c.expect("result").await;
+    assert_eq!(f["payload"]["events"], json!(page[1..]), "{f}");
+    assert_eq!(f["payload"]["continues"], true);
+    assert_eq!(f["payload"]["truncated"], false);
+    again["after"] = json!(Uuid::new_v4());
+    c.frame("session.subagent_history", again).await;
+    let f = c.expect("result").await;
+    assert_eq!(f["payload"]["events"], json!(page), "{f}");
+    assert!(f["payload"].get("continues").is_none(), "{f}");
+
+    // Before an event of the page: the ones ahead of it; before one it does not hold: none,
+    // left out.
+    let mut earlier = ask("a52af2b436ded4cea");
+    earlier["before"] = page[1]["event_id"].clone();
+    c.frame("session.subagent_history", earlier.clone()).await;
+    let f = c.expect("result").await;
+    assert_eq!(f["payload"]["events"], json!(page[..1]), "{f}");
+    assert_eq!(f["payload"]["truncated"], false);
+    earlier["before"] = json!(Uuid::new_v4());
+    c.frame("session.subagent_history", earlier).await;
+    let f = c.expect("result").await;
+    assert_eq!(f["payload"]["events"], json!([]), "{f}");
+    assert_eq!(f["payload"]["truncated"], true);
+
+    c.frame("session.subagent_history", ask("a55949578b136436b"))
+        .await;
+    let f = c.expect("result").await;
+    assert_eq!(f["payload"]["events"], json!([]));
+
+    let long = "a".repeat(65);
+    for bad in ["../agent-x", "a.b", "", long.as_str()] {
+        let id = c.frame("session.subagent_history", ask(bad)).await;
+        let f = reply_to(&mut c, &id).await;
+        assert_eq!(f["type"], "error", "{bad:?}: {f}");
+        assert_eq!(f["payload"]["code"], "invalid_frame");
+    }
+    w.stop().await;
+}
+
+// Of a long transcript only the last 4 MiB are read, without the line cut at their start; a
+// symlink or a FIFO in its place is no transcript (a FIFO would hang the read).
+#[tokio::test]
+async fn a_subagents_history_is_the_tail_of_a_regular_file() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let dir = env.dir.path().join("subagents");
+    std::fs::create_dir_all(&dir).unwrap();
+    adapters.set_subagents_dir(dir.clone());
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let record = |kind: &str, content: Value| {
+        json!({"parentUuid": Uuid::new_v4(), "isSidechain": true, "agentId": "big",
+            "type": kind, "uuid": Uuid::new_v4(), "timestamp": "2026-11-13T10:00:00.000Z",
+            "message": {"role": kind, "content": content}})
+        .to_string()
+    };
+    let call = |id: &str| {
+        record(
+            "assistant",
+            json!([{"type": "tool_use", "id": id, "name": "Bash", "input": {"command": "ls"}}]),
+        )
+    };
+    // The first call; then the last 4 MiB: a line cut right before a call (whole, it does not
+    // parse; its rest does), a text (no event) and the last call.
+    let tail = 4 * 1024 * 1024;
+    let (cut, last) = (call("toolu_cut"), call("toolu_last"));
+    let empty = record("user", json!("")).len();
+    let text = "x".repeat(tail - cut.len() - last.len() - 2 - empty);
+    let long = [
+        call("toolu_first"),
+        format!("junk {cut}"),
+        record("user", json!(text)),
+        last,
+    ];
+    let file = long.join("\n");
+    assert!(file[file.len() - tail..].starts_with(&cut));
+    std::fs::write(dir.join("agent-big.jsonl"), file).unwrap();
+    std::fs::write(dir.join("agent-small.jsonl"), call("toolu_small")).unwrap();
+    std::os::unix::fs::symlink(dir.join("agent-small.jsonl"), dir.join("agent-link.jsonl"))
+        .unwrap();
+    let fifo = dir.join("agent-fifo.jsonl");
+    let fifo = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+    let ask = |task_id: &str| json!({"request_id": "r-1", "session_id": sid, "task_id": task_id});
+    c.frame("session.subagent_history", ask("big")).await;
+    let f = c.expect("result").await;
+    let events = f["payload"]["events"].as_array().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| e["payload"]["call_id"].clone())
+            .collect::<Vec<_>>(),
+        ["toolu_last"],
+        "{f}"
+    );
+    assert_eq!(f["payload"]["truncated"], true);
+
+    c.frame("session.subagent_history", ask("small")).await;
+    let f = c.expect("result").await;
+    assert_eq!(f["payload"]["events"].as_array().unwrap().len(), 1, "{f}");
+    c.frame("session.subagent_history", ask("link")).await;
+    let f = c.expect("result").await;
+    assert_eq!(f["payload"]["events"], json!([]), "{f}");
+    c.frame("session.subagent_history", ask("fifo")).await;
+    let f = c
+        .maybe("result", Duration::from_secs(10))
+        .await
+        .expect("a FIFO is answered at once");
+    assert_eq!(f["payload"]["events"], json!([]), "{f}");
+    w.stop().await;
 }
 
 // The token rate goes as `tokens.rate` when it changes; one above 0 is sent again on the next
@@ -3959,5 +4211,93 @@ async fn model_is_started_and_switched() {
         .await;
     assert_eq!(reply_to(&mut c, &f).await["type"], "ack");
     assert_eq!(switched(&adapters).len(), 2);
+    w.stop().await;
+}
+
+// SPEC §8.1, 0.180: a tool result's whole text and images are uploaded for its session before
+// the event goes, which names them, and the adapter's next event comes after it; a refused
+// upload leaves its field out and the event goes as it was.
+#[tokio::test]
+async fn a_tool_result_goes_after_its_files() {
+    use hqc_worker::adapter::{ResultFiles, ResultImage};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+
+    let result = |preview: &str| {
+        agent_event(
+            sid,
+            EventKind::ToolResult {
+                call_id: "t1".into(),
+                result_preview: preview.into(),
+                error: false,
+                error_text: None,
+                duration_ms: None,
+                artifact_id: None,
+                artifact_ids: vec![],
+            },
+        )
+    };
+    let files = ResultFiles {
+        text: Some("the whole text".into()),
+        images: vec![ResultImage {
+            media_type: "image/png".into(),
+            data: b"png".to_vec(),
+        }],
+    };
+    let ev = result("the whole");
+    adapters
+        .emit(
+            sid,
+            AdapterEvent::ToolResult {
+                event: ev.clone(),
+                files: files.clone(),
+            },
+        )
+        .await;
+    let after = agent_message(sid, "after");
+    adapters.emit(sid, AdapterEvent::Event(after.clone())).await;
+    let f = stored_event(&mut c).await;
+    assert_eq!(event_id(&f), ev.event_id);
+    let ups = hub.artifacts.uploads();
+    assert_eq!(ups.len(), 2);
+    let p = &f["payload"]["event"]["payload"];
+    assert_eq!(p["artifact_id"], json!(ups[0].id));
+    assert_eq!(p["artifact_ids"], json!([ups[1].id]));
+    assert_eq!(p["result_preview"], "the whole");
+    assert_eq!(ups[0].body, b"the whole text");
+    assert_eq!(ups[0].headers["x-hqc-session-id"], sid.to_string());
+    assert_eq!(ups[0].headers["x-hqc-artifact-kind"], "text");
+    assert_eq!(ups[0].headers["content-type"], "text/plain; charset=utf-8");
+    assert_eq!(ups[1].body, b"png");
+    assert_eq!(ups[1].headers["x-hqc-artifact-kind"], "image");
+    assert_eq!(ups[1].headers["x-hqc-artifact-name"], "image.png");
+    assert_eq!(ups[1].headers["content-type"], "image/png");
+    assert_eq!(event_id(&stored_event(&mut c).await), after.event_id);
+
+    hub.artifacts.fail_uploads.store(true, Ordering::SeqCst);
+    let ev = result("again");
+    adapters
+        .emit(
+            sid,
+            AdapterEvent::ToolResult {
+                event: ev.clone(),
+                files,
+            },
+        )
+        .await;
+    let f = stored_event(&mut c).await;
+    assert_eq!(event_id(&f), ev.event_id);
+    let p = &f["payload"]["event"]["payload"];
+    assert!(
+        p.get("artifact_id").is_none() && p.get("artifact_ids").is_none(),
+        "{p}"
+    );
+    assert_eq!(p["result_preview"], "again");
     w.stop().await;
 }

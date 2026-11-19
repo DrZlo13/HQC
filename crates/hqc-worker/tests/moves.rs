@@ -864,6 +864,7 @@ async fn the_answer_goes_before_the_stop_at_shutdown() {
             subagents: 0,
             background_tasks: 0,
             foreground_calls: vec![],
+            activity: None,
         });
         stop.cancel();
         let mut answered = false;

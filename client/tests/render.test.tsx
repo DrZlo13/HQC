@@ -7,8 +7,9 @@ import { render } from "preact";
 import { act } from "preact/test-utils";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseEvent, parseServerFrame, type HqcEvent } from "../src/proto";
+import { parseEvent, parseServerFrame, type Activity, type EventOf, type HqcEvent } from "../src/proto";
 import { Timeline } from "../src/timeline";
+import { PermissionBlock } from "../src/ui/permission";
 import {
   ActivityLine,
   ChatItems,
@@ -111,7 +112,7 @@ const agentText = (seq: number, text: string, final: boolean) =>
 describe("every example event renders", () => {
   // Transport only: the stream text, the subagents and the schedules above the input
   // (chat.test.tsx), and the token rate, which reaches the client as the session's
-  // `output_per_s`.
+  // `output_per_s`; a retraction is stored but not drawn.
   const names = readdirSync(WIRE)
     .filter(
       (f) =>
@@ -119,6 +120,8 @@ describe("every example event renders", () => {
         f !== "event.agent.delta.json" &&
         f !== "event.agent.delta.reset.json" &&
         f !== "event.subagents.live.json" &&
+        f !== "event.subagents.live.retry.json" &&
+        f !== "event.retraction.json" &&
         f !== "event.tokens.rate.json" &&
         f !== "event.schedules.live.json",
     )
@@ -150,6 +153,15 @@ describe("every example event renders", () => {
     expect(t.streaming).toBe("");
     t.apply(ev("event.agent.delta", (e) => (e.payload.text = "Retried")));
     expect(t.streaming).toBe("Retried");
+  });
+
+  it("a retraction ends the text being written, which no message ends then (SPEC 0.179)", () => {
+    const t = new Timeline();
+    t.apply(ev("event.agent.delta", (e) => (e.payload.text = "I can't help")));
+    t.apply(ev("event.retraction"));
+    expect(t.streaming).toBe("");
+    t.apply(ev("event.agent.delta", (e) => (e.payload.text = "Here it is.")));
+    expect(t.streaming).toBe("Here it is.");
   });
 
   it("an older page loaded behind the live tail ends no stream", () => {
@@ -712,6 +724,39 @@ describe("approval.request (T26 card)", () => {
     );
   });
 
+  it("names the subagent that asks", () => {
+    const t = new Timeline();
+    t.apply(ev("event.approval.request.subagent"));
+    show(t);
+    expect(root.querySelector(".perm-title")!.textContent).toBe(
+      "Subagent “Fix schematic power nets in import” wants to run a command",
+    );
+  });
+
+  it("names the subagent on a phone's sheet too", () => {
+    const sheet = (e: HqcEvent) => {
+      const t = new Timeline();
+      t.apply(e);
+      root = document.createElement("div");
+      document.body.appendChild(root);
+      const actions: ChatActions = {
+        timeline: t,
+        approve: vi.fn(async () => {}),
+        answer: vi.fn(async () => {}),
+        resend: vi.fn(),
+        discard: vi.fn(),
+        openArtifact: vi.fn(),
+      };
+      act(() => render(<PermissionBlock event={e as EventOf<"approval.request">} actions={actions} sheet />, root));
+      return root.querySelector(".perm-sheet .perm-title")!.textContent;
+    };
+    expect(sheet(ev("event.approval.request.subagent"))).toBe(
+      "Subagent “Fix schematic power nets in import”: run the command?",
+    );
+    render(null, root);
+    expect(sheet(ev("event.approval.request"))).toBe("Run the command?");
+  });
+
   it("explains policy_hint allow and a path outside the workspace, nothing otherwise", () => {
     const req = (seq: number, id: string, description: string, hint?: string) =>
       ev("event.approval.request", (e) => {
@@ -1024,6 +1069,26 @@ describe("clarify.request", () => {
     expect(submit().disabled).toBe(true);
   });
 
+  it("names the subagent that asks, else the agent", () => {
+    const t = new Timeline();
+    t.apply(ev("event.clarify.request", withSeq(1)));
+    t.apply(
+      ev("event.clarify.request", (e) => {
+        e.seq = 2;
+        e.event_id = "0199f3a2-7c10-7000-8000-0000000001c2";
+        e.payload.request_id = "req-9";
+        e.payload.subagent = {
+          task_id: "a52af2b436ded4cea",
+          description: "Fix schematic power nets in import",
+        };
+      }),
+    );
+    show(t);
+    expect(
+      [...root.querySelectorAll(".card-clarify .card-title")].map((c) => c.textContent),
+    ).toEqual(["Agent asks", "Subagent “Fix schematic power nets in import” asks"]);
+  });
+
   it("closes after clarify.response", () => {
     const t = new Timeline();
     t.apply(ev("event.clarify.request", withSeq(1)));
@@ -1167,6 +1232,180 @@ describe("clarify.request", () => {
   });
 });
 
+describe("requests of the CLI (SPEC 0.180)", () => {
+  it("names the tool as the runtime does and says why it asks", () => {
+    const t = new Timeline();
+    t.apply(ev("event.approval.request.human_only"));
+    show(t);
+    expect(root.querySelector(".perm-title")!.textContent).toBe(
+      "The agent wants to use fetch (web)",
+    );
+    expect(root.querySelector(".perm-sub")!.textContent).toBe(
+      // The CLI's `display_name` of an MCP tool ("Fetch") drops its server.
+      "fetch (web) · https://example.com/report",
+    );
+    expect(root.querySelector(".perm-reason")!.textContent).toBe(
+      "Permission rule 'mcp__web__fetch' from project settings requires approval",
+    );
+    // Only a person may answer: once and deny.
+    expect(optionButtons().map((b) => b.getAttribute("data-option"))).toEqual([
+      "once",
+      "deny",
+    ]);
+    // Without the fields: the tool's own name, an MCP one with its server, no reason.
+    const plain = new Timeline();
+    plain.apply(
+      ev("event.approval.request", (e) => {
+        e.payload.tool = "mcp__web__fetch";
+      }),
+    );
+    show(plain);
+    expect(root.querySelector(".perm-title")!.textContent).toBe(
+      "The agent wants to use fetch (web)",
+    );
+    expect(root.querySelector(".perm-reason")).toBeNull();
+  });
+
+  it("says a request the agent withdrew was withdrawn", () => {
+    const t = new Timeline();
+    t.apply(ev("event.approval.request", withSeq(1)));
+    t.apply(
+      ev("event.approval.cancel", (e) => {
+        e.seq = 2;
+        e.payload = { request_id: "req-1", reason: "withdrawn" };
+      }),
+    );
+    t.apply(ev("event.clarify.request", withSeq(3)));
+    t.apply(
+      ev("event.clarify.cancel", (e) => {
+        e.seq = 4;
+        e.payload = { request_id: "req-2", reason: "withdrawn" };
+      }),
+    );
+    show(t);
+    expect(root.querySelector(".perm-done-outcome")!.textContent).toBe(
+      "· cancelled: withdrawn",
+    );
+    expect(root.querySelector(".card-clarify .outcome")!.textContent).toBe(
+      "Cancelled: withdrawn",
+    );
+  });
+
+  it("asks an MCP server's form: the server, its text, no Other, Decline", async () => {
+    const t = new Timeline();
+    t.apply(ev("event.clarify.request.elicitation"));
+    const { actions } = show(t);
+    const card = root.querySelector(".card-clarify")!;
+    expect(card.querySelector(".card-title")!.textContent).toBe("deploy asks");
+    expect(card.querySelector(".clarify-message")!.textContent).toBe(
+      "Where should the release go?",
+    );
+    expect(card.querySelector('input[aria-label="Other answer"]')).toBeNull();
+    const qs = card.querySelectorAll("fieldset");
+    expect(qs[2].querySelectorAll("input[type=radio]").length).toBe(2);
+    await act(async () => buttonByText("Decline")!.click());
+    expect(actions.answer).toHaveBeenLastCalledWith("req-4", {}, "decline");
+
+    const again = show(t);
+    await act(() => root.querySelector<HTMLInputElement>('input[value="us-east"]')!.click());
+    await act(async () =>
+      root.querySelector<HTMLButtonElement>(".card-clarify button[type=submit]")!.click(),
+    );
+    expect(again.actions.answer).toHaveBeenLastCalledWith("req-4", { "1": "us-east" }, "accept");
+  });
+
+  it("Answer of an MCP server's form waits for its required fields and an integer that reads as one", async () => {
+    const t = new Timeline();
+    t.apply(ev("event.clarify.request.elicitation"));
+    const { actions } = show(t);
+    const qs = root.querySelectorAll(".card-clarify fieldset");
+    expect(qs[0].querySelector(".question-header")!.textContent).toBe("Region · required");
+    expect(qs[1].querySelector(".question-header")).toBeNull();
+    const submit = () =>
+      root.querySelector<HTMLButtonElement>(".card-clarify button[type=submit]")!;
+    const replicas = (value: string) =>
+      act(() => {
+        const text = qs[1].querySelector<HTMLInputElement>("input[type=text]")!;
+        text.value = value;
+        text.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    // The required region has no answer.
+    expect(submit().disabled).toBe(true);
+    await replicas("3");
+    expect(submit().disabled).toBe(true);
+    await act(() => root.querySelector<HTMLInputElement>('input[value="us-east"]')!.click());
+    expect(submit().disabled).toBe(false);
+    // An integer that does not read as one.
+    await replicas("three");
+    expect(submit().disabled).toBe(true);
+    await act(async () => {
+      root.querySelector("form.card-clarify")!.dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(actions.answer).not.toHaveBeenCalled();
+    // Past a safe integer the worker does not read it as one either.
+    await replicas("99999999999999999999");
+    expect(submit().disabled).toBe(true);
+    await replicas("-3");
+    expect(submit().disabled).toBe(false);
+    // An optional field may stay empty.
+    await replicas("");
+    expect(submit().disabled).toBe(false);
+  });
+
+  it("shows an MCP server's link with Done, and a declined one", async () => {
+    const t = new Timeline();
+    t.apply(ev("event.clarify.request.elicitation_url", withSeq(1)));
+    const { actions } = show(t);
+    const a = root.querySelector<HTMLAnchorElement>(".card-clarify .clarify-link a")!;
+    expect(a.getAttribute("href")).toBe("https://github.com/login/device");
+    expect(root.querySelector(".card-clarify fieldset")).toBeNull();
+    await act(async () => buttonByText("Done")!.click());
+    expect(actions.answer).toHaveBeenLastCalledWith("req-5", {}, "accept");
+    t.apply(
+      ev("event.clarify.response", (e) => {
+        e.seq = 2;
+        e.payload = { request_id: "req-5", answers: {}, action: "accept" };
+      }),
+    );
+    show(t);
+    expect(root.querySelector(".card-clarify .outcome")!.textContent).toBe("Done");
+
+    const declined = new Timeline();
+    declined.apply(ev("event.clarify.request.elicitation_url", withSeq(1)));
+    declined.apply(ev("event.clarify.response.decline", withSeq(2)));
+    show(declined);
+    expect(root.querySelector(".card-clarify .outcome")!.textContent).toBe("Declined");
+    expect(buttonByText("Done")).toBeUndefined();
+
+    // The label is the address the link opens, a look-alike host in its punycode form.
+    const lookalike = new Timeline();
+    lookalike.apply(
+      ev("event.clarify.request.elicitation_url", (e) => {
+        e.payload.url = "https://gith\u0430b.com/login";
+      }),
+    );
+    show(lookalike);
+    expect(root.querySelector(".card-clarify .clarify-link a")!.textContent).toBe(
+      "https://xn--githb-7ve.com/login",
+    );
+
+    // A link that is no web page is shown as text.
+    const odd = new Timeline();
+    odd.apply(
+      ev("event.clarify.request.elicitation_url", (e) => {
+        e.payload.url = "javascript:alert(1)";
+      }),
+    );
+    show(odd);
+    expect(root.querySelector(".card-clarify .clarify-link a")).toBeNull();
+    expect(root.querySelector(".card-clarify .clarify-link")!.textContent).toBe(
+      "javascript:alert(1)",
+    );
+  });
+});
+
 describe("tool groups (T26)", () => {
   it("folds the result into the call row, collapsed, opened shows the result", async () => {
     const t = new Timeline();
@@ -1257,6 +1496,62 @@ describe("tool groups (T26)", () => {
     expect(cutRow.querySelector(".tool-cut")!.textContent).toBe(
       "The preview is cut at 4 KB: the rest of the arguments are not shown.",
     );
+  });
+
+  it("a result's http and https addresses are links; an Artifact call's page is a line under the run (SPEC 0.180)", async () => {
+    const out = (seq: number, call_id: string, result_preview: string) =>
+      ev("event.tool.result", (e) => {
+        e.seq = seq;
+        e.payload = { call_id, error: false, result_preview };
+      });
+    const t = new Timeline();
+    t.apply(call(1, "a", "Bash", { command: "curl -I example.com" }));
+    const text =
+      'See https://example.com/a?b=1. Not javascript:alert(1) or ftp://x.y/z; "url":"https://en.wikipedia.org/wiki/Rust_(programming_language)", [x](https://a.b/c)';
+    t.apply(out(2, "a", text));
+    t.apply(call(3, "p", "Artifact", { file_path: "report.html" }));
+    t.apply(out(4, "p", "Published Report at https://claude.ai/artifact/abc"));
+    // The same page opened again in the run: still one line.
+    t.apply(call(5, "q", "Artifact", { file_path: "report.html" }));
+    t.apply(out(6, "q", "Published Report at https://claude.ai/artifact/abc"));
+    show(t);
+    expect(root.querySelectorAll(".tool-artifact")).toHaveLength(1);
+    const g = root.querySelector(".tool-group")!;
+    // Folded, the page is on a line of its own after the run.
+    const page = root.querySelector<HTMLAnchorElement>(".tool-artifact a")!;
+    expect(page.getAttribute("href")).toBe("https://claude.ai/artifact/abc");
+    expect(page.getAttribute("target")).toBe("_blank");
+    expect(g.contains(page)).toBe(false);
+    await act(async () =>
+      g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
+    );
+    const [, result] = [...g.querySelectorAll("details.tool-row")[0].querySelectorAll(".pre")];
+    // A bracket the address opened stays in it; one that closes the text around it does not.
+    expect([...result.querySelectorAll("a")].map((a) => a.getAttribute("href"))).toEqual([
+      "https://example.com/a?b=1",
+      "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+      "https://a.b/c",
+    ]);
+    expect(result.textContent).toBe(text);
+  });
+
+  it("labels a result's link with the address it opens, a look-alike host in its punycode form (SPEC 0.180)", async () => {
+    const t = new Timeline();
+    t.apply(call(1, "a", "Bash", { command: "curl -I example.com" }));
+    t.apply(
+      ev("event.tool.result", (e) => {
+        e.seq = 2;
+        e.payload = { call_id: "a", error: false, result_preview: "See https://githаb.com/login" };
+      }),
+    );
+    show(t);
+    const g = root.querySelector(".tool-group")!;
+    await act(async () =>
+      g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
+    );
+    const a = g.querySelector<HTMLAnchorElement>("details.tool-row a")!;
+    expect(a.getAttribute("href")).toBe("https://xn--githb-7ve.com/login");
+    expect(a.textContent).toBe("https://xn--githb-7ve.com/login");
   });
 
   it("shows a result without its call as a group of its own", () => {
@@ -1908,6 +2203,23 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
     expect(again.querySelector(".subagent-stats")).toBeNull();
   });
 
+  it("says what the subagent spent at its end, when its notification says (SPEC 0.181)", () => {
+    const spent = (e: HqcEvent) => {
+      (e.payload as any).usage = { total_tokens: 155300, tool_uses: 188, duration_ms: 253000 };
+      return e;
+    };
+    const t = new Timeline();
+    t.apply(call(1, "ag", "Agent", { ...AGENT, run_in_background: true }));
+    t.apply(answer(2, "ag", "Async agent launched successfully.\nagentId: a1 (internal ID)"));
+    t.apply(spent(notification(61, "ag", "completed", "a1", "Fixed")));
+    t.apply(spent(notification(8041, undefined, "completed", "a1", "Fixed again")));
+    show(t);
+    const [first, again] = root.querySelectorAll(".subagent-end");
+    expect(first.querySelector(".subagent-stats")!.textContent).toBe("155.3k tokens · 188 tools · 1m 0s");
+    // A later end has no run time from the call.
+    expect(again.querySelector(".subagent-stats")!.textContent).toBe("155.3k tokens · 188 tools");
+  });
+
   it("a request for a call of the same batch keeps its call across a subagent's end card", () => {
     // Ask mode: the CLI runs the batch's calls together, so the request comes after the
     // subagent's result.
@@ -2216,6 +2528,35 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
     const line = draw("running")!;
     expect(line.textContent).toBe("Agent is working");
     expect(line.querySelector(".pulse-dot")).not.toBeNull();
+  });
+
+  it("running with an activity (SPEC 0.179): what the agent waits on instead", () => {
+    const line = (activity: Activity, state: any = "running", t = new Timeline()) => {
+      root = document.createElement("div");
+      document.body.appendChild(root);
+      act(() =>
+        render(
+          <ActivityLine state={state} timeline={t} now={() => NOW} activity={activity} />,
+          root,
+        ),
+      );
+      const text = root.querySelector(".activity")?.textContent;
+      render(null, root);
+      return text;
+    };
+    const retry = { kind: "retrying", attempt: 3, max_retries: 10, retry_delay_ms: 7400 } as const;
+    expect(line({ ...retry, error_status: 529 })).toBe("Retrying 3/10 (529), next in 8 s");
+    expect(line(retry)).toBe("Retrying 3/10 (no response), next in 8 s");
+    // The next attempt goes at once: no delay to count.
+    expect(line({ ...retry, retry_delay_ms: 0 })).toBe("Retrying 3/10 (no response)");
+    expect(line({ kind: "compacting" })).toBe("Compacting the conversation…");
+    expect(line({ kind: "thinking", estimated_tokens: 12345 })).toBe("Thinking · ~12k tokens");
+    expect(line({ kind: "thinking", estimated_tokens: 840 })).toBe("Thinking · ~840 tokens");
+    // A running command keeps its own line; other states keep theirs.
+    const t = new Timeline();
+    t.apply(call(1, "b", "Bash", { command: "sleep 30" }));
+    expect(line({ kind: "compacting" }, "running", t)).toContain("sleep 30");
+    expect(line({ kind: "compacting" }, "queued")).toBe("Input queued");
   });
 
   it('running with the last tool.call unanswered: "Running <command> <time>"', () => {
@@ -2659,6 +3000,38 @@ describe("the feed like the Claude Code tab", () => {
     expect(root.querySelector(".msg-agent")).toBeNull();
   });
 
+  it("says how a task ended and what it spent", () => {
+    const t = new Timeline();
+    t.apply(ev("event.system.task_notification", withSeq(1)));
+    t.apply(
+      ev("event.system.task_notification", (e) => {
+        e.seq = 2;
+        e.event_id = "0199f3a2-7c10-7000-8000-0000000001d2";
+        e.payload.status = "stopped";
+        delete e.payload.usage;
+      }),
+    );
+    t.apply(
+      ev("event.system.task_notification", (e) => {
+        e.seq = 3;
+        e.event_id = "0199f3a2-7c10-7000-8000-0000000001d3";
+        e.payload.status = "completed";
+      }),
+    );
+    show(t);
+    const folds = [...root.querySelectorAll("details.line-system-task_notification")];
+    expect(folds.map((f) => f.querySelector(".fold-label")!.textContent)).toEqual([
+      "Background task failed ·",
+      "Background task stopped ·",
+      "Background task ·",
+    ]);
+    expect(folds.map((f) => f.querySelector(".fold-stats")?.textContent ?? null)).toEqual([
+      "· 155.3k tokens · 188 tools · 4m 13s",
+      null,
+      "· 155.3k tokens · 188 tools · 4m 13s",
+    ]);
+  });
+
   it("peeks at a subagent's Markdown report without its marks and shows it open as Markdown", () => {
     const report =
       "### Summary\n**Asked:** close two findings in `redraw()`.\n\n- first fixed\n- second fixed";
@@ -2704,6 +3077,56 @@ describe("the feed like the Claude Code tab", () => {
     ]);
     expect(body.querySelector("ol li")!.textContent).toBe("Tests pass");
     expect(root.querySelector(".line.line-system-context_compacted")).toBeNull();
+  });
+
+  it("says how a compaction came and what it freed when the runtime did (SPEC 0.179)", () => {
+    const t = new Timeline();
+    t.apply(ev("event.system.context_compacted"));
+    t.apply(
+      ev("event.system.context_compacted", (e) => {
+        e.seq = 45;
+        e.payload = { code: "context_compacted", text: "Context compacted", trigger: "manual", pre_tokens: 9000 };
+      }),
+    );
+    show(t);
+    expect(
+      root.querySelector("details.line-system-context_compacted summary .fold-label")!.textContent,
+    ).toBe("Context compacted · auto · 153k tokens freed");
+    expect(root.querySelector(".line.line-system-context_compacted")!.textContent).toBe(
+      "Context compacted · manual",
+    );
+  });
+
+  it("hides what a retraction takes back, also when it loads after the retraction (SPEC 0.179)", () => {
+    const refused = ev("event.agent.message", (e) => {
+      e.seq = 1;
+      e.event_id = "0199f3a2-7c10-7000-8000-0000000001aa";
+      e.payload = { text: "I can't help with that.", final: false };
+    });
+    const call1 = call(2, "toolu_r", "Bash", { command: "ls" });
+    const retraction = ev("event.retraction", (e) => {
+      e.seq = 4;
+      e.payload.event_ids = [refused.event_id, call1.event_id];
+    });
+    const t = new Timeline();
+    t.apply(refused);
+    t.apply(call1);
+    t.apply(ev("event.system", (e) => {
+      e.seq = 3;
+      e.payload = { code: "model_refusal_fallback", text: "claude-opus-5-5 → claude-sonnet-5" };
+    }));
+    t.apply(retraction);
+    t.apply(agentText(5, "Here it is.", true));
+    show(t);
+    expect(root.textContent).not.toContain("I can't help with that.");
+    expect(root.querySelector(".tool-group")).toBeNull();
+    expect(root.textContent).toContain("claude-opus-5-5 → claude-sonnet-5");
+    expect(root.textContent).toContain("Here it is.");
+    // An older page brought after the retraction: still hidden.
+    const late = new Timeline();
+    late.apply(retraction);
+    late.apply(refused);
+    expect(late.events().map((e) => e.seq)).toEqual([]);
   });
 
   it("shows a reply Claude Code wrote itself as an error-style service line, not a message", () => {

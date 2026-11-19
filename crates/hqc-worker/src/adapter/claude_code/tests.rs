@@ -7,17 +7,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hqc_proto::event::{
-    ApprovalCanonical, Author, CancelReason, ClarifyAnswer, ClarifyQuestion, Event, EventKind,
-    LiveKind, LiveSubagent, SessionState,
+    ApiRetry, ApprovalCanonical, Author, CancelReason, ClarifyAction, ClarifyAnswer,
+    ClarifyQuestion, ContextCompacted, Event, EventKind, LiveKind, LiveSubagent, SessionState,
 };
-use hqc_proto::frame::{Runtime, SessionInput, SlashCommand};
+use hqc_proto::frame::{Activity, Runtime, SessionInput, SlashCommand};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::engine::{
-    next_cron_fire, resurrected_cron_jobs, Action, Core, COMMAND_TEXT_LIMIT, CONVERSATION_CLEARED,
-    CONVERSATION_CLEARED_TEXT,
+    next_cron_fire, record_event_id, resurrected_cron_jobs, Action, Core, COMMAND_TEXT_LIMIT,
+    CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT,
 };
 use super::process::{CommandSpec, OsSpawner, Sig};
 use super::scripted::ScriptedClaude;
@@ -254,7 +254,7 @@ impl Harness {
                         .unwrap(),
                     EventKind::ClarifyRequest { request_id, .. } => self
                         .adapter
-                        .answer_clarify(request_id, &clarify)
+                        .answer_clarify(request_id, &clarify, None)
                         .await
                         .unwrap(),
                     _ => {}
@@ -289,6 +289,12 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::TokenRate(_) => continue,
             // `foreground_calls_are_reported` looks at it.
             AdapterEvent::ForegroundCalls(_) => continue,
+            // `the_activity_follows_the_stream` and `a_heartbeat_is_reported` look at them.
+            AdapterEvent::Activity(_) | AdapterEvent::Heartbeat => continue,
+            AdapterEvent::ModelKept(m) => format!("model_kept:{m}"),
+            AdapterEvent::ToolResult { .. } => "tool.result".into(),
+            // `a_task_end_carries_its_usage_and_output` looks at it.
+            AdapterEvent::TaskOutput(_) => continue,
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -309,7 +315,7 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
 fn events(evs: &[AdapterEvent]) -> Vec<&Event> {
     evs.iter()
         .filter_map(|e| match e {
-            AdapterEvent::Event(e) => Some(e),
+            AdapterEvent::Event(e) | AdapterEvent::ToolResult { event: e, .. } => Some(e),
             _ => None,
         })
         .collect()
@@ -434,6 +440,33 @@ async fn a_custom_title_is_reported_at_turn_end() {
         .turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
         .await;
     assert_eq!(titles_in(&evs), ["Mine"]);
+}
+
+/// SPEC 0.181: a subagent's transcript is `<CLI session id>/subagents/agent-<task_id>.jsonl`
+/// beside the session's transcript, the id from `system/init`; none before it came.
+#[tokio::test]
+async fn a_subagents_transcript_is_beside_the_sessions() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start(fx.stream, fx.claude_session()).await;
+    assert_eq!(h.adapter.subagent_transcript("a1"), None);
+    let (work, config) = &h._dirs;
+    let transcript = super::paths::transcript_path(
+        config.path(),
+        &work.path().canonicalize().unwrap(),
+        &fx.claude_session(),
+    );
+    h.turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
+        .await;
+    assert_eq!(
+        h.adapter.subagent_transcript("a52af2b436ded4cea"),
+        Some(
+            transcript
+                .parent()
+                .unwrap()
+                .join(fx.claude_session().to_string())
+                .join("subagents/agent-a52af2b436ded4cea.jsonl")
+        )
+    );
 }
 
 #[tokio::test]
@@ -631,6 +664,8 @@ async fn ask_user_question_becomes_clarify() {
                 "client/: TypeScript PWA".into()
             ]),
             multi: Some(false),
+            required: false,
+            input: None,
         }]
     );
     assert_eq!(without_uuids(h.claude.stdin()), lines(fx.stdin));
@@ -1442,7 +1477,7 @@ async fn adapter_switches_a_running_process() {
 
 /// `set_model` on the adapter writes the control request to a running process (2.1.312
 /// answers `success` with the model it resolved the name to) and does nothing without one.
-/// The answer is no permission mode.
+/// The answer is no permission mode; a refusal is a line (SPEC 0.179).
 #[tokio::test]
 async fn adapter_switches_the_model_of_a_running_process() {
     let mut h = Harness::start("", Uuid::new_v4()).await;
@@ -1475,12 +1510,20 @@ async fn adapter_switches_the_model_of_a_running_process() {
     h.adapter.set_model("haiku").await.unwrap();
 
     let mut core = Core::new(Uuid::now_v7(), false);
-    for answer in [
-        r#"{"type":"control_response","response":{"subtype":"success","request_id":"hqc-model-1","response":{"model":"claude-sonnet-5-5"}}}"#,
+    let ok = r#"{"type":"control_response","response":{"subtype":"success","request_id":"hqc-model-1","response":{"model":"claude-sonnet-5-5"}}}"#;
+    assert!(core.on_line(ok).is_empty(), "{ok}");
+    let a = core.on_line(
         r#"{"type":"control_response","response":{"subtype":"error","request_id":"hqc-model-2","error":"Unknown model"}}"#,
-    ] {
-        assert!(core.on_line(answer).is_empty(), "{answer}");
-    }
+    );
+    let [Action::Emit(AdapterEvent::Event(e))] = a.as_slice() else {
+        panic!("{a:?}");
+    };
+    assert!(
+        matches!(&e.kind, EventKind::System { code, text, model: None, .. }
+            if code == "model_not_switched" && text == "Model not switched: Unknown model"),
+        "{:?}",
+        e.kind
+    );
 }
 
 /// The agent gets a cleared environment with only the allowed variables (SPEC §14).
@@ -2433,9 +2476,9 @@ fn clarify_cancel_and_multi() {
     core.on_line(&req.to_string());
     let rid = req["request_id"].as_str().unwrap();
     // The hub cancelled: empty answers → deny.
-    let w = writes(&core.answer_clarify(rid, &BTreeMap::new()).unwrap());
+    let w = writes(&core.answer_clarify(rid, &BTreeMap::new(), None).unwrap());
     assert_eq!(w[0]["response"]["response"]["behavior"], "deny");
-    assert!(core.answer_clarify(rid, &BTreeMap::new()).is_err());
+    assert!(core.answer_clarify(rid, &BTreeMap::new(), None).is_err());
 
     core.on_line(&req.to_string());
     let answers = BTreeMap::from([
@@ -2445,7 +2488,7 @@ fn clarify_cancel_and_multi() {
         ),
         ("7".to_string(), ClarifyAnswer::One("ignored".into())),
     ]);
-    let w = writes(&core.answer_clarify(rid, &answers).unwrap());
+    let w = writes(&core.answer_clarify(rid, &answers, None).unwrap());
     assert_eq!(
         w[0]["response"]["response"]["updatedInput"]["answers"],
         json!({"Which area should I focus on first?": "Hub (Recommended), Worker"})
@@ -2495,7 +2538,7 @@ fn clarify_question_in_full_and_free_text() {
             ClarifyAnswer::Many(vec!["fmt".into(), "clippy".into()]),
         ),
     ]);
-    let w = writes(&core.answer_clarify("q1", &answers).unwrap());
+    let w = writes(&core.answer_clarify("q1", &answers, None).unwrap());
     let r = &w[0]["response"]["response"];
     assert_eq!(r["behavior"], "allow");
     assert_eq!(
@@ -2506,6 +2549,498 @@ fn clarify_question_in_full_and_free_text() {
         r["updatedInput"]["questions"],
         req["request"]["input"]["questions"]
     );
+}
+
+/// `can_use_tool_line` with `patch` applied to its `request`.
+fn patched(fx: &Fixture, request_id: &str, patch: impl FnOnce(&mut Value)) -> String {
+    let mut v: Value = serde_json::from_str(&can_use_tool_line(fx, request_id, None)).unwrap();
+    patch(&mut v["request"]);
+    v.to_string()
+}
+
+/// The `approval.request` of `actions` as on the wire.
+fn approval_wire(actions: &[Action]) -> Value {
+    actions
+        .iter()
+        .find_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e))
+                if matches!(e.kind, EventKind::ApprovalRequest { .. }) =>
+            {
+                Some(serde_json::to_value(e).unwrap()["payload"].clone())
+            }
+            _ => None,
+        })
+        .expect("approval.request")
+}
+
+/// SPEC 0.180: a request the CLI gives only to a person (`requires_user_interaction`,
+/// `matched_ask_rule`, `suppress_always_allow_rule`) reaches the card although a session rule
+/// or a folder rule covers the call, with `human_only`, only `once` and `deny`, and no rule
+/// suggested; the others go as before.
+#[test]
+fn a_request_only_a_person_may_answer_reaches_the_card() {
+    let fx = fixture!("permission-allow");
+    let only: [(&str, Value); 3] = [
+        ("requires_user_interaction", json!(true)),
+        (
+            "matched_ask_rule",
+            json!({"source": "projectSettings", "tool_name": "Bash"}),
+        ),
+        ("suppress_always_allow_rule", json!(true)),
+    ];
+
+    // A session rule.
+    let mut core = Core::new(Uuid::now_v7(), false);
+    core.on_line(&can_use_tool_line(&fx, "r0", None));
+    core.answer_approval("r0", "session", None).unwrap();
+    assert_eq!(
+        approvals(&core.on_line(&can_use_tool_line(&fx, "r1", None))),
+        0
+    );
+    for (i, (k, v)) in only.iter().enumerate() {
+        let a = core.on_line(&patched(&fx, &format!("s{i}"), |r| r[*k] = v.clone()));
+        assert_eq!((approvals(&a), writes(&a).len()), (1, 0), "{k}");
+        let p = approval_wire(&a);
+        assert_eq!(p["human_only"], true, "{k}");
+        let ids: Vec<&str> = p["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["once", "deny"], "{k}");
+    }
+
+    // A folder rule.
+    let rules = crate::permissions::FolderRules::default();
+    rules.set(&["Bash(touch *)".into()]);
+    let mut core =
+        Core::new(Uuid::now_v7(), false).with_folder(rules, std::path::PathBuf::from("/w/proj"));
+    let a = core.on_line(&can_use_tool_line(&fx, "f0", None));
+    assert_eq!((approvals(&a), writes(&a).len()), (0, 1));
+    for (i, (k, v)) in only.iter().enumerate() {
+        let a = core.on_line(&patched(&fx, &format!("f{}", i + 1), |r| r[*k] = v.clone()));
+        assert_eq!((approvals(&a), writes(&a).len()), (1, 0), "{k}");
+        let p = approval_wire(&a);
+        assert_eq!(p["human_only"], true, "{k}");
+        assert!(p.get("rule_suggestions").is_none(), "{k}: {p}");
+    }
+    // Any other request is no person's only.
+    let mut plain = Core::new(Uuid::now_v7(), false);
+    let p = approval_wire(&plain.on_line(&can_use_tool_line(&fx, "p1", None)));
+    assert!(p.get("human_only").is_none(), "{p}");
+}
+
+/// SPEC 0.180: the card carries why the CLI asks (`decision_reason`) and its name of the tool
+/// (`display_name`), cut to 1024 and 256 bytes; blank ones are left out.
+#[test]
+fn approval_carries_the_reason_and_the_tools_name() {
+    let fx = fixture!("permission-allow");
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let p = approval_wire(&core.on_line(&patched(&fx, "r1", |r| {
+        r["decision_reason"] = json!("Permission rule 'Bash(touch:*)' requires approval");
+        r["display_name"] = json!("Shell");
+    })));
+    assert_eq!(
+        (&p["reason"], &p["display_name"]),
+        (
+            &json!("Permission rule 'Bash(touch:*)' requires approval"),
+            &json!("Shell")
+        )
+    );
+    let p = approval_wire(&core.on_line(&patched(&fx, "r2", |r| {
+        r["decision_reason"] = json!("é".repeat(1000));
+        r["display_name"] = json!("x".repeat(300));
+    })));
+    assert_eq!(p["reason"].as_str().unwrap().len(), 1024);
+    assert_eq!(p["display_name"].as_str().unwrap().len(), 256);
+    let p = approval_wire(&core.on_line(&patched(&fx, "r3", |r| {
+        r["decision_reason"] = json!(" ");
+        r.as_object_mut().unwrap().remove("display_name");
+    })));
+    assert!(
+        p.get("reason").is_none() && p.get("display_name").is_none(),
+        "{p}"
+    );
+}
+
+/// `approval.cancel` / `clarify.cancel` events of `actions`: kind, request id, reason.
+fn cancels(actions: &[Action]) -> Vec<(&'static str, String, CancelReason)> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => match &e.kind {
+                EventKind::ApprovalCancel { request_id, reason } => {
+                    Some(("approval", request_id.clone(), *reason))
+                }
+                EventKind::ClarifyCancel { request_id, reason } => {
+                    Some(("clarify", request_id.clone(), *reason))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn withdraw(request_id: &str) -> String {
+    json!({"type": "control_cancel_request", "request_id": request_id}).to_string()
+}
+
+/// SPEC 0.180: `control_cancel_request` closes the card of the request it names, `withdrawn`
+/// (an approval, a question, an MCP server's request), and an answer that comes later writes
+/// nothing to the CLI; an id not open here gives nothing.
+#[test]
+fn a_withdrawn_request_closes_its_card() {
+    let fx = fixture!("permission-allow");
+    let mut core = Core::new(Uuid::now_v7(), false);
+    core.on_line(&can_use_tool_line(&fx, "r1", None));
+    let a = core.on_line(&withdraw("r1"));
+    assert_eq!(
+        cancels(&a),
+        [("approval", "r1".to_string(), CancelReason::Withdrawn)]
+    );
+    assert!(writes(&a).is_empty());
+    assert!(core.answer_approval("r1", "once", None).is_err());
+
+    let ask = json!({"type": "control_request", "request_id": "q1", "request": {
+        "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+            {"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]}]}}});
+    core.on_line(&ask.to_string());
+    let a = core.on_line(&withdraw("q1"));
+    assert_eq!(
+        cancels(&a),
+        [("clarify", "q1".to_string(), CancelReason::Withdrawn)]
+    );
+    let answers = BTreeMap::from([("1".to_string(), ClarifyAnswer::One("A".into()))]);
+    assert!(core.answer_clarify("q1", &answers, None).is_err());
+
+    core.on_line(&elicitation("e1", json!({})));
+    let a = core.on_line(&withdraw("e1"));
+    assert_eq!(
+        cancels(&a),
+        [("clarify", "e1".to_string(), CancelReason::Withdrawn)]
+    );
+    assert!(core
+        .answer_clarify("e1", &BTreeMap::new(), Some(ClarifyAction::Accept))
+        .is_err());
+
+    assert!(core.on_line(&withdraw("e1")).is_empty());
+    assert!(core.on_line(&withdraw("nope")).is_empty());
+}
+
+/// An open AskUserQuestion `request_id` of the main agent.
+fn ask_line(request_id: &str) -> String {
+    json!({"type": "control_request", "request_id": request_id, "request": {
+        "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+            {"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]}]}}})
+    .to_string()
+}
+
+/// SPEC 0.180: Stop makes the CLI withdraw every request of the turn it aborts; for an
+/// approval and a question of the main agent that is the turn's end, `stopped` (a question is
+/// then answered by a message, §10.1), not `withdrawn`; an MCP server's request stays open
+/// until answered or withdrawn as it was.
+#[test]
+fn a_request_withdrawn_by_stop_is_stopped() {
+    let fx = fixture!("permission-allow");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&can_use_tool_line(&fx, "r1", None));
+    core.on_line(&ask_line("q1"));
+    core.on_line(&elicitation("e1", json!({})));
+    core.interrupt().expect("a turn runs");
+    let a = core.on_line(&withdraw("q1"));
+    assert_eq!(
+        cancels(&a),
+        [("clarify", "q1".to_string(), CancelReason::Stopped)]
+    );
+    let a = core.on_line(&withdraw("r1"));
+    assert_eq!(
+        cancels(&a),
+        [("approval", "r1".to_string(), CancelReason::Stopped)]
+    );
+    let a = core.on_line(&withdraw("e1"));
+    assert_eq!(
+        cancels(&a),
+        [("clarify", "e1".to_string(), CancelReason::Withdrawn)]
+    );
+}
+
+/// A request of a background subagent outlives the aborted turn: the CLI withdrawing it under
+/// Stop is a withdrawal, as the turn's `result` would leave it open.
+#[test]
+fn a_background_subagents_request_withdrawn_under_stop_is_withdrawn() {
+    let fx = fixture!("permission-allow");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    play(
+        &mut core,
+        r#"{"type":"system","subtype":"task_started","task_id":"a8b8fdc3b4a031d4f","tool_use_id":"toolu_01BR8iav6ZtPUAhpuCWdQPCt","description":"Touch hqc-live-check file","is_backgrounded":true,"task_type":"local_agent","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e13"}"#,
+    );
+    let mut v: Value =
+        serde_json::from_str(&can_use_tool_line(&fx, "bg", Some("touch x"))).unwrap();
+    v["request"]["agent_id"] = json!("a8b8fdc3b4a031d4f");
+    core.on_line(&v.to_string());
+    core.interrupt().expect("a turn runs");
+    assert_eq!(
+        cancels(&core.on_line(&withdraw("bg"))),
+        [("approval", "bg".to_string(), CancelReason::Withdrawn)]
+    );
+}
+
+/// "No" that interrupts the turn (the main agent's call) makes the CLI withdraw the other
+/// requests of the turn too: a parallel question is `stopped`. After the turn's `result` the
+/// turn is not being ended any more, and a withdrawal is `withdrawn` again.
+#[test]
+fn a_request_withdrawn_after_no_is_stopped_until_the_result() {
+    let fx = fixture!("permission-allow");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&can_use_tool_line(&fx, "r1", None));
+    core.on_line(&ask_line("q1"));
+    core.answer_approval("r1", "deny", None).unwrap();
+    assert_eq!(
+        cancels(&core.on_line(&withdraw("q1"))),
+        [("clarify", "q1".to_string(), CancelReason::Stopped)]
+    );
+    core.on_line(
+        r#"{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"terminal_reason":"aborted_tools","total_cost_usd":0.001,"usage":{"input_tokens":4,"output_tokens":2}}"#,
+    );
+    started(&mut core, sid);
+    core.on_line(&ask_line("q2"));
+    assert_eq!(
+        cancels(&core.on_line(&withdraw("q2"))),
+        [("clarify", "q2".to_string(), CancelReason::Withdrawn)]
+    );
+}
+
+/// An `elicitation` of the MCP server `deploy`, with `extra` in its request.
+fn elicitation(request_id: &str, extra: Value) -> String {
+    let mut r = json!({"subtype": "elicitation", "mcp_server_name": "deploy",
+        "message": "Where should the release go?"});
+    for (k, v) in extra.as_object().unwrap() {
+        r[k] = v.clone();
+    }
+    json!({"type": "control_request", "request_id": request_id, "request": r}).to_string()
+}
+
+/// The `clarify.request` of `actions` as on the wire.
+fn clarify_wire(actions: &[Action]) -> Value {
+    actions
+        .iter()
+        .find_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e))
+                if matches!(e.kind, EventKind::ClarifyRequest { .. }) =>
+            {
+                Some(serde_json::to_value(e).unwrap()["payload"].clone())
+            }
+            _ => None,
+        })
+        .expect("clarify.request")
+}
+
+/// SPEC 0.180: an MCP server's form is a question card of the server: its properties in
+/// `property_order` (an enum's values as options, a boolean as Yes/No, the rest free text), the
+/// title as the header and the description as the text, a property the schema's `required` lists
+/// `required`, an integer's or a number's free text with that `input`; the answer goes back
+/// typed as `accept`, Decline as `decline`, the hub's cancel as `cancel`. The turn's end leaves
+/// it open.
+#[test]
+fn an_mcp_servers_form_is_a_question_card() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let form = json!({
+        "requested_schema": {"type": "object", "required": ["region"], "properties": {
+            "keep": {"type": "boolean", "description": "Keep the old release"},
+            "note": {"type": "string"},
+            "ratio": {"type": "number", "title": "Ratio"},
+            "region": {"type": "string", "title": "Region", "description": "The region to deploy to",
+                "enum": ["eu-west", "us-east"]},
+            "replicas": {"type": "integer", "title": "Replicas"}}},
+        "property_order": ["region", "replicas", "keep", "note", "ratio"]});
+    let a = core.on_line(&elicitation("e1", form.clone()));
+    assert!(writes(&a).is_empty());
+    let p = clarify_wire(&a);
+    let example: Value = serde_json::from_str(include_str!(
+        "../../../../hqc-proto/examples/wire/event.clarify.request.elicitation.json"
+    ))
+    .unwrap();
+    let mut first = p.clone();
+    first["questions"] = json!(p["questions"].as_array().unwrap()[..3]);
+    first["request_id"] = json!("req-4");
+    assert_eq!(first, example["payload"]);
+    assert_eq!(
+        p["questions"].as_array().unwrap()[3..],
+        [
+            json!({"id": "4", "text": "note"}),
+            json!({"id": "5", "text": "Ratio", "input": "number"})
+        ]
+    );
+
+    let answers = BTreeMap::from([
+        ("1".to_string(), ClarifyAnswer::One("us-east".into())),
+        ("2".to_string(), ClarifyAnswer::One(" 3 ".into())),
+        ("3".to_string(), ClarifyAnswer::One("No".into())),
+        ("4".to_string(), ClarifyAnswer::One("  ".into())),
+        ("5".to_string(), ClarifyAnswer::One("0.5".into())),
+    ]);
+    let w = writes(
+        &core
+            .answer_clarify("e1", &answers, Some(ClarifyAction::Accept))
+            .unwrap(),
+    );
+    assert_eq!(
+        w,
+        [
+            json!({"type": "control_response", "response": {"subtype": "success",
+            "request_id": "e1", "response": {"action": "accept", "content":
+                {"region": "us-east", "replicas": 3, "keep": false, "ratio": 0.5}}}})
+        ]
+    );
+
+    core.on_line(&elicitation("e2", form.clone()));
+    let w = writes(
+        &core
+            .answer_clarify("e2", &BTreeMap::new(), Some(ClarifyAction::Decline))
+            .unwrap(),
+    );
+    assert_eq!(w[0]["response"]["response"], json!({"action": "decline"}));
+
+    core.on_line(&elicitation("e3", form.clone()));
+    // A turn's end does not close it: no agent asked it.
+    let a = core.on_line(
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"usage":{"input_tokens":1,"output_tokens":1}}"#,
+    );
+    assert!(cancels(&a).is_empty(), "{a:?}");
+    let w = writes(&core.answer_clarify("e3", &BTreeMap::new(), None).unwrap());
+    assert_eq!(w[0]["response"]["response"], json!({"action": "cancel"}));
+}
+
+/// SPEC 0.180: an MCP server's link is a card with its `url` and no questions, Done is `accept`
+/// without `content`; a form the card cannot ask (a nested object, an array) and a link without
+/// a URL are answered `cancel` at once, with a `system elicitation_unsupported` line.
+#[test]
+fn an_mcp_servers_link_and_a_form_hqc_cannot_ask() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let a = core.on_line(&elicitation(
+        "e1",
+        json!({"mode": "url", "url": "https://github.com/login/device", "elicitation_id": "x"}),
+    ));
+    let p = clarify_wire(&a);
+    assert_eq!(
+        (&p["questions"], &p["url"], &p["server"]),
+        (
+            &json!([]),
+            &json!("https://github.com/login/device"),
+            &json!("deploy")
+        )
+    );
+    let w = writes(
+        &core
+            .answer_clarify("e1", &BTreeMap::new(), Some(ClarifyAction::Accept))
+            .unwrap(),
+    );
+    assert_eq!(w[0]["response"]["response"], json!({"action": "accept"}));
+
+    for (id, extra) in [
+        (
+            "n1",
+            json!({"requested_schema": {"type": "object", "properties": {
+                "name": {"type": "string"}, "address": {"type": "object"}}}}),
+        ),
+        (
+            "n2",
+            json!({"requested_schema": {"type": "object", "properties": {
+                "tags": {"type": "array", "items": {"type": "string"}}}}}),
+        ),
+        ("n3", json!({"mode": "url"})),
+    ] {
+        let a = core.on_line(&elicitation(id, extra));
+        assert_eq!(approvals(&a), 0);
+        assert!(!a
+            .iter()
+            .any(|a| matches!(a, Action::Emit(AdapterEvent::Event(e))
+            if matches!(e.kind, EventKind::ClarifyRequest { .. }))));
+        let w = writes(&a);
+        assert_eq!(w.len(), 1, "{id}");
+        assert_eq!(w[0]["response"]["request_id"], id);
+        assert_eq!(w[0]["response"]["response"], json!({"action": "cancel"}));
+        let sys = system_events(&a);
+        assert_eq!(sys.len(), 1, "{id}");
+        assert_eq!(sys[0].0, "elicitation_unsupported");
+        assert!(sys[0].1.contains("deploy"), "{}", sys[0].1);
+        assert!(core
+            .answer_clarify(id, &BTreeMap::new(), Some(ClarifyAction::Decline))
+            .is_err());
+    }
+}
+
+/// SPEC 0.180: what an MCP server's request only shows is cut: a 10 KB `message` arrives as its
+/// first `PREVIEW_LIMIT` bytes and "…", the server's name as 256 bytes, a field's title and
+/// description as 1024; the field's name, the key of the answer, is kept whole.
+#[test]
+fn an_mcp_servers_long_message_is_cut() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let long = "m".repeat(10 * 1024);
+    let name = "n".repeat(2 * 1024);
+    let a = core.on_line(&elicitation(
+        "e1",
+        json!({"message": long, "mcp_server_name": "s".repeat(1024),
+            "requested_schema": {"type": "object", "properties": {
+                name.clone(): {"type": "string", "title": "t".repeat(4096),
+                    "description": "d".repeat(4096)}}}}),
+    ));
+    let p = clarify_wire(&a);
+    assert_eq!(
+        p["message"],
+        json!(format!("{}…", &long[..super::engine::PREVIEW_LIMIT]))
+    );
+    assert_eq!(p["server"], json!("s".repeat(256)));
+    assert_eq!(p["questions"][0]["text"], json!("d".repeat(1024)));
+    assert_eq!(p["questions"][0]["header"], json!("t".repeat(1024)));
+    // The answer goes back under the property's own name, not cut.
+    let answers = BTreeMap::from([("1".to_string(), ClarifyAnswer::One("x".into()))]);
+    let w = writes(
+        &core
+            .answer_clarify("e1", &answers, Some(ClarifyAction::Accept))
+            .unwrap(),
+    );
+    assert_eq!(w[0]["response"]["response"]["content"], json!({name: "x"}));
+}
+
+/// SPEC 0.180: a request whose `clarify.request` would be over 256 KiB (here its enum values,
+/// which go back to the server and are not cut) is answered `cancel` at once, with a `system
+/// elicitation_unsupported` line, and gives no card.
+#[test]
+fn an_mcp_servers_request_over_256_kib_is_cancelled() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let values: Vec<String> = (0..300)
+        .map(|i| format!("{i:04}{}", "v".repeat(1020)))
+        .collect();
+    assert!(values.iter().map(String::len).sum::<usize>() > 256 * 1024);
+    let a = core.on_line(&elicitation(
+        "e1",
+        json!({"requested_schema": {"type": "object", "properties": {
+            "region": {"type": "string", "enum": values}}}}),
+    ));
+    assert!(!a
+        .iter()
+        .any(|a| matches!(a, Action::Emit(AdapterEvent::Event(e))
+        if matches!(e.kind, EventKind::ClarifyRequest { .. }))));
+    let w = writes(&a);
+    assert_eq!(w.len(), 1);
+    assert_eq!(w[0]["response"]["request_id"], "e1");
+    assert_eq!(w[0]["response"]["response"], json!({"action": "cancel"}));
+    let sys = system_events(&a);
+    assert_eq!(sys.len(), 1);
+    assert_eq!(sys[0].0, "elicitation_unsupported");
+    assert!(sys[0].1.contains("too large"), "{}", sys[0].1);
+    assert!(core
+        .answer_clarify("e1", &BTreeMap::new(), Some(ClarifyAction::Decline))
+        .is_err());
 }
 
 /// A denial is the VS Code tab's (cc_remote docs/SPEC.md §2.12): "No" stops the turn
@@ -3626,7 +4161,8 @@ async fn a_model_switch_record_is_own() {
 }
 
 /// SPEC §8.1: a `rate_limit_event` (2.1.310) gives the 5-hour and 7-day windows of its
-/// `unifiedWindows`; one that names neither gives nothing.
+/// `unifiedWindows` and (since 0.179) its `status`, `rateLimitType` and `resetsAt`; one that
+/// names neither window gives nothing.
 #[test]
 fn limits_of_a_rate_limit_event() {
     let mut core = Core::new(Uuid::now_v7(), false);
@@ -3638,7 +4174,8 @@ fn limits_of_a_rate_limit_event() {
     assert_eq!(
         serde_json::to_value(l).unwrap(),
         json!({"five_hour": {"utilization": 0.39, "resets_at": 1794150000},
-               "seven_day": {"utilization": 0.23, "resets_at": 1794283200}})
+               "seven_day": {"utilization": 0.23, "resets_at": 1794283200},
+               "status": "allowed", "rate_limit_type": "five_hour", "resets_at": 1794150000})
     );
     assert!(core
         .on_line(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#)
@@ -4446,6 +4983,166 @@ fn a_task_notification_carries_its_call_status_and_task() {
     );
 }
 
+/// The line of a task's end (SPEC 0.181; lines made up after 2.1.312's code): the
+/// notification's `usage`; its `output_file`, when there is one, right after the line.
+#[test]
+fn a_task_end_carries_its_usage_and_output() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let stream = r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_A1","status":"completed","output_file":"/tmp/tasks/a1.output","summary":"Fixed both nets.","usage":{"total_tokens":23176,"tool_uses":4,"duration_ms":61000}}
+{"type":"system","subtype":"task_notification","task_id":"a2","tool_use_id":"toolu_A2","status":"completed","output_file":"","summary":"Done, 4."}
+{"type":"system","subtype":"task_notification","task_id":"bnx80r4bg","tool_use_id":"toolu_B1","status":"failed","output_file":"/tmp/tasks/bnx80r4bg.output","summary":"Background command \"make\" failed with exit code 2"}"#;
+    let mut lines = Vec::new();
+    for a in play(&mut core, stream) {
+        match a {
+            Action::Emit(AdapterEvent::Event(Event {
+                kind: EventKind::System { text, usage, .. },
+                ..
+            })) => lines.push(format!("{text} | {usage:?}")),
+            Action::Emit(AdapterEvent::TaskOutput(p)) => lines.push(p.display().to_string()),
+            _ => {}
+        }
+    }
+    let usage = hqc_proto::event::TaskUsage {
+        total_tokens: 23176,
+        tool_uses: 4,
+        duration_ms: 61000,
+    };
+    assert_eq!(
+        lines,
+        [
+            format!("Fixed both nets. | {:?}", Some(usage)),
+            "/tmp/tasks/a1.output".into(),
+            "Done, 4. | None".into(),
+            "Background command \"make\" failed with exit code 2 | None".into(),
+            "/tmp/tasks/bnx80r4bg.output".into(),
+        ]
+    );
+}
+
+/// A task the CLI keeps out of the transcript (`skip_transcript: true`; 2.1.312 sends it so for
+/// its own tasks, with `ambient: true`) is no activity: no line, no output.
+#[test]
+fn a_task_kept_out_of_the_transcript_gives_no_line() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let a = play(
+        &mut core,
+        r#"{"type":"system","subtype":"task_notification","task_id":"m1","status":"completed","output_file":"/tmp/tasks/m1.output","summary":"saving memories","skip_transcript":true,"ambient":true}"#,
+    );
+    assert!(
+        !a.iter().any(|a| matches!(
+            a,
+            Action::Emit(AdapterEvent::Event(_) | AdapterEvent::TaskOutput(_))
+        )),
+        "{a:?}"
+    );
+}
+
+/// An `ambient` task (2.1.312: in the CLI's list and in its `task_started`, a task the SDK says
+/// is no activity) is not counted in the background tasks, is no running subagent and no row
+/// above the input; the agent's command beside it is all three.
+#[test]
+fn an_ambient_task_is_no_activity() {
+    let lines = [
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"amem","task_type":"post_turn_memory","description":"saving memories","ambient":true},{"task_id":"afork","task_type":"local_agent","description":"Fork worker","ambient":true},{"task_id":"b2st7oc3z","task_type":"local_bash","description":"Run the full pass"}]}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"afork","tool_use_id":"toolu_01Fork","description":"Fork worker","is_backgrounded":true,"task_type":"local_agent","skip_transcript":true,"ambient":true}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"b2st7oc3z","tool_use_id":"toolu_01Run","description":"Run the full pass","is_backgrounded":true,"task_type":"local_bash"}"#,
+    ];
+    let want: [&[&str]; 3] = [&["background_tasks:1"], &[], &[]];
+    assert_eq!(task_counts(lines.into_iter()), want);
+    let row = live_row("b2st7oc3z", "Run the full pass", None);
+    assert_eq!(
+        live_lists(lines.into_iter()),
+        [vec![], vec![], vec![vec![row]]]
+    );
+}
+
+/// The tasks of an `ambient` one (2.1.312 runs a skill with `context: fork` as an `ambient`
+/// `local_agent`, and its tasks name it as their `parent_task_id`) are the agent's own: its
+/// subagent counts and has its row, its command has its row, and it counts as no subagent;
+/// its `task_started` or its entry in the list alone says it is `ambient`.
+#[test]
+fn the_tasks_of_an_ambient_one_are_the_agents() {
+    let start = r#"{"type":"system","subtype":"task_started","task_id":"afork","tool_use_id":"toolu_01Fork","description":"/review","is_backgrounded":true,"task_type":"local_agent","skip_transcript":true,"ambient":true}"#;
+    let fork =
+        r#"{"task_id":"afork","task_type":"local_agent","description":"/review","ambient":true},"#;
+    let listed = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"afork","task_type":"local_agent","description":"/review","ambient":true},{"task_id":"achild","task_type":"local_agent","description":"Check the board","parent_task_id":"afork"},{"task_id":"bchild","task_type":"local_bash","description":"Run the full pass","parent_task_id":"afork"}]}"#;
+    let unlisted = listed.replace(fork, "");
+    let child = r#"{"type":"system","subtype":"task_started","task_id":"achild","tool_use_id":"toolu_01Chk","description":"Check the board","is_backgrounded":true,"task_type":"local_agent","parent_task_id":"afork"}"#;
+    let command = r#"{"type":"system","subtype":"task_started","task_id":"bchild","tool_use_id":"toolu_01Run","description":"Run the full pass","is_backgrounded":true,"task_type":"local_bash"}"#;
+    let counts: [&[&str]; 4] = [&[], &["background_tasks:2", "subagents:1"], &[], &[]];
+    let subagent = live_row("achild", "Check the board", None);
+    let lists = [
+        vec![],
+        vec![vec![live_row("achild", "", None)]],
+        vec![vec![subagent.clone()]],
+        vec![vec![
+            subagent,
+            live_row("bchild", "Run the full pass", None),
+        ]],
+    ];
+    // Both say it; the list alone; the `task_started` alone.
+    for (lines, from) in [
+        (vec![start, listed, child, command], 0),
+        (vec![listed, child, command], 1),
+        (vec![start, unlisted.as_str(), child, command], 0),
+    ] {
+        assert_eq!(
+            task_counts(lines.iter().copied()),
+            counts[from..],
+            "{lines:?}"
+        );
+        assert_eq!(
+            live_lists(lines.iter().copied()),
+            lists[from..],
+            "{lines:?}"
+        );
+    }
+}
+
+/// A request of a subagent names it (SPEC 0.181): the CLI's `agent_id` is the subagent's
+/// `task_id` (2.1.312), and its task is the `description` of its `task_started`. The agent's
+/// own request, and one of a subagent the adapter has not seen start, name none.
+#[test]
+fn a_subagents_request_names_it() {
+    let fx = fixture!("permission-allow");
+    let mut core = Core::new(Uuid::now_v7(), false);
+    play(
+        &mut core,
+        r#"{"type":"system","subtype":"task_started","task_id":"a8b8fdc3b4a031d4f","tool_use_id":"toolu_01BR8iav6ZtPUAhpuCWdQPCt","description":"Touch hqc-live-check file","is_backgrounded":true,"task_type":"local_agent"}"#,
+    );
+    let asked = |core: &mut Core, line: Value| {
+        emitted(core.on_line(&line.to_string()))
+            .into_iter()
+            .find_map(|e| match e {
+                AdapterEvent::Event(Event {
+                    kind:
+                        EventKind::ApprovalRequest { subagent, .. }
+                        | EventKind::ClarifyRequest { subagent, .. },
+                    ..
+                }) => Some(subagent.map(|s| (s.task_id, s.description))),
+                _ => None,
+            })
+            .expect("a request")
+    };
+    let named = Some((
+        "a8b8fdc3b4a031d4f".to_string(),
+        "Touch hqc-live-check file".to_string(),
+    ));
+    let mut v: Value = serde_json::from_str(&can_use_tool_line(&fx, "r1", None)).unwrap();
+    assert_eq!(asked(&mut core, v.clone()), None);
+    v["request_id"] = json!("r2");
+    v["request"]["agent_id"] = json!("a8b8fdc3b4a031d4f");
+    assert_eq!(asked(&mut core, v.clone()), named);
+    v["request_id"] = json!("r3");
+    v["request"]["agent_id"] = json!("aunknown");
+    assert_eq!(asked(&mut core, v), None);
+    let q = json!({"type": "control_request", "request_id": "q1", "request": {
+        "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "agent_id": "a8b8fdc3b4a031d4f",
+        "input": {"questions": [{"question": "Which net?", "header": "Net", "multiSelect": false,
+            "options": [{"label": "VCC"}, {"label": "GND"}]}]}}});
+    assert_eq!(asked(&mut core, q), named);
+}
+
 /// An `Agent` call's `args_preview` has its `prompt` last: with a prompt past the 4 KB cut the
 /// sorted keys lost `subagent_type` and `run_in_background`, which the subagent's card shows.
 /// The other fields go from the shortest value to the longest.
@@ -4797,6 +5494,643 @@ fn a_subagent_line_does_not_release_a_held_compaction() {
         .collect();
     let summary = all[at]["message"]["content"].as_str().unwrap().to_owned();
     assert_eq!(system_events(&a), [("context_compacted".into(), summary)]);
+}
+
+/// `/compact` (fixture `stream-resume-compact`, 2.1.308): `system context_compacted` carries
+/// the `trigger`, `pre_tokens` and `post_tokens` of the boundary's `compact_metadata`.
+#[test]
+fn a_compaction_carries_its_trigger_and_tokens() {
+    let fx = fixture!("resume-compact", "2.1.308");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let compaction = play(&mut core, fx.stream)
+        .into_iter()
+        .find_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => match e.kind {
+                EventKind::System {
+                    code, compaction, ..
+                } if code == "context_compacted" => Some(compaction),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        compaction,
+        Some(ContextCompacted {
+            trigger: "manual".into(),
+            pre_tokens: 22240,
+            post_tokens: Some(4507),
+        })
+    );
+}
+
+/// SPEC §4, §8.1: a compaction that failed (`status` with `compact_result: failed`; live on
+/// 2.1.312 at 165 % of the window it came with `compact_error: too_few_groups`) is `system
+/// compaction_failed` "Compaction failed: <error>", "Compaction failed" without the error; one
+/// that went through gives no line of its own.
+#[test]
+fn a_failed_compaction_is_a_line() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let a = play(
+        &mut core,
+        concat!(
+            r#"{"type":"system","subtype":"status","status":"compacting"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"status","status":null,"compact_result":"failed","compact_error":"too_few_groups"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"status","status":null,"compact_result":"failed"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"status","status":null,"compact_result":"success"}"#,
+        ),
+    );
+    assert_eq!(
+        system_events(&a),
+        [
+            (
+                "compaction_failed".into(),
+                "Compaction failed: too_few_groups".into()
+            ),
+            ("compaction_failed".into(), "Compaction failed".into())
+        ]
+    );
+}
+
+/// SPEC §8.1: what the agent waits on, line by line (lines after the CLI's code, 2.1.312:
+/// `api_retry` cli:768796, `thinking_tokens` before each thinking delta cli:768702, `status`
+/// cli:768731): set by `api_retry`, `status compacting` and `thinking_tokens`, ended by a
+/// response that starts, a block that starts or ends, another `status` that is no report of
+/// the permission mode, the agent's `assistant` line and `result`. A thinking delta, `ping`, a
+/// subagent's line and a report of the mode leave it.
+#[test]
+fn the_activity_follows_the_stream() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let retry = |attempt, error_status| {
+        Some(Activity::Retrying(ApiRetry {
+            attempt,
+            max_retries: 10,
+            retry_delay_ms: 8000,
+            error_status,
+        }))
+    };
+    let thinking = |estimated_tokens| Some(Activity::Thinking { estimated_tokens });
+    let main =
+        |event: Value| json!({"type": "stream_event", "parent_tool_use_id": null, "event": event});
+    let steps: Vec<(Value, Vec<Option<Activity>>)> = vec![
+        (
+            json!({"type": "system", "subtype": "api_retry", "attempt": 3, "max_retries": 10,
+                "retry_delay_ms": 8000, "error_status": 529, "error": "overloaded"}),
+            vec![retry(3, Some(529))],
+        ),
+        (
+            json!({"type": "system", "subtype": "api_retry", "attempt": 4, "max_retries": 10,
+                "retry_delay_ms": 8000, "error_status": null, "error": "unknown"}),
+            vec![retry(4, None)],
+        ),
+        (
+            json!({"type": "stream_event", "parent_tool_use_id": "toolu_sub",
+                "event": {"type": "message_start", "message": {}}}),
+            vec![],
+        ),
+        (
+            main(json!({"type": "message_start", "message": {}})),
+            vec![None],
+        ),
+        (
+            main(json!({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""}})),
+            vec![],
+        ),
+        (
+            json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 12,
+                "estimated_tokens_delta": 12}),
+            vec![thinking(12)],
+        ),
+        (
+            main(json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "Let me look"}})),
+            vec![],
+        ),
+        (main(json!({"type": "ping"})), vec![]),
+        // A new estimate within 2 s of the last one reported waits.
+        (
+            json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 40,
+                "estimated_tokens_delta": 28}),
+            vec![],
+        ),
+        (
+            main(json!({"type": "content_block_stop", "index": 0})),
+            vec![None],
+        ),
+        (
+            json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 5,
+                "estimated_tokens_delta": 5}),
+            vec![thinking(5)],
+        ),
+        (
+            json!({"type": "assistant", "parent_tool_use_id": null,
+                "uuid": "0f6c1d2e-9999-4a55-9d0e-1a2b3c4d5e01",
+                "message": {"model": "claude-opus-5-5", "role": "assistant",
+                    "content": [{"type": "thinking", "thinking": "Done.", "signature": "s"}]}}),
+            vec![None],
+        ),
+        (
+            json!({"type": "system", "subtype": "status", "status": "compacting"}),
+            vec![Some(Activity::Compacting)],
+        ),
+        (
+            json!({"type": "system", "subtype": "status", "status": null,
+                "permissionMode": "default"}),
+            vec![],
+        ),
+        (
+            json!({"type": "system", "subtype": "status", "status": null,
+                "compact_result": "success"}),
+            vec![None],
+        ),
+        (
+            json!({"type": "system", "subtype": "status", "status": "compacting"}),
+            vec![Some(Activity::Compacting)],
+        ),
+        (
+            json!({"type": "system", "subtype": "status", "status": "requesting"}),
+            vec![None],
+        ),
+        (
+            json!({"type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 10,
+                "retry_delay_ms": 8000, "error_status": 529, "error": "overloaded"}),
+            vec![retry(1, Some(529))],
+        ),
+        (
+            json!({"type": "result", "subtype": "success", "is_error": false, "num_turns": 1,
+                "result": "", "total_cost_usd": 0.01,
+                "usage": {"input_tokens": 1, "output_tokens": 1}}),
+            vec![None],
+        ),
+    ];
+    for (line, want) in steps {
+        let got: Vec<Option<Activity>> = core
+            .on_line(&line.to_string())
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::Emit(AdapterEvent::Activity(a)) => Some(a),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, want, "{line}");
+    }
+}
+
+/// SPEC §4, §8.1: the CLI's and its hooks' messages (`system/informational`, fields after
+/// cli:108274, levels `info`, `notice`, `suggestion`, `warning`; `system/notification`,
+/// cli:768716) are `system runtime_notice` lines with their text; `info` (shown only in the
+/// transcript view of the terminal) and an empty text give none.
+#[test]
+fn cli_notices_are_lines() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let a = play(
+        &mut core,
+        concat!(
+            r#"{"type":"system","subtype":"informational","content":"Stop hook says: run the tests first","level":"warning","prevent_continuation":true}"#,
+            "\n",
+            r#"{"type":"system","subtype":"informational","content":"Loaded 3 skills","level":"info"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"informational","content":"  ","level":"notice"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"informational","content":"Settings applied in part","level":"notice"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"notification","key":"account-plugins-not-reloaded","text":"Couldn't finish reloading your plugins","priority":"medium","color":"warning"}"#,
+        ),
+    );
+    assert_eq!(
+        system_events(&a),
+        [
+            (
+                "runtime_notice".into(),
+                "Stop hook says: run the tests first".into()
+            ),
+            ("runtime_notice".into(), "Settings applied in part".into()),
+            (
+                "runtime_notice".into(),
+                "Couldn't finish reloading your plugins".into()
+            ),
+        ]
+    );
+}
+
+/// SPEC §4, §8.1: the CLI went on with another model (`model_fallback`, `model_consent_fallback`,
+/// fields after cli:108527): a line "<model> → <fallback>: <the CLI's words>", and the turn's
+/// `usage` names the model that answered; a refusal with no other model
+/// (`model_refusal_no_fallback`, sent with an empty `content`, cli:760131) is a line too.
+#[test]
+fn a_model_fallback_is_a_line_and_names_the_usage() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let a = play(
+        &mut core,
+        concat!(
+            r#"{"type":"system","subtype":"init","model":"claude-opus-5-5","permissionMode":"default","session_id":"s"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"model_fallback","trigger":"overloaded","original_model":"claude-opus-5-5","fallback_model":"claude-sonnet-5","content":"Switched to Sonnet 5 due to high demand for Opus 5.5"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"model_refusal_no_fallback","original_model":"claude-sonnet-5","request_id":null,"api_refusal_category":null,"api_refusal_explanation":"policy","refused_user_message_uuid":null,"content":""}"#,
+            "\n",
+            r#"{"type":"system","subtype":"model_refusal_no_fallback","original_model":"claude-sonnet-5","content":"Sonnet 5 declined this request."}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"","total_cost_usd":0.01,"usage":{"input_tokens":3,"output_tokens":4}}"#,
+        ),
+    );
+    assert_eq!(
+        system_events(&a),
+        [
+            (
+                "model_fallback".into(),
+                "claude-opus-5-5 → claude-sonnet-5: Switched to Sonnet 5 due to high demand for Opus 5.5".into()
+            ),
+            (
+                "model_refusal".into(),
+                "claude-sonnet-5 refused to answer: policy".into()
+            ),
+            ("model_refusal".into(), "Sonnet 5 declined this request.".into()),
+        ]
+    );
+    let model = a.iter().find_map(|a| match a {
+        Action::Emit(AdapterEvent::Event(e)) => match &e.kind {
+            EventKind::Usage { model, .. } => Some(model.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert_eq!(model, Some(Some("claude-sonnet-5".into())));
+}
+
+/// SPEC §4, §8.1: a model refused and another answered (2.1.312: the new answer's `assistant`
+/// names in `supersedes` the wire uuids of what it replaces, cli:107172; the turn's
+/// `model_refusal_fallback` repeats them in `retracted_message_uuids`, cli:760380): one
+/// `retraction` of the events of those records, before the new answer, a held text among them
+/// never sent; the notice retracts nothing again and is a line.
+#[test]
+fn a_refused_answer_is_retracted() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let [t, c, r, h, n] = std::array::from_fn::<Uuid, 5, _>(|_| Uuid::new_v4());
+    let assistant = |u: Uuid, content: Value, supersedes: &[Uuid]| {
+        let mut v = json!({"type": "assistant", "parent_tool_use_id": null, "uuid": u,
+            "message": {"model": "claude-opus-5-5", "role": "assistant", "content": content}});
+        if !supersedes.is_empty() {
+            v["supersedes"] = json!(supersedes);
+        }
+        v.to_string()
+    };
+    let mut a = play(
+        &mut core,
+        &[
+            assistant(t, json!([{"type": "text", "text": "Let me check."}]), &[]),
+            assistant(
+                c,
+                json!([{"type": "tool_use", "id": "toolu_r", "name": "Bash", "input": {}}]),
+                &[],
+            ),
+            json!({"type": "user", "parent_tool_use_id": null, "uuid": r,
+                "message": {"role": "user", "content": [{"type": "tool_result",
+                    "tool_use_id": "toolu_r", "content": "ok"}]}})
+            .to_string(),
+            assistant(
+                h,
+                json!([{"type": "text", "text": "I can't help with that."}]),
+                &[],
+            ),
+        ]
+        .join("\n"),
+    );
+    let refused: Vec<Uuid> = a
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => Some(e.event_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        refused,
+        [
+            record_event_id(&t, 0),
+            record_event_id(&c, 0),
+            record_event_id(&r, 0)
+        ]
+    );
+    a = play(
+        &mut core,
+        &[
+            assistant(n, json!([{"type": "text", "text": "Here it is."}]), &[t, c, r, h]),
+            json!({"type": "system", "subtype": "model_refusal_fallback", "trigger": "refusal",
+                "direction": "retry", "original_model": "claude-opus-5-5",
+                "fallback_model": "claude-sonnet-5", "request_id": null,
+                "retracted_message_uuids": [t, c, r, h],
+                "content": "Opus 5.5 declined. This response was generated by Sonnet 5 instead."})
+            .to_string(),
+            r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"","total_cost_usd":0.01,"usage":{"input_tokens":3,"output_tokens":4}}"#.into(),
+        ]
+        .join("\n"),
+    );
+    let got: Vec<String> = a
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => Some(match &e.kind {
+                EventKind::Retraction { event_ids } => format!("retraction {event_ids:?}"),
+                EventKind::AgentMessage { text, r#final, .. } => format!("{text} {final}"),
+                EventKind::System { code, text, .. } => format!("{code}: {text}"),
+                k => serde_json::to_value(k).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+            }),
+            _ => None,
+        })
+        .collect();
+    let ids = [
+        record_event_id(&t, 0),
+        record_event_id(&c, 0),
+        record_event_id(&r, 0),
+        record_event_id(&h, 0),
+    ];
+    assert_eq!(
+        got,
+        [
+            format!("retraction {ids:?}"),
+            "model_refusal_fallback: claude-opus-5-5 → claude-sonnet-5: Opus 5.5 declined. This response was generated by Sonnet 5 instead.".into(),
+            "Here it is. true".into(),
+            "usage".into(),
+            "status".into(),
+        ]
+    );
+}
+
+/// SPEC §4, §8.1: the CLI refused a model switch of ours (2.1.312: `error` with `error_code`
+/// and `model`, the model it kept, cli:1509084): a `system model_not_switched` line with the
+/// reason and that `model`, and the supervisor keeps it as the session's model.
+#[test]
+fn a_refused_model_switch_is_a_line_and_the_kept_model() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let line = json!({"type": "control_response", "response": {"subtype": "error",
+        "request_id": "hqc-model-0199f3a2-7c10-7000-8000-000000000001",
+        "error": "Model claude-nope is not available", "error_code": "not_found",
+        "model": "claude-opus-5-5"}});
+    let a = core.on_line(&line.to_string());
+    let [Action::Emit(AdapterEvent::Event(e)), Action::Emit(AdapterEvent::ModelKept(kept))] =
+        a.as_slice()
+    else {
+        panic!("{a:?}");
+    };
+    assert_eq!(kept, "claude-opus-5-5");
+    assert_eq!(
+        e.kind,
+        EventKind::System {
+            text: "Model not switched: Model claude-nope is not available. The agent stays on claude-opus-5-5".into(),
+            code: "model_not_switched".into(),
+            call_id: None,
+            status: None,
+            task_id: None,
+            from_session_id: None,
+            usage: None,
+            fork: None,
+            compaction: None,
+            model: Some("claude-opus-5-5".into()),
+        }
+    );
+}
+
+/// SPEC §8.1: the CLI refused a model switch the user has made again since (the hub sent
+/// another `session.model` before the answer): its refusal names the model kept before the
+/// newer switch, and gives neither a line nor that model; one of the latest switch does.
+#[test]
+fn a_refusal_of_an_older_model_switch_is_dropped() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let mut request = |model: &str| match core.set_model(model) {
+        Action::Write(v) => v["request_id"].as_str().unwrap().to_owned(),
+        a => panic!("{a:?}"),
+    };
+    let (older, latest) = (request("claude-nope"), request("claude-sonnet-5"));
+    let refusal = |id: &str| {
+        json!({"type": "control_response", "response": {"subtype": "error", "request_id": id,
+            "error": "Model claude-nope is not available", "model": "claude-opus-5-5"}})
+        .to_string()
+    };
+    assert!(core.on_line(&refusal(&older)).is_empty());
+    let a = core.on_line(&refusal(&latest));
+    assert!(
+        matches!(a.as_slice(), [
+            Action::Emit(AdapterEvent::Event(_)),
+            Action::Emit(AdapterEvent::ModelKept(m)),
+        ] if m == "claude-opus-5-5"),
+        "{a:?}"
+    );
+}
+
+/// SPEC §8.1: the CLI's fixed "set_model failed" can follow a switch that applied; one naming
+/// the model asked for gives no line.
+#[test]
+fn a_failed_answer_naming_the_model_asked_for_is_no_line() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let id = match core.set_model("claude-sonnet-5") {
+        Action::Write(v) => v["request_id"].as_str().unwrap().to_owned(),
+        a => panic!("{a:?}"),
+    };
+    let answer = json!({"type": "control_response", "response": {"subtype": "error",
+        "request_id": id, "error": "set_model failed", "model": "claude-sonnet-5"}});
+    assert!(core.on_line(&answer.to_string()).is_empty());
+}
+
+/// SPEC §4, §8.1: a refusal answered by another model for the session (`model_refusal_fallback`
+/// with `scope` `session` or none, cli:108465) makes the turn's `usage` name the model that
+/// answered; with `scope` `local` (a subagent's or a side question's answer) it does not.
+#[test]
+fn a_refusal_answered_by_another_model_names_it_in_the_usage() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let mut turn = |scope: Option<&str>| {
+        started(&mut core, sid);
+        let mut fallback = json!({"type": "system", "subtype": "model_refusal_fallback",
+            "trigger": "refusal", "direction": "retry", "original_model": "claude-opus-5-5",
+            "fallback_model": "claude-sonnet-5", "request_id": null,
+            "content": "Opus 5.5 declined. This response was generated by Sonnet 5 instead."});
+        if let Some(s) = scope {
+            fallback["scope"] = json!(s);
+        }
+        let a = play(
+            &mut core,
+            &[
+                r#"{"type":"system","subtype":"init","model":"claude-opus-5-5","permissionMode":"default","session_id":"s"}"#.into(),
+                fallback.to_string(),
+                r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"","total_cost_usd":0.01,"usage":{"input_tokens":3,"output_tokens":4}}"#.into(),
+            ]
+            .join("\n"),
+        );
+        a.iter().find_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => match &e.kind {
+                EventKind::Usage { model, .. } => model.clone(),
+                _ => None,
+            },
+            _ => None,
+        })
+    };
+    assert_eq!(turn(None).as_deref(), Some("claude-sonnet-5"));
+    assert_eq!(turn(Some("session")).as_deref(), Some("claude-sonnet-5"));
+    assert_eq!(turn(Some("local")).as_deref(), Some("claude-opus-5-5"));
+}
+
+/// SPEC §4, §8.1: `system/init`'s MCP servers that are not connected (live on 2.1.312, a server
+/// that did not connect in time: `status: failed`) and its `plugin_errors` are a line each; the
+/// CLI sends `init` before every turn, and the same set again gives none.
+#[test]
+fn init_problems_are_lines_when_they_change() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let init = |servers: Value, errors: Option<Value>| {
+        let mut v = json!({"type": "system", "subtype": "init", "model": "claude-opus-5-5",
+            "permissionMode": "default", "session_id": "s", "mcp_servers": servers});
+        if let Some(e) = errors {
+            v["plugin_errors"] = e;
+        }
+        v.to_string()
+    };
+    // `disabled`: turned off by the user (cli:817600), not a problem.
+    let failed = json!([{"name": "hqc", "status": "connected"},
+        {"name": "slow", "status": "failed"}, {"name": "docs", "status": "needs-auth"},
+        {"name": "off", "status": "disabled"}]);
+    let errors = json!([{"plugin": "lint@acme", "type": "hook-load-failed",
+        "message": "hooks.json is not valid JSON"}]);
+    let lines = |core: &mut Core, line: String| system_events(&core.on_line(&line));
+    assert_eq!(
+        lines(&mut core, init(failed.clone(), Some(errors.clone()))),
+        [
+            (
+                "mcp_not_connected".into(),
+                "MCP servers not connected: slow (failed), docs (needs-auth)".into()
+            ),
+            (
+                "plugin_errors".into(),
+                "Plugin errors: lint@acme: hooks.json is not valid JSON".into()
+            ),
+        ]
+    );
+    assert_eq!(lines(&mut core, init(failed.clone(), Some(errors))), []);
+    assert_eq!(
+        lines(
+            &mut core,
+            init(json!([{"name": "hqc", "status": "connected"}]), None)
+        ),
+        []
+    );
+    assert_eq!(
+        lines(&mut core, init(failed, None)),
+        [(
+            "mcp_not_connected".into(),
+            "MCP servers not connected: slow (failed), docs (needs-auth)".into()
+        )]
+    );
+}
+
+/// SPEC §8.1: the CLI sends a thinking estimate with every piece of a thinking, about ten a
+/// second; a new estimate goes at most once per 2 s, the end of the thinking at once.
+#[test]
+fn a_thinking_estimate_goes_at_most_once_per_two_seconds() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let activities = |core: &mut Core, line: Value| -> Vec<Option<Activity>> {
+        core.on_line(&line.to_string())
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::Emit(AdapterEvent::Activity(a)) => Some(a),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut got = Vec::new();
+    for n in 1..=10u64 {
+        got.extend(activities(
+            &mut core,
+            json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": n * 10,
+                "estimated_tokens_delta": 10}),
+        ));
+    }
+    assert_eq!(
+        got,
+        [Some(Activity::Thinking {
+            estimated_tokens: 10
+        })]
+    );
+    let stop = json!({"type": "stream_event", "parent_tool_use_id": null,
+        "event": {"type": "content_block_stop", "index": 0}});
+    assert_eq!(activities(&mut core, stop), [None]);
+}
+
+/// SPEC §8.1, §17.3: the CLI's beat of a long call of the main agent (`tool_progress` with
+/// `heartbeat: true` every 30 s; live on 2.1.312 its `tool_use_id` is `<call>-heartbeat-N` and
+/// its `parent_tool_use_id` the call's own) is a heartbeat, not a subagent's line.
+#[test]
+fn a_heartbeat_is_reported() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let line = json!({"type": "tool_progress", "tool_use_id": "toolu_01Hb-heartbeat-0",
+        "tool_name": "Bash", "parent_tool_use_id": "toolu_01Hb", "elapsed_time_seconds": 30,
+        "heartbeat": true, "session_id": "s", "uuid": "0f6c1d2e-7777-4a55-9d0e-1a2b3c4d5e01"});
+    assert_eq!(
+        core.on_line(&line.to_string()),
+        [Action::Emit(AdapterEvent::Heartbeat)]
+    );
+}
+
+/// SPEC §4, §8.1: a subagent's API retry (`tool_progress` with `subagent_retry`, after the
+/// CLI's code, cli:723779: its `agent_id` is the subagent's `task_id`, its `parent_tool_use_id`
+/// the subagent's `Agent` call) is on the subagent's row until a line of the same call without
+/// it, which says the retry resolved; one of a subagent not in the list changes nothing.
+#[test]
+fn a_subagent_retry_is_on_its_row() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    // Subagent a55949578b136436b of call toolu_01Ti9wrYYVp7kqsruhoHEsLf.
+    core.on_line(TWO_SUBAGENTS.lines().next().unwrap());
+    let progress = |retry: Option<&str>| {
+        let mut v = json!({"type": "tool_progress", "tool_use_id": "agent_msg_01",
+            "tool_name": "Agent", "parent_tool_use_id": "toolu_01Ti9wrYYVp7kqsruhoHEsLf",
+            "elapsed_time_seconds": 0, "subagent_type": "general-purpose", "session_id": "s",
+            "uuid": Uuid::new_v4().to_string()});
+        if let Some(agent) = retry {
+            v["subagent_retry"] = json!({"agent_id": agent, "attempt": 2, "max_retries": 10,
+                "retry_delay_ms": 4000, "error_status": 529, "error_category": "overloaded"});
+        }
+        v.to_string()
+    };
+    let mut rows = |line: String| -> Vec<Vec<Option<ApiRetry>>> {
+        core.on_line(&line)
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::Emit(AdapterEvent::LiveSubagents(list)) => {
+                    Some(list.into_iter().map(|s| s.retry).collect())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let retrying = ApiRetry {
+        attempt: 2,
+        max_retries: 10,
+        retry_delay_ms: 4000,
+        error_status: Some(529),
+    };
+    assert_eq!(
+        rows(progress(Some("a55949578b136436b"))),
+        [vec![Some(retrying)]]
+    );
+    assert_eq!(rows(progress(None)), [vec![None]]);
+    assert!(rows(progress(Some("a0000000000000000"))).is_empty());
+    assert!(rows(progress(None)).is_empty());
 }
 
 /// The CLI's own reply (`model` `<synthetic>`; the lines of a live run on 2.1.312 with a model
@@ -5292,6 +6626,14 @@ fn carried_messages_cancelled_after_the_result_end_their_turn() {
             "turn_ended [D] dropped [B]",
             "turn_ended [] dropped [D]"
         ]
+    );
+    // The second Stop's turn ended without a `result`: the next turn is not being stopped, and
+    // a request the CLI withdraws in it is withdrawn.
+    started(&mut core, sid);
+    core.on_line(&ask_line("q1"));
+    assert_eq!(
+        cancels(&core.on_line(&withdraw("q1"))),
+        [("clarify", "q1".to_string(), CancelReason::Withdrawn)]
     );
 }
 
@@ -7212,11 +8554,11 @@ async fn a_cleared_folder_is_marked_until_init() {
     .unwrap();
     let q1 = first(&mut events, question).await;
     assert!(own.is_clearing(&folder), "after conversation_reset");
-    a.answer_clarify(&q1, &BTreeMap::new()).await.unwrap();
+    a.answer_clarify(&q1, &BTreeMap::new(), None).await.unwrap();
     let q2 = first(&mut events, question).await;
     assert!(!own.is_clearing(&folder), "the init named it");
     assert!(own.is_live(new));
-    a.answer_clarify(&q2, &BTreeMap::new()).await.unwrap();
+    a.answer_clarify(&q2, &BTreeMap::new(), None).await.unwrap();
     first(&mut events, question).await;
     assert!(own.is_clearing(&folder), "cleared again");
     a.kill().await.unwrap();
@@ -7269,7 +8611,7 @@ async fn a_cleared_folder_is_unmarked_when_the_turn_of_clear_ends() {
     })
     .await;
     assert!(own.is_clearing(&folder), "after conversation_reset");
-    a.answer_clarify(&q1, &BTreeMap::new()).await.unwrap();
+    a.answer_clarify(&q1, &BTreeMap::new(), None).await.unwrap();
     first(&mut events, |ev| {
         matches!(ev, AdapterEvent::TurnEnded { .. }).then_some(())
     })
@@ -7598,7 +8940,7 @@ async fn a_large_transcript_is_read_for_its_title_only_at_the_turns_end() {
         );
     }
     h.adapter
-        .answer_clarify(&q1, &BTreeMap::new())
+        .answer_clarify(&q1, &BTreeMap::new(), None)
         .await
         .unwrap();
     let title = first(&mut h.events, |ev| match ev {
@@ -7692,4 +9034,163 @@ fn a_wakeup_is_reported_until_it_fires() {
         [None],
         "stopped"
     );
+}
+
+/// The `user` line of a tool result with `content`, and `tool_use_result` when given.
+fn tool_result_line(content: Value, tool_use_result: Option<Value>) -> String {
+    let mut v = json!({"type":"user","uuid":Uuid::new_v4(),"parent_tool_use_id":null,
+        "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":content}]}});
+    if let Some(r) = tool_use_result {
+        v["tool_use_result"] = r;
+    }
+    v.to_string()
+}
+
+/// SPEC §8.1, 0.180: a result longer than its 4 KB preview goes with its whole text, at most
+/// its first 2 MiB, to be uploaded; a short one is an event as before.
+#[test]
+fn a_long_result_goes_with_its_whole_text() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let long = format!("{}é", "x".repeat(5000));
+    let got = emitted(core.on_line(&tool_result_line(json!(long), None)));
+    let [AdapterEvent::ToolResult { event, files }] = &got[..] else {
+        panic!("{got:?}");
+    };
+    let EventKind::ToolResult { result_preview, .. } = &event.kind else {
+        panic!("{event:?}");
+    };
+    assert_eq!(result_preview.len(), super::engine::PREVIEW_LIMIT);
+    assert_eq!(files.text.as_deref(), Some(long.as_str()));
+    assert!(files.images.is_empty());
+
+    let huge = "y".repeat(crate::adapter::FULL_RESULT_LIMIT + 10);
+    let got = emitted(core.on_line(&tool_result_line(json!(huge), None)));
+    let [AdapterEvent::ToolResult { files, .. }] = &got[..] else {
+        panic!("{got:?}");
+    };
+    assert_eq!(
+        files.text.as_deref(),
+        Some(&huge[..crate::adapter::FULL_RESULT_LIMIT])
+    );
+
+    let got = emitted(core.on_line(&tool_result_line(json!("short"), None)));
+    assert!(
+        matches!(&got[..], [AdapterEvent::Event(e)] if matches!(e.kind, EventKind::ToolResult { .. })),
+        "{got:?}"
+    );
+}
+
+/// SPEC §8.1, 0.180: an image of a result (a screenshot) goes with it decoded, with its media
+/// type; the preview keeps its `[image]`, and one that does not decode is left out.
+#[test]
+fn a_result_image_goes_with_it() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let content = json!([
+        {"type":"text","text":"Screenshot"},
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0K"}},
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"not base64!"}},
+    ]);
+    let got = emitted(core.on_line(&tool_result_line(content, None)));
+    let [AdapterEvent::ToolResult { event, files }] = &got[..] else {
+        panic!("{got:?}");
+    };
+    let EventKind::ToolResult { result_preview, .. } = &event.kind else {
+        panic!("{event:?}");
+    };
+    assert_eq!(result_preview, "Screenshot\n[image]\n[image]");
+    assert_eq!(files.text, None);
+    assert_eq!(
+        files.images,
+        [crate::adapter::ResultImage {
+            media_type: "image/png".into(),
+            data: b"\x89PNG\r\n".to_vec(),
+        }]
+    );
+}
+
+/// SPEC §8.1, 0.180: an `Agent` call's result is the subagent's report from `tool_use_result`
+/// (2.1.312), without the trailer the CLI adds to the `tool_result` for the model.
+#[test]
+fn an_agent_result_is_its_report() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let content = json!([
+        {"type":"text","text":"The nets are fine."},
+        {"type":"text","text":"agentId: a60dff5983122596e (use SendMessage with to: 'a60dff5983122596e', summary: '<5-10 word recap>' to continue this agent)\n<usage>subagent_tokens: 1200\ntool_uses: 3\nduration_ms: 4100</usage>"},
+    ]);
+    let report = json!({"status":"completed","agentId":"a60dff5983122596e","agentType":"Explore",
+        "content":[{"type":"text","text":"The nets are fine."}],"totalToolUseCount":3,
+        "totalDurationMs":4100,"totalTokens":1200,"prompt":"Check the nets"});
+    let got = events(&emitted(
+        core.on_line(&tool_result_line(content.clone(), Some(report.clone()))),
+    ))
+    .into_iter()
+    .cloned()
+    .collect::<Vec<_>>();
+    let [Event {
+        kind: EventKind::ToolResult { result_preview, .. },
+        ..
+    }] = &got[..]
+    else {
+        panic!("{got:?}");
+    };
+    assert_eq!(result_preview, "The nets are fine.");
+    // A background launch has no report: its text stays.
+    let launched = json!({"status":"async_launched","agentId":"a1","description":"d","prompt":"p","outputFile":"/tmp/o"});
+    let got = events(&emitted(core.on_line(&tool_result_line(
+        json!("Async agent launched successfully."),
+        Some(launched),
+    ))))
+    .into_iter()
+    .cloned()
+    .collect::<Vec<_>>();
+    let [Event {
+        kind: EventKind::ToolResult { result_preview, .. },
+        ..
+    }] = &got[..]
+    else {
+        panic!("{got:?}");
+    };
+    assert_eq!(result_preview, "Async agent launched successfully.");
+    // A record with two results: `tool_use_result` is neither's, both keep their own text.
+    let mut two: Value =
+        serde_json::from_str(&tool_result_line(json!("first"), Some(report))).unwrap();
+    two["message"]["content"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type":"tool_result","tool_use_id":"t2","content":"second"}));
+    let got = events(&emitted(core.on_line(&two.to_string())))
+        .into_iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::ToolResult { result_preview, .. } => Some(result_preview.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["first", "second"]);
+}
+
+/// SPEC §8.1, 0.180: the CLI's "(no content)" for a reply without text is no `agent.message`.
+#[test]
+fn no_content_is_no_message() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let mut got = vec![];
+    for l in [
+        json!({"type":"assistant","uuid":Uuid::new_v4(),"parent_tool_use_id":null,
+            "message":{"model":"claude-haiku-5-5","content":[{"type":"text","text":"(no content)"}]}}),
+        json!({"type":"result","subtype":"success","usage":{}}),
+    ] {
+        got.extend(emitted(core.on_line(&l.to_string())));
+    }
+    let messages: Vec<_> = events(&got)
+        .into_iter()
+        .filter(|e| matches!(e.kind, EventKind::AgentMessage { .. }))
+        .collect();
+    assert!(messages.is_empty(), "{messages:?}");
 }

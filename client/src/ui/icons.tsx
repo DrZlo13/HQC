@@ -167,6 +167,14 @@ export const IconStop = ({ size = 12 }: { size?: number }) => (
   </svg>
 );
 
+/** "Send to back": the running command goes to the background. */
+export const IconBackground = ({ size = 12 }: { size?: number }) => (
+  <svg class="icon" aria-hidden="true" width={size} height={size} viewBox="0 0 12 12">
+    <rect x="1" y="1" width="6.5" height="6.5" rx="1.3" fill="none" stroke="currentColor" stroke-width="1.2" />
+    <path d="M7.5 4.5H11V11H4.5V7.5H7.5Z" fill="currentColor" />
+  </svg>
+);
+
 export const IconSend = ({ size = 16 }: { size?: number }) => (
   <Svg size={size}>
     <path d="M10 16V4M5 9l5-5 5 5" />

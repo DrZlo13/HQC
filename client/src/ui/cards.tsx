@@ -42,6 +42,7 @@ import {
   IconArrowIn,
   IconArrowOut,
   IconAttach,
+  IconBackground,
   IconCheck,
   IconChevron,
   IconCross,
@@ -66,7 +67,6 @@ import {
   formatDay,
   formatDuration,
   formatTime,
-  formatTimer,
   formatTokens,
   modelName,
   oneLine,
@@ -334,12 +334,20 @@ export function onlyRequests(items: Item[]): Item[] {
  *  the agent's quick calls (a Read, a grep) would swap the line for a moment each. */
 const CALL_SHOWN_AFTER_MS = 2000;
 
-/** The last line of the feed while a turn is on or input waits (SPEC §17.1): the running
- *  command with its timer, or what the session is doing. A command or subagent the runtime
- *  runs in the foreground (`foreground`, the session's `foreground_calls`) gets "Run in
- *  background", which calls `onBackground` with its `call_id`. With no command running, what
- *  the agent waits on (`activity`, the session's) stands instead of "Agent is working". In a
- *  room each working agent has a line of its own, led by its `name`. */
+/** Whether `ActivityLine` has a row for the session (SPEC §17.1): a turn is on, input waits, or
+ *  the session waits for an approval that is not an open request of the feed. */
+export function activityShown(state: SessionState, timeline: Timeline): boolean {
+  return state === 'running' || state === 'queued' || (state === 'waiting' && timeline.openRequests().length === 0);
+}
+
+/** The main agent's row of the live block above the input (SPEC §6, §17.1), its first: what
+ *  the session is doing while a turn is on or input waits. "Main agent: " and the running
+ *  command with its run time ("Command: <command>" for a shell command, otherwise "Running
+ *  <tool>"); a command or subagent the runtime runs in the foreground (`foreground`, the
+ *  session's `foreground_calls`) gets "Run in background", which calls `onBackground` with its
+ *  `call_id`. With no command running, what the agent waits on (`activity`, the session's)
+ *  stands instead of "Working". In a room each working agent has a row of its own, led by its
+ *  `name` in place of "Main agent: ". It is a list item of `LiveSubagents`' list. */
 export function ActivityLine({
   state,
   timeline,
@@ -362,50 +370,71 @@ export function ActivityLine({
 }) {
   const call = state === 'running' ? timeline.runningCall() : undefined;
   const t = useNow(1000, !!call, now);
-  const who = name && <span class="activity-name">{name} · </span>;
+  if (!activityShown(state, timeline)) return null;
+  const who = name ? <span class="live-agents-kind">{name} · </span> : undefined;
+  const lead = who ?? <span class="live-agents-kind">Main agent: </span>;
+  let body: ComponentChildren;
+  let right = '';
+  let callId: string | undefined;
+  const tone = state === 'running' ? '' : ` live-agents-lead-${state}`;
   if (call && t - timeline.runSince(call) >= CALL_SHOWN_AFTER_MS) {
     const asked = askTarget(call.payload.tool, call.payload.args_preview);
+    right = elapsed(t - Date.parse(call.ts));
     if (asked !== undefined) {
       // `hqc_ask` waits for another session's final answer (SPEC §7.1).
-      return (
-        <div class="activity activity-running activity-ask" role="status" aria-live="polite">
-          <span class="pulse-dot" aria-hidden="true" />
-          {who}
-          <span class="activity-label">Waiting for a reply</span>
-          <span class="activity-what mono">{asked ? `from ${asked}` : ''}</span>
-          <span class="activity-timer">{formatTimer(t - Date.parse(call.ts))}</span>
-        </div>
+      body = (
+        <>
+          {lead}
+          <span class="live-agents-lead">{asked ? `Waiting for a reply from ${asked}` : 'Waiting for a reply'}</span>
+        </>
       );
+    } else {
+      const line = callLine(call.payload.tool, call.payload.args_preview);
+      const text = relativePaths(line.text, root);
+      callId = call.payload.call_id;
+      body =
+        line.shell && text ? (
+          <>
+            {who}
+            <span class="live-agents-kind">Command: </span>
+            <span class="live-agents-task">{text}</span>
+          </>
+        ) : (
+          <>
+            {lead}
+            <span class="live-agents-lead">{['Running', toolLabel(call.payload.tool), text].filter(Boolean).join(' ')}</span>
+          </>
+        );
     }
-    const line = callLine(call.payload.tool, call.payload.args_preview);
-    const text = relativePaths(line.text, root);
-    const callId = call.payload.call_id;
-    return (
-      <div class="activity activity-running" role="status" aria-live="polite">
-        <span class="pulse-dot" aria-hidden="true" />
-        {who}
-        <span class="activity-label">Running</span>
-        <span class="activity-what mono">{line.shell && text ? text : [toolLabel(call.payload.tool), text].filter(Boolean).join(' ')}</span>
-        <span class="activity-timer">{formatTimer(t - Date.parse(call.ts))}</span>
-        {onBackground && foreground?.includes(callId) && (
-          <button type="button" class="btn-link activity-background" onClick={() => onBackground(callId)}>
-            Run in background
+  } else {
+    const label =
+      state === 'running' ? (activity ? activityLabel(activity) : 'Working') : state === 'queued' ? 'Input queued' : 'Waiting for approval';
+    body = (
+      <>
+        {lead}
+        <span class="live-agents-lead">{label}</span>
+      </>
+    );
+  }
+  return (
+    <li>
+      <div class="live-agents-row" role="status" aria-live="polite">
+        <span class={`pulse-dot live-agents-dot ${state === 'running' ? '' : 'live-agents-dot-still'}`} aria-hidden="true" />
+        <span class={`live-agents-what${tone}`}>{body}</span>
+        <span class="live-agents-stats">{right}</span>
+        {onBackground && callId && foreground?.includes(callId) && (
+          <button
+            type="button"
+            class="icon-btn live-agents-stop live-agents-background"
+            aria-label="Run in background"
+            title="Run in background"
+            onClick={() => onBackground(callId!)}
+          >
+            <IconBackground size={12} />
           </button>
         )}
       </div>
-    );
-  }
-  let label: string | null = null;
-  if (state === 'running') label = activity ? activityLabel(activity) : name ? `${name} is working` : 'Agent is working';
-  else if (state === 'queued') label = 'Input queued';
-  else if (state === 'waiting' && timeline.openRequests().length === 0) label = 'Waiting for approval';
-  if (!label) return null;
-  return (
-    <div class={`activity activity-${state}`} role="status" aria-live="polite">
-      {state === 'running' && <span class="pulse-dot" aria-hidden="true" />}
-      {state !== 'running' && who}
-      <span class="activity-label">{label}</span>
-    </div>
+    </li>
   );
 }
 

@@ -23,6 +23,7 @@ import type { ConnState, HubSocket } from '../src/ws';
 import { App } from '../src/ui/App';
 import { ChatItems, type ChatActions } from '../src/ui/cards';
 import { Chat } from '../src/ui/Chat';
+import { tileBackground } from '../src/ui/Appearance';
 import { PhoneHome } from '../src/ui/PhoneHome';
 import { ProjectRail, onMac, runSpeed, runningTitle } from '../src/ui/ProjectRail';
 import { ProjectSettings } from '../src/ui/ProjectSettings';
@@ -225,7 +226,7 @@ function hubApi(order: { mode: ListMode; session_ids: string[] } = { mode: 'stat
 function makeApp(list = LIST, api = hubApi()) {
   const socket = { onState: () => () => {} } as unknown as HubSocket;
   const app = new AppState(api as unknown as Api, socket);
-  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom' };
+  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null };
   app.projects.set('p0', { id: 'p0', name: 'Personal', slug: 'personal', description: '', is_personal: true, color: 'slate', quick_messages: [], created_at: at(100) });
   app.projects.set('p1', { id: 'p1', name: 'physics-mp', slug: 'physics-mp', description: '', is_personal: false, color: 'blue', quick_messages: [], icon: { kind: 'emoji', value: '⚛️' }, created_at: at(90) });
   app.currentProjectId = 'p1';
@@ -1840,7 +1841,7 @@ describe('the project bar: search, menu, archive', () => {
     };
     const socket = { onState: () => () => {} } as unknown as HubSocket;
     const app = new AppState(api as unknown as Api, socket);
-    app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom' };
+    app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null };
     // The lists bring it, the search never opened.
     await act(async () => app.refreshSessions());
     expect(api.archivedProjects).toHaveBeenCalledTimes(1);
@@ -2491,7 +2492,7 @@ describe('favorites', () => {
 });
 
 describe('the list on a reload', () => {
-  const ME = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm' as const, look: 'spacious' as const, project_sort: 'custom' as const };
+  const ME = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm' as const, look: 'spacious' as const, project_sort: 'custom' as const, new_session_project_id: null };
   /** A hub that has not answered yet. */
   const pending = () => new Promise<never>(() => {});
   /** A socket that has not connected; `state` plays its connect. */
@@ -4362,6 +4363,57 @@ describe('a phone (< 900 px)', () => {
     await act(async () => void (await app.setProjectFavorite('p1', true)));
     expect([...root.querySelectorAll('.phone-home .group-head')].map((h) => h.textContent)).toEqual(['Favorites1', 'Other projects1']);
     expect(phoneNames('all')).toEqual(['Personal']);
+  });
+
+  describe('the floating new-session button', () => {
+    const button = () => root.querySelector<HTMLAnchorElement>('.phone-home > a.phone-new-session');
+    const target = () => button()?.getAttribute('href');
+
+    it('opens the new-session window of the personal project until another is picked, in both views, in the picked project\'s color', async () => {
+      const { app } = phoneApp();
+      await open(app, '#/');
+      expect(target()).toBe('#/p/p0/new');
+      expect(button()!.getAttribute('aria-label')).toBe('New session in Personal');
+      expect(button()!.getAttribute('title')).toBe('New session in Personal');
+      expect(button()!.getAttribute('style')).toContain(tileBackground(app.project('p0')!));
+      await act(async () => void (app.me = { ...app.me!, new_session_project_id: 'p3' }));
+      await act(async () => app.setPhoneView('sessions'));
+      expect(root.querySelector('.phone-home-sessions')).not.toBeNull();
+      expect(target()).toBe('#/p/p3/new');
+      expect(button()!.getAttribute('aria-label')).toBe('New session in kiln');
+      expect(button()!.getAttribute('style')).toContain(tileBackground(app.project('p3')!));
+      await act(async () => app.setPhoneView('projects'));
+      expect(target()).toBe('#/p/p3/new');
+      expect(root.querySelectorAll('.phone-new-session')).toHaveLength(1);
+    });
+
+    it('is not there while the Undo bar of an archived project stands in its place', async () => {
+      const { app } = phoneApp();
+      await open(app, '#/');
+      expect(button()).not.toBeNull();
+      const kiln = app.projects.get('p3')!;
+      app.projects.delete('p3');
+      app.archivedProjects.set('p3', { ...kiln, archived_at: at(1) });
+      app.projectUndo = 'p3';
+      await act(async () => app.setPhoneView('sessions'));
+      expect(root.querySelector('.toast-project')).not.toBeNull();
+      expect(button()).toBeNull();
+      app.projectUndo = null;
+      await act(async () => app.setPhoneView('projects'));
+      expect(button()).not.toBeNull();
+    });
+
+    it('falls back to the personal project when the picked one is archived', async () => {
+      const { app } = phoneApp();
+      app.me = { ...app.me!, new_session_project_id: 'p3' };
+      await open(app, '#/');
+      expect(target()).toBe('#/p/p3/new');
+      const kiln = app.projects.get('p3')!;
+      app.projects.delete('p3');
+      app.archivedProjects.set('p3', { ...kiln, archived_at: at(1) });
+      await act(async () => app.setPhoneView('sessions'));
+      expect(target()).toBe('#/p/p0/new');
+    });
   });
 
   it("the title's menu: Projects or Sessions — every project's live sessions by state, each with its project's tile; the pick lasts until the page is reloaded", async () => {

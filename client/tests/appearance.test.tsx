@@ -372,7 +372,7 @@ it('saves letters in upper case and uploads an image; a wrong file never leaves 
 it('picks the app theme on the Settings page: a light tile applies at once and goes to the hub', async () => {
   location.hash = '#/settings';
   await until('theme tiles', () => $$('.theme-group .base-pick').length === 6);
-  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Look', 'Web search', 'Models', 'Notifications', 'Workers']);
+  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Look', 'New session', 'Web search', 'Models', 'Notifications', 'Workers']);
   expect($$('.theme-group-label').map((l) => l.textContent)).toEqual(['Dark', 'Light']);
   expect($('.base-pick[aria-pressed=true]')!.textContent).toBe('Warm');
   button('Graphite', '[aria-label="Light themes"]')!.click();

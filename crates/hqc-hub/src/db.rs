@@ -40,6 +40,8 @@ pub struct UserRow {
     pub look: String,
     /// `custom` | `name` | `recent`: the project bar's order (SPEC §3 User).
     pub project_sort: String,
+    /// The project a new session is quick-started in (SPEC §3 User); null: not picked.
+    pub new_session_project_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]

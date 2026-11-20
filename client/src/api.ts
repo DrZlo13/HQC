@@ -301,6 +301,11 @@ export class Api {
     return parseMe(await this.req('PATCH', '/api/me', { project_sort }));
   }
 
+  /** The project a new session is quick-started in, the same on every device. */
+  async setNewSessionProject(new_session_project_id: string): Promise<Me> {
+    return parseMe(await this.req('PATCH', '/api/me', { new_session_project_id }));
+  }
+
   async schedules(sessionId: string): Promise<Schedule[]> {
     return parseScheduleList(await this.req('GET', `/api/schedules?session_id=${enc(sessionId)}`));
   }

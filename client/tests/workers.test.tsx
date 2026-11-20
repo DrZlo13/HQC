@@ -36,6 +36,8 @@ function settingsApp(api: Partial<Api>) {
     device: {},
     theme: () => 'warm',
     lookName: () => 'spacious',
+    newSessionProject: () => undefined,
+    sortedProjects: () => [],
     webSearch: WEB_SEARCHES[0],
     providers: [],
     reloadSessions: vi.fn(async () => {}),

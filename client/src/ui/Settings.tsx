@@ -7,6 +7,7 @@ import type { LookName, Theme } from '../proto';
 import { pushStatus, subscribePush, type PushStatus } from '../push';
 import { BASES, LOOKS, THEMES } from '../theme';
 import { WEB_SEARCHES } from '../websearch';
+import { projectName } from './Appearance';
 import { ProvidersSection } from './Providers';
 import { ClaudeSignIn, signsIn } from './ClaudeSignIn';
 
@@ -42,6 +43,7 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [themeError, setThemeError] = useState<string | null>(null);
+  const [newSessionError, setNewSessionError] = useState<string | null>(null);
   const [lookError, setLookError] = useState<string | null>(null);
   const [workers, setWorkers] = useState<WorkerInfo[] | null>(null);
 
@@ -102,6 +104,16 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
       await app.setLookName(l);
     } catch (e) {
       setLookError((e as Error).message);
+    }
+  };
+
+  /** The project of the quick-start button, for every device: kept as soon as the hub has it. */
+  const pickNewSessionProject = async (id: string) => {
+    setNewSessionError(null);
+    try {
+      await app.setNewSessionProject(id);
+    } catch (e) {
+      setNewSessionError((e as Error).message);
     }
   };
 
@@ -176,6 +188,25 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
           session and a tile per project. The same on every device.
         </p>
         {lookError && <div class="error-text">{lookError}</div>}
+
+        <h2>New session</h2>
+        <select
+          class="input settings-new-session"
+          aria-label="Project of a new session"
+          value={app.newSessionProject()?.id ?? ''}
+          onChange={(e) => void pickNewSessionProject((e.target as HTMLSelectElement).value)}
+        >
+          {app.sortedProjects().map((p) => (
+            <option key={p.id} value={p.id}>
+              {projectName(p)}
+            </option>
+          ))}
+        </select>
+        <p class="muted">
+          The floating button on a phone's first screen and the desktop app's shortcut open a new
+          session in this project. The same on every device.
+        </p>
+        {newSessionError && <div class="error-text">{newSessionError}</div>}
 
         <h2>Web search</h2>
         <div class="seg-group settings-web-search" role="group" aria-label="Web search">

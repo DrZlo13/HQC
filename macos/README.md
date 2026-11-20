@@ -81,8 +81,9 @@ the screen with the menu bar, under it, in the system's light or dark appearance
 and full-screen space; a new one slides in on top and the others move down. It shows the
 project's tile (its colour and letters), the project's name and what happened (Permission,
 Question, Reply, Message or Failed), the session's title, and then a permission request's tool
-and its whole command or description (up to 6 lines; for a publication, the path, how many files,
-then the files, hidden ones first, as many as fit), a question and how many more there are, or
+and its whole command or description (up to 6 lines; the command or path first, from the
+request's call, or a fixed line saying the app cannot tell the command apart; for a publication,
+the path, how many files, then the files, hidden ones first, as many as fit), a question and how many more there are, or
 the reply, post or failure (up to 4 lines). A click on a card opens the session.
 
 A permission request, a publication included, has Allow and Deny always visible in a column on

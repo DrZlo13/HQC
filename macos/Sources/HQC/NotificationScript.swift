@@ -302,11 +302,11 @@ enum NotificationScript {
           };
 
           // One notification per request; other events of a session replace each other (SPEC §16).
-          // The card's text is the whole description, question or message, up to 600
-          // characters; a permission request names its tool, a question counts the ones after
-          // the first. A permission request, a publication included (the client publishes on a click
-          // on a button, as the card's Allow is), carries the options of the card's Allow and
-          // Deny buttons.
+          // The card's text is the whole description (a permission request's command or path
+          // first), question or message, up to 600 characters; a permission request names its
+          // tool, a question counts the ones after the first. A permission request, a publication
+          // included (the client publishes on a click on a button, as the card's Allow is),
+          // carries the options of the card's Allow and Deny buttons.
           // A publication's text (the hub's publish.rs card()) for the card's few lines: its
           // fixed sentence gives way to the path, and the hidden files and folders (a part of the
           // name starting with `.`) come before the rest, so they are on the card first. Text of
@@ -320,7 +320,82 @@ enum NotificationScript {
             return [head[1], lines[1], ...files.filter(hidden), ...files.filter((l) => !hidden(l))].join('\\n');
           };
 
-          const post = (id, project, title, e) => {
+          // The arguments of a call, as the client's callArgs() (client/src/ui/feed.ts):
+          // `args_preview` is the input as JSON cut at 4 KB, so a long one may not parse; then
+          // its whole string fields.
+          const callArgs = (s) => {
+            try {
+              const v = JSON.parse(s);
+              if (v && typeof v === 'object' && !Array.isArray(v)) return v;
+            } catch {}
+            const out = {};
+            for (const m of String(s || '').matchAll(/"(\\w+)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/g)) {
+              try {
+                out[m[1]] = JSON.parse(`"${m[2]}"`);
+              } catch {
+                out[m[1]] = m[2];
+              }
+            }
+            return out;
+          };
+
+          // A permission request's text with the command or path first. The worker's description
+          // is the CLI's description, then the command or path, cut at 4 KB (engine.rs
+          // describe()); a Bash call's description is the agent's own text, and a long one would
+          // fill the card's lines, or the whole 4 KB, before the command its Allow allows.
+          // `calls`: the calls before the request with no result yet; one of the request's tool is
+          // the request's (client/src/ui/feed.ts pairs them so), not for a subagent's request,
+          // whose calls are not in the session's events. The command of the call that ends the
+          // description as whole lines (the longest, of calls run side by side) comes first;
+          // with no such call, a description cut by the worker and a single call of the tool,
+          // that one's. Without a call, a description of two lines is the CLI's and the command,
+          // so the last line is it; a longer or cut one does not tell where the command starts,
+          // and the card says so first rather than show a line of it as the command. A worker's
+          // own request is its description alone.
+          const WHAT_KEYS = ['command', 'file_path', 'notebook_path', 'url', 'pattern'];
+          // How many events before the unread ones a read starts, for the requests' calls.
+          const LOOKBACK = 30;
+          const WORKER_TOOLS = ['workspace.use', 'workspace.create', 'workspace.delete', 'session.follow'];
+          const UNSEEN = 'Command unclear here: open the session to see it.';
+          // Cut by the worker before the command: the session does not have it either.
+          const CUT_OFF = 'Command cut off before it reached hqc: deny unless you know it.';
+          const commandFirst = (e, calls) => {
+            const p = e.payload || {};
+            const d = p.description || '';
+            if ((e.author && e.author.kind === 'system') || WORKER_TOOLS.includes(p.tool)) return d;
+            const whats = p.subagent
+              ? []
+              : calls
+                  .filter((c) => c.payload && c.payload.tool === p.tool)
+                  .map((c) => {
+                    const args = callArgs(c.payload.args_preview);
+                    const k = WHAT_KEYS.find((key) => typeof args[key] === 'string' && args[key]);
+                    return k ? args[k] : '';
+                  })
+                  .filter(Boolean);
+            const whole = whats
+              .filter((w) => d === w || d.endsWith(`\\n${w}`))
+              .sort((a, b) => b.length - a.length)[0];
+            if (whole) {
+              const rest = d.slice(0, d.length - whole.length).trim();
+              return rest ? `${whole}\\n${rest}` : whole;
+            }
+            // engine.rs preview(): the worker cuts at 4096 bytes, on a character's boundary.
+            const cut = new TextEncoder().encode(d).length >= 4093;
+            if (cut && whats.length === 1) return `${whats[0]}\\n${d}`;
+            const lines = d.split('\\n');
+            if (lines.length < 2 && !cut) return d;
+            if (lines.length === 2 && !cut) return `${lines[1]}\\n${lines[0]}`;
+            return `${cut ? CUT_OFF : UNSEEN}\\n${d}`;
+          };
+
+          // A permission request's text with the characters that break a line or turn the
+          // writing's direction shown as U+FFFD, as Claude Code's own dialog shows them: AppKit
+          // breaks the card's line at U+2028 and U+2029, so a short command could push its
+          // tail past the card's lines.
+          const visible = (s) => s.replace(/[\\u2028\\u2029\\u061C\\u202A-\\u202E\\u2066-\\u2069]/g, '\\uFFFD');
+
+          const post = (id, project, title, e, calls) => {
             const p = e.payload || {};
             const request = e.type === 'approval.request' || e.type === 'clarify.request';
             const tag = request && p.request_id ? `${id}:${p.request_id}` : `${id}:${e.type}`;
@@ -338,7 +413,7 @@ enum NotificationScript {
               viewing: openSession() === id,
             };
             if (e.type === 'approval.request') m.tool = String(p.tool || 'tool');
-            if (e.type === 'approval.request' && p.tool === 'hqc_publish') m.body = clip(publication(p.description || ''), 600);
+            if (e.type === 'approval.request') m.body = clip(visible(p.tool === 'hqc_publish' ? publication(p.description || '') : commandFirst(e, calls)), 600);
             if (e.type === 'clarify.request' && Array.isArray(p.questions)) m.more = Math.max(0, p.questions.length - 1);
             if (e.type === 'approval.request' && p.request_id) {
               // Answered or gone already: an earlier `requests` frame listed it, the last one not.
@@ -355,21 +430,31 @@ enum NotificationScript {
 
           const fetchNew = async (id, after, title, projectId) => {
             try {
-              const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/events?after_seq=${after}&limit=50`);
+              // From LOOKBACK events before `after`: the call a permission request is about comes
+              // before it, and a call is not unread (crates/hqc-hub/src/state.rs), so its summary
+              // moved `after` past it without a read. Only the events after `after` are posted.
+              const from = Math.max(0, after - LOOKBACK);
+              const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/events?after_seq=${from}&limit=${50 + LOOKBACK}`);
               if (!res.ok) return;
               const page = await res.json();
               // A room or an agent made since the last list call: list again before deciding.
               if (!listed.has(id)) await loadSessions();
               if (!listed.has(id)) await loadSessions();
+              // Each event with the calls before it that have no result yet.
               const fresh = [];
+              const pending = new Map();
               for (const e of (page && page.events) || []) {
-                if (!e || !(e.seq > (posted.get(id) || 0))) continue;
+                if (!e) continue;
+                const p = e.payload || {};
+                if (e.type === 'tool.call') pending.set(p.call_id, e);
+                if (e.type === 'tool.result') pending.delete(p.call_id);
+                if (!(e.seq > Math.max(after, posted.get(id) || 0))) continue;
                 posted.set(id, e.seq);
-                if (pushed(e, id)) fresh.push(e);
+                if (pushed(e, id)) fresh.push([e, [...pending.values()]]);
               }
               if (!fresh.length) return;
               const project = await projectOf(projectId);
-              for (const e of fresh) post(id, project, title, e);
+              for (const [e, calls] of fresh) post(id, project, title, e, calls);
             } catch {}
           };
 

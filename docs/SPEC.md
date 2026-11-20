@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.185, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.192, 2026-11-20. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2495,7 +2495,7 @@ line goes when it ends; a dropped socket, and a chat
 closed, clear the lines until the next subscribe brings the hub's list. Since 0.127 the list also
 holds the agent's background commands, which only `background_tasks` counts, so the chat shows it while
 either count is above 0; a command's line is its description and its run time. Since 0.141 a line
-starts with "Agent: " or "Command: " dimmed, as its `kind` says; a line without a known `kind`
+starts with "Agent: " (since 0.192 "Subagent: ") or "Command: " dimmed, as its `kind` says; a line without a known `kind`
 (from an older worker, or a value this client does not know) has neither. Since 0.161 a line
 marked `stoppable`, a subagent's, a command's or (since 0.169) a Monitor's, ends with a small
 stop button, as in the VS Code tab: it sends `POST .../tasks/{task_id}/stop` and is disabled until
@@ -2514,6 +2514,10 @@ message opens the schedules of the chat ("Schedules" in the menu), and goes when
 is sent or it is paused or deleted (a recurring one then shows its next run). The same one-line
 ellipsis as the other lines, on a computer and on a
 phone; a dropped socket clears these lines too until the next subscribe.
+Since 0.192 the main agent's row stands first in the block ("Main agent: Working", §17.1), and the
+block shows also while that row does (a turn is on, input waits, or an approval is awaited that is
+not an open request of the feed), with no subagent, command or timer; in a room each agent at work
+has a row of its own, led by its name in place of "Main agent: ".
 Since 0.181 a subagent's line (a row whose `kind` is `agent`, or none this client knows,
 whatever the feed holds: a chat loads only its latest events, and a subagent's subagent has no
 call there; a command's, a Monitor's, a wakeup's and a cron job's line is none) is, but for its
@@ -2540,8 +2544,8 @@ in the hub's memory; absent — none. The chat offers "Run in background" for su
 session is still `running` or `waiting`, the chat header and the session's row say "Pausing
 after this turn" instead of the state.
 `activity` (since 0.179): what the agent waits on now (`retrying`, `compacting`, `thinking`),
-from `session.state` (§5.4), kept in the hub's memory; absent — none. The chat's activity line
-shows it in place of "Agent is working" (§17.1); a client ignores a `kind` it does not know.
+from `session.state` (§5.4), kept in the hub's memory; absent — none. The chat's main agent
+row (§17.1) shows it in place of "Working"; a client ignores a `kind` it does not know.
 `permission_mode` and `effective_permission_mode` (since 0.42, T38): §3 Session; absent —
 null. The client shows the mode in the chat header: `effective_permission_mode`, else
 `permission_mode`; "Auto" and (since 0.129) "Allow all" as a marked badge, "Ask" as plain
@@ -2601,7 +2605,7 @@ The text ends with the `agent.message` stored for it, a `status` other than `run
 0.179) a `retraction`, after which the runtime sends no message for the text it took back. Since
 0.108 a `user.message`
 or `peer.message` that came while that text was being written stands under it in the feed, live
-(after the text, before the activity line, with the messages not stored yet) and once the text
+(after the text, with the messages not stored yet) and once the text
 is stored: the `agent.message` goes above the inputs with `during_text` right before it in `seq`
 order, never above the input it answers (`in_reply_to`) and, since 0.161, never above one that
 waited for a turn of its own and stands after the turns it waited through (below); a final one
@@ -2611,7 +2615,7 @@ from times. Since 0.161 an
 input with a `delivery` (`user.message`, `peer.message`) that came while a turn ran (with
 `during_text` too, not failed, and not delivered at its own `ts` as a mirrored one is, §9.2)
 stands at the bottom of the feed until the agent takes it, under everything live (after the
-text being written, before the messages not stored yet and the activity line), its time
+text being written, before the messages not stored yet), its time
 followed by "· queued" while it is `pending` ("· awaiting delivery" stays for an input that came
 while no turn ran), as the VS Code tab holds what is typed during a turn. Meanwhile the worker
 may write it into the running turn (§17.2: a person's input or, since 0.174, a `send` of another
@@ -3257,7 +3261,8 @@ The reply to an ask:
   hub before the `status idle` of the turn before it, and an ask queued behind that turn would
   fail as its own turn starts. A `status idle` without `in_reply_to` (an older worker, or a
   turn that names no input, §8.1) fails nothing, and the ask waits for its timeout. The asking
-  session's turn stays `running` while it waits; the turn watchdog (§17.3) leaves it alone. In the asking session's feed the client shows the
+  session's turn stays `running` while it waits; the turn watchdog (§17.3) leaves it alone. In the asking session's main agent row (since 0.192 the first
+  row of the live block above the input, §17.1) the client shows the
   waiting call as "Waiting for a reply from <session>" with its timer (the runtime's
   `tool.call` of `hqc_ask`, no event of its own), since 0.161 once the call has waited 2 s
   (§17.1).
@@ -3537,8 +3542,9 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   it, one with a provider left out), "$X this room". A room has no
   Restart, no Pause and no Move, in its menu or by dragging its row. The room's feed
   shows its agents' open approval requests and questions, an agent's post under its agent's
-  title in place of "Message from", a pass as a quiet line, and at its bottom a line per agent at
-  work, as a session's feed shows its own agent's work (§6); on the project bar the rate and the
+  title in place of "Message from", a pass as a quiet line, and (since 0.192 in the live block above the input, before 0.192 at
+  the bottom of the feed) a row per agent at work, as a session shows its own agent's work (§6,
+  §17.1); on the project bar the rate and the
   count of agents at work of a room are those of its running agents (§6). "New room" opens a
   window like a new session's (`#/p/<id>/new-room`): chips over the input — one per agent, which
   opens its name (`name`, §6), model and prompt, "+ Agent", then the mode, the workspace, the
@@ -5356,8 +5362,8 @@ other closes the card with "Cancelled: …", and so does a `peer.message` after 
 **Where requests are shown** (since 0.41, T37). A request is shown and answered not only in its
 own feed:
 - In every session that waits on its session through an open `hqc_ask` (§7.1), directly or
-  along a chain (A asks B, B asks C: C's request shows in B and in A), under that session's
-  "Waiting for a reply from …" line. The card is the same component as in the request's own
+  along a chain (A asks B, B asks C: C's request shows in B and in A), at the bottom of the
+  feed, above the live block whose main agent row says "Waiting for a reply from …" (§17.1). The card is the same component as in the request's own
   feed (permission card, text reply, clarify form), framed and headed by the session it
   belongs to (title, address, link) and its worker, so it cannot be taken for a request of
   the session the user is looking at; Enter and Esc do not answer it. Other sessions waiting
@@ -6246,22 +6252,30 @@ open requests, `process_state` and delivery. Priority top to bottom, the first t
 The `status.state` event uses the same set.
 
 The client shows the turn from `state` (from `summary`/`session.summary` and the session object),
-with no separate events: `running` — a pulsing "Running" pill in the header and an "Agent is
-working" line at the bottom of the feed ("Running <command or tool> <time since the call's
-`ts`>" while the last `tool.call` has no `tool.result`, T26, since 0.132 once that call has run
+with no separate events: `running` — a pulsing "Running" pill in the header and, since 0.192, the
+main agent's row, the first of the live block above the input (§6), not a line at the bottom of
+the feed: "Main agent: Working" ("Command: <command>" while the last `tool.call` that is a shell
+command has no `tool.result`, T26, otherwise "Main agent: Running <tool and its argument>", with
+the run time at the row's right, the time since the call's
+`ts`, as the block's other rows show it, `42s`, `1m 24s`; since 0.132 once that call has run
 for 2 s, counted from its `ts` or from a later answer to a request after it (a permission or a
 question it, or a subagent it runs, waited for), since 0.161 only a call after the last end of a
 turn, §6; since 0.177 the tool as the feed names it, `move (probe-bench)`, its paths relative to
 the session's folder; since 0.125, when that call is one
-of the session's `foreground_calls`, §6, the line ends with a small "Run in background" button,
-which sends `POST .../background` with its `call_id`, a failure shown as a notice; the button
+of the session's `foreground_calls`, §6, the row ends with a small icon button, "Run in
+background" (its tooltip and name), which sends `POST .../background` with its `call_id`, a
+failure shown as a notice; the button
 goes once the worker reports the call moved or ended; since 0.179, with no such call, the
-session's `activity`, §6, stands in place of "Agent is working": "Retrying 3/10 (529), next in
+session's `activity`, §6, stands in place of "Working": "Retrying 3/10 (529), next in
 8 s" — "no response" in place of a status the attempt did not get, the delay rounded up to
 whole seconds and left out when it is 0 —, "Compacting the conversation…", "Thinking · ~12k
-tokens"), `queued` — "Input queued", `paused` — "Paused" in the header and the session's row,
-`waiting` — "Waiting for approval" if the open request is not in the feed (otherwise its card is
-that line).
+tokens"; a waiting `hqc_ask` is "Waiting for a reply from <session>"), `queued` — "Main agent:
+Input queued", `paused` — "Paused" in the header and the session's row,
+`waiting` — "Main agent: Waiting for approval" if the open request is not in the feed (otherwise
+its card is that row). In a room each agent at work has its row, led by its name in place of
+"Main agent: ". The row is not in the feed, so the feed's window gets shorter when the block appears at
+the start of a turn: the chat stays at the bottom, as it does for any change of that window's
+size.
 A `status` event is not drawn as a feed line, except `error` with `detail`.
 
 The hub tracks "a turn is in progress" itself: a turn is opened by the worker's `ack` of
@@ -6665,6 +6679,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.185 → 0.192 (the activity line above the input, as "Main agent:")
+§6, §17.1: "Agent is working", the grey box at the end of the feed, read as a message of the
+dialogue. The main agent's row is now the first row of the live block above the input, as
+"Main agent: Working", "Main agent: Running …" or "Command: …" for a shell command, with the run
+time as the other rows show it, and "Run in background" is an icon button with a tooltip; the
+subagents' rows say "Subagent: " in place of "Agent: ", and the block shows while the main agent's
+row does. Client only.
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

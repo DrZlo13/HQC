@@ -112,14 +112,14 @@ const button = (scope: HTMLElement, text: string) =>
   [...scope.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim().startsWith(text));
 
 describe('the request of a waited-on session in the asking session', () => {
-  it('shows under "Waiting for a reply" as B\'s card, named and set apart from A\'s own', async () => {
+  it('shows B\'s card in the feed, above "Waiting for a reply", named and set apart from A\'s own', async () => {
     const { app } = setup();
     await mount(<Chat app={app} sessionId={A} />);
-    expect($('.activity-ask')!.textContent).toContain('Waiting for a reply');
+    expect($('.live-agents-row')!.textContent).toContain('Waiting for a reply');
     const card = $('.waited-requests .foreign-request')!;
     expect(card).not.toBeNull();
-    // Under the activity line, inside the feed.
-    expect($('.activity-ask')!.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // In the feed, above the live block where the activity row stands.
+    expect(card.compareDocumentPosition($('.live-agents-row')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // It names B, its address and its worker, and links to B.
     const head = card.querySelector('.req-head')!.textContent!;
     expect(head).toContain('Check the build on llm-server');

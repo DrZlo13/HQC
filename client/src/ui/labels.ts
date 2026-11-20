@@ -216,7 +216,7 @@ export function retryLabel(r: ApiRetry): string {
   return `Retrying ${r.attempt}/${r.max_retries} (${why})${next}`;
 }
 
-/** What the agent waits on, in the activity line instead of "Agent is working" (SPEC §17.1). */
+/** What the agent waits on, in the main agent's row instead of "Working" (SPEC §17.1). */
 export function activityLabel(a: Activity): string {
   switch (a.kind) {
     case 'retrying':

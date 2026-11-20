@@ -10,7 +10,7 @@ import { duringText, type Timeline } from '../timeline';
 import { ModelField, type ModelChoice } from './agentSettings';
 import { ArtifactViewer, type ViewedArtifact } from './attachments';
 import { LimitBar, Limits } from './limits';
-import { ActivityLine, FeedBlocks, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
+import { ActivityLine, FeedBlocks, activityShown, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
 import { peerMessages } from './relay';
 import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
@@ -444,6 +444,27 @@ export function Chat({
   const stop = () => act(() => chat.stop(), 'Not stopped');
   const toBackground = (callId: string) => void act(() => chat.background(callId), 'Not moved to the background');
   const stopTask = (taskId: string) => act(() => chat.stopTask(taskId), 'Not stopped');
+  // The rows first in the live block (§17.1): the main agent's, or a room's agents at work; only
+  // those that are drawn, so the block does not show empty for a row that would be nothing.
+  const lead = room
+    ? members.flatMap((m, i) =>
+        activityShown(m.state, memberChats[i].timeline)
+          ? [<ActivityLine key={m.id} state={m.state} timeline={memberChats[i].timeline} name={m.title || m.slug} />]
+          : [],
+      )
+    : !system && activityShown(state, t)
+      ? [
+          <ActivityLine
+            key="main"
+            state={state}
+            timeline={t}
+            root={path}
+            foreground={info?.foreground_calls}
+            activity={info?.activity}
+            onBackground={toBackground}
+          />,
+        ]
+      : [];
   // T38: Ask at once, Auto and Allow all after a one-line confirmation.
   const setMode = (mode: PermissionMode) => {
     const line = modeConfirm(mode);
@@ -747,20 +768,6 @@ export function Chat({
           {requestsOnly && items.length === 0 && <div class="empty">No requests</div>}
           {t.streaming && <StreamingMessage text={t.streaming} />}
           <FeedBlocks blocks={under} actions={actions} />
-          {!system && !room && (
-            <ActivityLine
-              state={state}
-              timeline={t}
-              root={path}
-              foreground={info?.foreground_calls}
-              activity={info?.activity}
-              onBackground={toBackground}
-            />
-          )}
-          {room &&
-            members.map((m, i) => (
-              <ActivityLine key={m.id} state={m.state} timeline={memberChats[i].timeline} name={m.title || m.slug} />
-            ))}
           {!system && <WaitedRequests app={app} sessionId={sessionId} />}
         </div>
       </div>
@@ -775,11 +782,13 @@ export function Chat({
       )}
       {/* The list also holds the agent's background commands, which only background_tasks counts. */}
       {/* The wakeups and cron jobs of the agent and the session's schedules wait while it is idle. */}
-      {((info?.subagents ?? 0) > 0 ||
+      {(lead.length > 0 ||
+        (info?.subagents ?? 0) > 0 ||
         (info?.background_tasks ?? 0) > 0 ||
         t.liveAgents.some((a) => a.kind === 'wakeup' || a.kind === 'cron') ||
         t.liveSchedules.length > 0) && (
         <LiveSubagents
+          lead={lead}
           agents={t.liveAgents}
           receivedAt={t.liveAgentsAt}
           schedules={t.liveSchedules}

@@ -30,6 +30,8 @@ libc = "0.2"
 base64 = "0.22"
 sha2 = "0.10"
 ssh-key = { version = "0.6", features = ["std", "ed25519", "encryption", "getrandom"] }
+# `hqc_publish` packs a folder into a zip (SPEC §7, §12): deflate only.
+zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"

@@ -71,7 +71,8 @@ impl Attacher {
             args
         })
         .map_err(|e| invalid(e.to_string()))?;
-        if a.kind == Some(ArtifactKind::Unknown) {
+        // `site` is the archive `hqc_publish` packs, not a file shown in the chat.
+        if matches!(a.kind, Some(ArtifactKind::Unknown | ArtifactKind::Site)) {
             return Err(invalid("kind: one of file, image, diff, html, text"));
         }
         let artifact_id = self

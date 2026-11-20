@@ -18,7 +18,8 @@
 //!   upload stops it, and no `mcp.call` is sent. The `files` of `hqc_send` and `hqc_ask` go
 //!   the same way ([`Attacher::prepare_files`], T41), and the files of an `hqc_ask` reply
 //!   are downloaded into the session's inbox before the result goes back
-//!   ([`Attacher::reply_files`]).
+//!   ([`Attacher::reply_files`]). `hqc_publish` packs and uploads its folder or file the same
+//!   way first ([`Attacher::prepare_publish`]).
 //! - [`ToDaemon::Cancel`] and EOF with calls open send `mcp.cancel` for each of them.
 //! - The token is never logged.
 
@@ -296,10 +297,12 @@ async fn serve(
                     );
                     continue;
                 }
-                // Files to upload first: `hqc_attach`'s, and `files` of a message (T41).
+                // Files to upload first: `hqc_attach`'s, `files` of a message (T41), the archive
+                // of `hqc_publish`.
                 let files = (tool == hqc_proto::mcp::SEND || tool == hqc_proto::mcp::ASK)
                     && args.get("files").is_some();
-                if tool == hqc_proto::mcp::ATTACH || files {
+                let publish = tool == hqc_proto::mcp::PUBLISH;
+                if tool == hqc_proto::mcp::ATTACH || files || publish {
                     let Some(folders) = link.mcp().folders(sid) else {
                         fail(
                             error_code::UNAVAILABLE,
@@ -314,6 +317,8 @@ async fn serve(
                     let task = tokio::spawn(async move {
                         let args = if files {
                             attacher.prepare_files(sid, &folders, args).await
+                        } else if publish {
+                            attacher.prepare_publish(sid, &folders, args).await
                         } else {
                             attacher.prepare(sid, &folders, args).await
                         };

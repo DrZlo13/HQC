@@ -1,0 +1,9 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000113",
+  "seq": 46,
+  "ts": "2026-11-08T10:00:05Z",
+  "author": { "kind": "agent", "id": "0199f3a2-7c10-7000-8000-000000000001" },
+  "type": "attachment",
+  "payload": { "artifact_id": "0199f3a2-7c10-7000-8000-0000000000f4", "kind": "site", "name": "report", "caption": "The weekly report" }
+}

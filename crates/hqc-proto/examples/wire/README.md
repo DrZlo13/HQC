@@ -129,3 +129,8 @@ person declined it (`action: decline`).
 
 Archived projects (§3 Project): `api.projects.archived.json` — `GET /api/projects?archived=1`, the
 projects with `archived_at`, which `api.projects.json` (the project bar) leaves out.
+
+SPEC 0.190: `api.artifact.site.json` — an artifact of kind `site` (the archive `hqc_publish`
+uploads) that is published: `public_url` (absent while it is not). `event.attachment.site.json`
+— the publication in the feed; `event.approval.request.publish.json` — the owner's card that
+comes before it (`tool: hqc_publish`).

@@ -230,9 +230,12 @@ final class MainViewController: NSViewController {
         let currentServers = store.servers
         let validIDs = Set(currentServers.map { $0.id })
 
-        // Tear down the web tabs of servers that were deleted.
+        // Tear down the web tabs of servers that were deleted, with their permission request
+        // cards: nothing could answer them any more.
         for serverID in Array(webTabs.keys) where !validIDs.contains(serverID) {
-            webTabs.removeValue(forKey: serverID)?.tearDown()
+            guard let tab = webTabs.removeValue(forKey: serverID) else { continue }
+            Notifier.shared.keepOpen(server: tab.server, tags: [])
+            tab.tearDown()
         }
 
         // Tear down web tabs whose server URL changed so they load the new address

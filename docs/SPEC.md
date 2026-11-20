@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.185, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.191, 2026-11-20. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -159,7 +159,7 @@ OIDC sign-in, §6; hub migration `0031_oidc_subject`), `display_name`, `api_keys
 (OpenRouter, Anthropic API; encrypted with the hub's master key, which lives in the hub's
 env/file, not in the database), `timezone`, `personal_project_id` (the implicit personal
 project, created on first sign-in; the personal assistant session lives in it), `theme`,
-`look`, `project_sort`.
+`look`, `project_sort`, `new_session_project_id`.
 
 `theme` (since 0.51, T49) — the client's base palette: three dark ones, `warm` (default) |
 `graphite` | `contrast`, and since 0.88 their light counterparts `warm_light` |
@@ -183,6 +183,13 @@ first in each; the same on every device of the user (`PATCH /api/me`). The hub s
 keeps `GET /api/projects` in the user's own order; the client sorts by it, and until
 `/api/me` answers uses the one last shown on this device (`hqc.projectSort`), without it
 `custom`.
+
+`new_session_project_id` (since 0.191, hub migration `0053_new_session_project`) — the project a
+quick-started new session opens in: a foreign key to the user's own `projects` row, null until
+the user picks one in Settings and again when that project is deleted (`ON DELETE SET NULL`);
+the same on every device of the user (`PATCH /api/me`, §6). The hub stores it; the client uses
+it only while the project is on the bar, else the user's personal project, so there is always
+a target and no "none" choice (§6 client layout, the phone and Settings).
 
 `timezone` (since 0.38, T35) — an IANA name, `UTC` until set; the default zone of new
 schedules (§16). The client sets it to the browser's zone (`PATCH /api/me`, §6) when it starts
@@ -1540,9 +1547,11 @@ HTTP API (iteration 1 and projects with workspaces from iteration 2; the list is
 the rest is marked "later"):
 
 - `GET /api/me` → `{id, email, display_name, timezone, personal_project_id, theme, look,
-  project_sort}` (`api.me.json`); `PATCH /api/me` {timezone?, theme?, look?, project_sort?}
-  (since 0.38, `api.me.patch.request.json`; an unknown zone: `400`; `theme` since 0.51, `look`
-  and `project_sort` since 0.114, §3 User, another value: `422`) → the same object;
+  project_sort, new_session_project_id}` (`api.me.json`); `PATCH /api/me` {timezone?, theme?,
+  look?, project_sort?, new_session_project_id?} (since 0.38, `api.me.patch.request.json`; an
+  unknown zone: `400`; `theme` since 0.51, `look` and `project_sort` since 0.114, §3 User,
+  another value: `422`; `new_session_project_id` since 0.191: a project that is not the user's
+  or does not exist: `404`, nothing stored) → the same object;
   later keys; `PUT /api/me/project_order` {project_ids} (since 0.64,
   `api.project_order.request.json`) → `{projects[]}` in that order: the user's own order of the
   project bar, kept per user (`users.project_order`); ids that are not the user's projects and
@@ -2100,11 +2109,16 @@ a row of light tiles, a click applies it at once). On a light theme the client s
 `default` (dark text) **[verify]**: whether an iPhone's Home Screen app picks the change up at
 once, at its next start or only when added again. The Settings page (since 0.114) has a back
 arrow to the address it was opened from (on a computer, from `#/`, the current project);
-"Web search" (since 0.142) picks where "Search in …" of selected text searches: Google (the
-default), DuckDuckGo, Bing or Yandex, kept on this device (`localStorage`), not on the hub;
-"Models" (since 0.144) lists the user's providers (§3 Provider), each with its model, `base_url`
-and the workers that allow it, or the `[providers.<name>] base_url = "…"` line a `worker.toml`
-needs when none does, with Edit and Delete, and "Add a provider"; the model menus of a session
+"New session" (since 0.191), after Look, picks from a select of the projects on the bar the
+project the phone's floating button and a wrapper's shortcut (`window.hqc.newSessionInProject()`,
+below) open a new session in (§3 User `new_session_project_id`), the same on every device; it
+shows the project in use, the personal one while none is picked or the picked one has left the
+bar, and a pick is stored at once, no "Save"; "Web search" (since
+0.142) picks where "Search in …" of selected text searches: Google (the default), DuckDuckGo,
+Bing or Yandex, kept on this device (`localStorage`), not on the hub; "Models" (since 0.144)
+lists the user's providers (§3 Provider), each with its model, `base_url` and the workers that
+allow it, or the `[providers.<name>] base_url = "…"` line a `worker.toml` needs when none does,
+with Edit and Delete, and "Add a provider"; the model menus of a session
 (the new session's model chip and the chat's "More") list, below the Claude models (Claude
 Code's default, the aliases, since 0.168 the versions, "Another model…"), the
 providers its worker allows; picking one in a chat asks once ("The agent restarts on …"), and a
@@ -2246,16 +2260,27 @@ row has its tile (with the bar's stripe running around it, at the bar's speed, w
 sessions works and none waits), its name (bold with unread events; in Spacious "N waiting · N
 running" under it), then a running mark in the project's own color with how many work, the amber
 count of those that wait and the count of those with unread events. A project opens its own
-screen, `#/p/<id>`, the session list; everything else replaces the screen as before. Both looks
-apply on a phone too: in Compact its list heads, groups and rows are denser and a row is one
-line with the state in the dot. Every back arrow ("‹" of a chat, a project's list, the requests,
-the search, the settings pages and the worker enrollment) steps back through the tab's history
+screen, `#/p/<id>`, the session list; everything else replaces the screen as before. In both
+views one round floating button (since 0.191), above the workers line at the right, opens the
+new-session window of the project in use, `#/p/<id>/new` (§3 User `new_session_project_id`:
+picked in Settings, the personal project until then), painted in that project's color as its
+tile is; it is there once `/api/me` has answered and that project is known (from the lists, or
+from the list kept from the last load), not while the Undo bar of an archived project stands in
+its place, and the lists leave room for it under their last row. Both looks apply on a phone
+too: in Compact its list heads, groups and rows are denser and a row is one line with the state
+in the dot. Every back arrow ("‹" of a chat, a project's list, the requests, the search, the
+settings pages and the worker enrollment) steps back through the tab's history
 when the entry under the screen is the arrow's address, and otherwise opens that address in
 place of the screen: the browser's or the phone's back gesture after an arrow never returns to
 the screen the arrow closed. Each entry keeps in its `history.state` the address it was opened
 from. A press on a button of the composer (send, attach, remove a file) leaves the focus in the
 field: a phone keeps its keyboard, and the composer does not grow under the tap by the home
 indicator's room before the click lands.
+
+The page has one function for a wrapper around it (since 0.191),
+`window.hqc.newSessionInProject()`: it opens that same new-session window, `#/p/<id>/new` of
+the project in use, and, called before `/api/me` has answered and that project is known, does it
+as soon as they are. The macOS app hangs its global shortcut on it.
 
 Quick messages (since 0.167, §3 Project). A chat whose project is known has a lightning-bolt
 button in the composer's row, right after the attach one (and after the key button, when there is
@@ -6665,6 +6690,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.185 → 0.191 (a floating new-session button on a phone)
+§3 User, §6, §6 client layout: the project a quick new session opens in is the user's setting,
+`users.new_session_project_id` (migration `0053_new_session_project`, `Me` and `PatchMe` in
+`hqc-proto`; `PATCH /api/me` stores only one of the user's own projects, else `404`), picked in
+Settings → "New session"; it is the personal project until one is picked and when the picked one
+is archived or deleted, so there is no "none". The first screen of a phone has one floating
+button in that project's color that opens `#/p/<id>/new`, and the page exposes
+`window.hqc.newSessionInProject()` for a wrapper's shortcut to do the same.
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

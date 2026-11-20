@@ -1327,6 +1327,8 @@ export interface Me {
   look: LookName;
   /** The project bar's order, the same on every device. */
   project_sort: ProjectSort;
+  /** The project a new session is quick-started in, the same on every device; null: not picked. */
+  new_session_project_id: Uuid | null;
 }
 
 /** The fields of the hub's session object (SPEC §6) the client uses. */
@@ -1464,6 +1466,7 @@ export function parseMe(v: unknown): Me {
     theme: oneOf(o, 'theme', THEME_NAMES) ?? 'warm',
     look: oneOf(o, 'look', LOOK_NAMES) ?? 'spacious',
     project_sort: oneOf(o, 'project_sort', PROJECT_SORT_NAMES) ?? 'custom',
+    new_session_project_id: optStr(o, 'new_session_project_id') ?? null,
   };
 }
 

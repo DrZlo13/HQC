@@ -163,6 +163,76 @@ async fn the_project_sort_round_trips_on_the_user() {
     hub.finish().await;
 }
 
+/// The project a phone's floating button opens a new session in (SPEC §3 User): kept on the
+/// user, one of their own projects only, null again when that project is deleted.
+#[tokio::test]
+async fn the_new_session_project_round_trips_on_the_user() {
+    let hub = TestHub::start().await;
+    let (s, me) = hub.get("/api/me").await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["new_session_project_id"], Value::Null, "the default");
+
+    let (s, p) = hub
+        .post("/api/projects", json!({"name": "quick-start"}))
+        .await;
+    assert_eq!(s, 201, "{p}");
+    let pid = p["id"].as_str().unwrap().to_string();
+    let (s, me) = hub
+        .patch("/api/me", json!({"new_session_project_id": pid}))
+        .await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["new_session_project_id"], pid.as_str());
+    let (_, me) = hub.get("/api/me").await;
+    assert_eq!(
+        me["new_session_project_id"],
+        pid.as_str(),
+        "stored, the same on every device"
+    );
+
+    // Another user's project, and a missing one, are `404` and change nothing.
+    let other = hqc_hub::db::ensure_user(&hub.app.db, "other@example.com")
+        .await
+        .unwrap();
+    let theirs = hqc_hub::db::create_project(&hub.app.db, other.id, "theirs", "")
+        .await
+        .unwrap();
+    for id in [theirs.id.to_string(), uuid::Uuid::new_v4().to_string()] {
+        let (s, _) = hub
+            .patch("/api/me", json!({"new_session_project_id": id}))
+            .await;
+        assert_eq!(s, 404, "not the user's project: {id}");
+    }
+    let (_, me) = hub.get("/api/me").await;
+    assert_eq!(me["new_session_project_id"], pid.as_str());
+    // A refused project stores nothing of its request.
+    let (s, _) = hub
+        .patch(
+            "/api/me",
+            json!({"look": "compact", "new_session_project_id": theirs.id.to_string()}),
+        )
+        .await;
+    assert_eq!(s, 404);
+    let (_, me) = hub.get("/api/me").await;
+    assert_eq!(
+        me["look"], "spacious",
+        "the look of the refused request is not stored"
+    );
+
+    // The other fields leave it alone.
+    let (s, me) = hub.patch("/api/me", json!({"look": "compact"})).await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["new_session_project_id"], pid.as_str());
+
+    assert_eq!(hub.delete(&format!("/api/projects/{pid}")).await, 204);
+    let (_, me) = hub.get("/api/me").await;
+    assert_eq!(
+        me["new_session_project_id"],
+        Value::Null,
+        "null with the deleted project"
+    );
+    hub.finish().await;
+}
+
 #[tokio::test]
 async fn color_and_icon_round_trip_and_the_personal_project_gets_them_too() {
     let hub = TestHub::start().await;

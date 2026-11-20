@@ -91,17 +91,24 @@ pub async fn me(user: CurrentUser) -> Json<api::Me> {
         theme: user.theme,
         look: user.look,
         project_sort: user.project_sort,
+        new_session_project_id: user.new_session_project_id,
     })
 }
 
-/// `PATCH /api/me` {timezone?, theme?, look?, project_sort?}: an IANA name, the default zone of
-/// new schedules (SPEC §16); the app's base palette (T49); the client's look and the project
-/// bar's order (SPEC §3 User).
+/// `PATCH /api/me` {timezone?, theme?, look?, project_sort?, new_session_project_id?}: an IANA
+/// name, the default zone of new schedules (SPEC §16); the app's base palette (T49); the client's
+/// look and the project bar's order; the user's own project a new session is quick-started in,
+/// another user's or a missing one `404` (SPEC §3 User).
 pub async fn patch_me(
     State(app): State<AppState>,
     mut user: CurrentUser,
     Json(b): Json<api::PatchMe>,
 ) -> ApiResult<Json<api::Me>> {
+    // Checked before anything is stored: a refused project leaves the other fields as they were.
+    let new_session_project = match b.new_session_project_id {
+        Some(id) => Some(project_for(&app, &user, id).await?.id),
+        None => None,
+    };
     if let Some(tz) = b.timezone {
         let tz = crate::schedules::parse_tz(&tz).map_err(ApiError::BadRequest)?;
         sqlx::query("UPDATE users SET timezone = $2, updated_at = now() WHERE id = $1")
@@ -134,6 +141,16 @@ pub async fn patch_me(
             .execute(&app.db)
             .await?;
         user.project_sort = sort;
+    }
+    if let Some(id) = new_session_project {
+        sqlx::query(
+            "UPDATE users SET new_session_project_id = $2, updated_at = now() WHERE id = $1",
+        )
+        .bind(user.id)
+        .bind(id)
+        .execute(&app.db)
+        .await?;
+        user.new_session_project_id = Some(id);
     }
     Ok(me(user).await)
 }

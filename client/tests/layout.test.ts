@@ -171,4 +171,12 @@ describe('layout widths', () => {
       expect(rule(sel)['width']).toBe(rule(sel)['flex-basis']);
     }
   });
+
+  it("a phone's workers line is its own height in both looks, under the home indicator's room, and the floating button stands on it", () => {
+    // `:root.list-compact .wline` (42px) would win over `.sessions-phone .wline` without a height of its own.
+    const height = 'calc(var(--wline-h) + env(safe-area-inset-bottom))';
+    expect(rule('.sessions-phone .wline')['height']).toBe(height);
+    expect(rule(':root.list-compact .sessions-phone .wline')['height']).toBe(height);
+    expect(rule('.phone-new-session')['bottom']).toBe('calc(var(--wline-h) + env(safe-area-inset-bottom) + 16px)');
+  });
 });

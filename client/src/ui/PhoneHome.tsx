@@ -9,7 +9,7 @@ import { useRef, useState } from 'preact/hooks';
 import type { AppState, PhoneView } from '../app';
 import type { Project } from '../proto';
 import { colorHex } from '../theme';
-import { projectName } from './Appearance';
+import { projectName, tileBackground } from './Appearance';
 import { ContextMenu, type MenuEntry } from './ContextMenu';
 import { useSubscription } from './hooks';
 import { IconChevronDown, IconPlus, IconSearch, IconSettings } from './icons';
@@ -102,10 +102,25 @@ export function PhoneHome({ app }: { app: AppState }) {
         </div>
       )}
       <div class="session-scroll">{view === 'projects' ? <Projects app={app} onError={setError} /> : <Sessions app={app} />}</div>
+      <NewSessionButton app={app} />
       <ProjectUndo app={app} />
       <WorkersLine app={app} />
       {at && <ContextMenu x={at.x} y={at.y} label="View" items={items} anchor={btn.current} backdrop onClose={() => setAt(null)} />}
     </section>
+  );
+}
+
+/** The floating button over both views: a new session in the project picked in Settings (the
+ *  personal one until then), in that project's color; not while the Undo bar of an archived
+ *  project (`ProjectUndo`) stands where it is. */
+function NewSessionButton({ app }: { app: AppState }) {
+  const p = app.newSessionProject();
+  if (!p || (app.projectUndo && app.archivedProjects.has(app.projectUndo))) return null;
+  const label = `New session in ${projectName(p)}`;
+  return (
+    <a class="phone-new-session" href={`#/p/${p.id}/new`} aria-label={label} title={label} style={`--tile: ${tileBackground(p)}`}>
+      <IconPlus size={26} />
+    </a>
   );
 }
 

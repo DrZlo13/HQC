@@ -24,7 +24,7 @@ afterEach(() => {
   localStorage.clear();
 });
 
-const ME: Me = { id: 'u', email: 'me@example.com', personal_project_id: 'p', theme: 'warm', look: 'spacious', project_sort: 'custom' };
+const ME: Me = { id: 'u', email: 'me@example.com', personal_project_id: 'p', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null };
 const socket = { onState: () => {}, onRequests: () => {}, onSummary: () => {}, start: () => {} } as unknown as HubSocket;
 /** The hub as `init` reaches it: `/api/me` answers `me`, no projects or sessions. */
 const hubApi = (me: Me) =>

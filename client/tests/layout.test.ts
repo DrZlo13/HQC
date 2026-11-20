@@ -116,6 +116,34 @@ describe('layout widths', () => {
     expect(rule('.perm-done-row .btn-link')['margin-left']).toBe('auto');
   });
 
+  it("a subagent's end card keeps its head inside the card on a phone: the spending cuts first, the task keeps the room", () => {
+    // Checked in Chromium and WebKit at 393px on a real end card ("32.7k tokens · 5 tools ·
+    // 12s"): before, the task was 0px and the head ran past the card; a card with "367.6k tokens
+    // · 265 tools · 1h 17m 22s" made the feed scroll sideways.
+    const stats = rule('.subagent-head .subagent-stats');
+    expect([stats['flex'], stats['min-width'], stats['overflow'], stats['text-overflow']]).toEqual([
+      '0 1000 auto',
+      '0',
+      'hidden',
+      'ellipsis',
+    ]);
+    const task = rule('.subagent-task');
+    expect([task['flex'], task['min-width'], task['overflow']]).toEqual(['0 1 auto', '0', 'hidden']);
+  });
+
+  it('a "Background task ·" line keeps inside the feed on a phone: its spending is cut where it does not fit beside the label', () => {
+    // The text takes only the room left (a basis of 0); the label stays whole.
+    expect(rule('.fold-peek')['flex']).toBe('1');
+    expect(rule('.fold-label')['flex']).toBe('none');
+    const stats = rule('.fold-stats');
+    expect([stats['flex'], stats['min-width'], stats['overflow'], stats['text-overflow']]).toEqual([
+      '0 1 auto',
+      '0',
+      'hidden',
+      'ellipsis',
+    ]);
+  });
+
   it("a call's line and its result share one line, the result three parts to the line's one; a thinking line is one line", () => {
     // Checked in Chromium and WebKit at 1280 and 390px: one line each, the arguments ~25% when
     // both are long, the time and the mark at the right edge.

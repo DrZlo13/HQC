@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.185, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.186, 2026-11-20. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -575,7 +575,7 @@ the client renders only them. The "source" column is the component that produces
 | `turn_lost` | hub | the turn was lost: the agent process stopped mid-turn, the worker restarted, or there have been no turn events from the worker for a long time (watchdog, "no events for N s"; §17.3) |
 | `agent_exited` | worker | the agent process exited on its own with an error or mid-turn (§17.3) |
 | `policy_denied` | worker | a tool call was rejected by a `deny` rule from the worker's `[permissions]`, without asking the owner (§8.1, §14); the client shows "Blocked by worker policy" |
-| `task_notification` | worker (adapter; mirror) | since 0.69: a background task of the agent (a shell command, a subagent) finished or stopped; `text` is the runtime's summary of it (§8.1, §9.1). It comes when the task ends, before the answer of the turn the runtime then starts by itself. Since 0.135 `call_id` is the `call_id` of the `tool.call` that started the task, `status` how it ended as the runtime says it (Claude Code: `completed`, `failed`, `stopped`) and `task_id` the runtime's id of the task (Claude Code: a subagent's `agentId`), each absent when the runtime does not say; the card of a subagent's `Agent` call takes its end from it, and a subagent's notification (by `call_id` or by the `agentId` of its background launch, with a `status` that ends it) stands in the feed as the subagent's end card (§6). Since 0.181 `usage` is what the task spent (Claude Code: the notification's `usage`), absent when the runtime does not say, the end card shows it (§6), and the task's output file follows the notification as an `attachment` (§8.1) (adapter only: a mirrored session's notification has neither `usage` nor the attachment). The client folds any other into a "Background task ·" line ("Background task failed ·" for `status` `failed`, "Background task stopped ·" for `stopped`, since 0.181) with the whole text on one line, without its Markdown marks, dimmed in italics like the start of a thinking, cut with an ellipsis where the line ends, and (since 0.181) with `usage` at its right end as `· <tokens> tokens · <n> tools · <run time>`, as the row above the input has it (§6); opened, it shows all of it as Markdown |
+| `task_notification` | worker (adapter; mirror) | since 0.69: a background task of the agent (a shell command, a subagent) finished or stopped; `text` is the runtime's summary of it (§8.1, §9.1). It comes when the task ends, before the answer of the turn the runtime then starts by itself. Since 0.135 `call_id` is the `call_id` of the `tool.call` that started the task, `status` how it ended as the runtime says it (Claude Code: `completed`, `failed`, `stopped`) and `task_id` the runtime's id of the task (Claude Code: a subagent's `agentId`), each absent when the runtime does not say; the card of a subagent's `Agent` call takes its end from it, and a subagent's notification (by `call_id` or by the `agentId` of its background launch, with a `status` that ends it) stands in the feed as the subagent's end card (§6). Since 0.181 `usage` is what the task spent (Claude Code: the notification's `usage`), absent when the runtime does not say, the end card shows it (§6), and the task's output file follows the notification as an `attachment` (§8.1) (adapter only: a mirrored session's notification has neither `usage` nor the attachment). The client folds any other into a "Background task ·" line ("Background task failed ·" for `status` `failed`, "Background task stopped ·" for `stopped`, since 0.181) with the whole text on one line, without its Markdown marks, dimmed in italics like the start of a thinking, cut with an ellipsis where the line ends, and (since 0.181) with `usage` at its right end as `· <tokens> tokens · <n> tools · <run time>`, as the row above the input has it (§6); opened, it shows all of it as Markdown. Since 0.186 the output file the notification is followed by (an `attachment` of kind `text`, named `<task_id>.output` after the notification of that `task_id`) is drawn inside the line, under its text once the line is opened, not as a block of its own; one in a turn that answers a question stays with that turn's attachments in its "Reply to" block (§6), and one whose line is not loaded is a card |
 | `context_compacted` | worker (adapter; since 0.162 mirror) | since 0.69: the runtime compacted the session's context (`/compact`); since 0.118 `text` is the summary the runtime wrote, "Context compacted" without one (§8.1); since 0.162 the mirror gives the same line from the transcript's `compact_boundary` and its summary (§9.1); the client folds the summary into a "Context compacted" line that opens to all of it as Markdown, and draws one with the fixed text as a divider. Since 0.179 the adapter's carries, when the runtime said, `trigger` (`auto` \| `manual`), `pre_tokens` (the context's tokens before) and `post_tokens` (after; absent when the runtime did not count them) — the mirror's carries none of them —, and the client's line reads "Context compacted · auto · 153k tokens freed", leaving out what is absent |
 | `compaction_failed` | worker (adapter) | since 0.179: a compaction the runtime started failed; `text` is "Compaction failed: " and the runtime's error, "Compaction failed" without one (§8.1) |
 | `conversation_cleared` | worker (adapter) | since 0.162: `/clear` started a new conversation in the same agent process, with a new transcript (Claude Code: `conversation_reset`, §8.1); `text` "Conversation cleared"; the session goes on in the new transcript, and the agent no longer has what was before the line in its context |
@@ -2403,7 +2403,9 @@ arguments and result as a call's row shows them. Its end, a lighter card of the 
 where the subagent ended: at a `system task_notification` with `status` `completed`, `failed` or
 `stopped` whose `call_id` is an `Agent` or `Task` call's, or whose `task_id` is the `agentId` of
 such a call's background launch, in place of the notification's "Background task ·" line (a
-command's or a Monitor's notification keeps its line); and at the result of a subagent that ran in
+command's or a Monitor's notification keeps its line; since 0.186 the output file the worker
+uploaded after it (§8.1) is drawn inside that line, under its text once the line is opened,
+not as a card of its own); and at the result of a subagent that ran in
 the foreground, any result of the call but a background launch's. Its first line is the state's mark
 (a check, a cross, a square when stopped), "Agent finished:" dimmed (since 0.141), the task, "done",
 "failed" or "stopped", since 0.181 the notification's `usage` as `<tokens> tokens · <n> tools`
@@ -4101,7 +4103,9 @@ outside them), only opened as `hqc_attach` opens one: a regular file whose last 
 symlink, `text`, named as the file, its last 2 MB when it is larger (a failed build says why at the
 end; the CLI gives the model the tail of a command's output too), the caption then "The last 2 MB
 of <size> bytes"; the worker writes the `attachment` event itself
-(§4) once the upload is in, beside the session's loop, so it comes after the line, and a file that
+(§4) once the upload is in, beside the session's loop, so it comes after the line — since 0.186
+the client draws it inside that line, under its text once the line is opened, not as a block
+of its own (§4, §6) —, and a file that
 is not there, not regular or empty, or an upload the hub refuses, gives no event and only a line in the
 worker's log. 2.1.312 makes a subagent's `output_file` a symlink to its transcript, so a
 subagent's end has no such attachment. Since 0.70 a subagent's `task_notification` without its report (no `handback` field) that
@@ -6665,6 +6669,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.185 → 0.186 (a background task's output inside its line)
+§4, §6, §8.1: every finished background command left a card of its output file standing in the
+feed, a block of its own under the "Background task ·" line — since 0.181 the worker uploads
+the task's output and follows its notification with an `attachment` (§8.1), and the client
+drew it as it draws any attachment. Now the client folds that attachment into the line: once
+the line is opened, it stands under the text with the usual Open and Download of an
+attachment, and folded, the line looks as it did. Only the client changes.
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

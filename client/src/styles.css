@@ -3493,6 +3493,10 @@ select.input {
   font-size: 13px;
   overflow-wrap: anywhere;
 }
+/* The output file in a task's fold: under the text above it, at the text's indent. */
+.fold-text + .attachment {
+  margin: 10px 0 0 18px;
+}
 
 .line-worker-log {
   font-family: var(--mono);

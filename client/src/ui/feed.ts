@@ -7,7 +7,9 @@
 // the ask's result, and the final message answering a question with the attachments and sends
 // of its turn. A subagent the agent starts (its `Agent` call) is a block of its own too, with
 // its result and its state, and so is its end: its notification, or its result when it ran in
-// the foreground. Pure logic, no DOM.
+// the foreground. Any other task's notification is a "Background task" line, and the output
+// file the worker uploads after it folds into that line, not a card of its own. Pure logic,
+// no DOM.
 
 import type { EventOf, HqcEvent, LiveSubagent, ToolResult } from '../proto';
 import type { Item, Timeline } from '../timeline';
@@ -55,7 +57,11 @@ export type Block =
       files: EventOf<'attachment'>[];
       sends: PeerCall[];
       usage?: EventOf<'usage'>;
-    };
+    }
+  /** A background task's notification that is no subagent's end (the "Background task ·"
+   *  line), with the output file the worker uploaded after it (SPEC §8.1), drawn inside the
+   *  line. */
+  | { kind: 'task'; key: string; event: EventOf<'system'>; files: EventOf<'attachment'>[] };
 
 /** Events the feed does not draw at all: `status` but an error with a reason (SPEC §17.1). */
 function hidden(e: HqcEvent): boolean {
@@ -133,6 +139,8 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
   }
   // The calls whose subagent has an end card already.
   const ended = new Set<string>();
+  // The task lines, by the name of the output file the worker uploads for them.
+  const tasks = new Map<string, Extract<Block, { kind: 'task' }>>();
   const end = (key: string, call: EventOf<'tool.call'>, e: EventOf<'system'> | EventOf<'tool.result'>) => {
     close();
     out.push({ kind: 'subagent-end', key, call, end: e, first: !ended.has(call.payload.call_id) });
@@ -239,15 +247,34 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
         out.push(reply ?? { kind: 'agent', key: it.key, event: e });
         continue;
       }
+      case 'attachment':
+        // A finished task's output file (kind `text`, named after its `task_id`) folds into
+        // its line: the worker uploads it beside the session's loop, so it can arrive between
+        // calls of the next turn, and an event taken into a line must not split a tool group.
+        // Without its line (the line is on an older page not loaded) it is a card as any.
+        if (e.payload.kind === 'text') {
+          const b = tasks.get(e.payload.name);
+          if (b) {
+            b.files.push(e);
+            continue;
+          }
+        }
+        break;
       case 'system': {
         // A subagent's end, by its call or by the `agentId` of its background launch; any other
-        // task's stays a "Background task" line.
+        // task's stays a "Background task" line, its output file folding inside it.
         const p = e.payload;
-        if (p.code !== 'task_notification' || !SUBAGENT_ENDS.has(p.status ?? '')) break;
+        if (p.code !== 'task_notification') break;
         const byCall = p.call_id === undefined ? undefined : timeline.callFor(p.call_id);
         const call =
           byCall && subagentTool(byCall.payload.tool) ? byCall : p.task_id === undefined ? undefined : launches.get(p.task_id);
-        if (!call) break;
+        if (!call || !SUBAGENT_ENDS.has(p.status ?? '')) {
+          close();
+          const line: Extract<Block, { kind: 'task' }> = { kind: 'task', key: it.key, event: e, files: [] };
+          if (p.task_id !== undefined) tasks.set(`${p.task_id}.output`, line);
+          out.push(line);
+          continue;
+        }
         end(it.key, call, e);
         continue;
       }

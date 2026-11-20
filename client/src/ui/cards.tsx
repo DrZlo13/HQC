@@ -223,6 +223,8 @@ function gutter(b: Block, actions: ChatActions): Gutter {
       return subagentEnd(b.call, b.end).state === 'done'
         ? { mark: mark('ok', <IconCheck size={13} />) }
         : { mark: mark('error', <IconCross size={13} />) };
+    case 'task':
+      return { mark: mark('fold', <IconChevron size={12} />) };
     case 'sent':
     case 'reply-to':
       return { mark: mark('relay', <IconArrowOut />) };
@@ -254,7 +256,6 @@ function gutter(b: Block, actions: ChatActions): Gutter {
           // An agent's post in its room is a message of the room, marked as an agent's text.
           return actions.roomAgent?.(e.payload.from_session_id) ? { mark: mark('dot', <span class="feed-dot" />) } : { mark: mark('relay', <IconArrowIn />) };
         case 'system':
-          if (e.payload.code === 'task_notification') return { mark: mark('fold', <IconChevron size={12} />) };
           return { full: true };
         case 'unknown':
           return {};
@@ -271,6 +272,7 @@ export function blockSeq(b: Block): number | undefined {
     case 'agent':
     case 'approval':
     case 'reply-to':
+    case 'task':
       return b.event.seq;
     case 'sent':
     case 'reply-from':
@@ -299,6 +301,8 @@ function BlockView({ block, actions }: { block: Block; actions: ChatActions }) {
       return <SubagentCard block={block} actions={actions} />;
     case 'subagent-end':
       return <SubagentEndCard block={block} />;
+    case 'task':
+      return <TaskNotification note={block.event.payload} files={block.files} actions={actions} />;
     case 'sent':
       return <SentBlock block={block} actions={actions} />;
     case 'reply-from':
@@ -500,7 +504,6 @@ export function EventView({ event, actions, queued }: { event: HqcEvent; actions
 function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => number }) {
   const p = event.payload;
   if (p.code === 'worker_log') return <WorkerLogLine event={event} />;
-  if (p.code === 'task_notification') return <TaskNotification note={p} />;
   // A compaction with the runtime's summary folds it; one without (older events carry the
   // fixed text) is text as is. Either says how it came and what it freed when the runtime did.
   if (p.code === 'context_compacted') {
@@ -563,8 +566,19 @@ const TASK_END_LABELS = new Map([
  *  where the line ends (a first line alone, often a heading like "### Summary", read as the
  *  whole message), dimmed in italics like the Thinking line's start of its text, then what it
  *  spent, when the runtime says, as the subagents' row above the input has it; open, the text
- *  as Markdown. */
-function TaskNotification({ note }: { note: EventOf<'system'>['payload'] }) {
+ *  as Markdown, then the output file the worker uploaded for the task (SPEC §8.1), a card as
+ *  any attachment. */
+function TaskNotification({
+  note,
+  files,
+  actions,
+}: {
+  note: EventOf<'system'>['payload'];
+  /** The output file the worker uploaded after the task ended (SPEC §8.1), drawn inside the
+   *  open line; empty when none came after it. */
+  files: EventOf<'attachment'>[];
+  actions: ChatActions;
+}) {
   const { text, usage } = note;
   // The feed renders again on every streamed piece; the text is parsed once. A report runs to
   // tens of KB, and its first 2000 characters are wider than any window.
@@ -578,6 +592,16 @@ function TaskNotification({ note }: { note: EventOf<'system'>['payload'] }) {
         {usage && <span class="fold-stats">· {stats(usage, usage.duration_ms)}</span>}
       </summary>
       <Markdown class="fold-text" text={text} />
+      {files.map((f) => (
+        <AttachmentView
+          key={f.seq}
+          id={f.payload.artifact_id}
+          kind={f.payload.kind}
+          name={f.payload.name}
+          caption={f.payload.caption}
+          actions={actions}
+        />
+      ))}
     </details>
   );
 }

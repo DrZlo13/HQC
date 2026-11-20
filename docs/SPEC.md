@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.185, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.193, 2026-11-20. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -545,7 +545,7 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); mirror — prompts from the Claude Code transcript (§9.1) |
+| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.193: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text`, `reset?` (since 0.161: `true` when the runtime abandoned the attempt that wrote the text so far, which the hub and the client drop, §6, §8.1; `text` is then empty; absent when false) | adapter; transport only, not written to the database |
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?, due_in_ms?, retry?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands and (since 0.169) Monitor watchers, in the order they became rows, then (since 0.169) the wakeup the agent armed and its cron jobs, empty when none (§8.1); since 0.181 a task the CLI marks `ambient` is no row, and the commands and subagents it starts are rows as the agent's own (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.161; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row, a command's and (since 0.169) a Monitor's say, `retry` (since 0.179) `{attempt, max_retries, retry_delay_ms, error_status?}` while its request to the model API failed and waits to be retried (`error_status` absent: the attempt got no response; §8.1), `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row, `command` for a command's and, since 0.169, `monitor` for a Monitor's, `wakeup` for the agent's wakeup and `cron` for one of its cron jobs; a command's or a Monitor's row carries only `task_id`, `description` (its Bash call's description, or the command; the Monitor's description), `duration_ms`, `call_id?`, `kind` and `stoppable`; a wakeup's and a job's row also `due_in_ms` (since 0.169), the milliseconds until it fires when the list was sent, by the worker's clock, 0 once due, absent on a job whose next fire is not known |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops, and (since 0.179) again, unchanged, at each heartbeat of a long call of the main agent (§8.1, §17.3) |
@@ -1466,6 +1466,13 @@ MCP calls (worker → hub → worker):
   (`resets_at`). Sent whenever the runtime reports them (Claude Code: every
   `rate_limit_event`, §8.1). The hub keeps the latest per worker in memory, with when it came,
   and shows it in `GET /api/workers`; after a hub restart there is none until the next turn.
+- `session.subagent_leftovers` {session_id, subagent, ended_s, commands[{task_id, description,
+  running_s}]} → `ack {}` (since 0.193) — a subagent of the session's agent ended a while ago and
+  commands it started still run (Claude Code: §8.1): `subagent` is its task, `ended_s` how many
+  seconds ago it ended, each command its `task_id` in the runtime, its `description` and how many
+  seconds it has run. Sent directly, once per such end, while the agent runs.
+  The hub gives the agent a note as the owner's pending input (§8.1), unless the session is a
+  room's or paused, or is not on this worker; it acks the frame either way.
 - `workspace.created` {request_id, canonical | error} → `ack {}` (since 0.58, T45) — the outcome
   of `workspace.create`: the folder is ready at `canonical`, or it was not made (`error`, a
   message for the user; nothing is left on disk). Sent directly when the clone (or since 0.60 the
@@ -4104,22 +4111,44 @@ of <size> bytes"; the worker writes the `attachment` event itself
 (§4) once the upload is in, beside the session's loop, so it comes after the line, and a file that
 is not there, not regular or empty, or an upload the hub refuses, gives no event and only a line in the
 worker's log. 2.1.312 makes a subagent's `output_file` a symlink to its transcript, so a
-subagent's end has no such attachment. Since 0.70 a subagent's `task_notification` without its report (no `handback` field) that
-comes while the latest `background_tasks_changed` list (below) holds the subagent or a task of it is
-no end: the adapter keeps the latest one and handles it (the line, the cancel of the subagent's open
-requests) when the subagent stops counting or the process exits; a notification with the report
-replaces it and is handled at once. 2.1.312 sends two for a subagent whose command it moved to the
-background: "This agent has not reported yet…" without `handback` while the list holds the subagent
-and its commands, and its real end, `handback: "send"` and `handback_report {text}`, after the
-subagent's `SubagentHandback` call. A notification with `handback` is the end at once, also while a
-command the subagent left running is still listed (live on 2.1.312: a subagent's wait loop
-that never ended). A task gives one line: a later `task_notification` of the same `task_id`
-only cancels the subagent's open requests (the CLI's own description of the field: any
-notification "can be followed by a later one for the same task_id when the agent is resumed or
-finishes its wait; the later one replaces what the earlier one showed"; checked live on 2.1.312:
-a subagent that reported while its 200 s `ping`, moved to the background, ran on is listed and
-started again when the `ping` ends, and sends a second notification with `handback: "send"` and
-the same summary); `system` `compact_boundary` (`compact_metadata.trigger: manual`
+subagent's end has no such attachment. A subagent's `task_notification` that is the CLI's
+placeholder — no `handback` field and a `summary` that starts with "This agent has not reported
+yet" — and comes while the latest `background_tasks_changed` list (below) holds the subagent or a
+task of it is no end: the adapter keeps the latest one and handles it (the line, the cancel of the
+subagent's open requests) when the subagent stops counting or the process exits; any other
+notification of the subagent replaces it and is handled at once. 2.1.312 sends two for a subagent
+whose command it moved to the background: the placeholder while the list holds the subagent and
+its commands, and its real end, `handback: "send"` and `handback_report {text}`, after the
+subagent's `SubagentHandback` call. Any other notification is the end at once, also while a
+command the subagent started is still listed: on 2.1.312 one with `handback` (live: a subagent's
+wait loop that never ended); 2.1.329 sends, for a subagent that stops while commands it started
+still run, one with the text of its last message as `summary` and no `handback` (seen live: a
+subagent's `until grep …; do sleep 10; done` loops that never ended, its report "All done: …"),
+and tells the model that the agent "may resume on its own when that work completes … the result
+below may be interim". A later `task_notification` of the same `task_id` cancels the subagent's
+open requests and gives a line only when its text differs from that of the line given for the
+task before and is not the placeholder (the CLI's own description of the field: any notification
+"can be followed by a later one for the same task_id when the agent is resumed or finishes its
+wait; the later one replaces what the earlier one showed", which an append-only feed cannot do;
+checked live on 2.1.312: a subagent that reported while its 200 s `ping`, moved to the
+background, ran on is listed and started again when the `ping` ends, and sends a second
+notification with `handback: "send"` and the same summary, which gives no line). Since 0.193 a
+subagent whose end comes while the list holds commands it started (`local_bash` tasks with it as
+`parent_task_id`) is remembered with the time of its end; it is forgotten when none of those is in
+the list any more or the CLI starts it again (`task_started`). 30 minutes after its end, counted on
+the 2-second tick of the token rate (§4 `tokens.rate`), the worker sends `session.subagent_leftovers`
+(§5.4) once with the subagent's task (the `description` of its `task_started`) and the commands it
+started that the list still holds and whose `task_started` came, each with its `task_id`,
+`description` and run time, and how long ago the subagent ended. The hub gives the session's
+agent the note `[hqc] Subagent "<task>" reported <time since the end> ago, but background
+commands it started still run (their descriptions as the subagent wrote them): "<description>"
+(task <task_id>, <run time>); …. Stop the ones no longer needed with TaskStop, or leave them.`
+(the times as in the note of a pause) as the session owner's pending `user.message`, delivered as
+any input, as the note of a pause is (§17.3); none to a room nor to a paused session. The task
+and each description are the model's words, so each goes in as data: a JSON string (its quotes
+and line breaks escaped), with what reads as `[hqc room` or `[hqc peer` escaped as in a room's
+input (§7.1.1) and the worker's input (§7.1); `system`
+`compact_boundary` (`compact_metadata.trigger: manual`
 after `/compact`, 2.1.308 and 2.1.312; an automatic compaction was not checked; its `uuid` is
 that of the transcript's `system compact_boundary` record) →
 `system context_compacted` with the `event_id` derived from that `uuid`, held until the summary:
@@ -4175,8 +4204,8 @@ command of it is a command of the agent (its row below), a subagent of it a suba
 other. A subagent also counts while the latest list holds it (`task_type: local_agent`) or a task
 of the list not marked `ambient` has it as `parent_task_id` (since 0.166: the comment watcher of
 a page a subagent published names the subagent and stays for the whole process), the latter
-until a `task_notification` with its report (`handback`) and again from its next
-`task_started`: a command a subagent that reported left running is a background task of the
+until its end (a `task_notification` other than the placeholder held above) and again from its
+next `task_started`: a command a subagent that ended left running is a background task of the
 session, not a running subagent. With `CLAUDE_CODE_ENTRYPOINT=claude-vscode` 2.1.312 moves a subagent's
 Bash call that runs for more than about 180 s to the background (the agent's own 240 s Bash
 call stays in the foreground) and reports the subagent ended (`task_updated` `completed`,
@@ -4212,7 +4241,7 @@ that stops counting is forgotten. Since 0.127 the list holds, after the subagent
 agent's background shell commands: the entries of the latest `background_tasks_changed` list with
 `task_type: local_bash`, without `ambient: true` (tasks the SDK says hosts should leave out of
 activity indicators), whose `task_started` has come, and whose `parent_task_id` is none or a
-subagent that has reported. 2.1.312 registers a Monitor's
+subagent that has ended (above). 2.1.312 registers a Monitor's
 task as `local_bash` too, without `ambient`, and nothing in the list tells it from a command:
 the adapter remembers the ids of the `Monitor` `tool_use` blocks of every `assistant` line, the
 agent's and its subagents', and marks the task whose `task_started` names one as its
@@ -4222,7 +4251,7 @@ so a command's or a Monitor's row comes at its `task_started`; a Bash call moved
 background later, whose `task_started` came while it ran in the foreground, gets its row when the
 list takes it. A task whose `task_started` this process did not see has no row, nor has one after
 its `task_notification`. A subagent's row stands for its own commands; a command that a subagent
-which reported left running gets its own row when that subagent's row goes. Other task types
+which ended left running gets its own row when that subagent's row goes. Other task types
 (`mcp_task`, `local_workflow`, …) are no rows. A command's row is its `task_id`, its `description` —
 the entry's, which 2.1.312 sets to the Bash call's `description`, or to the command without one, cut
 to 4096 bytes as `args_preview` — and `duration_ms`, the worker's own time since the command's first
@@ -6665,6 +6694,23 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.185 → 0.193 (a subagent that ends with its commands still running)
+§8.1: a subagent of Claude Code 2.1.329 that stops while commands it started run on (a wait loop
+that never ends) sends its `task_notification` with its report as `summary` and no `handback`.
+The adapter took every notification without `handback` while the subagent's commands were listed
+for 2.1.312's placeholder "This agent has not reported yet…" and held it until they ended, so the
+feed had no "Agent finished" card and the line above the input said the subagent was running for
+hours. Only the placeholder is held now; any other notification is the subagent's end at once,
+and the commands it left get rows of their own (stoppable) instead of its row. A later
+notification of the same task gives a line when its text differs, so the real report of a subagent
+the CLI resumed after an interim one shows too. §5.4, §8.1: when such commands still run 30
+minutes after the end, the worker sends the new `session.subagent_leftovers` once, with how long
+ago the subagent ended, and the hub gives the agent a note naming them, as the owner's pending
+input, so that it stops the ones no longer needed; the subagent's task and the commands'
+descriptions are the model's words and go into the note as JSON strings, with the marks of a
+room's and another session's lines escaped. §4: the hub is a source of `user.message` on that
+frame. No migration.
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

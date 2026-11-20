@@ -95,6 +95,7 @@ The hub is configured by environment variables only; it takes a single command-l
 | `HQC_ARTIFACT_RETENTION_DAYS` | no, `30` | artifact cleanup (SPEC §12, T21): once a day (and right after start) the hub deletes artifact records that no event references and that have not been uploaded or attached to an input for this many days; the file is deleted from disk once no records for its sha256 remain. Whole days; `0` means never delete |
 | `HQC_ARTIFACT_PUBLIC_BASE` | no | origin of a separate artifact domain, `https://artifacts.<hub domain>` without a path (`http://` only for loopback). Signed links point there, and HTML is rendered in an iframe only from there; the hub adds this origin to `img-src`/`frame-src`/`connect-src` of its CSP, and on this host serves only `/artifacts/*` (everything else is `404`). The domain is the same tunnel to the same hub, **outside** Access (§1.6). If unset, links are relative, on the hub's domain (behind Access), and HTML can only be downloaded |
 | `HQC_ARTIFACT_KEY` | no | HMAC key for signed links, at least 32 characters (`openssl rand -hex 32`). If unset, a random one per run: links from the previous run stop working, and the client just requests new ones. Needed only if links must survive a restart |
+| `HQC_PUBLISH_BASE` | no | origin of the publication domain (SPEC §12): pages and files an agent publishes with `hqc_publish` are served there by a public link, `https://<host>` without a path (`http://` only for loopback). Recommended: a registrable domain of its own (e.g. `pages.example.net` for a hub at `hqc.example.com`, not a subdomain of the hub's), so that published pages are another site than the hub for the browser. Neither the artifact domain nor an origin of `HQC_PUBLIC_ORIGINS`, otherwise the hub does not start. The proxy sends it to the same hub **outside** Access and the sign-in (§1.6, §1.9); on this host the hub serves only published files and `/health`. If unset, `hqc_publish` answers that publishing is not set up |
 | `HQC_PUBLIC_ORIGINS` | no | comma-separated origins browsers open the hub at: `https://hqc.example.com`. When set, `Origin` on `/api/*` (WebSocket and writes) is checked against this list instead of the request's `Host`. Needed if a proxy in front of the hub rewrites `Host` to the container name (Caddy with `header_up Host`, cloudflared with `httpHostHeader`) and does not set `X-Forwarded-Host`; the symptom is `WebSocket connection to wss://…/api/ws failed` in the browser and `Origin does not match the hub's host` in the hub log |
 | `HQC_CLIENT_IP_HEADER` | in OIDC mode | the header a reverse proxy in front of the hub puts the client's address in, from the TCP peer, e.g. `X-Real-Ip` for Traefik (§1.9). When set, the per-address limits on `/worker/*` (SPEC §20) take the address from this header (the TCP peer when it is absent), and the hub reads neither `CF-Connecting-IP` nor `CF-IPCountry` (the country on the enrollment screen). If unset: `CF-Connecting-IP` (Cloudflare Tunnel, §1.6), otherwise the TCP peer; in OIDC mode the hub then does not start |
 | `HQC_TURN_WATCHDOG_S` | no, `900` | turn watchdog (SPEC §17.3), whole seconds: if a session is `running` and the worker has sent no event for it (including `agent.delta`) for longer than this, the hub closes the turn with `system turn_lost` "no events for N s", and the session stays in `error` until the next input. Waiting for an answer to approval/clarify and the worker being offline do not count. `0` turns it off |
@@ -285,6 +286,15 @@ signature with a 10-minute TTL. In the hub, `HQC_ARTIFACT_PUBLIC_BASE=https://ar
 only with it are HTML attachments shown in a sandboxed iframe; on this name the hub serves only
 `/artifacts/*`. Everything works without a separate domain: links go to the hub's domain behind
 Access, and HTML can only be downloaded.
+
+**Publication domain** (optional, SPEC §12), for `hqc_publish`: a name of its own, best on a
+registrable domain apart from the hub's (e.g. `pages.example.net`, a zone in the same Cloudflare
+account): one more `hostname` in the tunnel's `ingress` to the same `http://127.0.0.1:8080` and
+`cloudflared tunnel route dns hqc pages.example.net`. Do **not** put Access on this name (or use
+Bypass, Everyone): a publication is public by design, its link is the only key, and its owner
+unpublishes it in the chat, or deletes the session (or the project) that published it. In the hub, `HQC_PUBLISH_BASE=https://pages.example.net` (§1.2); on this
+name the hub serves only published files and `/health`. Without it the agent's `hqc_publish`
+is refused.
 
 Where to get the values for the hub:
 - `HQC_ACCESS_AUD`: Applications → `hqc` → Configure (Overview) → **Application Audience
@@ -521,6 +531,7 @@ these containers are on, in the services and at the top level:
       HQC_OIDC_ALLOWED_EMAILS: you@example.com
       HQC_CLIENT_IP_HEADER: X-Real-Ip
       HQC_ARTIFACT_PUBLIC_BASE: https://artifacts.hqc.example.com
+      HQC_PUBLISH_BASE: https://pages.example.net
     networks: [default, hqc-traefik]
     labels:
       traefik.enable: "true"
@@ -543,8 +554,14 @@ these containers are on, in the services and at the top level:
       traefik.http.routers.hqc-artifacts.tls.certresolver: letsencrypt
       traefik.http.routers.hqc-artifacts.middlewares: hqc-hsts
       traefik.http.routers.hqc-artifacts.service: hqc-hub
+      # Publication domain: public, published files only (SPEC §12), no sign-in.
+      traefik.http.routers.hqc-pages.rule: Host(`pages.example.net`)
+      traefik.http.routers.hqc-pages.entrypoints: websecure
+      traefik.http.routers.hqc-pages.tls.certresolver: letsencrypt
+      traefik.http.routers.hqc-pages.middlewares: hqc-hsts
+      traefik.http.routers.hqc-pages.service: hqc-hub
       # Plain http: a redirect to https for both names.
-      traefik.http.routers.hqc-http.rule: Host(`hqc.example.com`) || Host(`artifacts.hqc.example.com`)
+      traefik.http.routers.hqc-http.rule: Host(`hqc.example.com`) || Host(`artifacts.hqc.example.com`) || Host(`pages.example.net`)
       traefik.http.routers.hqc-http.entrypoints: web
       traefik.http.routers.hqc-http.middlewares: hqc-https
       traefik.http.routers.hqc-http.service: hqc-hub
@@ -628,6 +645,12 @@ networks:
   above without the sign-in; the hub serves only `/artifacts/*` there (§1.2
   `HQC_ARTIFACT_PUBLIC_BASE`). Without the router and the variable, signed links go to the hub's
   domain behind the sign-in and HTML attachments can only be downloaded.
+- Publication domain: a DNS name for `pages.example.net` (best a registrable domain of its own, §1.2)
+  pointing at Traefik, and the `hqc-pages` router above, without the sign-in: a publication is
+  public by design, until its owner unpublishes it in the chat or deletes the session (or the
+  project) that published it; the hub serves only published files there (§1.2
+  `HQC_PUBLISH_BASE`).
+  Without the router and the variable the agent's `hqc_publish` is refused.
 - `OAUTH2_PROXY_COOKIE_REFRESH` shorter than the ID token lifetime, see `HQC_OIDC_ISSUER` in §1.2.
 - `OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST`: a CSRF cookie of its own for every sign-in attempt
   (`_oauth2_proxy_<random>_csrf`). Without it there is one `_oauth2_proxy_csrf`, which also holds

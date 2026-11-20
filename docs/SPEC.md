@@ -145,8 +145,9 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   same owner can still use the owner's hqc tools through its sessions' tokens, within the caps.
 - A publication (since 0.190, `hqc_publish`, §7, §12) is public: anyone who has its link opens
   it, without Access or the sign-in, until its owner unpublishes it or deletes the session (or
-  the project) that published it. Only the session owner's `once` on the card in the session's
-  own chat publishes, whatever the session's mode and `auto_approve`; a compromised hub can
+  the project) that published it. Only the session owner's `once` on the card of the session's
+  request (in its chat, the Requests list or the feed of a session or room waiting on it)
+  publishes, whatever the session's mode and `auto_approve`; a compromised hub can
   answer that card itself, as any request. The worker packs only files whose canonical paths
   lie inside the folder and `allowed_roots` (a link pointing out is refused by its name). The
   hub trusts the archive no more than that: it opens it with limits (§20) and serves it only on
@@ -1986,10 +1987,10 @@ the rest is marked "later"):
   absent while it is not published, and on a hub without `HQC_PUBLISH_BASE`); `DELETE
   /api/artifacts/{id}/publication` (since 0.190) → `204`: the owner unpublishes it,
   `published_at` and `public_id` are cleared and the link is `404` from then on; an artifact not
-  published: `204`, nothing changes; `GET /api/artifacts/{id}/url` → `{url, expires_at}` (`api.artifact.url.json`), a signed link
-  valid for 10 minutes (§12). Someone else's or a nonexistent artifact: `404`. An input (`POST
-  .../input`) with `artifact_ids` of someone else's or nonexistent artifacts: `400
-  unknown_artifact`; more than 32: `400`. Download by link: `GET /artifacts/{id}?exp=&sig=`
+  published: `204`, nothing changes; `GET /api/artifacts/{id}/url` → `{url, expires_at}`
+  (`api.artifact.url.json`), a signed link valid for 10 minutes (§12). Someone else's or a
+  nonexistent artifact: `404`. An input (`POST .../input`) with `artifact_ids` of someone
+  else's or nonexistent artifacts: `400 unknown_artifact`; more than 32: `400`. Download by link: `GET /artifacts/{id}?exp=&sig=`
   (outside `/api`, §12); for the worker: `GET /worker/artifacts/{id}` (§5.3)
 - `GET /api/requests` → `{requests[]}` (`api.requests.json`, since 0.41, T37): every open
   request (`approval`, `clarify`, `worker_approval`, since 0.76 `move`, since 0.95 `follow`,
@@ -6740,7 +6741,7 @@ send from a session in a lower mode (§7.1).
   | `artifact_ids` of `hqc_send`/`hqc_ask` on the hub | at most 32, each an artifact of the owner linked to the calling session | `error invalid_args` / `not_found`, nothing is stored |
   | files of an `hqc_ask` reply (§7.1) | at most 32, artifacts of the target's owner only; downloaded by the asking worker with the limits of an input (100 MB each, 500 MB per reply) | the rest left out (warn in the hub's log) / that file reported with an `error` |
   | `hqc_publish` packing on the worker (§7, since 0.190) | at most 10 000 files, 500 MiB together, paths up to 512 bytes, only regular files and folders, every entry inside the folder and `allowed_roots` after resolving symlinks; the zip up to 100 MB | `error invalid_args`, nothing is uploaded |
-  | `hqc_publish` archive on the hub (`hqc_proto::mcp::MAX_SITE_*`) | at most 10 000 entries, 500 MiB unpacked by the sizes the entries declare, names up to 512 bytes, relative, without an empty, `.` or `..` component, a control character or a bidirectional control, each once; stored or deflated, not encrypted, no links; `index.html` at the top or a single file; `path` 1–4096 bytes, showable | `error invalid_args`, no card |
+  | `hqc_publish` archive on the hub (`hqc_proto::mcp::MAX_SITE_*`) | the file ends with its end record (no comment, not zip64) right after its central directory, whose records the hub walks itself before the zip reader opens it (and the reader must open that directory): at most 10 000, names up to 512 bytes, no extra field, no comment, stored or deflated; 500 MiB unpacked by the sizes the entries declare; names relative, without an empty, `.` or `..` component, a control character or a bidirectional control, each once (the records walked against the names the reader keeps); not encrypted, no links; `index.html` at the top or a single file; `path` 1–4096 bytes, showable | `error invalid_args`, no card |
   | open `hqc_publish` requests per session | 1 | `error unavailable` |
   | a published entry served (§12) | no more than the size its archive declares | the rest is not sent |
   | published files streamed at once (§12, `hqc_hub::publish::MAX_STREAMS`) | 32, each on a blocking thread until its reader has it | `503` with `Retry-After: 5` |
@@ -6831,7 +6832,8 @@ opaque origin; Web Workers, popups, forms, cookies and `localStorage` do not wor
 files streamed at once (`503` beyond), the feed's card; deleting the publishing session or its
 project takes a publication down, which the delete confirmations say, archiving does not; the
 cleanup keeps a published `site` while its session exists. §2.1, §20: the domain outside Access,
-the limits.
+the limits (the hub walks the archive's central directory itself before the zip reader opens
+it).
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

@@ -292,9 +292,9 @@ registrable domain apart from the hub's (e.g. `pages.example.net`, a zone in the
 account): one more `hostname` in the tunnel's `ingress` to the same `http://127.0.0.1:8080` and
 `cloudflared tunnel route dns hqc pages.example.net`. Do **not** put Access on this name (or use
 Bypass, Everyone): a publication is public by design, its link is the only key, and its owner
-unpublishes it in the chat, or deletes the session (or the project) that published it. In the hub, `HQC_PUBLISH_BASE=https://pages.example.net` (§1.2); on this
-name the hub serves only published files and `/health`. Without it the agent's `hqc_publish`
-is refused.
+unpublishes it in the chat, or deletes the session (or the project) that published it. In the
+hub, `HQC_PUBLISH_BASE=https://pages.example.net` (§1.2); on this name the hub serves only
+published files and `/health`. Without it the agent's `hqc_publish` is refused.
 
 Where to get the values for the hub:
 - `HQC_ACCESS_AUD`: Applications → `hqc` → Configure (Overview) → **Application Audience
@@ -645,12 +645,11 @@ networks:
   above without the sign-in; the hub serves only `/artifacts/*` there (§1.2
   `HQC_ARTIFACT_PUBLIC_BASE`). Without the router and the variable, signed links go to the hub's
   domain behind the sign-in and HTML attachments can only be downloaded.
-- Publication domain: a DNS name for `pages.example.net` (best a registrable domain of its own, §1.2)
-  pointing at Traefik, and the `hqc-pages` router above, without the sign-in: a publication is
-  public by design, until its owner unpublishes it in the chat or deletes the session (or the
+- Publication domain: a DNS name for `pages.example.net` (best a registrable domain of its own,
+  §1.2) pointing at Traefik, and the `hqc-pages` router above, without the sign-in: a publication
+  is public by design, until its owner unpublishes it in the chat or deletes the session (or the
   project) that published it; the hub serves only published files there (§1.2
-  `HQC_PUBLISH_BASE`).
-  Without the router and the variable the agent's `hqc_publish` is refused.
+  `HQC_PUBLISH_BASE`). Without the router and the variable the agent's `hqc_publish` is refused.
 - `OAUTH2_PROXY_COOKIE_REFRESH` shorter than the ID token lifetime, see `HQC_OIDC_ISSUER` in §1.2.
 - `OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST`: a CSRF cookie of its own for every sign-in attempt
   (`_oauth2_proxy_<random>_csrf`). Without it there is one `_oauth2_proxy_csrf`, which also holds

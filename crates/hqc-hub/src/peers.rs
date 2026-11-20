@@ -1488,8 +1488,8 @@ pub async fn worker_restarted(app: &AppState, worker_id: Uuid) -> anyhow::Result
 }
 
 /// Answers to asks and to `hqc_move`s and `hqc_publish`es that asked the owner (SPEC §7) of
-/// `worker_id` it has not acknowledged: sent after `hello`, no `session.start` needed (the worker routes `mcp.result`
-/// itself).
+/// `worker_id` it has not acknowledged: sent after `hello`, no `session.start` needed (the
+/// worker routes `mcp.result` itself).
 pub async fn after_hello(app: &AppState, worker_id: Uuid) -> anyhow::Result<()> {
     let rows: Vec<PendingRow> = sqlx::query_as(&format!(
         "SELECT {ASK_COLS} FROM pending_requests

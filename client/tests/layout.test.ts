@@ -116,6 +116,20 @@ describe('layout widths', () => {
     expect(rule('.perm-done-row .btn-link')['margin-left']).toBe('auto');
   });
 
+  it("a subagent's end card keeps its head inside the card on a phone: the spending cuts first, the task keeps the room", () => {
+    // Checked in Chromium and WebKit at 393px with "367.6k tokens · 265 tools · 1h 17m 22s":
+    // before, the task was 0px and the head ran past the card, the feed scrolled sideways.
+    const stats = rule('.subagent-head .subagent-stats');
+    expect([stats['flex'], stats['min-width'], stats['overflow'], stats['text-overflow']]).toEqual([
+      '0 1000 auto',
+      '0',
+      'hidden',
+      'ellipsis',
+    ]);
+    const task = rule('.subagent-task');
+    expect([task['flex'], task['min-width'], task['overflow']]).toEqual(['0 1 auto', '0', 'hidden']);
+  });
+
   it("a call's line and its result share one line, the result three parts to the line's one; a thinking line is one line", () => {
     // Checked in Chromium and WebKit at 1280 and 390px: one line each, the arguments ~25% when
     // both are long, the time and the mark at the right edge.

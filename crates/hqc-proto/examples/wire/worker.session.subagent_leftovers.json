@@ -1,0 +1,16 @@
+{
+  "id": "w-41",
+  "type": "session.subagent_leftovers",
+  "payload": {
+    "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+    "subagent": "Heightmap: 25 frames, summed match",
+    "ended_s": 1800,
+    "commands": [
+      {
+        "task_id": "b3k9wq2lz",
+        "description": "Wait for the suite to finish",
+        "running_s": 9300
+      }
+    ]
+  }
+}

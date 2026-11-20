@@ -582,6 +582,12 @@ async fn handle_text(
             conn.reply(&id, HubFrame::Ack(Ack::default()));
             Ok(())
         }
+        // Acked also when nothing is stored for it: the worker sends it once and never again.
+        WorkerFrame::SubagentLeftovers(f) => {
+            let r = crate::leftovers::notice(app, conn.worker_id, &f).await;
+            conn.reply(&id, HubFrame::Ack(Ack::default()));
+            r
+        }
         WorkerFrame::WorkspaceCreated(c) => {
             match crate::workspaces::created(app, conn, &c).await {
                 Ok(()) => {

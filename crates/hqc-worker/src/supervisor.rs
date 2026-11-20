@@ -50,7 +50,9 @@
 //!   ([`AdapterEvent::TokenRate`]) goes as `tokens.rate` when it changes, 0 once when the agent
 //!   stops, and again as it is on every [`AdapterEvent::Heartbeat`]. The output file of a
 //!   background task that ended ([`AdapterEvent::TaskOutput`]) is uploaded and becomes an
-//!   `attachment` of the session.
+//!   `attachment` of the session. The commands a subagent left running 30 minutes after it
+//!   reported ([`AdapterEvent::SubagentLeftovers`]) go as `session.subagent_leftovers`, not
+//!   once the agent is stopped.
 //! - A tool result with files ([`AdapterEvent::ToolResult`]: its whole text, its images) goes to
 //!   the hub once they are uploaded with `PUT /worker/artifacts`, before the adapter's next
 //!   event (SPEC §8.1).
@@ -106,8 +108,8 @@ use hqc_proto::frame::{
     error_code, worker_approval, Ack, ClaudeAuthResult, ClaudeLoginDoneResult, ClaudeLoginResult,
     Envelope, HeldBy, HubFrame, LockedBy, PermissionMode, ProcessState, RequestResult, ResultBody,
     Runtime, SecretOutcome, SecretPut, SecretPutResult, SessionInput, SessionStart, StartMode,
-    SubagentHistoryResult, TitleRequest, TitleResult, WireError, WorkerApprovalRequest,
-    WorkerFrame, WorkspaceKeyDeleteResult, WorkspaceKeysResult,
+    SubagentHistoryResult, SubagentLeftovers, TitleRequest, TitleResult, WireError,
+    WorkerApprovalRequest, WorkerFrame, WorkspaceKeyDeleteResult, WorkspaceKeysResult,
 };
 
 /// Why `secret.put` and the workspace keys are refused on a worker without them (SPEC 0.147).
@@ -2432,6 +2434,22 @@ impl Session {
             AdapterEvent::TaskOutput(path) => {
                 let (link, artifacts, id) = (self.link.clone(), self.artifacts.clone(), self.id);
                 tokio::spawn(async move { attach_task_output(&link, &artifacts, id, &path).await });
+            }
+            // As the count: the commands of a process already stopped stopped with it.
+            AdapterEvent::SubagentLeftovers {
+                subagent,
+                ended_s,
+                commands,
+            } => {
+                if self.state != ProcessState::Stopped {
+                    self.link
+                        .send(WorkerFrame::SubagentLeftovers(SubagentLeftovers {
+                            session_id: self.id,
+                            subagent,
+                            ended_s,
+                            commands,
+                        }));
+                }
             }
             AdapterEvent::RuntimeSessionId(r) => {
                 // A start of this task resumes it, as the hub's next `session.start` will

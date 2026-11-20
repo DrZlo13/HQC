@@ -4,7 +4,8 @@
 //! subagents ([`Core::live_ids`]:
 //! `<projects folder>/<CLI session id>/subagents/agent-<task_id>.jsonl`) go into a window of
 //! [`WINDOW`]; the rate is their sum over it per second, reported when it changes. While no
-//! turn and no subagent runs ([`Core::working`]) it is 0.
+//! turn and no subagent runs ([`Core::working`]) it is 0. The same tick tells of the commands a
+//! subagent left running ([`Core::leftovers`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::SeekFrom;
@@ -96,7 +97,8 @@ fn reads_title(working: bool, fresh: bool, titled: bool) -> bool {
     working && fresh && !titled
 }
 
-/// Counts the rate of the process until it exits.
+/// Counts the rate of the process until it exits, and on each tick runs what
+/// [`Core::leftovers`] gives.
 pub(super) async fn meter(
     core: Arc<Mutex<Core>>,
     io: Arc<Io>,
@@ -114,7 +116,7 @@ pub(super) async fn meter(
             _ = tick.tick() => {}
             _ = exited.wait_for(Option::is_some) => return,
         }
-        let (mut tokens, working, fresh, session, live) = {
+        let (mut tokens, working, fresh, session, live, leftovers) = {
             let mut c = lock(&core);
             (
                 c.take_output_tokens(),
@@ -122,8 +124,12 @@ pub(super) async fn meter(
                 c.fresh(),
                 c.cli_session().map(str::to_owned),
                 c.live_ids(),
+                c.leftovers(std::time::Instant::now()),
             )
         };
+        if let Err(e) = io.run(leftovers).await {
+            tracing::warn!(session_id = %io.session_id, "{e:#}");
+        }
         // Beside the session's transcript: `<CLI session id>/subagents`.
         let dir = io
             .transcript()

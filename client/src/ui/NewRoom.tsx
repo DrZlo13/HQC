@@ -1,5 +1,5 @@
 // A new room (`#/p/<project>/new-room`): a chat with several agents, each with its own model and
-// prompt, opened from the room button beside "+" of the session column. It is a chat window as
+// prompt, opened from "New room…" in the session column head's "⋯". It is a chat window as
 // a new session is: the chips over the input choose the room's mode, where its agents work (the
 // workspace, the folder and the permissions, the chips of a new session) and the agents, each a
 // chip that opens its name, model and prompt; the first message makes the room and goes in as

@@ -10,7 +10,6 @@ import { ContextMenu, type MenuEntry } from './ContextMenu';
 import {
   IconArchive,
   IconBack,
-  IconChevronDown,
   IconChevronUp,
   IconCode,
   IconGrip,
@@ -18,7 +17,6 @@ import {
   IconMove,
   IconOpenNew,
   IconPause,
-  IconPin,
   IconPlay,
   IconPlus,
   IconRename,
@@ -28,7 +26,6 @@ import {
   IconRoom,
   IconSearch,
   IconSettings,
-  IconShield,
   IconStar,
   IconStarOff,
   IconGlobe,
@@ -38,7 +35,7 @@ import { ROOM_MODE_LABELS, agentsLabel, formatWhen, homePath } from './labels';
 import { newSessionWhere } from './NewSession';
 import { MoveSession, confirmDeleteProject } from './ProjectSettings';
 import { RequestsLink } from './requests';
-import { LIST_MODES, bucketOf, groupSessions, moveTo, renameByPrompt, runningLabel, subLabel, type SessionGroup } from './sessions';
+import { LIST_MODES, bucketOf, canPause, groupSessions, moveTo, renameByPrompt, restartableSession, runningLabel, subLabel, type SessionGroup } from './sessions';
 
 /** "+ project": asks for the name, then opens the new project's settings — a new project
  *  has no workspaces yet, and that is the first thing to add. */
@@ -96,11 +93,6 @@ export function prefetchOn(load: () => void) {
       load();
     },
   };
-}
-
-/** The rules screen of the session's folder (T48), if it has one. */
-function rulesHref(s: SessionInfo): string | undefined {
-  return s.workspace_id && `#/p/${s.project_id}/rules/${s.workspace_id}?session=${encodeURIComponent(s.id)}`;
 }
 
 /** Adds the session to the user's favorites or takes it out; a refusal goes to the list's
@@ -400,9 +392,6 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       <div class="group-head">
         <span class="group-label">Favorites</span>
         <span class="group-count">{favorites.length}</span>
-        <span class="group-pin" aria-hidden="true">
-          <IconPin />
-        </span>
       </div>
       <ul class="session-list">{favorites.map(row)}</ul>
     </div>
@@ -418,7 +407,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   return (
     <section class={`sessions ${phone ? 'sessions-phone' : ''} ${reorder ? 'is-reordering' : ''}`}>
       {/* One row: on a phone "‹" back to the projects, then the project's name, the search (its
-          own page), the order, the project's menu, a new room and a new session. */}
+          own page), the project's menu (the order and a new room in it) and a new session. */}
       <header class="side-head">
         {phone && (
           <a class="icon-btn btn-back" href="#/" aria-label="Back to projects" onClick={(e) => onBack(e, '#/')}>
@@ -431,18 +420,17 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
         <a class="icon-btn btn-search" href="#/search" aria-label="Search sessions and messages" title="Search">
           <IconSearch />
         </a>
-        <ModeMenu app={app} pid={pid} mode={mode} disabled={!!reorder} phone={phone} onReorder={startReorder} />
-        {project && <ProjectMenu app={app} project={project} phone={phone} />}
-        <button
-          type="button"
-          class="icon-btn btn-new-room"
-          aria-label="New room"
-          title="New room"
-          disabled={!pid || !app.me}
-          onClick={newRoom}
-        >
-          <IconRoom />
-        </button>
+        {project && (
+          <ProjectMenu
+            app={app}
+            project={project}
+            phone={phone}
+            mode={mode}
+            reordering={!!reorder}
+            onReorder={startReorder}
+            onNewRoom={newRoom}
+          />
+        )}
         <button
           type="button"
           class="btn btn-primary btn-new-session"
@@ -595,14 +583,11 @@ function titleOf(s: SessionInfo): string {
 }
 
 /** A session's menu, the same on a desktop row and a phone row: Open in new tab, favorites,
- *  then Rename, Move to project… (not for a room), Folder rules, then Restart session and Pause
- *  session (not for an archived, a service, a VS Code-driven session, a room or one whose worker
- *  is offline), or for a paused session Resume session alone, Archive and Delete… (a step of its
- *  own). */
+ *  then Rename and Move to project… (not for a room), then Restart session (`restartableSession`),
+ *  Pause session while the agent works (`canPause`, as by Stop in the chat) or Resume session for
+ *  a paused one, Archive and Delete… (a step of its own). A folder's rules are in the chat's
+ *  "More". */
 function sessionMenu(app: AppState, s: SessionInfo, on: { onMove: () => void; onAskDelete: () => void }): MenuEntry[] {
-  const rules = rulesHref(s);
-  const restartable = !s.archived && !s.system && !s.room_mode && s.state !== 'locked_vscode' && s.state !== 'worker_offline';
-  const paused = !!s.paused_at;
   return [
     { label: 'Open in new tab', icon: <IconOpenNew />, cls: 'btn-open-tab', href: `#/s/${s.id}`, newTab: true },
     {
@@ -614,15 +599,10 @@ function sessionMenu(app: AppState, s: SessionInfo, on: { onMove: () => void; on
     'sep',
     { label: 'Rename', icon: <IconRename />, cls: 'btn-rename', onSelect: () => renameByPrompt(app, s, (m) => app.setListNotice(m)) },
     ...(s.room_mode ? [] : [{ label: 'Move to project…', icon: <IconMove />, cls: 'btn-move', onSelect: on.onMove }]),
-    ...(rules ? [{ label: 'Folder rules', icon: <IconShield />, cls: 'btn-rules', href: rules }] : []),
     'sep',
-    ...(restartable && !paused
-      ? [
-          { label: 'Restart session', icon: <IconRestart />, cls: 'btn-restart', onSelect: () => restart(app, s) },
-          { label: 'Pause session', icon: <IconPause />, cls: 'btn-pause', onSelect: () => pause(app, s) },
-        ]
-      : []),
-    ...(paused ? [{ label: 'Resume session', icon: <IconPlay />, cls: 'btn-resume', onSelect: () => resume(app, s) }] : []),
+    ...(restartableSession(s) ? [{ label: 'Restart session', icon: <IconRestart />, cls: 'btn-restart', onSelect: () => restart(app, s) }] : []),
+    ...(canPause(s) ? [{ label: 'Pause session', icon: <IconPause />, cls: 'btn-pause', onSelect: () => pause(app, s) }] : []),
+    ...(s.paused_at ? [{ label: 'Resume session', icon: <IconPlay />, cls: 'btn-resume', onSelect: () => resume(app, s) }] : []),
     { label: 'Archive', icon: <IconArchive />, cls: 'btn-archive', onSelect: () => app.archiveLater(s) },
     { label: 'Delete…', icon: <IconTrash />, cls: 'btn-delete', danger: true, keepOpen: true, onSelect: on.onAskDelete },
   ];
@@ -634,84 +614,23 @@ function below(el: HTMLElement | null): { x: number; y: number } {
   return { x: r?.left ?? 0, y: (r?.bottom ?? 0) + 4 };
 }
 
-/** "State ▾" of the column's header: the list's order — State, Recent, Custom — and Reorder. */
-function ModeMenu({
-  app,
-  pid,
-  mode,
-  disabled,
-  phone,
-  onReorder,
-}: {
-  app: AppState;
-  pid?: string;
-  mode: ListMode;
-  disabled: boolean;
-  /** A tap beside the menu only closes it. */
-  phone?: boolean;
-  onReorder: () => void;
-}) {
-  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
-  const btn = useRef<HTMLButtonElement>(null);
-  const label = LIST_MODES.find((m) => m.id === mode)?.label ?? 'State';
-  const items: MenuEntry[] = [
-    ...LIST_MODES.map((m) => ({
-      label: m.label,
-      cls: `btn-mode-${m.id}`,
-      checked: mode === m.id,
-      onSelect: () => {
-        if (pid && mode !== m.id) void app.setListMode(pid, m.id);
-      },
-    })),
-    'sep',
-    {
-      label: 'Reorder…',
-      icon: <IconReorder />,
-      cls: 'btn-reorder',
-      disabled: !pid || app.sortedSessions().length < 2,
-      onSelect: onReorder,
-    },
-  ];
-  return (
-    <>
-      <button
-        ref={btn}
-        type="button"
-        class="btn-mode"
-        aria-label={`Session order: ${label}`}
-        aria-haspopup="menu"
-        aria-expanded={!!at}
-        disabled={!pid || disabled}
-        onClick={() => setAt(at ? null : below(btn.current))}
-      >
-        {label}
-        <IconChevronDown />
-      </button>
-      {at && (
-        <ContextMenu x={at.x} y={at.y} label="Session order" items={items} anchor={btn.current} backdrop={phone} onClose={() => setAt(null)} />
-      )}
-    </>
-  );
+/** A project's favorites item, in the bar's right click and in a phone's column header. */
+function projectFavorite(app: AppState, project: Project): MenuEntry {
+  return {
+    label: project.favorite_at ? 'Remove from favorites' : 'Add to favorites',
+    icon: project.favorite_at ? <IconStarOff /> : <IconStar />,
+    cls: 'btn-favorite',
+    onSelect: () =>
+      void app.setProjectFavorite(project.id, !project.favorite_at).catch((e: Error) => app.setListNotice(`Favorites not saved: ${e.message}`)),
+  };
 }
 
-/** A project's menu, the same on the project bar (a right click) and in the column's header
- *  ("⋯"): Open in new tab, favorites; Project settings…; Archive project (Restore for an
- *  archived one) and Delete project…, neither for the personal project (SPEC §3). Archiving the
- *  open project opens the personal one; on a phone, the projects screen with its Undo. */
-export function projectMenu(app: AppState, project: Project, phone?: boolean): MenuEntry[] {
+/** The end of both project menus: Project settings…; Archive project (Restore for an archived
+ *  one) and Delete project…, neither for the personal project (SPEC §3). Archiving the open
+ *  project opens the personal one; on a phone, the projects screen with its Undo. */
+function projectTail(app: AppState, project: Project, phone?: boolean): MenuEntry[] {
   const name = projectName(project);
   const items: MenuEntry[] = [
-    { label: 'Open in new tab', icon: <IconOpenNew />, cls: 'btn-open-tab', href: `#/p/${project.id}`, newTab: true },
-    {
-      label: project.favorite_at ? 'Remove from favorites' : 'Add to favorites',
-      icon: project.favorite_at ? <IconStarOff /> : <IconStar />,
-      cls: 'btn-favorite',
-      onSelect: () =>
-        void app
-          .setProjectFavorite(project.id, !project.favorite_at)
-          .catch((e: Error) => app.setListNotice(`Favorites not saved: ${e.message}`)),
-    },
-    'sep',
     { label: 'Project settings…', icon: <IconSettings />, cls: 'btn-project-settings', href: `#/p/${project.id}/settings` },
   ];
   if (project.archived_at) {
@@ -746,18 +665,79 @@ export function projectMenu(app: AppState, project: Project, phone?: boolean): M
   return items;
 }
 
-/** "⋯" of the column's header: the project's menu; on a phone a tap beside it only closes it. */
-function ProjectMenu({ app, project, phone }: { app: AppState; project: Project; phone?: boolean }) {
+/** A project's right click on the bar: Open in new tab, favorites, then the end it shares with
+ *  the column header's "⋯" (`projectTail`). */
+export function projectMenu(app: AppState, project: Project, phone?: boolean): MenuEntry[] {
+  return [
+    { label: 'Open in new tab', icon: <IconOpenNew />, cls: 'btn-open-tab', href: `#/p/${project.id}`, newTab: true },
+    projectFavorite(app, project),
+    'sep',
+    ...projectTail(app, project, phone),
+  ];
+}
+
+/** "⋯" of the column's header: the list's order — State, Recent, Custom (none while Reorder
+ *  runs) — and "Reorder…"; "New room…"; then, on a phone, whose project screen has no bar to
+ *  right-click, the favorites, and the end of the bar's menu (`projectTail`). On a phone a tap
+ *  beside the menu only closes it. */
+function ProjectMenu({
+  app,
+  project,
+  phone,
+  mode,
+  reordering,
+  onReorder,
+  onNewRoom,
+}: {
+  app: AppState;
+  project: Project;
+  phone?: boolean;
+  mode: ListMode;
+  reordering: boolean;
+  onReorder: () => void;
+  onNewRoom: () => void;
+}) {
   const [at, setAt] = useState<{ x: number; y: number } | null>(null);
   const btn = useRef<HTMLButtonElement>(null);
-  const items = projectMenu(app, project, phone);
+  const items: MenuEntry[] = [
+    ...LIST_MODES.map((m) => ({
+      label: m.label,
+      cls: `btn-mode-${m.id}`,
+      checked: mode === m.id,
+      disabled: reordering,
+      onSelect: () => {
+        if (mode !== m.id) void app.setListMode(project.id, m.id);
+      },
+    })),
+    {
+      label: 'Reorder…',
+      icon: <IconReorder />,
+      cls: 'btn-reorder',
+      disabled: reordering || app.sortedSessions().length < 2,
+      onSelect: onReorder,
+    },
+    'sep',
+    { label: 'New room…', icon: <IconRoom />, cls: 'btn-new-room', disabled: !app.me, onSelect: onNewRoom },
+    'sep',
+    ...(phone ? [projectFavorite(app, project)] : []),
+    ...projectTail(app, project, phone),
+  ];
+  // Its name says what it holds, as the menu does for this project.
+  const holds = [
+    'order',
+    'new room',
+    ...(phone ? ['favorites'] : []),
+    'settings',
+    ...(project.archived_at ? ['restore'] : project.is_personal ? [] : ['archive']),
+    ...(project.is_personal ? [] : ['delete']),
+  ];
   return (
     <>
       <button
         ref={btn}
         type="button"
         class="icon-btn btn-project-menu"
-        aria-label="Project: settings, favorites, archive"
+        aria-label={`Project: ${holds.join(', ')}`}
         title="Project"
         aria-haspopup="menu"
         aria-expanded={!!at}
@@ -795,9 +775,11 @@ type HoverHandlers = {
 };
 
 /** A session's state mark: a dot of its group (amber waits, the accent works, a ring is
- *  idle), `</>` while it is open in VS Code and not working there; a room's is its icon, in the
- *  dot's colors, with `room` (`roomTip`) for its tooltip. `color`: the project's own, for a
- *  working dot in a list of several projects, where `--accent` is the last opened one's. */
+ *  idle), `</>` while it is open in VS Code and not working there, the pause sign in the ring's
+ *  colour while it is paused (one still finishing its turn before the pause keeps its dot); a
+ *  room's is its icon, in the dot's colors, with `room` (`roomTip`) for its tooltip. `color`:
+ *  the project's own, for a working dot in a list of several projects, where `--accent` is the
+ *  last opened one's. */
 function StateMark({ s, color, room }: { s: SessionInfo; color?: string; room?: string }) {
   const bucket = bucketOf(s);
   if (s.room_mode) {
@@ -811,6 +793,13 @@ function StateMark({ s, color, room }: { s: SessionInfo; color?: string; room?: 
     return (
       <span class="dot-vs" aria-hidden="true">
         <IconCode size={12} />
+      </span>
+    );
+  }
+  if (s.paused_at && bucket === 'idle') {
+    return (
+      <span class="dot-vs dot-paused" title="Paused" aria-hidden="true">
+        <IconPause size={12} />
       </span>
     );
   }

@@ -11,7 +11,7 @@ import { useMemo, useState } from 'preact/hooks';
 import type { Activity, ClarifyAction, ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, ModelProvider, SessionState } from '../proto';
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import type { ArtifactStore } from '../artifacts';
-import { modelMenuItems, type ModelChoice } from './agentSettings';
+import { ModelName, modelMenuItems, type ModelChoice } from './agentSettings';
 import { AttachmentView, PendingAttachments, type ViewedArtifact } from './attachments';
 import { ContextMenu } from './ContextMenu';
 import {
@@ -155,8 +155,8 @@ export interface ChatActions {
    *  be given (the session's worker does not take secrets). */
   giveSecret?(requestId: string, f: SecretFields): Promise<void>;
   /** The offer of another model under a refusal of the model (SPEC 0.168): absent where the
-   *  chat's "More" has no model field, and while VS Code holds the session — its message
-   *  cannot be sent again from here. */
+   *  chat header has no model pill to switch (a room, the service session, an archived one),
+   *  and while VS Code holds the session — its message cannot be sent again from here. */
   modelSwitch?: ModelSwitch;
 }
 
@@ -615,8 +615,9 @@ function WorkerLogLine({ event }: { event: EventOf<'system'> }) {
  *  and, while no message of the user stands after it in the feed, "Switch model" under its
  *  text. It opens the model menu (`ChatActions.modelSwitch`), the session's model checked and
  *  without Claude Code's default: a running agent is not switched to it, it takes it at its
- *  next start. The checked one only closes the menu; once another went through, the line says
- *  so in the button's place. */
+ *  next start. The checked entry itself (an alias, or the version in its family's submenu) only
+ *  closes the menu; a family checked for one of its versions switches to its alias. Once another
+ *  model went through, the line says so in the button's place. */
 function RefusalLine({ event, actions }: { event: EventOf<'agent.message'>; actions: ChatActions }) {
   const ms = actions.modelSwitch;
   const phone = useIsPhone();
@@ -652,23 +653,17 @@ function RefusalLine({ event, actions }: { event: EventOf<'agent.message'>; acti
     const at = { x: open.x, y: open.y, above: true, anchor: open.anchor, backdrop: phone, onClose: () => setOpen(null) };
     menu = open.custom ? (
       <ContextMenu {...at} label="Model">
-        <label class="menu-field">
-          <span class="field-label">Model name</span>
-          <input
-            class="input mono"
-            name="model_name"
-            placeholder="claude-sonnet-4-5"
-            data-focus
-            onKeyDown={(e) => {
-              if (e.key !== 'Enter' || e.isComposing) return;
-              e.preventDefault();
-              const m = (e.currentTarget as HTMLInputElement).value.trim();
-              if (!m) return;
-              setOpen(null);
-              pick({ model: m });
-            }}
-          />
-        </label>
+        <ModelName
+          value=""
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' || e.isComposing) return;
+            e.preventDefault();
+            const m = (e.currentTarget as HTMLInputElement).value.trim();
+            if (!m) return;
+            setOpen(null);
+            pick({ model: m });
+          }}
+        />
       </ContextMenu>
     ) : (
       <ContextMenu

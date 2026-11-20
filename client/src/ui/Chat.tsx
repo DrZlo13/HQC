@@ -1,3 +1,4 @@
+import type { ComponentChildren } from 'preact';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiError, type SecretFields, type SecretGiven, type SessionPatch, type WorkerLimits } from '../api';
 import type { AppState } from '../app';
@@ -7,7 +8,7 @@ import { onBack } from '../nav';
 import { PERMISSION_MODES, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState, type SlashCommand } from '../proto';
 import type { OutgoingFile } from '../session';
 import { duringText, type Timeline } from '../timeline';
-import { ModelField, type ModelChoice } from './agentSettings';
+import { ModelName, isTypedModel, type ModelChoice, modelMenuItems } from './agentSettings';
 import { ArtifactViewer, type ViewedArtifact } from './attachments';
 import { LimitBar, Limits } from './limits';
 import { ActivityLine, FeedBlocks, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
@@ -15,9 +16,28 @@ import { peerMessages } from './relay';
 import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
 import { copyText } from '../clipboard';
-import { ContextMenu } from './ContextMenu';
+import { ContextMenu, type MenuEntry } from './ContextMenu';
 import { ComposerSecret } from './secrets';
-import { IconArchive, IconAttach, IconBolt, IconKey, IconBack, IconCode, IconCopy, IconLock, IconMore, IconPanel, IconQuote, IconSearch, IconSend, IconShield, IconStop } from './icons';
+import {
+  IconArchive,
+  IconAttach,
+  IconBolt,
+  IconChevronDown,
+  IconKey,
+  IconBack,
+  IconCode,
+  IconCopy,
+  IconLock,
+  IconMore,
+  IconPanel,
+  IconPause,
+  IconPlay,
+  IconQuote,
+  IconRename,
+  IconSearch,
+  IconSend,
+  IconStop,
+} from './icons';
 import { MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatCost, homePath, modeConfirm, modelName, shownModel } from './labels';
 import { LiveSubagents } from './LiveSubagents';
 import { CopyButton } from './Markdown';
@@ -25,7 +45,7 @@ import { PermissionBlock } from './permission';
 import { MoveSession } from './ProjectSettings';
 import { WaitedRequests } from './requests';
 import { SchedulesPanel } from './Schedules';
-import { archivedLabel, atWorkAfterTurn, pausingAfterTurn, renameByPrompt } from './sessions';
+import { archivedLabel, atWorkAfterTurn, canPause, pausingAfterTurn, restartableSession } from './sessions';
 
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
 /** Blocks of the feed rendered on open; scrolling to the top adds `SHOWN` more. */
@@ -133,7 +153,8 @@ export function Chat({
   // A room's agents: their chats stay open while the room's is, the newest page and the live
   // events only, for the running command each one's activity line names.
   const room = info?.room_mode;
-  // Its mode stands where a session names its model, and its agents' sessions go under the line.
+  // It has no pills of its own: its mode stands in the meta row after the folder (on a phone,
+  // after the state), and its agents' sessions go under the line.
   const members = room ? app.roomMembers(sessionId) : [];
   const memberIds = members.map((m) => m.id).join(' ');
   const memberChats = useMemo(() => (memberIds ? memberIds.split(' ').map((id) => app.chat(id)) : []), [app, memberIds]);
@@ -165,7 +186,7 @@ export function Chat({
   }, [app, sessionId, fetchCommands]);
   const worker = app.workerName(info?.worker_id);
   // The usage limits of the session's worker account (SPEC §6), for the bar above the input
-  // and the "More" menu.
+  // and the model pill's menu.
   const loadLimits = async () => (await app.api.workers()).find((w) => w.id === info?.worker_id)?.limits ?? undefined;
 
   // Read cursor: whatever is on screen while the tab is visible counts as read.
@@ -232,7 +253,7 @@ export function Chat({
           )
       : undefined,
     forking: (eventId) => app.forking(eventId),
-    // Where "More" has the model field (SPEC 0.168; a room has none), and not while VS Code
+    // Where the header has the model pill (SPEC 0.168; a room has none), and not while VS Code
     // holds the session: its message cannot be sent again from here.
     modelSwitch:
       !system && !room && info && !info.archived && state !== 'locked_vscode'
@@ -444,6 +465,12 @@ export function Chat({
   const stop = () => act(() => chat.stop(), 'Not stopped');
   const toBackground = (callId: string) => void act(() => chat.background(callId), 'Not moved to the background');
   const stopTask = (taskId: string) => act(() => chat.stopTask(taskId), 'Not stopped');
+  // Pause beside Stop (SPEC §17.3): the agent stops once its turn ends; Resume in its place
+  // starts it again. Restart in "More" kills the process and starts it on the same history.
+  const pause = () => act(() => app.api.pauseSession(sessionId), 'Not paused');
+  const resume = () => act(() => app.api.resumeSession(sessionId), 'Not resumed');
+  const restart = () => act(() => app.api.restartSession(sessionId), 'Not restarted');
+  const rename = (title: string) => act(() => app.renameSession(sessionId, title), 'Not renamed');
   // T38: Ask at once, Auto and Allow all after a one-line confirmation.
   const setMode = (mode: PermissionMode) => {
     const line = modeConfirm(mode);
@@ -493,8 +520,7 @@ export function Chat({
   const pill = <StatePill state={shown} timeline={t} where={locked ? `In ${holder}${worker ? ` on ${worker}` : ''}` : undefined} pausing={!!info && pausingAfterTurn(info)} />;
   const agents = agentsLabel(info?.subagents);
   const conn = app.offline && <span class="conn-lost">offline</span>;
-  // In the meta row on a computer; on a phone, where the row has no room for the address beside
-  // a running session's buttons, the header's last line, under the buttons too.
+  // In the meta row on a computer; on a phone after the pills, on their line.
   const spawned = info?.spawned_by && (
     <span class="chat-spawned">
       started by{' '}
@@ -519,6 +545,183 @@ export function Chat({
   }, [loaded]);
   // A phone's "‹": the session's project.
   const up = info ? `#/p/${info.project_id}` : '#/';
+  // The permission mode and the model, each a pill with its menu; an archived session's are marks
+  // without one. A room has neither of its own (its agents have them): its mode stands in the
+  // meta row. On a computer they stand in the row after the state, on a phone on a line of their
+  // own under it, "started by" after them.
+  const pills = !system && !room && info && (
+    <>
+      <ModePill
+        info={info}
+        phone={phone}
+        frozen={archived}
+        onMode={setMode}
+        onBrowser={app.givesBrowser(info.worker_id) ? setBrowser : undefined}
+      />
+      <ModelPill
+        info={info}
+        model={model}
+        phone={phone}
+        frozen={archived}
+        providers={app.providersFor(info.worker_id)}
+        loadLimits={loadLimits}
+        onAgent={setAgent}
+      />
+    </>
+  );
+  const title = (
+    <ChatTitle
+      title={info?.title || 'Session'}
+      name={info?.title ?? ''}
+      phone={phone}
+      // An archived session is read-only; the worker's service session has no title of its own
+      // to give.
+      onRename={info && !archived && !system ? rename : undefined}
+    />
+  );
+  const meta = (
+    <div class="chat-meta">
+      {pill}
+      {/* Next to the state: the row is one line, and its end is what a narrow window cuts. */}
+      {conn}
+      {agents && (
+        <span class="chat-agents" title="Subagents the agent runs now">
+          {agents}
+        </span>
+      )}
+      {!phone && pills}
+      {system && <span class="chat-system-note">the worker's service session</span>}
+      {!phone && spawned}
+      {phone ? (
+        // On a phone the row is the state, its subagents and a room's mode; the worker and the
+        // folder are in "More".
+        room && <span class="chat-room">Room · {ROOM_MODE_LABELS[room]}</span>
+      ) : (
+        <>
+          {/* "on": after "started by <address>" the machine reads as where it runs. */}
+          {worker && !system && !locked && <span class="chat-worker">on {worker}</span>}
+          {path && (
+            <>
+              {/* Held elsewhere, the worker is in the pill: nothing to part the path from. */}
+              {!locked && <span class="sep">/</span>}
+              <span class="chat-path">
+                <span class="mono" title={homePath(path)}>
+                  {homePath(path)}
+                </span>
+                <CopyButton text={path} label="Copy path" />
+              </span>
+            </>
+          )}
+          {!room && info?.browser && (
+            <>
+              <span class="sep">/</span>
+              <span class="chat-browser" title={`The agent has your Chrome on ${worker ?? 'its worker'}`}>
+                Browser
+              </span>
+            </>
+          )}
+          {room && (
+            <>
+              {(worker || path) && <span class="sep">/</span>}
+              <span class="chat-room">Room · {ROOM_MODE_LABELS[room]}</span>
+            </>
+          )}
+          {cost !== undefined && (
+            <>
+              <span class="sep">/</span>
+              <span class="chat-cost">
+                {formatCost(cost)} this {room ? 'room' : 'session'}
+              </span>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+  const roomAgents = members.length > 0 && (
+    <div class="chat-room-agents">
+      {members.map((m) => (
+        <a key={m.id} class="chat-room-agent" href={`#/s/${m.id}`}>
+          {m.title || m.slug} · {STATE_LABELS[atWorkAfterTurn(m) ? 'running' : m.state]}
+        </a>
+      ))}
+    </div>
+  );
+  const buttons = (
+    <>
+      {system && (
+        <button
+          type="button"
+          class={`btn btn-small btn-outline btn-filter ${requestsOnly ? 'is-on' : ''}`}
+          aria-pressed={requestsOnly}
+          onClick={() => {
+            // The other view has blocks of its own: its window starts again at its newest ones.
+            from.current = undefined;
+            stick.current = true;
+            setRequestsOnly(!requestsOnly);
+          }}
+        >
+          Requests only
+        </button>
+      )}
+      {showRetry && !phone && (
+        <button type="button" class="btn btn-small btn-primary btn-retry" onClick={() => act(() => chat.retry(), 'Retry failed')}>
+          Retry
+        </button>
+      )}
+      {/* Pause only while the agent works (SPEC §17.3), right before Stop; a paused session has
+          Resume in its place, and Stop still while its turn runs to its end. */}
+      {info && canPause(info) &&
+        (phone ? (
+          <button type="button" class="icon-btn icon-btn-round btn-pause" aria-label="Pause after this turn" onClick={pause}>
+            <IconPause size={14} />
+          </button>
+        ) : (
+          <button type="button" class="btn btn-small btn-outline btn-pause" title="The agent stops when this turn ends; messages wait for Resume" onClick={pause}>
+            <IconPause size={12} />
+            Pause
+          </button>
+        ))}
+      {!!info?.paused_at && !archived &&
+        (phone ? (
+          <button type="button" class="icon-btn icon-btn-round btn-resume" aria-label="Resume" onClick={resume}>
+            <IconPlay size={14} />
+          </button>
+        ) : (
+          <button type="button" class="btn btn-small btn-outline btn-resume" onClick={resume}>
+            <IconPlay size={12} />
+            Resume
+          </button>
+        ))}
+      {!system && STOPPABLE.has(room ? shown : state) &&
+        (phone ? (
+          <button type="button" class="icon-btn icon-btn-round btn-stop" aria-label="Stop the agent" onClick={stop}>
+            <IconStop size={14} />
+          </button>
+        ) : (
+          <button type="button" class="btn btn-small btn-outline btn-stop" onClick={stop}>
+            <IconStop />
+            Stop
+          </button>
+        ))}
+      {!system && info && (
+        <MoreMenu
+          info={info}
+          phone={phone}
+          // Held elsewhere, the machine is in the state pill already.
+          worker={locked ? undefined : worker}
+          path={path}
+          cost={cost}
+          onRetry={showRetry && phone ? () => void act(() => chat.retry(), 'Retry failed') : undefined}
+          onSchedules={() => setSchedules(true)}
+          onMove={() => setMoving(true)}
+          // A room has no folder of its own, whatever workspace it was made in.
+          rules={!room && rulesHref && workspace ? { href: rulesHref, path: homePath(workspace.path) } : undefined}
+          onRestart={restartableSession(info) ? () => void restart() : undefined}
+        />
+      )}
+    </>
+  );
   return (
     <section
       class={`chat ${dragging ? 'chat-dragging' : ''} ${phone ? 'chat-phone' : ''} ${archived ? 'chat-archived' : ''}`}
@@ -538,165 +741,40 @@ export function Chat({
       }}
     >
       <header class="chat-head">
-        {phone && (
-          <a
-            class="icon-btn icon-btn-round back"
-            href={up}
-            aria-label="Back to sessions"
-            onClick={(e) => onBack(e, up)}
-          >
-            <IconBack />
-          </a>
-        )}
-        {sessions && <SessionsButton sessions={sessions} />}
-        <div class="chat-head-main">
-          <h1 class="chat-title">{info?.title || 'Session'}</h1>
-          <div class="chat-meta">
-            {pill}
-            {/* Next to the state: the row is one line, and its end is what a narrow window cuts. */}
-            {conn}
-            {agents && (
-              <span class="chat-agents" title="Subagents the agent runs now">
-                {agents}
-              </span>
-            )}
-            {!system && info && <PermissionMark info={info} />}
-            {system && <span class="chat-system-note">the worker's service session</span>}
-            {!phone && spawned}
-            {phone ? (
-              <>
-                {/* Held elsewhere, the machine is in the pill already. */}
-                <span class="chat-where mono">{[!locked && worker, path && homePath(path).split('/').pop()].filter(Boolean).join(' · ')}</span>
-                {room && <span class="chat-room">Room · {ROOM_MODE_LABELS[room]}</span>}
-              </>
-            ) : (
-              <>
-                {worker && !system && !locked && <span>{worker}</span>}
-                {path && (
-                  <>
-                    {/* Held elsewhere, the worker is in the pill: nothing to part the path from. */}
-                    {!locked && <span class="sep">/</span>}
-                    <span class="chat-path">
-                      <span class="mono" title={homePath(path)}>
-                        {homePath(path)}
-                      </span>
-                      <CopyButton text={path} label="Copy path" />
-                    </span>
-                  </>
-                )}
-                {info?.provider && (
-                  <>
-                    <span class="sep">/</span>
-                    <span class="chat-model chat-provider" title={info.provider.label}>
-                      {info.provider.label}
-                    </span>
-                  </>
-                )}
-                {!room && info?.browser && (
-                  <>
-                    <span class="sep">/</span>
-                    <span class="chat-model chat-browser" title={`The agent has your Chrome on ${worker ?? 'its worker'}`}>
-                      Browser
-                    </span>
-                  </>
-                )}
-                {room ? (
-                  <>
-                    {(worker || path) && <span class="sep">/</span>}
-                    <span class="chat-room">Room · {ROOM_MODE_LABELS[room]}</span>
-                  </>
-                ) : (
-                  model && (
-                    <>
-                      <span class="sep">/</span>
-                      <span class="chat-model" title={model}>
-                        {modelName(model)}
-                      </span>
-                    </>
-                  )
-                )}
-                {cost !== undefined && (
-                  <>
-                    <span class="sep">/</span>
-                    <span class="chat-cost">
-                      {formatCost(cost)} this {room ? 'room' : 'session'}
-                    </span>
-                  </>
-                )}
-              </>
-            )}
-          </div>
-          {members.length > 0 && (
-            <div class="chat-room-agents">
-              {members.map((m) => (
-                <a key={m.id} class="chat-room-agent" href={`#/s/${m.id}`}>
-                  {m.title || m.slug} · {STATE_LABELS[atWorkAfterTurn(m) ? 'running' : m.state]}
-                </a>
-              ))}
+        {phone ? (
+          <>
+            {/* Line 1: "‹", the title up to the first button, and the buttons; the lines under
+                it are as wide as the header past "‹". */}
+            <div class="chat-head-top">
+              <a class="icon-btn icon-btn-round back" href={up} aria-label="Back to sessions" onClick={(e) => onBack(e, up)}>
+                <IconBack />
+              </a>
+              {title}
+              {buttons}
             </div>
-          )}
-        </div>
-        {system && (
-          <button
-            type="button"
-            class={`btn btn-small btn-outline btn-filter ${requestsOnly ? 'is-on' : ''}`}
-            aria-pressed={requestsOnly}
-            onClick={() => {
-              // The other view has blocks of its own: its window starts again at its newest ones.
-              from.current = undefined;
-              stick.current = true;
-              setRequestsOnly(!requestsOnly);
-            }}
-          >
-            Requests only
-          </button>
+            {meta}
+            {/* A room's agents stay right under its state, as on a computer. */}
+            {roomAgents}
+            {/* Each pill at its full text, then "started by" (alone where there are no pills),
+                whose address gives way first. */}
+            {(pills || spawned) && (
+              <div class="chat-pills">
+                {pills}
+                {spawned}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            {sessions && <SessionsButton sessions={sessions} />}
+            <div class="chat-head-main">
+              {title}
+              {meta}
+              {roomAgents}
+            </div>
+            {buttons}
+          </>
         )}
-        {rulesHref &&
-          (phone ? (
-            <a class="icon-btn icon-btn-round btn-folder-rules" href={rulesHref} aria-label="Folder rules" title="Folder rules">
-              <IconShield />
-            </a>
-          ) : (
-            <a class="btn btn-small btn-ghost btn-folder-rules" href={rulesHref} title={`Rules for ${homePath(workspace!.path)}`}>
-              <IconShield />
-              Folder rules
-            </a>
-          ))}
-        {showRetry && !phone && (
-          <button type="button" class="btn btn-small btn-primary btn-retry" onClick={() => act(() => chat.retry(), 'Retry failed')}>
-            Retry
-          </button>
-        )}
-        {!system && STOPPABLE.has(room ? shown : state) &&
-          (phone ? (
-            <button type="button" class="icon-btn icon-btn-round btn-stop" aria-label="Stop the agent" onClick={stop}>
-              <IconStop size={14} />
-            </button>
-          ) : (
-            <button type="button" class="btn btn-small btn-outline btn-stop" onClick={stop}>
-              <IconStop />
-              Stop
-            </button>
-          ))}
-        {!system && info && (
-          <MoreMenu
-            info={info}
-            phone={phone}
-            path={path}
-            model={model}
-            cost={cost}
-            loadLimits={loadLimits}
-            onRetry={showRetry && phone ? () => void act(() => chat.retry(), 'Retry failed') : undefined}
-            onRename={() => renameByPrompt(app, info, setNotice)}
-            onSchedules={() => setSchedules(true)}
-            onMove={() => setMoving(true)}
-            onPermissionMode={setMode}
-            onAgent={setAgent}
-            providers={app.providersFor(info.worker_id)}
-            onBrowser={!system && app.givesBrowser(info.worker_id) ? setBrowser : undefined}
-          />
-        )}
-        {phone && spawned}
       </header>
       {archived && info && (
         <div class="archived-band stripes">
@@ -999,7 +1077,7 @@ const MODE_MARKS: Record<PermissionMode, { cls: string; title: string }> = {
   },
 };
 
-/** What a switch to each mode in "More" does (T38). */
+/** What each mode of the mode pill's switch does (T38). */
 const SWITCH_TITLES: Record<PermissionMode, string> = {
   ask: "Ask before tool calls outside the worker's rules",
   auto: "Claude Code decides tool calls itself; the worker's deny list is the only limit",
@@ -1007,12 +1085,13 @@ const SWITCH_TITLES: Record<PermissionMode, string> = {
     "Claude Code runs every tool call without asking, with no classifier either; the worker's deny list, the ask rules of Claude Code's settings and its own safety checks are the only limits",
 };
 
-/** The session's permission mode (T38): what the worker reports the agent runs in, else
- *  what hqc asked for. "Auto" and "Allow all" stand out: nothing but the worker's deny list
- *  (and in Allow all the ask rules of Claude Code's settings and its own safety checks) stops
- *  a call. A turn capped by a message from a session in a lower mode (T39) shows both: the
- *  cap's mode for this turn, named by that session, and the session's own mode after it. */
-export function PermissionMark({ info }: { info: SessionInfo }) {
+/** What the mode pill says (T38): its look, tooltip and words, and the words as plain text for
+ *  its name. What the worker reports the agent runs in, else what hqc asked for; asked for a
+ *  higher mode than the worker runs, both; a turn capped by a message from a session in a lower
+ *  mode (T39), the cap's mode for this turn, named by that session, and the session's own mode
+ *  after it. With neither known yet the session runs its worker's default (`known` false), which
+ *  the client does not know. */
+function modeFace(info: SessionInfo): { cls: string; title: string; text: ComponentChildren; label: string; known: boolean } {
   const runs = info.effective_permission_mode;
   const asked = info.permission_mode;
   const by = info.permission_capped_by;
@@ -1020,39 +1099,288 @@ export function PermissionMark({ info }: { info: SessionInfo }) {
     const now = runs ?? 'ask';
     // Without a mode of its own the session runs the worker's default, which is not known here.
     const own = asked ? MODE_LABELS[asked] : "the session's own mode";
-    return (
-      <span
-        class={`${MODE_MARKS[now].cls} perm-capped`}
-        title={`This turn runs in ${MODE_LABELS[now]}: it was started by a message along a chain with ${by}, which runs in ${MODE_LABELS[now]}, and a message cannot raise permissions. ${asked ? `The session's own mode, ${MODE_LABELS[asked]},` : "The session's own mode"} comes back when the turn ends.`}
-      >
-        {MODE_LABELS[now]} (asked by {by})<span class="perm-next"> · {own} after this turn</span>
-      </span>
-    );
+    return {
+      cls: `${MODE_MARKS[now].cls} perm-capped`,
+      title: `This turn runs in ${MODE_LABELS[now]}: it was started by a message along a chain with ${by}, which runs in ${MODE_LABELS[now]}, and a message cannot raise permissions. ${asked ? `The session's own mode, ${MODE_LABELS[asked]},` : "The session's own mode"} comes back when the turn ends.`,
+      text: (
+        <>
+          {MODE_LABELS[now]} (asked by {by})<span class="perm-next"> · {own} after this turn</span>
+        </>
+      ),
+      label: `${MODE_LABELS[now]} (asked by ${by}) · ${own} after this turn`,
+      known: true,
+    };
   }
   if (asked && runs && PERMISSION_MODES.indexOf(asked) > PERMISSION_MODES.indexOf(runs)) {
     // Asked for a higher mode than the worker runs: not restarted yet, a process that cannot
     // switch, or a worker that does not allow it.
-    return (
-      <span
-        class={MODE_MARKS[runs].cls}
-        title={`The worker runs this session in ${MODE_LABELS[runs]}: until the agent next runs, or for good if the worker does not allow ${MODE_LABELS[asked]}`}
-      >
-        {MODE_LABELS[runs]} ({MODE_LABELS[asked]} asked)
-      </span>
-    );
+    const text = `${MODE_LABELS[runs]} (${MODE_LABELS[asked]} asked)`;
+    return {
+      cls: MODE_MARKS[runs].cls,
+      title: `The worker runs this session in ${MODE_LABELS[runs]}: until the agent next runs, or for good if the worker does not allow ${MODE_LABELS[asked]}`,
+      text,
+      label: text,
+      known: true,
+    };
   }
   const shown = runs ?? asked;
-  if (!shown) return null;
+  if (!shown) {
+    return { cls: 'perm-default', title: "The worker's default mode, which it has not reported yet", text: 'Default', label: 'Default', known: false };
+  }
+  return { cls: MODE_MARKS[shown].cls, title: MODE_MARKS[shown].title, text: MODE_LABELS[shown], label: MODE_LABELS[shown], known: true };
+}
+
+/** Where a pill's menu opens: under its left end. */
+function underPill(el: HTMLElement | null): { x: number; y: number } {
+  const r = el?.getBoundingClientRect();
+  return { x: r?.left ?? 0, y: (r?.bottom ?? 0) + 4 };
+}
+
+/** The chat's title, renamed in place: on a computer a pencil after it while the mouse is on
+ *  it, on a phone a tap on the title itself, puts a field in its place, in its type. Enter or a
+ *  press away saves the name, trimmed (an empty or unchanged one sends nothing); Esc keeps the
+ *  old one. Without `onRename` (an archived or the service session) it is the title alone.
+ *  `title` is what the header shows ("Session" for an untitled one), `name` the session's own
+ *  title, which the field starts from. */
+function ChatTitle({ title, name, phone, onRename }: { title: string; name: string; phone: boolean; onRename?: (title: string) => void }) {
+  // The text in the field while the title is edited.
+  const [draft, setDraft] = useState<string | null>(null);
+  // The title when the field opened: a title that changes meanwhile (the CLI or the agent names
+  // the session) is not put back by a field left unchanged.
+  const opened = useRef('');
+  // The edit ended by Enter or Esc: the blur of the field going away does not end it again.
+  const ended = useRef(false);
+  const field = useRef<HTMLInputElement>(null);
+  const editing = draft !== null;
+  useLayoutEffect(() => {
+    if (!editing) return;
+    field.current?.focus();
+    field.current?.select();
+  }, [editing]);
+  const start = () => {
+    ended.current = false;
+    opened.current = name;
+    setDraft(name);
+  };
+  const end = (value: string | null) => {
+    if (ended.current) return;
+    ended.current = true;
+    setDraft(null);
+    const typed = value?.trim();
+    if (typed && typed !== opened.current) onRename?.(typed);
+  };
+  if (editing && onRename) {
+    return (
+      <h1 class="chat-title is-editing">
+        <input
+          ref={field}
+          class="chat-title-input"
+          aria-label="Title"
+          value={draft}
+          onInput={(e) => setDraft((e.currentTarget as HTMLInputElement).value)}
+          onKeyDown={(e) => {
+            // Handled here: a request's card in the chat would take Enter and Esc as its answer.
+            if (e.key === 'Enter' && !e.isComposing) {
+              e.preventDefault();
+              end((e.currentTarget as HTMLInputElement).value);
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              end(null);
+            }
+          }}
+          onBlur={(e) => end((e.currentTarget as HTMLInputElement).value)}
+        />
+      </h1>
+    );
+  }
   return (
-    <span class={MODE_MARKS[shown].cls} title={MODE_MARKS[shown].title}>
-      {MODE_LABELS[shown]}
-    </span>
+    <h1 class={`chat-title ${phone && onRename ? 'is-renamable' : ''}`} onClick={phone && onRename ? start : undefined}>
+      {title}
+      {!phone && onRename && (
+        <button type="button" class="icon-btn btn-rename-title" aria-label="Rename" title="Rename" onClick={start}>
+          <IconRename size={13} />
+        </button>
+      )}
+    </h1>
   );
 }
 
-/** The mode the menu switches from: hqc's choice, else what the agent runs in. */
-export function currentMode(info: SessionInfo): PermissionMode {
-  return info.permission_mode ?? info.effective_permission_mode ?? 'ask';
+/** The session's permission mode (T38) as a round pill beside the state. Pressed, it opens a
+ *  switch Ask | Auto | Allow all over its items, the session's own mode pressed (Auto and Allow
+ *  all keep their one-line confirmation), and on a worker that gives a browser (`onBrowser`,
+ *  SPEC 0.148) the browser under it. `frozen` (archived): the mark alone, without a menu. */
+function ModePill({
+  info,
+  phone,
+  frozen,
+  onMode,
+  onBrowser,
+}: {
+  info: SessionInfo;
+  phone: boolean;
+  frozen: boolean;
+  onMode: (mode: PermissionMode) => void;
+  onBrowser?: (on: boolean) => void;
+}) {
+  const btn = useRef<HTMLButtonElement>(null);
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const face = modeFace(info);
+  if (frozen) {
+    return face.known ? (
+      <span class={`btn-mode-pill ${face.cls}`} title={face.title}>
+        <span class="pill-text">{face.text}</span>
+      </span>
+    ) : null;
+  }
+  // The mode a switch goes from: hqc's choice, else what the agent runs in.
+  const own = info.permission_mode ?? info.effective_permission_mode;
+  const items: MenuEntry[] = !onBrowser
+    ? []
+    : info.browser
+      ? [{ label: 'Browser: on · Turn off', cls: 'btn-browser btn-browser-off', title: 'The agent restarts without your Chrome', onSelect: () => onBrowser(false) }]
+      : [{ label: 'Browser: off · Give the browser', cls: 'btn-browser btn-browser-on', title: 'The agent restarts with your Chrome on its worker', onSelect: () => onBrowser(true) }];
+  return (
+    <>
+      <button
+        ref={btn}
+        type="button"
+        class={`btn-mode-pill ${face.cls}`}
+        title={face.title}
+        aria-label={`Permission mode: ${face.label}`}
+        aria-haspopup="menu"
+        aria-expanded={!!at}
+        onClick={() => setAt(at ? null : underPill(btn.current))}
+      >
+        <span class="pill-text">{face.text}</span>
+        <IconChevronDown size={10} />
+      </button>
+      {at && (
+        <ContextMenu
+          x={at.x}
+          y={at.y}
+          label="Permission mode"
+          anchor={btn.current}
+          backdrop={phone}
+          onClose={() => setAt(null)}
+          top={
+            <div class="mode-switch" role="group" aria-label="Permission mode">
+              {PERMISSION_MODES.map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  class={`btn-mode-${m}`}
+                  aria-pressed={m === own}
+                  title={SWITCH_TITLES[m]}
+                  data-focus={m === own ? '' : undefined}
+                  onClick={() => {
+                    setAt(null);
+                    if (m !== own) onMode(m);
+                  }}
+                >
+                  {MODE_LABELS[m]}
+                </button>
+              ))}
+            </div>
+          }
+          items={items}
+        />
+      )}
+    </>
+  );
+}
+
+/** The session's model as a pill beside the mode's: the provider it runs on, else the model
+ *  the header names (`model`: the one switched to since the last turn, else the last turn's),
+ *  else "Default". Pressed, it opens the model menu (`modelMenuItems`): a pick switches the
+ *  session at once, the entry it has (an alias, a version in the submenu) only closes the menu,
+ *  while a family checked for one of its versions switches to its alias; "Another model…" asks
+ *  for the name and Enter switches to it; the usage limits of the worker's account stand under
+ *  the items.
+ *  `frozen` (archived): the name alone, without a menu. */
+function ModelPill({
+  info,
+  model,
+  phone,
+  frozen,
+  providers,
+  loadLimits,
+  onAgent,
+}: {
+  info: SessionInfo;
+  model?: string;
+  phone: boolean;
+  frozen: boolean;
+  /** The providers the session's worker allows (SPEC 0.144). */
+  providers: ModelProvider[];
+  /** The usage limits of the session's worker account, read when the menu opens. */
+  loadLimits: () => Promise<WorkerLimits | undefined>;
+  onAgent: (patch: AgentPatch) => Promise<boolean>;
+}) {
+  const btn = useRef<HTMLButtonElement>(null);
+  const [at, setAt] = useState<{ x: number; y: number; typing?: boolean } | null>(null);
+  const label = info.provider?.label ?? (model ? modelName(model) : 'Default');
+  const title = info.provider?.label ?? model ?? "Claude Code's default model";
+  if (frozen) {
+    return (
+      <span class="btn-model-pill" title={title}>
+        <span class="pill-text">{label}</span>
+      </span>
+    );
+  }
+  const pick = (c: ModelChoice) => {
+    if ('provider' in c ? c.provider === info.provider?.id : !info.provider && c.model === info.model) return;
+    void onAgent(agentPatch(info, c));
+  };
+  let menu: ComponentChildren = null;
+  if (at) {
+    const common = { x: at.x, y: at.y, label: 'Model', anchor: btn.current, backdrop: phone, onClose: () => setAt(null) };
+    menu = at.typing ? (
+      <ContextMenu {...common}>
+        <ModelName
+          // A name typed before stands in the field.
+          value={!info.provider && isTypedModel(info.model) ? info.model! : ''}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' || e.isComposing) return;
+            e.preventDefault();
+            const m = (e.currentTarget as HTMLInputElement).value.trim();
+            if (!m) return;
+            setAt(null);
+            pick({ model: m });
+          }}
+        />
+      </ContextMenu>
+    ) : (
+      <ContextMenu
+        {...common}
+        items={modelMenuItems({
+          model: info.model,
+          provider: info.provider?.id,
+          providers,
+          onPick: pick,
+          onAnother: () => setAt({ ...at, typing: true }),
+        })}
+        bottom={<Limits load={loadLimits} />}
+      />
+    );
+  }
+  return (
+    <>
+      <button
+        ref={btn}
+        type="button"
+        class="btn-model-pill"
+        title={title}
+        aria-label={`Model: ${label}`}
+        aria-haspopup="menu"
+        aria-expanded={!!at}
+        onClick={() => setAt(at ? null : underPill(btn.current))}
+      >
+        <span class="pill-text">{label}</span>
+        <IconChevronDown size={10} />
+      </button>
+      {menu}
+    </>
+  );
 }
 
 type AgentPatch = Pick<SessionPatch, 'model' | 'provider_id'>;
@@ -1064,46 +1392,41 @@ function agentPatch(info: SessionInfo, c: ModelChoice): AgentPatch {
   return info.provider ? { provider_id: null, model: c.model ?? null } : { model: c.model ?? null };
 }
 
-/** "More": rename, schedules, the move to another project, the permission mode and the model; on
- *  a phone also the path, the model of the last turn and the cost. Archiving is on the
- *  list's rows, restore and delete on the archive's (T50). */
+/** "More": on a phone first where the session runs, "<worker> · <folder>" (the folder with its
+ *  copy button; no worker while VS Code holds it, the state pill names it), and the cost, then
+ *  Retry; Schedules
+ *  and Move to project… (neither for a room: it has no worker or folder; no move for an
+ *  archived session), Folder rules (`rules`, T48) and Restart session. The title is renamed in
+ *  place, the mode and the model are pills of the meta row, Pause stands by Stop; archiving is
+ *  on the list's rows, restore and delete on the archive's (T50). Nothing to hold, no button. */
 function MoreMenu({
   info,
   phone,
+  worker,
   path,
-  model,
   cost,
   onRetry,
-  onRename,
   onSchedules,
   onMove,
-  onPermissionMode,
-  onAgent,
-  loadLimits,
-  providers,
-  onBrowser,
+  rules,
+  onRestart,
 }: {
   info: SessionInfo;
   phone: boolean;
+  /** On a phone, with the folder, where the session runs: the meta row has no room for them. */
+  worker?: string;
   path?: string;
-  model?: string;
   cost?: number;
   /** On a phone "Retry" lives here, not in the crowded header. */
   onRetry?: () => void;
-  /** "Rename": a prompt for the title, as in the list's menu. */
-  onRename: () => void;
   onSchedules: () => void;
   /** "Move to project…": the session continues in another folder and project. */
   onMove: () => void;
-  onPermissionMode: (mode: PermissionMode) => void;
-  /** A change PATCHes at once; `null` is the runtime's default. */
-  onAgent: (patch: AgentPatch) => void;
-  /** The usage limits of the session's worker account, read when the menu opens. */
-  loadLimits: () => Promise<WorkerLimits | undefined>;
-  /** The providers the session's worker allows (SPEC 0.144). */
-  providers: ModelProvider[];
-  /** Turns the browser on or off (SPEC 0.148); absent: the worker gives none. */
-  onBrowser?: (on: boolean) => void;
+  /** The rules screen of the session's folder and the folder, for the tooltip. */
+  rules?: { href: string; path: string };
+  /** "Restart session": the agent's process killed and started on the same history; absent
+   *  where it may not be (`restartableSession`). */
+  onRestart?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -1122,9 +1445,10 @@ function MoreMenu({
       doc.removeEventListener('keydown', esc);
     };
   }, [open]);
-  const facts = phone && (path || model || cost !== undefined);
-  // An archived room has only Retry and a phone's facts: without them, no button.
-  if (info.room_mode && info.archived && !onRetry && !facts) return null;
+  const facts = phone && (worker || path || cost !== undefined);
+  const schedules = !info.room_mode;
+  const move = !info.archived && !info.room_mode;
+  if (!facts && !onRetry && !schedules && !move && !rules && !onRestart) return null;
   const item = (cls: string, label: string, fn: () => void, title?: string) => (
     <button
       type="button"
@@ -1155,48 +1479,24 @@ function MoreMenu({
         <div class="menu" role="menu">
           {facts && (
             <div class="menu-info">
-              {path && (
-                <div class="menu-info-row">
-                  <span class="mono">{homePath(path)}</span>
-                  <CopyButton text={path} label="Copy path" />
+              {(worker || path) && (
+                <div class="menu-info-row menu-place">
+                  <span class="mono">{[worker, path && homePath(path)].filter(Boolean).join(' · ')}</span>
+                  {path && <CopyButton text={path} label="Copy path" />}
                 </div>
               )}
-              {model && <div class="menu-info-row">{modelName(model)}</div>}
               {cost !== undefined && <div class="menu-info-row">{formatCost(cost)} this {info.room_mode ? 'room' : 'session'}</div>}
             </div>
           )}
-          {!info.archived && item('btn-rename', 'Rename', onRename)}
           {onRetry && item('btn-retry', 'Retry', onRetry)}
-          {/* A room has no worker: a scheduled message would wait there for ever, and there is
-              no folder to move. Nor has it a model, permission mode or browser of its own, or
-              limits to show: its agents have them. */}
-          {!info.room_mode && item('btn-schedules', 'Schedules', onSchedules, 'Messages scheduled into this session')}
-          {!info.archived &&
-            !info.room_mode &&
-            item('btn-move', 'Move to project…', onMove, 'Continue this session in another folder and project on its worker')}
-          {!info.archived &&
-            !info.room_mode &&
-            PERMISSION_MODES.filter((m) => m !== currentMode(info)).map((m) =>
-              item(`btn-mode-${m}`, `Switch to ${MODE_LABELS[m]}`, () => onPermissionMode(m), SWITCH_TITLES[m]),
-            )}
-          {!info.archived &&
-            !info.room_mode &&
-            onBrowser &&
-            (info.browser
-              ? item('btn-browser btn-browser-off', 'Browser: on · Turn off', () => onBrowser(false), 'The agent restarts without your Chrome')
-              : item('btn-browser btn-browser-on', 'Browser: off · Give the browser', () => onBrowser(true), 'The agent restarts with your Chrome on its worker'))}
-          {!info.archived && !info.room_mode && (
-            <div class="menu-settings">
-              <ModelField
-                value={info.model}
-                onChange={(m) => onAgent(agentPatch(info, { model: m }))}
-                providers={providers}
-                provider={info.provider?.id}
-                onProvider={(id) => onAgent(agentPatch(info, { provider: id }))}
-              />
-              <Limits load={loadLimits} />
-            </div>
+          {schedules && item('btn-schedules', 'Schedules', onSchedules, 'Messages scheduled into this session')}
+          {move && item('btn-move', 'Move to project…', onMove, 'Continue this session in another folder and project on its worker')}
+          {rules && (
+            <a role="menuitem" class="menu-item btn-folder-rules" href={rules.href} title={`Rules for ${rules.path}`} onClick={() => setOpen(false)}>
+              Folder rules
+            </a>
           )}
+          {onRestart && item('btn-restart', 'Restart session', onRestart, "The agent's process starts again on the same history")}
         </div>
       )}
     </div>

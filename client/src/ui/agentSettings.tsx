@@ -1,6 +1,8 @@
-// A session's model, in the chat's "More" menu (a new session chooses it on a chip). The field
-// reports a value once it is chosen (a typed name on `change`); `undefined` is the runtime's
-// default. A provider the worker allows (SPEC 0.144) is one more choice.
+// A session's model: the menu of the chat header's model pill, of a new session's chip and of
+// "Switch model" under a refusal (`modelMenuItems`, the name typed in `ModelName`), and the field
+// of a room's agent (`ModelField`), which reports a value once it is chosen (a typed name on
+// `change`). `undefined` is the runtime's default. A provider the worker allows (SPEC 0.144) is
+// one more choice.
 
 import { useEffect, useState } from 'preact/hooks';
 import type { ModelProvider } from '../proto';
@@ -38,9 +40,16 @@ export const isTypedModel = (m: string | undefined): boolean =>
 /** What a model menu picks: a Claude model (`undefined`: Claude Code's default) or a provider. */
 export type ModelChoice = { model: string | undefined } | { provider: string };
 
+/** The versions of one family (`opus`: claude-opus-*), newest first as in the whole list. */
+const familyVersions = (alias: (typeof MODEL_ALIASES)[number]): string[] =>
+  MODEL_VERSIONS.filter((m) => m.startsWith(`claude-${alias}-`));
+
 /** The items of a model menu, the one now (`model`, `provider`) checked: Claude Code's default
- *  (left out with `withDefault: false`), the aliases, the versions, "Another model…" (`onAnother`:
- *  the menu asks for the name next), then `providers`. */
+ *  (left out with `withDefault: false`), a family each — Opus, Sonnet, Haiku, Fable: its alias
+ *  picked by the item itself, its versions (SPEC 0.168) in its submenu; the family is checked
+ *  for its alias and for each of its versions, and names the version as its `detail` ("4.8"),
+ *  yet picked it is still its alias — then "Another model…" (`onAnother`: the menu asks for the
+ *  name next), then `providers`. */
 export function modelMenuItems({
   model,
   provider,
@@ -57,12 +66,11 @@ export function modelMenuItems({
   onAnother: () => void;
 }): MenuEntry[] {
   const claude = !provider;
-  const named = (m: string) => ({
-    label: modelName(m),
-    cls: `btn-model-${m}`,
-    checked: claude && model === m,
-    onSelect: () => onPick({ model: m }),
-  });
+  // A version chosen in a family's submenu shows on the family, closed: "Opus  4.8".
+  const detailOf = (alias: (typeof MODEL_ALIASES)[number]): string | undefined => {
+    if (!claude || !model || !familyVersions(alias).includes(model)) return undefined;
+    return modelName(model).slice(modelName(alias).length + 1);
+  };
   const items: MenuEntry[] = [
     ...(withDefault
       ? [
@@ -74,9 +82,21 @@ export function modelMenuItems({
           },
         ]
       : []),
-    ...MODEL_ALIASES.map(named),
-    'sep',
-    ...MODEL_VERSIONS.map(named),
+    ...MODEL_ALIASES.map((alias) => ({
+      label: modelName(alias),
+      cls: `btn-model-${alias}`,
+      checked: claude && model !== undefined && (model === alias || familyVersions(alias).includes(model)),
+      detail: detailOf(alias),
+      onSelect: () => onPick({ model: alias }),
+      submenu: familyVersions(alias).map(
+        (m): MenuEntry => ({
+          label: modelName(m),
+          cls: `btn-model-${m}`,
+          checked: claude && model === m,
+          onSelect: () => onPick({ model: m }),
+        }),
+      ),
+    })),
     'sep',
     // Another model waits for its name, in the menu.
     {
@@ -183,5 +203,40 @@ export function ModelField({
         </label>
       )}
     </>
+  );
+}
+
+/** The name of another model, typed in the next step of a model menu ("Another model…"):
+ *  `onChange`, where the menu takes the name as it is typed (a new session's chip), hears each
+ *  change, trimmed (an empty name is the runtime's default); `onKeyDown` the keys, Enter to
+ *  finish. */
+export function ModelName({
+  value,
+  onChange,
+  onKeyDown,
+}: {
+  value: string;
+  onChange?: (model: string | undefined) => void;
+  onKeyDown?: (e: KeyboardEvent) => void;
+}) {
+  // Its own text: a name that becomes an alias as it is typed ("opus") stays in the field.
+  const [name, setName] = useState(value);
+  return (
+    <label class="menu-field">
+      <span class="field-label">Model name</span>
+      <input
+        class="input mono"
+        name="model_name"
+        placeholder="claude-sonnet-4-5"
+        data-focus
+        value={name}
+        onInput={(e) => {
+          const v = (e.currentTarget as HTMLInputElement).value;
+          setName(v);
+          onChange?.(v.trim() || undefined);
+        }}
+        onKeyDown={onKeyDown}
+      />
+    </label>
   );
 }

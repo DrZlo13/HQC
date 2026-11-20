@@ -87,13 +87,15 @@ A 12-megapixel photo takes about a second. libheif is LGPL-3.0; its license is i
     (⌘K / Ctrl+K), the order menu (Custom, Name, Recent), the project's menu and archived
     projects; in the Compact look, a row per project with its icon and full name; a project
     takes a session row dropped on it;
-  - `SessionList.tsx` + `sessions.ts` — the session column: a head of one row (name, search, the
-    order menu, "⋯", "+"), the project's favorites pinned over the list, the groups (Needs you,
+  - `SessionList.tsx` + `sessions.ts` — the session column: a head of one row (name, search, "⋯"
+    with the list's order, Reorder, a new room and the project's items, "+"), the project's
+    favorites pinned over the list, the groups (Needs you,
     Running, idle by age), one menu per row on a right click, archive and favorites buttons past
     the column's edge on hover, a desktop row dragged onto a project on the bar to move it there,
     the workers line at the bottom; `PhoneHome.tsx` — a
     phone's first screen, the projects; `NewSession.tsx` — a new session as a chat window with
-    its chips; `ContextMenu.tsx` — the client's menus;
+    its chips; `ContextMenu.tsx` — the client's menus, an item's submenu as a flyout beside it on
+    a computer and unfolded under it on a phone;
   - `ProjectSettings.tsx` — the project settings page (`#/p/<id>/settings`): Appearance, the
     project's quick messages (a list, an add and edit form; every save sends the whole list on top of
     the hub's current one), workspaces (add from the worker's folder tree, import from Claude Code, "VS Code
@@ -102,8 +104,11 @@ A 12-megapixel photo takes about a second. libheif is LGPL-3.0; its license is i
     theme; a full-screen sheet on a phone);
   - `Chat.tsx` — the composer completes `/` from the session's `commands` (T27: arrows, Tab or
     Enter, Esc, a tap); its bolt button opens the project's quick messages, a press of one sends it;
-  - `Chat.tsx` — the header (state pill, worker, path, model and cost from `usage`,
-    "Stop", the "More" menu), the feed, a bar in place of the input field while VS Code holds the
+  - `Chat.tsx` — the header (the title renamed in place; the state, the permission mode and the
+    model as pills, their menus switching them, the model's with the usage limits; worker, path
+    and cost from `usage`; "Pause" or "Resume" before "Stop"; the "More" menu; on a phone the
+    buttons on the title's line, the pills and "started by" on a line of their own, and worker,
+    path and cost in "More"), the feed, a bar in place of the input field while VS Code holds the
     session, the live subagents and background commands over the input (`LiveSubagents.tsx`),
     the input field; on a phone an open request is a bottom sheet in place of the input field;
   - `feed.ts` — pure feed logic: tool call groups captioned by the intermediate

@@ -36,6 +36,11 @@ export function isDeny(o: ApprovalOption): boolean {
   return o.canonical === 'deny' || o.canonical === 'deny_always';
 }
 
+/** Said when a session or a project is deleted: its publications go with it (`hqc_publish`,
+ *  SPEC §12). The client does not know whether the hub publishes at all, so it is always said. */
+export const UNPUBLISH_SESSION = 'Pages it published stop opening.';
+export const UNPUBLISH_PROJECT = 'Pages its sessions published stop opening.';
+
 /** The one line asked before a session goes to Auto (T38); Ask needs no confirmation. */
 export const AUTO_CONFIRM =
   "Switch to Auto? Claude Code then runs tool calls without asking; the worker's deny list is the only limit.";

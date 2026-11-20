@@ -317,7 +317,8 @@ function PermissionCard({
 
   // Enter allows once, Esc denies: only for the request the chat gives the keys to, while
   // its card is on screen and the focus is not in a field.
-  const hotkeys = live && !busy && actions.hotkeyRequest === p.request_id;
+  // Never a publication (`hqc_publish`): a public link is made by a click on its button only.
+  const hotkeys = live && !busy && actions.hotkeyRequest === p.request_id && p.tool !== 'hqc_publish';
   useEffect(() => {
     if (!hotkeys) return;
     const doc = card.current?.ownerDocument;
@@ -344,14 +345,17 @@ function PermissionCard({
     return () => doc.removeEventListener('keydown', onKey);
   }, [hotkeys, p.request_id]);
 
-  // The hub's card of an agent's `hqc_move` (SPEC §7, §10.1) and of a move after the transcript
-  // (SPEC §9.2) has a worker request's form.
+  // The hub's cards of an agent's `hqc_move` and `hqc_publish` (SPEC §7, §10.1) and of a move
+  // after the transcript (SPEC §9.2) have a worker request's form.
+  const publish = v.worker && p.tool === 'hqc_publish' && !actions.system;
   const title = v.worker
     ? p.tool === 'hqc_move' && !actions.system
       ? 'The agent asks to move this session'
       : p.tool === 'session.follow' && !actions.system
         ? 'Move this session after its transcript?'
-        : 'The worker asks for permission'
+        : publish
+          ? 'The agent asks to publish'
+          : 'The worker asks for permission'
     : sheet && p.tool === 'Bash'
       ? p.subagent
         ? `${asker(p.subagent, '')}: run the command?`
@@ -451,7 +455,7 @@ function PermissionCard({
               disabled={busy}
               onClick={() => answer(once)}
             >
-              {optionLabel(once)}
+              {publish ? 'Publish' : optionLabel(once)}
               {!sheet && hotkeys && <kbd class="kbd">⏎</kbd>}
             </button>
           )}

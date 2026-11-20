@@ -615,6 +615,44 @@ describe('rendering attachments', () => {
     expect(cards[1].querySelector('.relay-files')).toBeNull();
   });
 
+  it('a publication opens its public link in a new tab, and its owner unpublishes it (SPEC 0.190)', async () => {
+    const site = { ...meta('s', 'site', 'report'), public_url: 'https://view.example.net/5f1c/' };
+    const src = { ...fakeSource([site]), unpublishArtifact: vi.fn(async () => {}) };
+    const store = new ArtifactStore(src as never);
+    const { el, actions } = chatWith([ev('event.attachment.site', (e) => (e.payload.artifact_id = 's'))], store);
+    await flush();
+    const card = el.querySelector('.attachment-kind-site .card-attachment')!;
+    expect(card.querySelector('.card-title')!.textContent).toBe('report publication');
+    expect(el.querySelector('.attachment-caption')!.textContent).toBe('The weekly report');
+    const open = card.querySelector<HTMLAnchorElement>('a')!;
+    expect([open.textContent, open.getAttribute('href'), open.target, open.rel]).toEqual([
+      'Open',
+      'https://view.example.net/5f1c/',
+      '_blank',
+      'noopener noreferrer',
+    ]);
+    expect(src.artifactLink).not.toHaveBeenCalled();
+
+    // Unpublished: the hub answers without the link now.
+    src.artifact.mockImplementation(async () => meta('s', 'site', 'report'));
+    await act(async () => [...card.querySelectorAll('button')].find((b) => b.textContent === 'Unpublish')!.click());
+    await flush();
+    expect(src.unpublishArtifact).toHaveBeenCalledWith('s');
+    expect(src.artifact).toHaveBeenCalledTimes(2);
+    expect(card.querySelector('.card-title')!.textContent).toBe('report publication · not published');
+    expect(card.querySelector('a')).toBeNull();
+    expect(card.querySelector('button')).toBeNull();
+    expect(actions.openArtifact).not.toHaveBeenCalled();
+  });
+
+  it("someone else's publication shows its name alone", async () => {
+    const { el } = chatWith([ev('event.attachment.site')], new ArtifactStore(fakeSource([]) as never));
+    await flush();
+    const card = el.querySelector('.attachment-kind-site .card-attachment')!;
+    expect(card.querySelector('.card-title')!.textContent).toBe('report publication');
+    expect(card.querySelector('a, button')).toBeNull();
+  });
+
   it('with the viewer an image and a Markdown text open in it, other text in a tab', async () => {
     const metas = [
       meta('img', 'image', 'screen.png'),

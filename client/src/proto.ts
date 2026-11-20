@@ -47,7 +47,8 @@ export type ClarifyAction = (typeof CLARIFY_ACTIONS)[number] | Unknown;
 export const PEER_MODES = ['send', 'ask'] as const;
 export type PeerMode = (typeof PEER_MODES)[number] | Unknown;
 
-export const ARTIFACT_KINDS = ['file', 'image', 'diff', 'html', 'text'] as const;
+/** `site`: the archive of a page or a file an agent publishes with `hqc_publish` (SPEC 0.190). */
+export const ARTIFACT_KINDS = ['file', 'image', 'diff', 'html', 'text', 'site'] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number] | Unknown;
 
 export const DELIVERIES = ['pending', 'delivered', 'failed'] as const;
@@ -1161,7 +1162,8 @@ export interface OpenRequest {
   session_id: Uuid;
   request_id: string;
   /** `approval` | `clarify` | `worker_approval` | `move` (an agent's `hqc_move`, SPEC §7) |
-   *  `follow` (a move after the transcript, SPEC §9.2); open. */
+   *  `follow` (a move after the transcript, SPEC §9.2) | `publish` (an agent's `hqc_publish`);
+   *  open. */
   kind: string;
   address: string;
   title: string;
@@ -2078,6 +2080,8 @@ export interface Artifact {
   size: number;
   sha256: string;
   created_at: string;
+  /** The public link of a published `site` (SPEC 0.190); absent while it is not published. */
+  public_url?: string;
 }
 
 export function parseArtifact(v: unknown): Artifact {
@@ -2090,6 +2094,7 @@ export function parseArtifact(v: unknown): Artifact {
     size: num(o, 'size'),
     sha256: optStr(o, 'sha256') ?? '',
     created_at: optStr(o, 'created_at') ?? '',
+    public_url: optStr(o, 'public_url'),
   };
 }
 

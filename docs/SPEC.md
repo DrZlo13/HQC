@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.185, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.189, 2026-11-20. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2272,6 +2272,13 @@ once, and what another device changed shows when the answer comes.
 Each message in the list is a button. The opener has `aria-expanded` and, while the list is open,
 `aria-controls`; Esc on a message of the list puts the focus back on the opener. The new session's
 window has no such button.
+A message the user typed, with text, has a lightning-bolt button "Add to quick messages" among
+its buttons, between copy and fork (since 0.189); like fork, not while it waits for delivery or
+when it was not delivered. A press reads the project from the hub, adds the
+message's text exactly as typed at the end of that list and sends it whole in `PATCH
+/api/projects/{id}`; a text the hub's list has already sends nothing. A text the project's list
+has is a check, "In quick messages", that cannot be pressed; the hub's refusal is said in the
+chat's notice. The service session has no such button.
 The project settings have a section "Quick messages" between Appearance and Workspaces: a line
 saying what they are, the list in stored order (each message as written, kept to 3 lines, with
 "Edit" and "Delete"), and "Add a quick message"; the form for a new or an edited message is a
@@ -6665,6 +6672,12 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.185 → 0.189 (a message of the user added to the quick messages)
+§6 client layout, quick messages: a message the user typed has a button that adds its text at the
+end of the project's quick messages (read from the hub first, sent whole in `PATCH
+/api/projects/{id}`, nothing sent for a text already there); a text in the list is a check.
+Client only. 0.186–0.188 are taken by open branches.
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

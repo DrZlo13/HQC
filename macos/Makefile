@@ -77,14 +77,14 @@ build: $(ICON) ## Build a release HQC.app bundle (compile + assemble + sign: ad-
 		'    <true/>' \
 		'    <key>NSAppTransportSecurity</key>' \
 		'    <dict>' \
-		'        <key>NSAllowsArbitraryLoads</key>' \
+		'        <key>NSAllowsArbitraryLoadsInWebContent</key>' \
 		'        <true/>' \
 		'    </dict>' \
 		'</dict>' \
 		'</plist>' \
 		> "$(APP)/Contents/Info.plist"
 	@echo "==> Signing ($(SIGN_IDENTITY))..."
-	codesign --force --deep --sign "$(SIGN_IDENTITY)" "$(APP)" || true
+	codesign --force --deep --sign "$(SIGN_IDENTITY)" "$(APP)"
 	@echo "==> Done. Created $(APP) (run: open $(APP))"
 
 .PHONY: run

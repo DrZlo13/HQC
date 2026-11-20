@@ -168,6 +168,8 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
     // Answers a permission request with one of its options, by the client's own call
     // (client/src/api.ts approve()); `done` gets whether the hub took it.
     func answer(session: String, request: String, option: String, done: @escaping (Bool) -> Void) {
+        // The call carries the page's sign-in: only on the server's own page.
+        guard isServerHost(webView.url?.host) else { return done(false) }
         let script = """
             const res = await fetch('/api/sessions/' + encodeURIComponent(session) + '/requests/' + encodeURIComponent(request), {
               method: 'POST',
@@ -185,6 +187,13 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
                 done(false)
             }
         }
+    }
+
+    // Whether `host` is this tab's server's: its scheme is not compared, so a server typed as
+    // `http://` that redirects to `https://` still matches.
+    private func isServerHost(_ host: String?) -> Bool {
+        guard let host, let own = server.url.host else { return false }
+        return host.caseInsensitiveCompare(own) == .orderedSame
     }
 
     // Stop any in-flight load and detach delegates before this tab is discarded.
@@ -211,6 +220,10 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
     // event to post, or `{open: [tag]}`, the tags of every open request, on each `requests` frame.
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
+        // Only the server's own page: the handlers are there in every frame, and an agent's HTML
+        // attachment is a frame of the feed (client/src/ui/attachments.tsx), which could draw a
+        // card of its own whose Allow answers a real request.
+        guard message.frameInfo.isMainFrame, isServerHost(message.frameInfo.securityOrigin.host) else { return }
         guard let m = message.body as? [String: Any] else { return }
         if message.name == ChromeScript.handlerName {
             if let css = m["background"] as? String, let color = Self.color(css: css) {
@@ -252,7 +265,7 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
     // A computed CSS colour, `rgb(r, g, b)` or `rgba(r, g, b, a)`; nil for anything else and
     // for a transparent one (a page without its styles yet).
     private static func color(css: String) -> NSColor? {
-        guard let open = css.firstIndex(of: "("), let close = css.lastIndex(of: ")") else { return nil }
+        guard let open = css.firstIndex(of: "("), let close = css.lastIndex(of: ")"), open < close else { return nil }
         let parts = css[css.index(after: open)..<close]
             .split(separator: ",")
             .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }

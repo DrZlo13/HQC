@@ -14,8 +14,13 @@
 //! - `PUT /worker/artifacts`: a worker uploads the file of an agent's `hqc_attach` for one of
 //!   its sessions (SPEC §5.4, §7); the owner is the session's owner.
 //!
+//! - `DELETE /api/artifacts/{id}/publication`: the owner unpublishes a `site` published by
+//!   `hqc_publish` ([`crate::publish`], since SPEC 0.190); `GET /api/artifacts/{id}` shows its
+//!   `public_url` while it is published.
+//!
 //! Cleanup (T21, [`cleanup`]): once a day artifacts no event refers to and not used for
 //! `HQC_ARTIFACT_RETENTION_DAYS` are deleted; a file goes when no row has its sha256 any more.
+//! A published artifact is never deleted while its publishing session exists.
 //!
 //! Every content response carries [`content_headers`]: a `sandbox` CSP, `nosniff` and a
 //! `Content-Disposition` by kind. HTML is inline only on a separate artifact domain;
@@ -71,10 +76,13 @@ pub struct ArtifactRow {
     pub name: String,
     pub storage_key: String,
     pub created_at: DateTime<Utc>,
+    /// Set while a `site` is published (SPEC 0.190), with its `public_id`.
+    pub published_at: Option<DateTime<Utc>>,
+    pub public_id: Option<String>,
 }
 
-const COLS: &str =
-    "id, owner_id, session_id, kind, mime, size, sha256, name, storage_key, created_at";
+const COLS: &str = "id, owner_id, session_id, kind, mime, size, sha256, name, storage_key, \
+                    created_at, published_at, public_id";
 
 impl ArtifactRow {
     pub fn kind(&self) -> ArtifactKind {
@@ -91,6 +99,7 @@ impl ArtifactRow {
             size: self.size.max(0) as u64,
             sha256: self.sha256.clone(),
             created_at: self.created_at,
+            public_url: None,
         }
     }
 }
@@ -103,16 +112,22 @@ pub async fn artifact(db: &PgPool, id: Uuid) -> sqlx::Result<Option<ArtifactRow>
 }
 
 /// Insert, or the row the owner already has with this content and name (`false`); with
-/// `set_kind` that row takes the kind of `a`, one the upload named.
+/// `set_kind` that row takes the kind of `a`, one the upload named. A `site` is always a row
+/// of its own (SPEC 0.190): each publication is unpublished apart.
 async fn insert_artifact(
     db: &PgPool,
     a: &ArtifactRow,
     set_kind: bool,
 ) -> sqlx::Result<(ArtifactRow, bool)> {
+    let conflict = if a.kind == "site" {
+        ""
+    } else {
+        "ON CONFLICT (owner_id, sha256, name) WHERE kind <> 'site' DO NOTHING"
+    };
     let new: Option<ArtifactRow> = sqlx::query_as(&format!(
         "INSERT INTO artifacts (id, owner_id, kind, mime, size, sha256, name, storage_key)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (owner_id, sha256, name) DO NOTHING
+         {conflict}
          RETURNING {COLS}"
     ))
     .bind(a.id)
@@ -132,7 +147,7 @@ async fn insert_artifact(
     // old one, which would otherwise drop it without a word (SPEC 0.128).
     let old = sqlx::query_as(&format!(
         "UPDATE artifacts SET updated_at = now(), kind = CASE WHEN $4 THEN $5 ELSE kind END
-         WHERE owner_id = $1 AND sha256 = $2 AND name = $3 RETURNING {COLS}"
+         WHERE owner_id = $1 AND sha256 = $2 AND name = $3 AND kind <> 'site' RETURNING {COLS}"
     ))
     .bind(a.owner_id)
     .bind(&a.sha256)
@@ -181,8 +196,12 @@ pub async fn attach_to_session(
     .bind(session_id)
     .execute(db)
     .await?;
+    // A site keeps the session that published it: once that session is deleted its link is
+    // down for good, and an input of another session does not bring it back (SPEC 0.190).
     sqlx::query(
-        "UPDATE artifacts SET session_id = coalesce(session_id, $2), updated_at = now()
+        "UPDATE artifacts SET session_id = CASE WHEN kind = 'site' THEN session_id
+                                               ELSE coalesce(session_id, $2) END,
+                              updated_at = now()
          WHERE id = ANY($1)",
     )
     .bind(ids)
@@ -308,7 +327,7 @@ pub fn clean_name(raw: &str) -> String {
     }
 }
 
-fn blob_path(cfg: &ArtifactConfig, sha: &str) -> PathBuf {
+pub(crate) fn blob_path(cfg: &ArtifactConfig, sha: &str) -> PathBuf {
     cfg.dir.join(&sha[..2]).join(sha)
 }
 
@@ -464,7 +483,9 @@ pub async fn cleanup_loop(app: AppState, keep: std::time::Duration) {
 
 /// Deletes artifacts that no event refers to (`user.message.artifact_ids`, `attachment` and
 /// `tool.result` `artifact_id`) and that were not uploaded or used for `keep`; their files go
-/// when no row has the sha256 any more. Returns how many rows went.
+/// when no row has the sha256 any more. A published `site` stays while its publishing session
+/// does (SPEC 0.190): once that session is deleted, it goes as an unpublished one. Returns how
+/// many rows went.
 pub async fn cleanup(app: &AppState, keep: std::time::Duration) -> anyhow::Result<usize> {
     let shas: Vec<String> = sqlx::query_scalar(
         "WITH refs AS (
@@ -475,6 +496,7 @@ pub async fn cleanup(app: &AppState, keep: std::time::Duration) -> anyhow::Resul
              WHERE jsonb_typeof(payload->'artifact_id') = 'string')
          DELETE FROM artifacts a
          WHERE a.updated_at < now() - $1 * interval '1 second'
+           AND (a.published_at IS NULL OR a.session_id IS NULL)
            AND NOT EXISTS (SELECT 1 FROM refs r WHERE r.id = a.id::text)
          RETURNING a.storage_key",
     )
@@ -736,7 +758,14 @@ pub async fn upload(
                     .text()
                     .await
                     .map_err(|e| ApiError::BadRequest(format!("multipart: {}", e.body_text())))?;
-                kind = Some(parse_kind(&v)?);
+                let k = parse_kind(&v)?;
+                // The archive of a publication comes only from `hqc_publish` (SPEC 0.190).
+                if k == ArtifactKind::Site {
+                    return Err(ApiError::BadRequest(
+                        "kind: site is the archive of hqc_publish".into(),
+                    ));
+                }
+                kind = Some(k);
             }
             // Unknown fields are ignored (SPEC §6).
             _ => {}
@@ -772,6 +801,12 @@ async fn save(
 ) -> ApiResult<(ArtifactRow, bool)> {
     let named = kind.is_some();
     let kind = kind.unwrap_or_else(|| kind_of(&mime, &name));
+    // The archive of `hqc_publish` is a zip whatever its name says (SPEC 0.190).
+    let mime = if kind == ArtifactKind::Site {
+        "application/zip".to_string()
+    } else {
+        mime
+    };
     let row = ArtifactRow {
         id: db::new_id(),
         owner_id: owner,
@@ -786,6 +821,8 @@ async fn save(
         name,
         storage_key: stored.sha256.clone(),
         created_at: Utc::now(),
+        published_at: None,
+        public_id: None,
     };
     let (row, created) = insert_artifact(&app.db, &row, named).await?;
     place(&app.config.artifacts, stored).await?;
@@ -810,13 +847,39 @@ async fn own(app: &AppState, user: &CurrentUser, id: Uuid) -> ApiResult<Artifact
     }
 }
 
-/// `GET /api/artifacts/{id}`.
+/// `GET /api/artifacts/{id}`; a published `site` with its `public_url` (SPEC 0.190).
 pub async fn meta(
     State(app): State<AppState>,
     user: CurrentUser,
     UrlPath(id): UrlPath<Uuid>,
 ) -> ApiResult<Json<Artifact>> {
-    Ok(Json(own(&app, &user, id).await?.to_api()))
+    let a = own(&app, &user, id).await?;
+    let mut out = a.to_api();
+    out.public_url = crate::publish::public_url(&app, &a).await;
+    Ok(Json(out))
+}
+
+/// `DELETE /api/artifacts/{id}/publication` (SPEC 0.190): the owner unpublishes; the link is
+/// `404` from now on and the artifact is left to the cleanup. Not published: nothing changes.
+pub async fn unpublish(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    UrlPath(id): UrlPath<Uuid>,
+) -> ApiResult<StatusCode> {
+    let a = own(&app, &user, id).await?;
+    let done = sqlx::query(
+        "UPDATE artifacts SET published_at = NULL, public_id = NULL, updated_at = now()
+         WHERE id = $1 AND owner_id = $2 AND published_at IS NOT NULL",
+    )
+    .bind(a.id)
+    .bind(user.id)
+    .execute(&app.db)
+    .await?
+    .rows_affected();
+    if done > 0 {
+        tracing::info!(artifact_id = %a.id, "publication removed by its owner");
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `GET /api/artifacts/{id}/url`.
@@ -877,15 +940,18 @@ pub async fn signed(
 
 /// The request came to the separate artifact domain (`HQC_ARTIFACT_PUBLIC_BASE`).
 pub fn is_artifact_host(cfg: &ArtifactConfig, headers: &HeaderMap) -> bool {
-    let Some(want) = cfg.public_host() else {
-        return false;
-    };
+    cfg.public_host()
+        .is_some_and(|want| host_is(&want, headers))
+}
+
+/// The `Host` of the request is `want` (`host[:port]`, lowercase; `:443` is no port).
+pub(crate) fn host_is(want: &str, headers: &HeaderMap) -> bool {
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(|h| h.trim().to_ascii_lowercase());
     let strip = |h: String| h.strip_suffix(":443").map(String::from).unwrap_or(h);
-    host.map(strip) == Some(strip(want))
+    host.map(strip) == Some(strip(want.to_string()))
 }
 
 /// A text error for the content routes: they are opened by browsers and `<img>`, not the API.
@@ -1015,6 +1081,19 @@ pub async fn from_worker(
 /// [`crate::security::Budget`] bucket of the bytes a worker uploads.
 const UPLOAD_BYTES: &str = "worker_upload_bytes";
 
+/// The published `site` whose link has `public_id` (SPEC 0.190); not one whose publishing
+/// session is gone (`session_id` null): the publication went with it.
+pub async fn published(db: &PgPool, public_id: &str) -> sqlx::Result<Option<ArtifactRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {COLS} FROM artifacts
+         WHERE public_id = $1 AND published_at IS NOT NULL AND session_id IS NOT NULL
+           AND kind = 'site'"
+    ))
+    .bind(public_id)
+    .fetch_optional(db)
+    .await
+}
+
 /// The artifact was uploaded for `session_id` or given to it in an input.
 pub async fn of_session(db: &PgPool, session_id: Uuid, artifact_id: Uuid) -> sqlx::Result<bool> {
     sqlx::query_scalar(
@@ -1027,7 +1106,7 @@ pub async fn of_session(db: &PgPool, session_id: Uuid, artifact_id: Uuid) -> sql
 }
 
 /// Inverse of [`pct`]; an invalid sequence stays as it is.
-fn pct_decode(s: &str) -> String {
+pub(crate) fn pct_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -1156,6 +1235,8 @@ mod tests {
             name: name.into(),
             storage_key: String::new(),
             created_at: Utc::now(),
+            published_at: None,
+            public_id: None,
         }
     }
 

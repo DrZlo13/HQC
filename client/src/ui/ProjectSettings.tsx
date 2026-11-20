@@ -15,7 +15,7 @@ import { colorLabel } from '../theme';
 import { AppearanceDialog, ProjectGlyph, projectName } from './Appearance';
 import { useSubscription } from './hooks';
 import { IconBack, IconCross, IconPlus, IconShield } from './icons';
-import { homePath } from './labels';
+import { UNPUBLISH_PROJECT, homePath } from './labels';
 import { atWorkAfterTurn } from './sessions';
 
 /** How often the list is read again while a clone runs (T45). */
@@ -83,7 +83,8 @@ function making(w: Workspace): { tag: string; failed: string; note: string } {
  *  refusal of the hub rejects. From the project settings and the session column's "⋯". */
 export async function confirmDeleteProject(app: AppState, project: Project): Promise<void> {
   const n = [...app.sessions.values()].filter((s) => s.project_id === project.id).length;
-  if (!confirm(`Delete project “${project.name}” and its sessions (${n})? The folders on the workers stay.`)) return;
+  const what = `Delete project “${project.name}” and its sessions (${n})? The folders on the workers stay.`;
+  if (!confirm(`${what} ${UNPUBLISH_PROJECT}`)) return;
   await app.deleteProject(project.id);
   goUp('#/');
 }

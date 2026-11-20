@@ -54,6 +54,9 @@ pub struct Inner {
     pub budget: Budget,
     /// Searches running at once (SPEC §15, §20).
     pub searches: Arc<Semaphore>,
+    /// Published files being streamed at once, each on a blocking thread
+    /// ([`crate::publish::MAX_STREAMS`], SPEC §12, §20).
+    pub publish_streams: Arc<Semaphore>,
     /// Worker -> the moves the owner allowed whose result the previous hub process did not
     /// store, found on start and carried out once that worker says `hello` ([`crate::moves`]).
     pub left_moves: Mutex<HashMap<Uuid, Vec<crate::db::PendingRow>>>,
@@ -161,6 +164,7 @@ impl AppState {
             clock: Default::default(),
             budget: Budget::default(),
             searches: Arc::new(Semaphore::new(config.limits.search_concurrency)),
+            publish_streams: Arc::new(Semaphore::new(crate::publish::MAX_STREAMS)),
             left_moves: Mutex::new(HashMap::new()),
             limits: Mutex::new(HashMap::new()),
             owner_locks: Mutex::new(HashMap::new()),

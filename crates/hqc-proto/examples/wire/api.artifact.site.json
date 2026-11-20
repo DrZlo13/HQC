@@ -1,0 +1,10 @@
+{
+  "id": "0199f3a2-7c10-7000-8000-0000000000f4",
+  "kind": "site",
+  "name": "report",
+  "mime": "application/zip",
+  "size": 31842,
+  "sha256": "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b",
+  "created_at": "2026-11-08T10:00:00Z",
+  "public_url": "https://view.example.net/5f1c8e0a9b2d4c6e8f0a1b3c5d7e9f21/"
+}

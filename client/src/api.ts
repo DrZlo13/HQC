@@ -592,6 +592,11 @@ export class Api {
     return parseArtifact(await this.req('GET', `/api/artifacts/${enc(id)}`));
   }
 
+  /** `DELETE /api/artifacts/{id}/publication`: the owner unpublishes a `site` (SPEC 0.190). */
+  async unpublishArtifact(id: string): Promise<void> {
+    await this.req('DELETE', `/api/artifacts/${enc(id)}/publication`);
+  }
+
   /** A signed link, valid for 10 minutes (SPEC §12). */
   async artifactLink(id: string): Promise<ArtifactUrl> {
     return parseArtifactUrl(await this.req('GET', `/api/artifacts/${enc(id)}/url`));

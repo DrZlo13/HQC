@@ -163,6 +163,9 @@ pub enum ArtifactKind {
     Diff,
     Html,
     Text,
+    /// A zip of a page and its files, or of one file, that `hqc_publish` publishes by a
+    /// public link (since SPEC 0.190).
+    Site,
     #[serde(other)]
     Unknown,
 }
@@ -1038,6 +1041,31 @@ mod tests {
             subagent.as_ref().map(|s| s.task_id.as_str()),
             Some("a52af2b436ded4cea")
         );
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+    }
+
+    /// SPEC 0.190: the attachment of a published page (`kind: site`) and the hub's card that
+    /// asks the owner to allow `hqc_publish`.
+    #[test]
+    fn publication_events_roundtrip() {
+        let src = include_str!("../examples/wire/event.attachment.site.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(
+            e.kind,
+            EventKind::Attachment {
+                kind: ArtifactKind::Site,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let src = include_str!("../examples/wire/event.approval.request.publish.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::ApprovalRequest { tool, .. } = &e.kind else {
+            panic!("not approval.request: {:?}", e.kind);
+        };
+        assert_eq!(tool, crate::mcp::PUBLISH);
         assert_eq!(serde_json::to_value(&e).unwrap(), wire);
     }
 

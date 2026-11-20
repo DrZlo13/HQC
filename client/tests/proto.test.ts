@@ -372,6 +372,12 @@ describe('examples/wire', () => {
     });
     expect(parseWorkspaceConflict(load('api.error.json'))).toBeNull();
     expect(parseArtifact(load('api.artifact.json'))).toMatchObject({ kind: 'image', name: 'screen.png', size: 48213 });
+    expect(parseArtifact(load('api.artifact.json')).public_url).toBeUndefined();
+    // SPEC 0.190: a published `site` and its public link.
+    expect(parseArtifact(load('api.artifact.site.json'))).toMatchObject({
+      kind: 'site',
+      public_url: 'https://view.example.net/5f1c8e0a9b2d4c6e8f0a1b3c5d7e9f21/',
+    });
     expect(parseArtifactUrl(load('api.artifact.url.json')).url).toMatch(/^https:\/\/artifacts\./);
     // T15: candidates for the import from Claude Code; a mirrored workspace.
     expect(parseCandidateList(load('api.candidates.json')).map((c) => c.sessions_count)).toEqual([3, 41]);

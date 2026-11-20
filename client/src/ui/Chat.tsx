@@ -44,7 +44,7 @@ const losesScrollInGesture = () => {
 /** The signed links of all chats of the page, one map: a chat opened again gets the same links
  *  while they live, and the browser shows its images from its cache. Emptied whenever the
  *  hub's socket opens: a hub restarted without `HQC_ARTIFACT_KEY` signs with a new key. The
- *  metadata stays per chat opened. */
+ *  metadata stays per chat opened (a page unpublished elsewhere shows so on the next open). */
 const linkCaches = new WeakMap<AppState, LinkCache>();
 function sharedLinks(app: AppState): LinkCache {
   let links = linkCaches.get(app);

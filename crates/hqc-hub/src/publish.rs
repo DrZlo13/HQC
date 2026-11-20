@@ -23,7 +23,8 @@
 //!   its `index.html`; anything else, or an artifact no longer published, is `404`.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
+    io::{self, BufReader, Read, Seek, SeekFrom},
     path::Path,
     time::Duration,
 };
@@ -174,18 +175,112 @@ async fn inspect_blob(
         .map_err(internal)
 }
 
+/// The most a central directory of [`MAX_SITE_FILES`] records may take: 46 bytes of header and
+/// the name of each (a record carries no extra field and no comment).
+const MAX_DIRECTORY: u64 = (MAX_SITE_FILES * (46 + MAX_SITE_NAME)) as u64;
+
+/// The refusal for an end record or a directory that is not the plain one a worker writes.
+const NOT_PLAIN: &str =
+    "its end record and central directory are not the plain ones a worker writes";
+
+/// Checks the end record and the central directory of the archive at `path` before the zip
+/// reader sees them, and returns the number of records in the directory and where it starts.
+/// The reader takes every record the end record declares into memory, keeps one per name, and
+/// copies a record's whole extra field once per zip64 block in it (a 64 KB field of empty
+/// blocks costs it about a gigabyte of copying); when it fails on a directory it searches the
+/// file for an earlier end record and reads that one's directory instead. Whatever a worker
+/// uploads is checked here first, and the same reader then runs on every request for a
+/// published link.
+///
+/// The end record must be the last 22 bytes of the file (no comment, one disk, no zip64: the
+/// reader's search for it then finds this one, and never takes the zip64 path), the directory
+/// must end right where it starts and be no larger than [`MAX_DIRECTORY`], and each of its
+/// records must have a name of at most [`MAX_SITE_NAME`] bytes, no extra field, no comment and
+/// a stored or deflated method: the reader then has nothing in the directory to fail on, as an
+/// archive the worker packs has nothing of the kind.
+fn check_directory(path: &Path) -> Result<(usize, u64), String> {
+    const END: u64 = 22;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("cannot open it: {e}"))?;
+    let len = f
+        .metadata()
+        .map_err(|e| format!("cannot read it: {e}"))?
+        .len();
+    let not_zip = |e: io::Error| format!("not a zip archive: {e}");
+    if len < END {
+        return Err("not a zip archive: shorter than an end record".into());
+    }
+    f.seek(SeekFrom::Start(len - END)).map_err(not_zip)?;
+    let mut end = [0u8; END as usize];
+    f.read_exact(&mut end).map_err(not_zip)?;
+    let u16_at = |b: &[u8], at: usize| u16::from_le_bytes([b[at], b[at + 1]]);
+    let u32_at =
+        |b: &[u8], at: usize| u32::from(u16_at(b, at)) | u32::from(u16_at(b, at + 2)) << 16;
+    if end[..4] != [b'P', b'K', 5, 6] {
+        return Err("not a zip archive: no end record".into());
+    }
+    let (entries, total) = (usize::from(u16_at(&end, 8)), usize::from(u16_at(&end, 10)));
+    if total > MAX_SITE_FILES {
+        return Err(format!("more than {MAX_SITE_FILES} entries"));
+    }
+    let (size, start) = (u64::from(u32_at(&end, 12)), u64::from(u32_at(&end, 16)));
+    if u16_at(&end, 4) != 0
+        || u16_at(&end, 6) != 0
+        || entries != total
+        || u16_at(&end, 20) != 0
+        || start.checked_add(size) != Some(len - END)
+        || size > MAX_DIRECTORY
+    {
+        return Err(NOT_PLAIN.into());
+    }
+    f.seek(SeekFrom::Start(start)).map_err(not_zip)?;
+    let mut f = BufReader::new(f);
+    let mut head = [0u8; 46];
+    for _ in 0..total {
+        if f.read_exact(&mut head).is_err() || head[..4] != [b'P', b'K', 1, 2] {
+            return Err(NOT_PLAIN.into());
+        }
+        let (name, extra, comment) = (
+            usize::from(u16_at(&head, 28)),
+            usize::from(u16_at(&head, 30)),
+            usize::from(u16_at(&head, 32)),
+        );
+        if name > MAX_SITE_NAME {
+            return Err(format!("a name is over {MAX_SITE_NAME} bytes"));
+        }
+        if extra != 0 || comment != 0 {
+            return Err("a record has an extra field or a comment".into());
+        }
+        if !matches!(u16_at(&head, 10), 0 | 8) {
+            return Err("a record is neither stored nor deflated".into());
+        }
+        f.seek_relative(name as i64).map_err(not_zip)?;
+    }
+    match f.stream_position() {
+        Ok(at) if at == start + size => Ok((total, start)),
+        _ => Err(NOT_PLAIN.into()),
+    }
+}
+
 /// Opens a published archive with the limits of SPEC §20: a zip of at most [`MAX_SITE_FILES`]
 /// entries, at most [`MAX_SITE_UNPACKED`] bytes unpacked together (a zip bomb stops here),
 /// names of at most [`MAX_SITE_NAME`] bytes, relative, without `.` or `..` components, without
 /// control characters or bidirectional controls (they are shown on the card), each once;
 /// stored or deflated, not encrypted, no links; `index.html` at the top, or a single file.
+/// The end record and the directory are checked first ([`check_directory`]), so the zip reader
+/// only ever reads a bounded, plain directory; a reader that opened a directory starting
+/// elsewhere is refused, and as it keeps one record per name, fewer entries than records means
+/// a name is in the directory more than once.
 pub fn inspect(path: &Path) -> Result<Site, String> {
+    let (records, start) = check_directory(path)?;
     let f = std::fs::File::open(path).map_err(|e| format!("cannot open it: {e}"))?;
     let mut z = zip::ZipArchive::new(f).map_err(|e| format!("not a zip archive: {e}"))?;
-    if z.len() > MAX_SITE_FILES {
-        return Err(format!("more than {MAX_SITE_FILES} entries"));
+    if z.central_directory_start() != start {
+        return Err(NOT_PLAIN.into());
     }
-    let (mut files, mut unpacked, mut seen) = (Vec::new(), 0u64, HashSet::new());
+    if z.len() != records {
+        return Err("a name is in it more than once".into());
+    }
+    let (mut files, mut unpacked) = (Vec::new(), 0u64);
     for i in 0..z.len() {
         let e = z.by_index_raw(i).map_err(|e| format!("entry {i}: {e}"))?;
         let name = e.name().to_string();
@@ -193,9 +288,6 @@ pub fn inspect(path: &Path) -> Result<Site, String> {
             return Err(format!("a name is over {MAX_SITE_NAME} bytes"));
         }
         check_name(&name, e.is_dir())?;
-        if !seen.insert(name.clone()) {
-            return Err(format!("{name} is in it twice"));
-        }
         if e.encrypted() || e.is_symlink() {
             return Err(format!("{name} is encrypted or a link"));
         }

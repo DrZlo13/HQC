@@ -1044,3 +1044,137 @@ async fn an_allowed_publication_is_carried_out_after_a_hub_restart() {
     }
     hub.finish().await;
 }
+
+/// The local header of the one empty stored `index.html` of the hand-written archives below
+/// (the CRC-32 of nothing is 0). The crate's writer refuses a repeated name, so their bytes
+/// are written by hand.
+fn local_index() -> Vec<u8> {
+    let name = b"index.html";
+    let mut z = Vec::new();
+    z.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+    z.extend_from_slice(&[10, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // version, flags, stored, time, date
+    z.extend_from_slice(&[0; 12]); // CRC-32, compressed and uncompressed size
+    z.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    z.extend_from_slice(&[0, 0]); // extra field length
+    z.extend_from_slice(name);
+    z
+}
+
+/// A central directory starting at `at` with one record per `names`, each with compression
+/// `method` and `extra` bytes of empty zip64 blocks as its extra field, all pointing at the
+/// local header at offset 0, and its end record.
+fn directory(names: &[String], extra: usize, method: u16, at: usize) -> Vec<u8> {
+    let mut z = Vec::new();
+    for n in names {
+        z.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        z.extend_from_slice(&[10, 0, 10, 0, 0, 0]); // versions, flags
+        z.extend_from_slice(&method.to_le_bytes());
+        z.extend_from_slice(&[0; 4]); // time, date
+        z.extend_from_slice(&[0; 12]); // CRC-32, sizes
+        z.extend_from_slice(&(n.len() as u16).to_le_bytes());
+        z.extend_from_slice(&(extra as u16).to_le_bytes());
+        z.extend_from_slice(&[0; 6]); // comment length, disk, internal attributes
+        z.extend_from_slice(&[0; 4]); // external attributes
+        z.extend_from_slice(&0u32.to_le_bytes()); // offset of the local header
+        z.extend_from_slice(n.as_bytes());
+        z.extend_from_slice(&[1, 0, 0, 0].repeat(extra / 4));
+    }
+    let size = z.len() as u32;
+    z.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    z.extend_from_slice(&[0; 4]); // disk numbers
+    z.extend_from_slice(&(names.len() as u16).to_le_bytes());
+    z.extend_from_slice(&(names.len() as u16).to_le_bytes());
+    z.extend_from_slice(&size.to_le_bytes());
+    z.extend_from_slice(&(at as u32).to_le_bytes());
+    z.extend_from_slice(&[0, 0]); // comment length
+    z
+}
+
+/// A zip of the one `index.html` whose central directory has one stored record per `names`.
+fn zip_with_directory(names: &[String], extra: usize) -> Vec<u8> {
+    let mut z = local_index();
+    let at = z.len();
+    z.extend(directory(names, extra, 0, at));
+    z
+}
+
+/// What `inspect` says of these archive bytes.
+fn inspected_bytes(bytes: &[u8]) -> Result<hqc_hub::publish::Site, String> {
+    let path = std::env::temp_dir().join(format!("hqc-inspect-{}.zip", Uuid::new_v4()));
+    std::fs::write(&path, bytes).unwrap();
+    let r = hqc_hub::publish::inspect(&path);
+    std::fs::remove_file(&path).unwrap();
+    r
+}
+
+/// What `inspect` says of the archive with these central directory names.
+fn inspected(names: &[String]) -> Result<hqc_hub::publish::Site, String> {
+    inspected_bytes(&zip_with_directory(names, 0))
+}
+
+#[test]
+fn a_directory_that_repeats_a_name_is_refused() {
+    let one = || "index.html".to_string();
+    assert!(inspected(&[one()]).is_ok());
+    let e = inspected(&[one(), one()]).unwrap_err();
+    assert!(e.contains("more than once"), "{e}");
+}
+
+#[test]
+fn a_directory_of_more_records_than_the_limit_is_refused() {
+    let names = vec!["index.html".to_string(); hqc_proto::mcp::MAX_SITE_FILES + 1];
+    let e = inspected(&names).unwrap_err();
+    assert!(
+        e.contains(&format!(
+            "more than {} entries",
+            hqc_proto::mcp::MAX_SITE_FILES
+        )),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_record_with_a_large_extra_field_is_refused() {
+    let e = inspected_bytes(&zip_with_directory(&["index.html".to_string()], 65_532)).unwrap_err();
+    assert!(e.contains("an extra field or a comment"), "{e}");
+}
+
+/// The zip reader, failing on the last directory, reads the one of an earlier end record: here
+/// the last one's record has the AES method without its extra field, and a directory nobody
+/// checked lies before it.
+#[test]
+fn a_directory_the_reader_would_fail_on_is_refused() {
+    let names = ["index.html".to_string()];
+    let mut z = local_index();
+    let hidden = z.len();
+    z.extend(directory(&names, 0, 0, hidden));
+    let last = z.len();
+    z.extend(directory(&names, 0, 99, last));
+    let e = inspected_bytes(&z).unwrap_err();
+    assert!(e.contains("neither stored nor deflated"), "{e}");
+}
+
+/// An archive packed as the worker packs it (`write_zip` in the worker's `mcp/publish.rs`), at
+/// the limits, passes.
+#[test]
+fn an_archive_at_the_limits_is_published() {
+    let path = std::env::temp_dir().join(format!("hqc-inspect-{}.zip", Uuid::new_v4()));
+    let mut z = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    let o = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(zip::DateTime::default())
+        .unix_permissions(0o644);
+    let max = hqc_proto::mcp::MAX_SITE_FILES;
+    for i in 0..max {
+        let name = if i == 0 {
+            "index.html".to_string()
+        } else {
+            format!("{i:05}{}", "a".repeat(hqc_proto::mcp::MAX_SITE_NAME - 5))
+        };
+        z.start_file(name, o).unwrap();
+    }
+    z.finish().unwrap();
+    let site = hqc_hub::publish::inspect(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(site.files.len(), max);
+}

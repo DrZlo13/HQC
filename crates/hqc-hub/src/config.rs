@@ -46,6 +46,10 @@ pub struct ArtifactConfig {
     /// `HQC_ARTIFACT_RETENTION_DAYS` (T21, default 30, `0` off): artifacts no event refers to
     /// and unused for this long are removed by a daily cleanup.
     pub retention: Option<Duration>,
+    /// `HQC_PUBLISH_BASE` (since SPEC 0.190): origin of the domain published pages are served on
+    /// (`https://view.example.net`), outside Cloudflare Access and apart from the hub and the
+    /// artifact domain. `None`: `hqc_publish` is unavailable.
+    pub publish_base: Option<String>,
 }
 
 pub const DEFAULT_ARTIFACT_RETENTION_DAYS: u64 = 30;
@@ -77,15 +81,24 @@ impl ArtifactConfig {
             retention: Some(Duration::from_secs(
                 DEFAULT_ARTIFACT_RETENTION_DAYS * 86_400,
             )),
+            publish_base: None,
         }
     }
 
     /// `host[:port]` of [`Self::public_base`], lowercase.
     pub fn public_host(&self) -> Option<String> {
-        let b = self.public_base.as_deref()?;
-        let rest = b.split_once("://")?.1;
-        Some(rest.trim_end_matches('/').to_ascii_lowercase())
+        host_of(self.public_base.as_deref()?)
     }
+
+    /// `host[:port]` of [`Self::publish_base`], lowercase.
+    pub fn publish_host(&self) -> Option<String> {
+        host_of(self.publish_base.as_deref()?)
+    }
+}
+
+fn host_of(base: &str) -> Option<String> {
+    let rest = base.split_once("://")?.1;
+    Some(rest.trim_end_matches('/').to_ascii_lowercase())
 }
 
 /// `https://host`, or `http://` to a loopback host, without a user before the host; a path may
@@ -108,12 +121,39 @@ fn is_https_or_loopback(url: &str) -> bool {
 
 /// `HQC_ARTIFACT_PUBLIC_BASE`: `https://host[:port]` (or `http://` on loopback), no path.
 pub fn artifact_public_base(v: &str) -> anyhow::Result<String> {
+    origin_base("HQC_ARTIFACT_PUBLIC_BASE", v)
+}
+
+/// `HQC_PUBLISH_BASE`: as [`artifact_public_base`].
+pub fn publish_base(v: &str) -> anyhow::Result<String> {
+    origin_base("HQC_PUBLISH_BASE", v)
+}
+
+fn origin_base(name: &str, v: &str) -> anyhow::Result<String> {
     let v = v.trim().trim_end_matches('/');
     let host = v.split_once("://").map(|x| x.1).unwrap_or("");
     if !is_https_or_loopback(v) || host.contains(['/', '?', '#', '@']) {
-        bail!("HQC_ARTIFACT_PUBLIC_BASE={v}: expected https://host[:port] (http only on loopback), without a path");
+        bail!("{name}={v}: expected https://host[:port] (http only on loopback), without a path");
     }
     Ok(v.to_string())
+}
+
+/// The publication domain is none of the hub's own (SPEC §12): not the artifact domain, not an
+/// origin of `HQC_PUBLIC_ORIGINS`.
+fn check_publish_base(a: &ArtifactConfig, public_origins: &[String]) -> anyhow::Result<()> {
+    let Some(host) = a.publish_host() else {
+        return Ok(());
+    };
+    if a.public_host().as_deref() == Some(host.as_str()) {
+        bail!("HQC_PUBLISH_BASE: the publication domain must not be the artifact domain");
+    }
+    if public_origins
+        .iter()
+        .any(|o| host_of(o).as_deref() == Some(host.as_str()))
+    {
+        bail!("HQC_PUBLISH_BASE: the publication domain must not be the hub's own");
+    }
+    Ok(())
 }
 
 /// Limits of the unauthenticated `/worker/*` routes and of push subscriptions (SPEC §20).
@@ -320,8 +360,8 @@ impl Config {
     /// `HQC_OIDC_ALLOWED_EMAILS`, `HQC_DEV`, `HQC_DEV_USER`, `HQC_VAPID_PRIVATE`,
     /// `HQC_VAPID_PUBLIC`, `HQC_VAPID_SUBJECT`, `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`,
     /// `HQC_ARTIFACT_DIR`, `HQC_ARTIFACT_PUBLIC_BASE`, `HQC_ARTIFACT_KEY`,
-    /// `HQC_ARTIFACT_RETENTION_DAYS`, `HQC_PUBLIC_ORIGINS`, `HQC_CLIENT_IP_HEADER`,
-    /// `HQC_MIRROR_SESSIONS_PER_DAY`.
+    /// `HQC_ARTIFACT_RETENTION_DAYS`, `HQC_PUBLISH_BASE`, `HQC_PUBLIC_ORIGINS`,
+    /// `HQC_CLIENT_IP_HEADER`, `HQC_MIRROR_SESSIONS_PER_DAY`.
     pub fn from_env() -> anyhow::Result<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let database_url = var("HQC_DATABASE_URL").context("HQC_DATABASE_URL is not set")?;
@@ -363,6 +403,11 @@ impl Config {
             artifacts.key = k.into_bytes();
         }
         artifacts.retention = retention_from(var("HQC_ARTIFACT_RETENTION_DAYS").as_deref())?;
+        artifacts.publish_base = var("HQC_PUBLISH_BASE")
+            .map(|v| publish_base(&v))
+            .transpose()?;
+        let public_origins = public_origins(var("HQC_PUBLIC_ORIGINS").as_deref())?;
+        check_publish_base(&artifacts, &public_origins)?;
         std::fs::create_dir_all(&artifacts.dir).with_context(|| {
             format!(
                 "HQC_ARTIFACT_DIR={}: cannot create",
@@ -387,7 +432,7 @@ impl Config {
                 ..Limits::default()
             },
             artifacts,
-            public_origins: public_origins(var("HQC_PUBLIC_ORIGINS").as_deref())?,
+            public_origins,
             client_ip_header: var("HQC_CLIENT_IP_HEADER")
                 .map(|v| {
                     axum::http::HeaderName::from_bytes(v.trim().as_bytes())
@@ -597,6 +642,33 @@ mod tests {
         let mut c = ArtifactConfig::new("x".into());
         c.public_base = Some("https://Artifacts.example.com:8443".into());
         assert_eq!(c.public_host().unwrap(), "artifacts.example.com:8443");
+    }
+
+    /// SPEC 0.190: `HQC_PUBLISH_BASE` takes an origin as `HQC_ARTIFACT_PUBLIC_BASE` does, and is
+    /// neither the artifact domain nor the hub's.
+    #[test]
+    fn publish_base_variable() {
+        assert_eq!(
+            publish_base("https://View.example.net/").unwrap(),
+            "https://View.example.net"
+        );
+        for bad in [
+            "http://view.example.net",
+            "https://view.example.net/p",
+            "view.example.net",
+        ] {
+            let e = publish_base(bad).unwrap_err().to_string();
+            assert!(e.starts_with("HQC_PUBLISH_BASE="), "{e}");
+        }
+        let mut c = ArtifactConfig::new("x".into());
+        c.publish_base = Some("https://View.example.net".into());
+        assert_eq!(c.publish_host().unwrap(), "view.example.net");
+        assert!(check_publish_base(&c, &[]).is_ok());
+        c.public_base = Some("https://view.example.net".into());
+        assert!(check_publish_base(&c, &[]).is_err());
+        c.public_base = Some("https://artifacts.example.com".into());
+        assert!(check_publish_base(&c, &["https://view.example.net".into()]).is_err());
+        assert!(check_publish_base(&c, &["https://hqc.example.com".into()]).is_ok());
     }
 
     const OIDC: [(&str, &str); 5] = [

@@ -1417,12 +1417,13 @@ pub async fn expire(app: &AppState) -> anyhow::Result<()> {
 
 /// `mcp.cancel` from `worker_id`: an open ask of that call is closed and the asking
 /// session gets `system ask_cancelled`; the target's turn goes on (SPEC §5.2). An open request
-/// of an `hqc_move` that waits for the owner gets `approval.cancel {stopped}`, and nothing
-/// moves (SPEC §7, §10.1). A fast call has nothing open here.
+/// of an `hqc_move` or an `hqc_publish` that waits for the owner gets `approval.cancel
+/// {stopped}`, and nothing moves or is published (SPEC §7, §10.1). A fast call has nothing open
+/// here.
 pub async fn cancelled(app: &AppState, worker_id: Uuid, c: &McpCancel) -> anyhow::Result<()> {
     let open: Option<PendingRow> = sqlx::query_as(&format!(
         "SELECT {ASK_COLS} FROM pending_requests
-         WHERE kind IN ('ask', 'move', 'secret') AND request_id = $1 AND worker_id = $2
+         WHERE kind IN ('ask', 'move', 'secret', 'publish') AND request_id = $1 AND worker_id = $2
            AND closed_at IS NULL"
     ))
     .bind(&c.request_id)
@@ -1430,7 +1431,10 @@ pub async fn cancelled(app: &AppState, worker_id: Uuid, c: &McpCancel) -> anyhow
     .fetch_optional(&app.db)
     .await?;
     let Some(p) = open else { return Ok(()) };
-    if p.kind == crate::moves::KIND || p.kind == crate::secrets::KIND {
+    if p.kind == crate::moves::KIND
+        || p.kind == crate::publish::KIND
+        || p.kind == crate::secrets::KIND
+    {
         // Without a frame, as the ask: nobody waits for the call's result.
         return requests::cancel_without_frame(app, &p, CancelReason::Stopped).await;
     }
@@ -1483,13 +1487,13 @@ pub async fn worker_restarted(app: &AppState, worker_id: Uuid) -> anyhow::Result
     Ok(())
 }
 
-/// Answers to asks and to `hqc_move`s that asked the owner (SPEC §7) of `worker_id` it has not
-/// acknowledged: sent after `hello`, no `session.start` needed (the worker routes `mcp.result`
+/// Answers to asks and to `hqc_move`s and `hqc_publish`es that asked the owner (SPEC §7) of
+/// `worker_id` it has not acknowledged: sent after `hello`, no `session.start` needed (the worker routes `mcp.result`
 /// itself).
 pub async fn after_hello(app: &AppState, worker_id: Uuid) -> anyhow::Result<()> {
     let rows: Vec<PendingRow> = sqlx::query_as(&format!(
         "SELECT {ASK_COLS} FROM pending_requests
-         WHERE kind IN ('ask', 'move', 'secret') AND worker_id = $1 AND result IS NOT NULL
+         WHERE kind IN ('ask', 'move', 'secret', 'publish') AND worker_id = $1 AND result IS NOT NULL
            AND result_delivered_at IS NULL
          ORDER BY closed_at"
     ))

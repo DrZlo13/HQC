@@ -164,8 +164,9 @@ describe('the hover buttons', () => {
     expect(r).toMatch(/position: absolute;/);
     expect(r).toMatch(/right: 100%;/);
     expect(rule('.msg-bubble > .msg-time')).toMatch(/position: relative;/);
-    // A bubble with them holds them; on a touch screen they are in the line's flow.
-    expect(rule('.msg-bubble-acts')).toMatch(/min-width: 7\.5em;/);
+    // A bubble with them holds all three (copy, add to quick messages, fork); on a touch screen
+    // they are in the line's flow.
+    expect(rule('.msg-bubble-acts')).toMatch(/min-width: calc\(7\.5em \+ 20px\);/);
     expect(CSS).toMatch(/@media \(hover: none\) \{\s*\.msg-time-actions \{\s*position: static;/);
     expect(CSS).toMatch(/\n\.feed-block:hover \.msg-time-actions,\s*\.msg-time-actions:focus-within \{\s*opacity: 1;/);
     expect(rule('.chat:not(.chat-phone) .msg-time-actions .btn-copy-idle')).toMatch(/height: 18px;/);
@@ -180,6 +181,17 @@ describe('the hover buttons', () => {
       expect(root.querySelector('.msg-time-actions')).toBeNull();
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+
+  it('add to quick messages where fork is: not on a message waiting for delivery or not delivered', () => {
+    const quickMessages = { has: () => false, add: vi.fn(async () => {}) };
+    const labels = () => [...root.querySelectorAll('.msg-user .msg-time-actions button')].map((b) => b.getAttribute('aria-label'));
+    show([user(1, 'go')], { fork: vi.fn(), quickMessages });
+    expect(labels()).toEqual(['Copy', 'Add to quick messages', 'Fork from here']);
+    for (const delivery of ['pending', 'failed']) {
+      show([user(1, 'go', (e) => (e.delivery = delivery))], { fork: vi.fn(), quickMessages });
+      expect(labels()).toEqual(['Copy']);
     }
   });
 

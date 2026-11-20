@@ -3208,9 +3208,10 @@ select.input {
   opacity: 1;
   pointer-events: auto;
 }
-/* A bubble with them is wide enough to hold them, a one-word message too. */
+/* A bubble with them is wide enough to hold them, a one-word message too: 7.5em held copy and
+   fork, each further button is 20 px (18 px and the gap). */
 .msg-bubble-acts {
-  min-width: 7.5em;
+  min-width: calc(7.5em + 20px);
 }
 /* A touch screen as wide as a computer's has no hover: the buttons stay, in the line's flow so
    they cover no text. */
@@ -7024,6 +7025,14 @@ button.ps-look {
   background: transparent;
   color: var(--muted);
   cursor: progress;
+}
+
+/* A text already among the project's quick messages (or being added): its button waits,
+   without the hover. */
+.btn-copy.btn-to-quick:disabled {
+  background: transparent;
+  color: var(--muted);
+  cursor: default;
 }
 
 /* ---- diffs and paths in markdown (T16) ---- */

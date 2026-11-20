@@ -42,6 +42,7 @@ import {
   IconArrowIn,
   IconArrowOut,
   IconAttach,
+  IconBolt,
   IconCheck,
   IconChevron,
   IconCross,
@@ -151,6 +152,10 @@ export interface ChatActions {
   /** A fork before this message of the user is under way: its time says so, and its fork
    *  button waits. */
   forking?(eventId: string): boolean;
+  /** The project's quick messages (SPEC §6): `has` — the text is in the list, `add` puts it at
+   *  the end and says a refusal itself; absent where the session has no project and where the
+   *  card is shown away from its session. */
+  quickMessages?: { has(text: string): boolean; add(text: string): Promise<void> };
   /** Gives the secret an agent's `hqc_secret` asks for (SPEC 0.147); absent where it cannot
    *  be given (the session's worker does not take secrets). */
   giveSecret?(requestId: string, f: SecretFields): Promise<void>;
@@ -794,8 +799,11 @@ function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'
   // The hub copies the history before it answers, seconds for a long session (SPEC §6).
   const forking = fork && !!actions.forking?.(event.event_id);
   const phone = useIsPhone();
+  // Where fork is: a message waiting for delivery or not delivered keeps its copy button alone.
+  const quick = event.author.kind === 'user' && event.payload.text && d !== 'pending' && d !== 'failed' ? actions.quickMessages : undefined;
   const buttons = (event.payload.text || fork) && [
     event.payload.text && <CopyButton key="copy" text={event.payload.text} icon />,
+    quick && <QuickAddButton key="quick" text={event.payload.text} quick={quick} />,
     fork && (
       <button
         key="fork"
@@ -838,6 +846,25 @@ function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'
       </Bubble>
       {phone && buttons && <MessageActions>{buttons}</MessageActions>}
     </div>
+  );
+}
+
+/** Adds the message's text to the project's quick messages; a text already there is a check. */
+function QuickAddButton({ text, quick }: { text: string; quick: NonNullable<ChatActions['quickMessages']> }) {
+  const { busy, run } = useAction();
+  const has = quick.has(text);
+  const said = has ? 'In quick messages' : 'Add to quick messages';
+  return (
+    <button
+      type="button"
+      class="btn-copy btn-copy-idle btn-to-quick"
+      disabled={busy || has}
+      aria-label={said}
+      title={said}
+      onClick={() => run(() => quick.add(text))}
+    >
+      {has ? <IconCheck /> : <IconBolt size={13} />}
+    </button>
   );
 }
 

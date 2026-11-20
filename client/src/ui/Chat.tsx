@@ -232,6 +232,13 @@ export function Chat({
           )
       : undefined,
     forking: (eventId) => app.forking(eventId),
+    // As the composer's list: not in the service session, which has no composer.
+    quickMessages: project && !system
+      ? {
+          has: (text) => (project.quick_messages ?? []).includes(text),
+          add: (text) => app.addQuickMessage(project.id, text).catch((err: Error) => setNotice(`Not added to quick messages: ${err.message}`)),
+        }
+      : undefined,
     // Where "More" has the model field (SPEC 0.168; a room has none), and not while VS Code
     // holds the session: its message cannot be sent again from here.
     modelSwitch:

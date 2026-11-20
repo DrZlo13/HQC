@@ -1962,6 +1962,66 @@ describe('quick messages', () => {
     expect($('.quick-edit')!.textContent).toBe('No quick messages yet — add them in project settings');
     expect($('.quick-edit a')!.getAttribute('href')).toBe('#/p/p1/settings');
   });
+
+  describe('added from a message', () => {
+    const TEXT = (HISTORY[0] as EventOf<'user.message'>).payload.text;
+    const PROJECT = { id: 'p1', name: 'hqc', slug: 'hqc', description: '', is_personal: false, color: 'teal' as const, created_at: '2026-10-01T00:00:00Z' };
+    /** The kept list is `kept`, the hub's is `hub`; `patchProject` answers with the list sent. */
+    async function chatWith(kept: string[], hub: string[]) {
+      const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+      app.projects.set('p1', { ...PROJECT, quick_messages: kept });
+      Object.assign(api, {
+        project: vi.fn(async () => ({ ...PROJECT, quick_messages: hub })),
+        patchProject: vi.fn(async (_id: string, p: { quick_messages: string[] }) => ({ ...PROJECT, quick_messages: p.quick_messages })),
+      });
+      await mount(app);
+      return api as unknown as { project: ReturnType<typeof vi.fn>; patchProject: ReturnType<typeof vi.fn> };
+    }
+    const button = () => $('.msg-user .btn-to-quick') as HTMLButtonElement;
+    const press = () => act(async () => button().click());
+
+    it('a message of the user has the button between copy and fork; the agent\'s has none', async () => {
+      await chatWith([], []);
+      const acts = [...$('.msg-user .msg-time-actions')!.querySelectorAll('button')];
+      expect(acts.map((b) => b.getAttribute('aria-label'))).toEqual(['Copy', 'Add to quick messages', 'Fork from here']);
+      expect($('.msg-agent .btn-to-quick')).toBeNull();
+    });
+
+    it('adds the text at the end of the hub\'s list, then is a check', async () => {
+      const api = await chatWith(['Continue'], ['Continue', 'Added on the phone']);
+      expect(button().disabled).toBe(false);
+      await press();
+      await vi.waitFor(() => expect(api.patchProject).toHaveBeenCalledTimes(1));
+      expect(api.project).toHaveBeenCalledWith('p1');
+      expect(api.patchProject).toHaveBeenCalledWith('p1', { quick_messages: ['Continue', 'Added on the phone', TEXT] });
+      await vi.waitFor(() => expect(button().getAttribute('aria-label')).toBe('In quick messages'));
+      expect(button().disabled).toBe(true);
+      expect(button().getAttribute('title')).toBe('In quick messages');
+    });
+
+    it('a text already in the list is a check', async () => {
+      await chatWith([TEXT], [TEXT]);
+      expect(button().getAttribute('aria-label')).toBe('In quick messages');
+      expect(button().disabled).toBe(true);
+    });
+
+    it('a text another device added meanwhile sends nothing and is a check', async () => {
+      const api = await chatWith([], [TEXT]);
+      await press();
+      await vi.waitFor(() => expect(button().getAttribute('aria-label')).toBe('In quick messages'));
+      expect(api.patchProject).not.toHaveBeenCalled();
+    });
+
+    it('a refusal of the hub is said, and the button works again', async () => {
+      const api = await chatWith([], []);
+      api.patchProject.mockRejectedValueOnce(new Error('too long'));
+      await press();
+      await vi.waitFor(() => expect(root.textContent).toContain('Not added to quick messages: too long'));
+      expect(button().disabled).toBe(false);
+      await press();
+      await vi.waitFor(() => expect(api.patchProject).toHaveBeenCalledTimes(2));
+    });
+  });
 });
 
 describe('phone (Mobile-Session)', () => {

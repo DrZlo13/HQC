@@ -27,6 +27,7 @@ pub mod error;
 pub mod events;
 pub mod fork;
 pub mod icons;
+pub mod leftovers;
 pub mod mcp;
 pub mod mirror;
 pub mod moves;

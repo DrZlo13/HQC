@@ -25,10 +25,16 @@
 //!   `call_id`, then its `output_file` as
 //!   [`AdapterEvent::TaskOutput`], except for a task with `skip_transcript: true`, a
 //!   task that a subagent started or whose `task_started` said it runs in the foreground,
-//!   until a `task_updated` moves it to the background; one without the subagent's report
-//!   (`handback`) while the latest `background_tasks_changed` still holds the subagent, or a
-//!   task of it, is no end: the latest one is handled when the subagent stops counting
-//!   (below); a task gives one line, a later notification of it none;
+//!   until a `task_updated` moves it to the background; the CLI's placeholder "This agent has
+//!   not reported yet…" without `handback` while the latest `background_tasks_changed` still
+//!   holds the subagent, or a task of it, is no end: the latest one is handled when the
+//!   subagent stops counting (below); any other notification of a subagent is its end, also
+//!   while commands it started still run (2.1.329 sends its report in `summary`, no
+//!   `handback`); a later notification of a task gives a line only when its text differs
+//!   from the one shown, the placeholder never; a subagent that reported while commands it
+//!   started were listed, and that the CLI neither starts again nor rids of them for 30 min,
+//!   → [`AdapterEvent::SubagentLeftovers`] once ([`Core::leftovers`], on the token rate's
+//!   tick);
 //!   `system` `compact_boundary` → `system context_compacted` with the `trigger`, `pre_tokens`
 //!   and `post_tokens` of its `compact_metadata`, held until the summary the CLI
 //!   writes after it, the main agent's `user` line with `isSynthetic: true`, which gives its
@@ -50,7 +56,7 @@
 //!   not, a subagent's own too) until `task_notification` or a `task_updated` status other
 //!   than `running` of the same `task_id`, a foreground one at the latest until the `result`,
 //!   and any subagent the latest `background_tasks_changed` list holds or a task of it names
-//!   as its `parent_task_id`, unless that subagent reported since its last `task_started`
+//!   as its `parent_task_id`, unless that subagent ended since its last `task_started`
 //!   ([`Core::reported`]) → [`AdapterEvent::Subagents`] when the count changes, a drop that
 //!   a `background_tasks_changed` brings at the next line of another kind: the CLI reports a
 //!   subagent ended while it waits for a command moved to the background, and lists and
@@ -160,6 +166,7 @@
 //! separate sidechain files, not in the session transcript.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -170,7 +177,7 @@ use hqc_proto::event::{
     ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, LiveKind, LiveSubagent,
     RequestSubagent, SessionState, TaskUsage, MODEL_NOT_SWITCHED,
 };
-use hqc_proto::frame::{Activity, PermissionMode, SessionInput, SlashCommand};
+use hqc_proto::frame::{Activity, LeftoverCommand, PermissionMode, SessionInput, SlashCommand};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -212,6 +219,13 @@ pub const POLICY_DENIED: &str = "policy_denied";
 /// `system.code` of a background task (a shell command, a subagent) that finished or
 /// stopped: stream-json `system` `task_notification` (SPEC §4, §8.1).
 pub const TASK_NOTIFICATION: &str = "task_notification";
+/// How the `summary` of a subagent's `task_notification` that is no end starts: the CLI's
+/// placeholder while the subagent waits on its own background work before it reports
+/// (2.1.312; `PWr` of 2.1.325).
+const NOT_REPORTED_YET: &str = "This agent has not reported yet";
+/// How long after a subagent reported, with background commands it started still listed, the
+/// main agent is told of those still listed then ([`Core::leftovers`]).
+const LEFTOVER_AFTER: Duration = Duration::from_secs(30 * 60);
 /// `system.code` of stream-json `system` `compact_boundary` (SPEC §4, §8.1).
 pub const CONTEXT_COMPACTED: &str = "context_compacted";
 pub const CONTEXT_COMPACTED_TEXT: &str = "Context compacted";
@@ -552,20 +566,28 @@ pub struct Core {
     /// the session's agent. A task of the agent itself that the CLI moves to the background
     /// later (`task_updated` `patch.is_backgrounded: true`) leaves the set.
     quiet_tasks: HashMap<String, bool>,
-    /// The latest `task_notification` without a report (`handback`) of each subagent the
+    /// The latest placeholder `task_notification` ([`not_reported_yet`]) of each subagent the
     /// latest `background_tasks_changed` still held ([`Core::listed`]) when it came: not its
     /// end yet. It is handled as the end when the subagent stops counting
     /// ([`Core::report_subagents`]) or the process exits.
     held_ends: BTreeMap<String, Value>,
-    /// Subagents whose latest `task_notification` carried their report (`handback`), until
-    /// the CLI starts them again: a task of theirs still listed is the session's background
-    /// work, it does not count them as running ([`Core::running_subagents`]).
+    /// Subagents whose latest `task_notification` was their end (any but a held placeholder),
+    /// until the CLI starts them again: a task of theirs still listed is the session's
+    /// background work, it does not count them as running ([`Core::running_subagents`]).
     reported: HashSet<String>,
-    /// Tasks whose end gave its line: a later `task_notification` of the same `task_id` gives
-    /// none (2.1.312 sends one each time a subagent stops, also after its report when a command
-    /// it left running ends and the CLI resumes it; "the later one replaces what the earlier one
-    /// showed", which an append-only feed cannot do).
-    announced: HashSet<String>,
+    /// Tasks whose end gave its line, with a hash of the line's text: a later
+    /// `task_notification` of the same `task_id` gives a line only when its text differs and is
+    /// not the placeholder (2.1.312 sends one each time a subagent stops, also after its report
+    /// when a command it left running ends and the CLI resumes it, with the same text; 2.1.329
+    /// sends the text a subagent stopped with while its commands ran, "the result below may be
+    /// interim", and its real report after the CLI resumed it: "the later one replaces what the
+    /// earlier one showed", which an append-only feed cannot do).
+    announced: HashMap<String, u64>,
+    /// Subagents of [`Core::reported`] whose end came while the latest list held commands they
+    /// started ([`left_by`]), with when and their task (the `description` of their
+    /// `task_started`), until those commands leave the list, the CLI starts the subagent again
+    /// or [`Core::leftovers`] tells of them.
+    left_running: HashMap<String, (Instant, String)>,
     /// The main agent's output tokens since the last [`Core::take_output_tokens`]: those of
     /// the response being written as estimated from its deltas, the rest of its
     /// `usage.output_tokens` at its end.
@@ -663,7 +685,8 @@ impl Core {
             quiet_tasks: HashMap::new(),
             held_ends: BTreeMap::new(),
             reported: HashSet::new(),
-            announced: HashSet::new(),
+            announced: HashMap::new(),
+            left_running: HashMap::new(),
             output_tokens: 0,
             streamed_chars: 0,
             streamed_estimated: 0,
@@ -759,6 +782,52 @@ impl Core {
     /// The `task_id`s of the subagents of [`Core::live`].
     pub fn live_ids(&self) -> Vec<String> {
         self.live.iter().map(|a| a.task_id.clone()).collect()
+    }
+
+    /// Each subagent of [`Core::left_running`] that ended [`LEFTOVER_AFTER`] or more before
+    /// `now` → [`AdapterEvent::SubagentLeftovers`] with the commands of the latest list it
+    /// started, whose `task_started` came ([`Core::bash_tasks`]), how long each has run and how
+    /// long ago the subagent ended; the subagent is then forgotten, so it is told once.
+    pub fn leftovers(&mut self, now: Instant) -> Vec<Action> {
+        let due: Vec<String> = self
+            .left_running
+            .iter()
+            .filter(|(_, (at, _))| now.saturating_duration_since(*at) >= LEFTOVER_AFTER)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut out = Vec::new();
+        for id in due {
+            let Some((ended, subagent)) = self.left_running.remove(&id) else {
+                continue;
+            };
+            let commands: Vec<LeftoverCommand> = self
+                .background
+                .iter()
+                .filter(|t| left_by(t, &id))
+                .filter_map(|t| {
+                    let task_id = t["task_id"].as_str()?;
+                    let (_, started) = self.bash_tasks.get(task_id)?;
+                    Some(LeftoverCommand {
+                        task_id: task_id.to_owned(),
+                        description: preview(
+                            t["description"].as_str().unwrap_or(""),
+                            PREVIEW_LIMIT,
+                        ),
+                        running_s: now.saturating_duration_since(*started).as_secs(),
+                    })
+                })
+                .collect();
+            if commands.is_empty() {
+                continue;
+            }
+            tracing::info!(session_id = %self.session_id, task_id = %id, commands = commands.len(), "subagent left commands running");
+            out.push(Action::Emit(AdapterEvent::SubagentLeftovers {
+                subagent,
+                ended_s: now.saturating_duration_since(ended).as_secs(),
+                commands,
+            }));
+        }
+        out
     }
 
     // ---- from the supervisor -------------------------------------------------------
@@ -1266,6 +1335,7 @@ impl Core {
                     let agent = v["task_type"] == "local_agent" && v["ambient"] != true;
                     if let Some(id) = v["task_id"].as_str().filter(|_| agent) {
                         self.reported.remove(id);
+                        self.left_running.remove(id);
                         self.live_started(id, v["description"].as_str().unwrap_or(""), call);
                     }
                     let mut out =
@@ -1831,6 +1901,10 @@ impl Core {
                 .filter_map(|t| t["task_id"].as_str().map(str::to_owned)),
         );
         self.background = tasks.into_iter().cloned().collect();
+        // A subagent whose commands all left the list left none running.
+        let background = &self.background;
+        self.left_running
+            .retain(|id, _| background.iter().any(|t| left_by(t, id)));
         let mut out = Vec::new();
         let n = self.background_work();
         if n != before {
@@ -1898,7 +1972,7 @@ impl Core {
     /// `completed`, `task_notification` "This agent has not reported yet: it is waiting on its
     /// own background work…") while the command still runs; when it ends, the CLI starts the
     /// same `task_id` again. A task of a subagent in [`Core::reported`] does not count it: the
-    /// subagent handed its report over and left the task running.
+    /// subagent ended and left the task running.
     fn running_subagents(&self) -> usize {
         self.running_subagent_ids().len()
     }
@@ -2854,26 +2928,39 @@ impl Core {
     /// `warning` above it after a blank line. Not a flush: a held text keeps
     /// waiting for what decides whether it is final. First the task's open requests (a
     /// subagent's, by `agent_id`) are cancelled; a task in [`Core::quiet_tasks`] gets no line,
-    /// nor one in [`Core::announced`];
+    /// nor one in [`Core::announced`] with the same text;
     /// a task this process did not see start (it began before a `--resume`) counts as a
-    /// background one. A notification without the subagent's report (`handback`) while the
-    /// latest `background_tasks_changed` still holds the subagent or a task of it is no end
-    /// (2.1.312 sends it when the subagent waits on its own command moved to the background,
-    /// "This agent has not reported yet…"): it waits in [`Core::held_ends`], with the line and
-    /// the cancels, until the subagent stops counting. One with the report is the end, also
-    /// while a task the subagent left running is listed ([`Core::reported`]).
+    /// background one. The CLI's placeholder ([`not_reported_yet`]) while the latest
+    /// `background_tasks_changed` still holds the subagent or a task of it is no end (2.1.312
+    /// sends it when the subagent waits on its own command moved to the background): it waits
+    /// in [`Core::held_ends`], with the line and the cancels, until the subagent stops counting.
+    /// Any other is the end, also while a task the subagent left running is listed
+    /// ([`Core::reported`]): 2.1.329 sends one with the subagent's last text in `summary`, no
+    /// `handback`, when it stops with commands of its own still running, and may resume it
+    /// when they end. A subagent that ends so with commands it started listed joins
+    /// [`Core::left_running`].
     fn on_task_notification(&mut self, v: &Value) -> Vec<Action> {
         let id = v["task_id"].as_str();
-        let report = !v["handback"].is_null();
-        if let Some(id) = id.filter(|id| !report && self.listed(id)) {
+        let waits = not_reported_yet(v);
+        if let Some(id) = id.filter(|id| waits && self.listed(id)) {
             tracing::info!(session_id = %self.session_id, task_id = id, "subagent end held: it still counts");
             self.held_ends.insert(id.to_owned(), v.clone());
             return vec![];
         }
         if let Some(id) = id {
             self.held_ends.remove(id);
-            if report {
+            if !waits {
                 self.reported.insert(id.to_owned());
+                if self.background.iter().any(|t| left_by(t, id)) {
+                    let task = self
+                        .live
+                        .iter()
+                        .find(|a| a.task_id == id)
+                        .map(|a| a.title.clone())
+                        .unwrap_or_default();
+                    self.left_running
+                        .insert(id.to_owned(), (Instant::now(), task));
+                }
             }
         }
         self.on_task_ended(v)
@@ -2900,9 +2987,6 @@ impl Core {
         if v["skip_transcript"] == true {
             return out;
         }
-        if id.is_some_and(|id| !self.announced.insert(id.to_owned())) {
-            return out;
-        }
         fn field(v: &Value) -> Option<&str> {
             v.as_str().map(str::trim).filter(|s| !s.is_empty())
         }
@@ -2912,6 +2996,18 @@ impl Core {
             (Some(r), None) => text(r),
             (None, _) => field(&v["summary"]).map_or_else(|| "Background task".into(), text),
         };
+        // A later end of the task: its line again only with a new text, never the placeholder.
+        if let Some(id) = id {
+            let mut h = std::hash::DefaultHasher::new();
+            t.hash(&mut h);
+            let hash = h.finish();
+            match self.announced.get(id) {
+                Some(shown) if *shown == hash || t.starts_with(NOT_REPORTED_YET) => return out,
+                _ => {
+                    self.announced.insert(id.to_owned(), hash);
+                }
+            }
+        }
         tracing::info!(session_id = %self.session_id, task_id = ?v["task_id"].as_str(), status = ?v["status"].as_str(), "background task notification");
         out.push(Action::Emit(AdapterEvent::Event(new_event(
             self.session_id,
@@ -3569,6 +3665,22 @@ pub fn args_preview(tool: &str, input: &Value) -> String {
         None => compact(input),
     };
     preview(&json, PREVIEW_LIMIT)
+}
+
+/// `task_notification` `v` is the CLI's placeholder for a subagent that waits on its own
+/// background work before it reports: no `handback`, a `summary` that starts with
+/// [`NOT_REPORTED_YET`].
+fn not_reported_yet(v: &Value) -> bool {
+    v["handback"].is_null()
+        && v["summary"]
+            .as_str()
+            .is_some_and(|s| s.starts_with(NOT_REPORTED_YET))
+}
+
+/// Listed task `t` is a command subagent `id` started (`local_bash`, a shell command or a
+/// Monitor, whose `parent_task_id` is the subagent).
+fn left_by(t: &Value, id: &str) -> bool {
+    t["task_type"] == "local_bash" && t["parent_task_id"] == id
 }
 
 /// The `usage` of a `task_notification` (`total_tokens`, `tool_uses`, `duration_ms`); `None`

@@ -10,7 +10,7 @@ use hqc_proto::event::{
     ApiRetry, ApprovalCanonical, Author, CancelReason, ClarifyAction, ClarifyAnswer,
     ClarifyQuestion, ContextCompacted, Event, EventKind, LiveKind, LiveSubagent, SessionState,
 };
-use hqc_proto::frame::{Activity, Runtime, SessionInput, SlashCommand};
+use hqc_proto::frame::{Activity, LeftoverCommand, Runtime, SessionInput, SlashCommand};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -295,6 +295,7 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::ToolResult { .. } => "tool.result".into(),
             // `a_task_end_carries_its_usage_and_output` looks at it.
             AdapterEvent::TaskOutput(_) => continue,
+            AdapterEvent::SubagentLeftovers { .. } => "subagent_leftovers".into(),
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -8188,7 +8189,7 @@ fn a_held_subagent_end_comes_at_the_next_line_of_another_kind() {
 /// (live on 2.1.312, a wait loop that never ended): its end, with `handback`, is the line at
 /// once, and the command left in the list no longer counts it. When the command ends the CLI
 /// lists and starts the subagent again: it counts by a task of its own again, and its next
-/// end, held while that task is listed, gives no second line.
+/// end, the placeholder held while that task is listed, gives no second line.
 #[test]
 fn a_subagent_that_reported_with_a_command_left_running_ends_at_once() {
     let lines = [
@@ -8208,7 +8209,7 @@ fn a_subagent_that_reported_with_a_command_left_running_ends_at_once() {
         r#"{"type":"system","subtype":"task_started","task_id":"A","is_backgrounded":true,"task_type":"local_agent"}"#,
         r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"d","task_type":"local_bash","parent_task_id":"A"}]}"#,
         r#"{"type":"system","subtype":"task_updated","task_id":"A","patch":{"status":"completed"}}"#,
-        r#"{"type":"system","subtype":"task_notification","task_id":"A","status":"completed","summary":"waiting again"}"#,
+        r#"{"type":"system","subtype":"task_notification","task_id":"A","status":"completed","summary":"This agent has not reported yet: it is waiting on its own background work and will deliver its report through SubagentHandback when that finishes.\n"}"#,
         r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
         r#"{"type":"result","subtype":"success","num_turns":1}"#,
     ];
@@ -8230,26 +8231,37 @@ fn a_subagent_that_reported_with_a_command_left_running_ends_at_once() {
 }
 
 /// Subagent `A` held while a task of it is listed; a list that drops `A` and adds `B` at once
-/// does not count `A` out at once: the next list holds `A` again, and its end waits. Its real
-/// end comes when a list drops it, at the next line of another kind.
+/// does not count `A` out at once: the next list holds `A` again, and its end waits. Its held
+/// end, the later of its two placeholders, comes when a list drops it, at the next line of
+/// another kind.
 #[test]
 fn a_held_subagent_listed_again_with_another_keeps_its_end() {
+    let waits = |n: &str| {
+        format!(
+            r#"{{"type":"system","subtype":"task_notification","task_id":"A","status":"completed","summary":"This agent has not reported yet ({n})"}}"#
+        )
+    };
+    let (first, second) = (waits("first"), waits("second"));
     let lines = [
         r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"A","task_type":"local_agent"}]}"#,
         r#"{"type":"system","subtype":"task_started","task_id":"A","is_backgrounded":true,"task_type":"local_agent"}"#,
         r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"A","task_type":"local_agent"},{"task_id":"c","task_type":"local_bash","parent_task_id":"A"}]}"#,
         r#"{"type":"system","subtype":"task_updated","task_id":"A","patch":{"status":"completed"}}"#,
-        r#"{"type":"system","subtype":"task_notification","task_id":"A","status":"completed","summary":"not yet"}"#,
+        first.as_str(),
         r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"B","task_type":"local_agent"}]}"#,
         r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"A","task_type":"local_agent"},{"task_id":"B","task_type":"local_agent"}]}"#,
         r#"{"type":"result","subtype":"success","num_turns":1}"#,
-        r#"{"type":"system","subtype":"task_notification","task_id":"A","status":"completed","summary":"done"}"#,
+        second.as_str(),
         r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"B","task_type":"local_agent"}]}"#,
         r#"{"type":"result","subtype":"success","num_turns":0}"#,
     ];
     assert_eq!(
         system_lines(lines.into_iter()),
-        [(10, "task_notification".to_string(), "done".to_string())]
+        [(
+            10,
+            "task_notification".to_string(),
+            "This agent has not reported yet (second)".to_string()
+        )]
     );
 }
 
@@ -8373,6 +8385,165 @@ fn a_subagent_waiting_on_its_background_command_keeps_its_request() {
         }
     }
     assert_eq!(cancels, [(21, "sub".to_string())]);
+}
+
+/// A background subagent starts a background wait loop of its own that never ends and stops
+/// with its report (2.1.329: the subagent's `task_started`, its Bash call's with
+/// `owned_by_subagent` and `parent_task_id`, the CLI's list of both, `task_updated` `completed`,
+/// `task_notification` `completed` with the report as `summary` and no `handback`, the list with
+/// the loop alone, then the turn the CLI starts by itself).
+const LEFT_RUNNING: [&str; 9] = [
+    r#"{"type":"system","subtype":"task_started","task_id":"a6996d99c74dd1835","tool_use_id":"toolu_01Agent","description":"Heightmap: 25 frames, summed match","subagent_type":"general-purpose","is_backgrounded":true,"task_type":"local_agent"}"#,
+    r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a6996d99c74dd1835","task_type":"local_agent","description":"Heightmap: 25 frames, summed match"}]}"#,
+    r#"{"type":"system","subtype":"task_started","task_id":"bq4wq8f2x","tool_use_id":"toolu_01Wait","description":"Wait for the suite","owned_by_subagent":true,"is_backgrounded":true,"parent_task_id":"a6996d99c74dd1835","task_type":"local_bash"}"#,
+    r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a6996d99c74dd1835","task_type":"local_agent","description":"Heightmap: 25 frames, summed match"},{"task_id":"bq4wq8f2x","task_type":"local_bash","description":"Wait for the suite","owner_agent_id":"a6996d99c74dd1835","parent_task_id":"a6996d99c74dd1835"}]}"#,
+    r#"{"type":"system","subtype":"task_updated","task_id":"a6996d99c74dd1835","patch":{"status":"completed"}}"#,
+    r#"{"type":"system","subtype":"task_notification","task_id":"a6996d99c74dd1835","tool_use_id":"toolu_01Agent","status":"completed","summary":"Всё сделано: 457 passed","usage":{"total_tokens":257800,"tool_uses":152,"duration_ms":11139000}}"#,
+    r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bq4wq8f2x","task_type":"local_bash","description":"Wait for the suite","owner_agent_id":"a6996d99c74dd1835","parent_task_id":"a6996d99c74dd1835"}]}"#,
+    r#"{"type":"system","subtype":"init"}"#,
+    r#"{"type":"result","subtype":"success","num_turns":1}"#,
+];
+
+/// [`LEFT_RUNNING`]: the report is the subagent's end at once, a line with it at the
+/// notification; the subagent stops counting at the next line of another kind, where its row
+/// goes and the loop it left gets a row of its own, a stoppable command.
+#[test]
+fn a_subagent_that_reports_with_its_command_running_ends_at_once() {
+    let got: Vec<(usize, String)> = system_lines(LEFT_RUNNING.into_iter())
+        .into_iter()
+        .map(|(i, _, t)| (i, t))
+        .collect();
+    assert_eq!(got, [(5, "Всё сделано: 457 passed".to_string())]);
+    let subagents: Vec<(usize, String)> = task_counts(LEFT_RUNNING.into_iter())
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, e)| e.into_iter().map(move |e| (i, e)))
+        .filter(|(_, e)| e.starts_with("subagents"))
+        .collect();
+    assert_eq!(
+        subagents,
+        [
+            (0, "subagents:1".to_string()),
+            (7, "subagents:0".to_string())
+        ]
+    );
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let mut last = None;
+    for l in LEFT_RUNNING {
+        for a in core.on_line(l) {
+            if let Action::Emit(AdapterEvent::LiveSubagents(list)) = a {
+                last = Some(list);
+            }
+        }
+    }
+    let rows: Vec<_> = last
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.task_id, r.description, r.kind, r.stoppable))
+        .collect();
+    assert_eq!(
+        rows,
+        [(
+            "bq4wq8f2x".to_string(),
+            "Wait for the suite".to_string(),
+            Some(LiveKind::Command),
+            true
+        )]
+    );
+}
+
+/// [`LEFT_RUNNING`] up to the report, then the loop ends, the CLI lists and starts the subagent
+/// again and it ends once more: a text that differs from the one shown gives a second line (the
+/// first was interim), the same text none.
+#[test]
+fn a_later_end_of_a_subagent_gives_a_line_only_with_a_new_text() {
+    let again = |summary: &str| {
+        let mut lines: Vec<String> = LEFT_RUNNING[..7].iter().map(|l| l.to_string()).collect();
+        lines.extend([
+            r#"{"type":"system","subtype":"task_notification","task_id":"bq4wq8f2x","status":"completed","summary":"Background command \"Wait for the suite\" completed (exit code 0)"}"#.to_string(),
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#.to_string(),
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a6996d99c74dd1835","task_type":"local_agent"}]}"#.to_string(),
+            LEFT_RUNNING[0].to_string(),
+            LEFT_RUNNING[4].to_string(),
+            LEFT_RUNNING[5].replace("Всё сделано: 457 passed", summary),
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#.to_string(),
+            LEFT_RUNNING[7].to_string(),
+        ]);
+        system_lines(lines.iter().map(String::as_str))
+            .into_iter()
+            .map(|(i, _, t)| (i, t))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        again("Всё сделано: 507 subtests passed"),
+        [
+            (5, "Всё сделано: 457 passed".to_string()),
+            (12, "Всё сделано: 507 subtests passed".to_string())
+        ]
+    );
+    assert_eq!(
+        again("Всё сделано: 457 passed"),
+        [(5, "Всё сделано: 457 passed".to_string())]
+    );
+}
+
+/// One [`AdapterEvent::SubagentLeftovers`]: the subagent's task, the seconds since its end and
+/// its commands.
+type Told = (String, u64, Vec<LeftoverCommand>);
+
+/// The [`AdapterEvent::SubagentLeftovers`] of `actions`.
+fn leftovers_of(actions: Vec<Action>) -> Vec<Told> {
+    actions
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::SubagentLeftovers {
+                subagent,
+                ended_s,
+                commands,
+            }) => Some((subagent, ended_s, commands)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// [`LEFT_RUNNING`]: 30 min after the report, with the loop still listed, the main agent is
+/// told once, with how long ago the subagent reported, the loop and how long it has run; not
+/// before, not again. Nothing when the
+/// loop left the list meanwhile, or the CLI started the subagent again.
+#[test]
+fn a_command_a_subagent_left_running_is_told_once_after_30_min() {
+    let fed = |extra: &[&str]| {
+        let mut core = Core::new(Uuid::now_v7(), false);
+        for l in LEFT_RUNNING.iter().chain(extra) {
+            core.on_line(l);
+        }
+        (core, std::time::Instant::now())
+    };
+    let half_hour = Duration::from_secs(30 * 60);
+    let (mut core, at) = fed(&[]);
+    assert_eq!(leftovers_of(core.leftovers(at)), []);
+    assert_eq!(
+        leftovers_of(core.leftovers(at + half_hour - Duration::from_secs(5))),
+        []
+    );
+    let told = leftovers_of(core.leftovers(at + half_hour));
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0].0, "Heightmap: 25 frames, summed match");
+    assert!((1800..1810).contains(&told[0].1), "{}", told[0].1);
+    assert_eq!(told[0].2.len(), 1);
+    let c = &told[0].2[0];
+    assert_eq!(
+        (c.task_id.as_str(), c.description.as_str()),
+        ("bq4wq8f2x", "Wait for the suite")
+    );
+    assert!((1800..1810).contains(&c.running_s), "{}", c.running_s);
+    assert_eq!(leftovers_of(core.leftovers(at + 2 * half_hour)), []);
+
+    let (mut core, at) =
+        fed(&[r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#]);
+    assert_eq!(leftovers_of(core.leftovers(at + half_hour)), []);
+    let (mut core, at) = fed(&[LEFT_RUNNING[0]]);
+    assert_eq!(leftovers_of(core.leftovers(at + half_hour)), []);
 }
 
 /// SPEC 0.148: a session given the browser runs with `--chrome` and without the tools that

@@ -5,12 +5,11 @@
 // session actions do nothing.
 extension ShortcutAction {
 
-    // None for New Session in Project, Back and Forward: MainViewController opens the project's
-    // address or steps the web view's history instead.
+    // None for Back and Forward: MainViewController steps the web view's history instead.
     var script: String? {
         switch self {
         case .newSession: return Self.newSessionScript
-        case .newSessionInProject: return nil
+        case .newSessionInProject: return Self.newSessionInProjectScript
         case .archiveSession: return Self.archiveScript
         case .previousSession: return Self.sessionStepScript(-1)
         case .nextSession: return Self.sessionStepScript(1)
@@ -19,6 +18,15 @@ extension ShortcutAction {
         case .back, .forward: return nil
         }
     }
+
+    // The client's own function: it opens the new-session screen of the project picked in its
+    // Settings (stored on the hub; the personal project until one is picked). Resolves to
+    // whether the page has it.
+    private static let newSessionInProjectScript = """
+        if (!window.hqc) return false;
+        await window.hqc.newSessionInProject();
+        return true;
+        """
 
     // Clicks the client's own "New session" button as soon as it is there and enabled (it is
     // disabled until the client has loaded the user), checking every 100 ms for up to 5 s.

@@ -30,16 +30,16 @@ Settings… (⌘,) holds:
   no server the app opens Settings at launch.
 - **Shortcuts**: the app's own shortcuts, working while the app is active; New Session in
   Project works from any app, and brings the window up. They act on the active tab's page
-  through the client's own controls (New Session in Project: on its project's server tab, by
-  the page address; Back and Forward: the page's history, as ‹ ›); each is also an item in the
-  File or Go menu. To change one, click its button, then press a key with at least one of ⌘ ⌃
-  ⌥; Esc cancels, Delete clears it. A shortcut recorded for one action is taken off any other
-  action that had it.
+  through the client's own controls (New Session in Project: the client's own function, which
+  opens the project picked in the client's Settings; Back and Forward: the page's history, as
+  ‹ ›); each is also an item in the File or Go menu. To change one, click its button, then
+  press a key with at least one of ⌘ ⌃ ⌥; Esc cancels, Delete clears it. A shortcut recorded
+  for one action is taken off any other action that had it.
 
   | action | default | menu | what it does |
   |---|---|---|---|
   | New Session | ⌘N | File | a new session in the current project |
-  | New Session in Project | ⌃⌥⌘N | File | a new session in the project picked for it, on that project's server |
+  | New Session in Project | ⌃⌥⌘N | File | a new session in the project picked in the client's Settings (on the hub; the personal project until one is picked), in the active tab |
   | Archive Session | ⌃⌘A | File | archives the open session, as its row's menu does (with Undo) |
   | Previous Session / Next Session | ⌥⌘↑ / ⌥⌘↓ | Go | the row above or below in the session column |
   | Previous Project / Next Project | ⌃⌘↑ / ⌃⌘↓ | Go | the project above or below on the project bar |
@@ -47,9 +47,7 @@ Settings… (⌘,) holds:
 
   Where the session column is not shown (a narrow window, the search page) the session
   shortcuts other than the two New Session ones do nothing; below 900 px the client has no
-  project bar, and the project shortcuts do nothing either. The project of New Session in
-  Project is picked in the menu next to its shortcut, from the projects of every server the app
-  is signed in to; with None it only brings the window up.
+  project bar, and the project shortcuts do nothing either.
 - **Notifications**: Stay on screen, how long a notification card other than a permission
   request stays (1–120 s, 5 s by default); a new card takes the new time, a card replaced in
   place keeps its own.

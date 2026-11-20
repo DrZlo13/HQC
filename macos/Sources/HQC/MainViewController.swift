@@ -278,9 +278,7 @@ final class MainViewController: NSViewController {
     func presentSettings() {
         guard settingsWindowController == nil else { return }
 
-        let controller = SettingsWindowController(store: store) { [weak self] done in
-            self?.loadProjects(done: done)
-        }
+        let controller = SettingsWindowController(store: store)
         settingsWindowController = controller
 
         guard let window = view.window, let sheet = controller.window else {
@@ -291,24 +289,6 @@ final class MainViewController: NSViewController {
         window.beginSheet(sheet) { [weak self] _ in
             // Release the controller once the sheet dismisses so it rebuilds fresh next time.
             self?.settingsWindowController = nil
-        }
-    }
-
-    // The projects of every server's page, in the store's order, for the menu of New Session in
-    // Project; `done` is called once, on the main thread, when every tab has answered.
-    private func loadProjects(done: @escaping ([NewSessionTarget]) -> Void) {
-        let tabs = store.servers.compactMap { webTabs[$0.id] }
-        guard !tabs.isEmpty else { return done([]) }
-        var lists = Array(repeating: [NewSessionTarget](), count: tabs.count)
-        var waiting = tabs.count
-        for (index, tab) in tabs.enumerated() {
-            tab.projects { projects in
-                lists[index] = projects.map {
-                    NewSessionTarget(serverID: tab.server.id, projectID: $0.id, projectName: $0.name)
-                }
-                waiting -= 1
-                if waiting == 0 { done(lists.flatMap { $0 }) }
-            }
         }
     }
 
@@ -334,11 +314,9 @@ final class MainViewController: NSViewController {
 
     // MARK: - Shortcut actions
 
-    // Runs a shortcut action in the active tab; New Session in Project opens its project's
-    // new session in the tab of its server, Back and Forward step the active tab's history.
+    // Runs a shortcut action in the active tab; Back and Forward step the active tab's history.
     func perform(_ action: ShortcutAction) {
         switch action {
-        case .newSessionInProject: return openNewSessionInProject()
         case .back: return goBack(nil)
         case .forward: return goForward(nil)
         default: break
@@ -347,16 +325,6 @@ final class MainViewController: NSViewController {
         // The new session's message field takes the focus only inside a focused web view.
         view.window?.makeFirstResponder(tab.webView)
         tab.perform(action)
-    }
-
-    // The saved project's server tab, then the project's new-session screen in its page. No
-    // project saved, or its server no longer in the store: nothing.
-    private func openNewSessionInProject() {
-        guard let target = NewSessionTarget.load() else { return }
-        selectServer(id: target.serverID)
-        guard let tab = activeTab, tab.server.id == target.serverID else { return }
-        view.window?.makeFirstResponder(tab.webView)
-        tab.openNewSession(project: target.projectID)
     }
 
     // MARK: - Reload, back, forward and zoom: View menu items (responder chain targets), the

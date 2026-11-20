@@ -67,8 +67,7 @@ struct Shortcut: Codable, Equatable {
     }
 }
 
-// What the app's shortcuts do, each run in the active tab's page; New Session in Project in the
-// tab of its project's server.
+// What the app's shortcuts do, each run in the active tab's page.
 enum ShortcutAction: String, CaseIterable {
     case newSession
     case newSessionInProject
@@ -137,33 +136,6 @@ enum ShortcutAction: String, CaseIterable {
             }
         }
         self.shortcut = shortcut
-    }
-}
-
-// A project on one of the servers, as New Session in Project opens it: its target, kept in
-// UserDefaults as JSON, and each item of its menu in Settings. The name is what Settings shows
-// while the server's projects are not loaded.
-struct NewSessionTarget: Codable, Equatable {
-    let serverID: UUID
-    // The hub's id of the project.
-    let projectID: String
-    let projectName: String
-
-    private static let defaultsKey = "newSessionProject"
-
-    // The saved target; nil when none was picked.
-    static func load() -> NewSessionTarget? {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey) else { return nil }
-        return try? JSONDecoder().decode(NewSessionTarget.self, from: data)
-    }
-
-    // Saves `target` as the target; nil clears it.
-    static func save(_ target: NewSessionTarget?) {
-        if let target, let data = try? JSONEncoder().encode(target) {
-            UserDefaults.standard.set(data, forKey: defaultsKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: defaultsKey)
-        }
     }
 }
 

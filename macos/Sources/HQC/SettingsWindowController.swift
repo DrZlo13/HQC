@@ -10,8 +10,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let removeButton = NSButton()
     private let editButton = NSButton()
     private let recorders = ShortcutAction.allCases.map { ShortcutRecorder(action: $0) }
-    // The project New Session in Project opens, next to its recorder.
-    private let projectPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     // How long a notification card other than a permission request stays on screen.
     private let lifetimeValue = NSTextField(labelWithString: "")
     private let lifetimeStepper = NSStepper()
@@ -19,8 +17,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     // Private pasteboard type used only for intra-table drag-to-reorder of servers.
     private let serverRowType = NSPasteboard.PasteboardType("io.github.drzlo13.hqc.settings.server-row")
 
-    // `loadProjects` hands every server's projects, in the store's order, to its callback.
-    init(store: ServerStore, loadProjects: (@escaping ([NewSessionTarget]) -> Void) -> Void) {
+    init(store: ServerStore) {
         self.store = store
 
         let window = NSWindow(
@@ -36,12 +33,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         super.init(window: window)
 
         buildUI()
-
-        // The saved project until the servers' projects are in.
-        fillProjectPopup([])
-        loadProjects { [weak self] projects in
-            self?.fillProjectPopup(projects)
-        }
 
         NotificationCenter.default.addObserver(self,
                                                selector: #selector(reloadTable),
@@ -105,18 +96,12 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         buttonStack.spacing = 8
         buttonStack.translatesAutoresizingMaskIntoConstraints = false
 
-        // The app's shortcuts: one row per action, its name and its recorder; New
-        // Session in Project's row also has its project.
+        // The app's shortcuts: one row per action, its name and its recorder.
         let shortcutsLabel = NSTextField(labelWithString: "Shortcuts")
         shortcutsLabel.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
         shortcutsLabel.translatesAutoresizingMaskIntoConstraints = false
-        projectPopup.target = self
-        projectPopup.action = #selector(pickNewSessionProject)
-        // A long project name is cut short instead of widening the sheet.
-        projectPopup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let shortcutsGrid = NSGridView(views: zip(ShortcutAction.allCases, recorders).map { action, recorder -> [NSView] in
-            let row: [NSView] = [NSTextField(labelWithString: action.title), recorder]
-            return action == .newSessionInProject ? row + [projectPopup] : row
+            [NSTextField(labelWithString: action.title), recorder]
         })
         shortcutsGrid.rowSpacing = 6
         shortcutsGrid.columnSpacing = 12
@@ -275,46 +260,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     @objc private func reloadTable() {
         tableView.reloadData()
         updateButtonState()
-    }
-
-    // MARK: - New Session in Project
-
-    // The project menu: None, then `projects`, titled "Project" with one server and
-    // "Server › Project" with two or more. The saved project is selected, and is an item by its
-    // saved name also when it is not among `projects`.
-    private func fillProjectPopup(_ projects: [NewSessionTarget]) {
-        let saved = NewSessionTarget.load()
-        let isSaved = { (project: NewSessionTarget) in
-            project.serverID == saved?.serverID && project.projectID == saved?.projectID
-        }
-        var items = projects
-        // A saved project of a server no longer in the list is left out: the shortcut skips it.
-        if let saved, store.servers.contains(where: { $0.id == saved.serverID }),
-           !projects.contains(where: isSaved) {
-            items.insert(saved, at: 0)
-        }
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "None", action: nil, keyEquivalent: ""))
-        for project in items {
-            let item = NSMenuItem(title: menuTitle(of: project), action: nil, keyEquivalent: "")
-            item.representedObject = project
-            menu.addItem(item)
-        }
-        projectPopup.menu = menu
-        projectPopup.selectItem(at: items.firstIndex(where: isSaved).map { $0 + 1 } ?? 0)
-    }
-
-    private func menuTitle(of project: NewSessionTarget) -> String {
-        guard store.servers.count >= 2,
-              let server = store.servers.first(where: { $0.id == project.serverID }) else {
-            return project.projectName
-        }
-        return "\(server.name) › \(project.projectName)"
-    }
-
-    // A project picked saves it as the target; None clears it.
-    @objc private func pickNewSessionProject() {
-        NewSessionTarget.save(projectPopup.selectedItem?.representedObject as? NewSessionTarget)
     }
 
     // MARK: - Notifications

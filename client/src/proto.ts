@@ -300,6 +300,9 @@ export interface ClarifyQuestion {
   options?: string[];
   /** A description per option, in the order of `options`; "" where an option has none. */
   option_descriptions?: string[];
+  /** A mockup per option (Claude Code's `preview`), by the rule of `option_descriptions`;
+   *  shown as plain text, never rendered. */
+  option_previews?: string[];
   multi?: boolean;
   /** A field an MCP server's form requires (since 0.180). */
   required?: boolean;
@@ -621,6 +624,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
         header: optStr(q, 'header'),
         options: present(q, 'options') ? strArr(q, 'options') : undefined,
         option_descriptions: optStrArr(q, 'option_descriptions'),
+        option_previews: optStrArr(q, 'option_previews'),
         multi: optBool(q, 'multi'),
         required: optBool(q, 'required'),
         input: oneOf(q, 'input', ANSWER_INPUTS),

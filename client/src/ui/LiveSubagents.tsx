@@ -3,12 +3,14 @@
 // led by "Agent:", "Command:" (when the worker says which), "Monitor:", "Wakeup:", "Cron:" or
 // "Scheduled:". A subagent has its task and what it does now (that it retries a request to the
 // model API, while it does, or that it waits for permission), then its tokens, tool calls and
-// run time, which ticks here between the lists the hub sends; a command or a watcher has only
-// its description and run time. A timer, a wakeup or a cron job of the agent and a message
-// scheduled by the hub, has "in 12m 34s" instead, counting down to "due"; a scheduled message
-// opens the schedules of the chat. A `stoppable` line ends with a stop button. A subagent's
-// line opens what it has done under it, drawn as the feed draws the agent's own steps.
+// run time, which ticks here between the lists the hub sends (a phone leaves out the word
+// "tokens" and the tool calls); a command or a watcher has only its description and run time.
+// A timer, a wakeup or a cron job of the agent and a message scheduled by the hub, has
+// "in 12m 34s" instead, counting down to "due"; a scheduled message opens the schedules of the
+// chat. A `stoppable` line ends with a stop button. A subagent's line opens what it has done
+// under it, drawn as the feed draws the agent's own steps.
 
+import type { ComponentChildren } from 'preact';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { LiveKind, LiveSchedule, LiveSubagent, SubagentHistory } from '../proto';
 import { Timeline, type Item } from '../timeline';
@@ -41,14 +43,14 @@ const PREFIX: Record<LiveKind, string> = {
 };
 
 /** What the line says: the word before, the task, what follows it (the task's activity, or a
- *  cron job's schedule), what stands on the right, and whether the dot stays still (a timer
- *  waits, it does not run). */
+ *  cron job's schedule), what stands on the right (its `.live-agents-stats` span), and whether
+ *  the dot stays still (a timer waits, it does not run). */
 interface Row {
   key: string;
   prefix: string;
   task: string;
   after: string;
-  right: string;
+  right: ComponentChildren;
   timer: boolean;
   open?: () => void;
   /** The line opens what its subagent has done under it (since 0.181). */
@@ -130,7 +132,7 @@ export function LiveSubagents({
                   <RowText row={r} />
                 </span>
               )}
-              <span class="live-agents-stats">{r.right}</span>
+              {r.right}
             </>
           );
           // Beside the line that opens the history, not in it: a button holds no other.
@@ -200,7 +202,11 @@ function agentRow(a: LiveSubagent, age: number, asking?: ReadonlySet<string>): R
         : a.activity
           ? `${a.kind === 'cron' ? ' · ' : ': '}${a.activity}`
           : '',
-    right: waits ? countdown(a.due_in_ms, age) : stats(a, a.duration_ms + Math.max(0, age)),
+    right: waits ? (
+      <span class="live-agents-stats">{countdown(a.due_in_ms, age)}</span>
+    ) : (
+      <Stats cls="live-agents-stats" a={a} ms={a.duration_ms + Math.max(0, age)} />
+    ),
     timer: waits,
     stop: a.stoppable ? a.task_id : undefined,
   };
@@ -212,7 +218,7 @@ function scheduleRow(s: LiveSchedule, age: number, open: () => void): Row {
     prefix: 'Scheduled: ',
     task: s.message,
     after: '',
-    right: countdown(s.due_in_ms, age),
+    right: <span class="live-agents-stats">{countdown(s.due_in_ms, age)}</span>,
     timer: true,
     open,
   };
@@ -336,6 +342,44 @@ export function stats(a: Pick<LiveSubagent, 'total_tokens' | 'tool_uses'>, ms?: 
   if (a.tool_uses !== undefined) parts.push(count(a.tool_uses, 'tool'));
   if (ms !== undefined) parts.push(elapsed(ms));
   return parts.join(' · ');
+}
+
+/** `stats(a, ms)` in a span of class `cls`, after `lead`: a phone hides the word "tokens"
+ *  (`.stats-word`) and the tool calls with their separator (`.stats-tools`, styles.css) for the
+ *  room of the task, and keeps `155.3k · 4m 13s`; with only the tool calls, the whole span. */
+export function Stats({
+  cls,
+  a,
+  ms,
+  lead = '',
+}: {
+  cls: string;
+  a: Pick<LiveSubagent, 'total_tokens' | 'tool_uses'>;
+  ms?: number;
+  lead?: string;
+}) {
+  const shown = a.total_tokens !== undefined || ms !== undefined;
+  // The separator that goes with the tool calls is hidden with them: before them after the
+  // tokens, after them before the run time when they come first.
+  const tools =
+    a.tool_uses === undefined
+      ? null
+      : a.total_tokens !== undefined
+        ? ` · ${count(a.tool_uses, 'tool')}`
+        : `${count(a.tool_uses, 'tool')}${ms !== undefined ? ' · ' : ''}`;
+  return (
+    <span class={shown ? cls : `${cls} stats-tools`}>
+      {lead}
+      {a.total_tokens !== undefined && (
+        <>
+          {tokens(a.total_tokens)}
+          <span class="stats-word"> tokens</span>
+        </>
+      )}
+      {tools !== null && <span class="stats-tools">{tools}</span>}
+      {ms !== undefined && `${a.total_tokens !== undefined ? ' · ' : ''}${elapsed(ms)}`}
+    </span>
+  );
 }
 
 /** As VS Code shows them: `950`, `155.3k`, `1.2M`. */

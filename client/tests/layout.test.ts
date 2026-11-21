@@ -165,6 +165,15 @@ describe('layout widths', () => {
     expect([rule('.room-prompt')['resize'], rule('.room-prompt')['max-height']]).toEqual(['vertical', '45vh']);
   });
 
+  it("a menu and the layer under it start no text selection or browser menu; a field in a menu still does", () => {
+    // A phone row's menu opens under the finger of the long press; on an iPhone the press went
+    // on into the browser's own selection of the page. Not checkable outside iOS.
+    const menu = rule('.menu-scrim, .menu.ctx-menu');
+    expect([menu['-webkit-user-select'], menu['user-select'], menu['-webkit-touch-callout']]).toEqual(['none', 'none', 'none']);
+    const field = rule('.ctx-menu input, .ctx-menu textarea');
+    expect([field['-webkit-user-select'], field['user-select']]).toEqual(['text', 'text']);
+  });
+
   it("a dot has a width as well as a flex basis: Safari sizes a project's running mark by its items' widths", () => {
     expect([rule('.dot')['flex'], rule('.dot')['width']]).toEqual(['0 0 8px', '8px']);
     for (const sel of ['.sessions-phone .dot', '.preview-row .dot']) {

@@ -66,6 +66,13 @@ pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's 
     start it with hqc_spawn as its description says and do not do it here, on \"Do it here\" do \
     it here. Do not ask on a message from another session or a room (an `[hqc peer` or \
     `[hqc room` header): that session or room gave the task and chose where it runs. \
+    Required as well: when the user asks how a subagent you started is doing, what it has done \
+    or what it is thinking, and when you report its progress yourself, read it with hqc_read, \
+    `subagent` being the `agentId` from the result of your Agent call, with `thinking: true` for \
+    its thinking (`later` of an answer reads what it did since); do not judge it by the files it \
+    changed. The result of a background Agent call says to answer only that the agent is still \
+    running, since its output file would overflow your context: hqc_read reads its steps page \
+    by page instead, and the `agentId` that result calls internal is what hqc_read takes. \
     Other sessions: hqc_list_sessions, hqc_send, hqc_ask, hqc_spawn, hqc_room (a room of several \
     agents); history: hqc_search_history to find, hqc_read to read a session or a room in full, or \
     what a subagent is doing; later or recurring messages: hqc_schedule; moving this session to \

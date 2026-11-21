@@ -167,14 +167,14 @@ use anyhow::{anyhow, bail};
 use hqc_claude_jsonl::{model_usage_tokens, CostState, TokenSums};
 use hqc_proto::event::{
     AnswerInput, ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
-    ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, LiveKind, LiveSubagent,
-    RequestSubagent, SessionState, TaskUsage, MODEL_NOT_SWITCHED,
+    ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, GrantPlace, LiveKind,
+    LiveSubagent, OptionGrant, RequestSubagent, SessionState, TaskUsage, MODEL_NOT_SWITCHED,
 };
 use hqc_proto::frame::{Activity, PermissionMode, SessionInput, SlashCommand};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use super::rules::SessionRules;
+use super::rules::{rule_text, shown, SessionRules};
 use crate::adapter::{new_event, AdapterEvent, ResultFiles, ResultImage, FULL_RESULT_LIMIT};
 use crate::permissions::{FolderRules, Policy};
 
@@ -194,6 +194,9 @@ const CRON_OFFSET_CAP_MS: f64 = 1_800_000.0;
 const CRON_CACHE_LEAD_MS: i64 = 15_000;
 const CRON_CACHE_TTL_MS: i64 = 300_000;
 pub const ERROR_TEXT_LIMIT: usize = 300;
+/// The most rules an option's grant lists, and the longest one, in bytes (SPEC §4).
+const GRANT_RULES: usize = 10;
+const GRANT_RULE_LIMIT: usize = 256;
 
 /// A denial without text, sent with `interrupt: true`: what the "No" of the VS Code tab sends
 /// (extension 2.1.309, cc_remote docs/SPEC.md §2.12). The CLI ends the turn at once with
@@ -2678,16 +2681,36 @@ impl Core {
             .flat_map(|s| s["rules"].as_array().cloned().unwrap_or_default())
             .collect();
 
+        // What `session` and `always` grant, in the terms `answer_approval` acts on them.
         let mut options = vec![option("once", "Allow once", ApprovalCanonical::Once)];
         if !human_only {
-            options.push(option(
-                "session",
-                "Allow for this session",
-                ApprovalCanonical::Session,
-            ));
+            options.push(ApprovalOption {
+                grant: Some(OptionGrant {
+                    place: GrantPlace::Session,
+                    rules: grant_rules(shown(&tool, &suggested)),
+                    exact: true,
+                }),
+                ..option(
+                    "session",
+                    "Allow for this session",
+                    ApprovalCanonical::Session,
+                )
+            });
         }
         if !human_only && !local_rules.is_empty() && !self.restricted {
-            options.push(option("always", "Always allow", ApprovalCanonical::Always));
+            options.push(ApprovalOption {
+                grant: Some(OptionGrant {
+                    place: GrantPlace::LocalSettings,
+                    rules: grant_rules(
+                        local_rules
+                            .iter()
+                            .flat_map(|s| s["rules"].as_array().into_iter().flatten())
+                            .filter_map(rule_text),
+                    ),
+                    exact: false,
+                }),
+                ..option("always", "Always allow", ApprovalCanonical::Always)
+            });
         }
         options.push(option("deny", "Deny", ApprovalCanonical::Deny));
 
@@ -2698,6 +2721,7 @@ impl Core {
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| preview(s, limit))
         };
+        let call_args = args_preview(&tool, &input);
         tracing::info!(session_id = %self.session_id, %tool, human_only, "approval requested");
         self.pending.insert(
             request_id.clone(),
@@ -2711,6 +2735,7 @@ impl Core {
         );
         vec![self.emit_new(EventKind::ApprovalRequest {
             request_id,
+            args_preview: Some(call_args),
             tool,
             description,
             options,
@@ -3314,7 +3339,28 @@ fn option(id: &str, label: &str, canonical: ApprovalCanonical) -> ApprovalOption
         id: id.into(),
         label: label.into(),
         canonical,
+        grant: None,
     }
+}
+
+/// A grant's rules: at most [`GRANT_RULES`], each cut to [`GRANT_RULE_LIMIT`] bytes; a rule
+/// that was cut ends with "…" (within the limit), so the card does not show a stub as the rule
+/// the CLI writes whole.
+pub(super) fn grant_rules(rules: impl IntoIterator<Item = String>) -> Vec<String> {
+    rules
+        .into_iter()
+        .take(GRANT_RULES)
+        .map(|r| {
+            let whole = hqc_proto::replace_nul(&r);
+            if whole.len() <= GRANT_RULE_LIMIT {
+                return whole.into_owned();
+            }
+            // The mark counts in the limit.
+            let mut text = preview(&whole, GRANT_RULE_LIMIT - '…'.len_utf8());
+            text.push('…');
+            text
+        })
+        .collect()
 }
 
 /// The CLI's own description plus what is being touched: the command, file, URL or the

@@ -97,6 +97,36 @@ pub struct ApprovalOption {
     pub id: String,
     pub label: String,
     pub canonical: ApprovalCanonical,
+    /// What choosing the option grants beyond this call (SPEC 0.200); absent for an option
+    /// that grants nothing, and from a worker that does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<OptionGrant>,
+}
+
+/// `approval.option.grant`: where a standing allowance is kept and the rules it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionGrant {
+    pub place: GrantPlace,
+    /// The rules, as Claude Code writes a rule: `toolName` or `toolName(ruleContent)`; at most
+    /// 10, each at most 256 bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<String>,
+    /// The exact call is allowed too (the worker's session rules always add it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exact: bool,
+}
+
+/// `OptionGrant.place`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantPlace {
+    /// The worker's memory, until the agent's process ends.
+    Session,
+    /// `.claude/settings.local.json` at the root of the git repository containing the session's
+    /// cwd (outside one, in the cwd), written by Claude Code (SPEC §8.1).
+    LocalSettings,
+    #[serde(other)]
+    Unknown,
 }
 
 /// `approval.request.policy_hint`: a rule of the worker's `[permissions]` matches the call
@@ -425,6 +455,10 @@ pub enum EventKind {
         request_id: String,
         tool: String,
         description: String,
+        /// The call's arguments as `tool.call.args_preview` carries them: the card shows the
+        /// whole command and every argument from it (since SPEC 0.200).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args_preview: Option<String>,
         options: Vec<ApprovalOption>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at: Option<DateTime<Utc>>,
@@ -991,6 +1025,31 @@ mod tests {
         };
         assert_eq!(tool, "hqc_secret");
         assert_eq!(secret.as_ref().unwrap().name, "WIFI_PASS");
+        assert_eq!(serde_json::to_value(&ev).unwrap(), wire);
+    }
+
+    /// SPEC 0.200: the call's arguments and what an option grants ride on the request.
+    #[test]
+    fn a_request_with_grants_roundtrips() {
+        let src = include_str!("../examples/wire/event.approval.request.grants.json");
+        let wire: serde_json::Value = serde_json::from_str(src).unwrap();
+        let ev: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::ApprovalRequest {
+            args_preview,
+            options,
+            ..
+        } = &ev.kind
+        else {
+            panic!("not approval.request");
+        };
+        assert!(args_preview.as_deref().unwrap().contains("npm test"));
+        assert_eq!(options[0].grant, None);
+        let session = options[1].grant.as_ref().unwrap();
+        assert_eq!(session.place, GrantPlace::Session);
+        assert!(session.exact);
+        let always = options[2].grant.as_ref().unwrap();
+        assert_eq!(always.place, GrantPlace::LocalSettings);
+        assert!(!always.exact);
         assert_eq!(serde_json::to_value(&ev).unwrap(), wire);
     }
 

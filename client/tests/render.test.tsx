@@ -757,6 +757,211 @@ describe("approval.request (T26 card)", () => {
     expect(sheet(ev("event.approval.request"))).toBe("Run the command?");
   });
 
+  describe("the call on the card (SPEC 0.200)", () => {
+    const script = "cat > x.py <<'EOF'\nimport sys\nprint(sys.argv)\nEOF\npython3 x.py /etc/passwd";
+    const asking = (tool: string, description: string, args?: object | string, seq = 2) =>
+      ev("event.approval.request", (e) => {
+        e.seq = seq;
+        e.payload = { ...e.payload, tool, description, rule_suggestions: [] };
+        if (args !== undefined) e.payload.args_preview = typeof args === "string" ? args : JSON.stringify(args);
+      });
+    const card = (...events: HqcEvent[]) => {
+      const t = new Timeline();
+      for (const e of events) t.apply(e);
+      show(t, { workspaceRoot: "/w/hqc" });
+    };
+    const text = (sel: string) => root.querySelector(sel)?.textContent;
+
+    it("shows the whole of a multi-line command when the call stands right before the request", () => {
+      const args = { description: "Write and run a script", command: script };
+      card(call(1, "a", "Bash", args), asking("Bash", `Write and run a script\n${script}`));
+      expect(text(".perm-what")).toBe(`$ ${script}`);
+      expect(text(".perm-sub")).toBe("Bash · Write and run a script");
+      expect(root.querySelector(".perm-cut")).toBeNull();
+      // The paths of every line count for the warning, not those of the first only.
+      expect(text(".perm-note")).toContain("/etc/passwd");
+    });
+
+    it("shows the whole command of a request that has no call, from its own arguments", () => {
+      const args = { description: "Write and run a script", command: script };
+      card(asking("Bash", `Write and run a script\n${script}`, args));
+      expect(text(".perm-what")).toBe(`$ ${script}`);
+      expect(text(".perm-sub")).toBe("Bash · Write and run a script");
+    });
+
+    it("shows a one-line command of 500 characters without cutting it", () => {
+      const long = `echo ${"a".repeat(495)}`;
+      const args = { description: "Print", command: long };
+      card(call(1, "a", "Bash", args), asking("Bash", `Print\n${long}`, args));
+      expect(text(".perm-what")).toBe(`$ ${long}`);
+      expect(text(".perm-what")).not.toContain("…");
+    });
+
+    it("says that a command cut at 4 KB is cut", () => {
+      const cut = JSON.stringify({ description: "Big", command: `${script}\n${"x".repeat(5000)}` }).slice(0, 4096);
+      card(asking("Bash", "Big\nscript", cut));
+      expect(text(".perm-what")!.startsWith("$ cat > x.py")).toBe(true);
+      expect(text(".perm-cut")).toBe("The command is cut at 4 KB: the rest is not shown.");
+    });
+
+    it("says the command is cut, not the other fields, when a Bash call with other fields is cut in its command", () => {
+      const cut = JSON.stringify({ timeout: 5000, description: "Big", command: `${script}\n${"x".repeat(5000)}` }).slice(0, 4096);
+      card(asking("Bash", "Big\nscript", cut));
+      expect(text(".perm-what")!.startsWith("$ cat > x.py")).toBe(true);
+      expect(text(".perm-args pre")).toBe('{\n  "timeout": 5000\n}');
+      // One mark, about the command; the arguments under it are whole.
+      expect([...root.querySelectorAll(".perm-cut")].map((m) => m.textContent)).toEqual([
+        "The command is cut at 4 KB: the rest is not shown.",
+      ]);
+    });
+
+    it("keeps the arguments' own cut mark when the cut is in a field after a whole command", () => {
+      const cut = JSON.stringify({ command: "sleep 5", description: "Wait", note: "x".repeat(5000) }).slice(0, 4096);
+      card(asking("Bash", "Wait\nsleep 5", cut));
+      expect(text(".perm-what")).toBe("$ sleep 5");
+      expect([...root.querySelectorAll(".perm-cut")].map((m) => m.textContent)).toEqual([
+        "The preview is cut at 4 KB: the rest of the arguments are not shown.",
+      ]);
+    });
+
+    // happy-dom lays nothing out: a box "scrolls" when the stub says its content is taller.
+    const scrolling = (boxes: Record<string, boolean>) => {
+      vi.restoreAllMocks();
+      const box = (el: Element) => (el.parentElement!.classList.contains("perm-what") ? "what" : "args");
+      vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
+        return boxes[box(this)] ? 500 : 100;
+      });
+      vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(() => 240);
+    };
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+    const lines = (n: number) => Array.from({ length: n }, (_, i) => `echo ${i}`).join("\n");
+
+    it("counts the lines of a command whose box scrolls, once for a final line break, and only then", () => {
+      scrolling({ what: true });
+      card(asking("Bash", "Ten\nx", { command: `${lines(10)}\n` }));
+      expect(text(".perm-lines")).toBe("10 lines: the box scrolls");
+      document.body.innerHTML = "";
+      // One long line wraps in a narrow frame and scrolls as well.
+      card(asking("Bash", "Long\nx", { command: `echo ${"a".repeat(350)}` }));
+      expect(text(".perm-lines")).toBe("The command scrolls in the box");
+      document.body.innerHTML = "";
+      scrolling({ what: false });
+      card(asking("Bash", "Ten\nx", { command: lines(10) }));
+      expect(root.querySelector(".perm-lines")).toBeNull();
+    });
+
+    it("says that the frame of a call with one argument scrolls, when it does", () => {
+      scrolling({ what: true });
+      card(asking("mcp__web__open", "mcp__web__open", { url: `https://example.com/${"a".repeat(300)}` }));
+      expect(text(".perm-lines")).toBe("The call scrolls in the box");
+      document.body.innerHTML = "";
+      scrolling({ what: false });
+      card(asking("mcp__web__open", "mcp__web__open", { url: "https://example.com/" }));
+      expect(root.querySelector(".perm-lines")).toBeNull();
+    });
+
+    it("says that the box of the arguments scrolls, when it does", () => {
+      const args = { description: "Wait", command: "sleep 5", timeout: 5000 };
+      scrolling({ args: true });
+      card(asking("Bash", "Wait\nsleep 5", args));
+      expect(text(".perm-args .perm-lines")).toBe("The arguments scroll in the box");
+      expect(root.querySelector(".perm-what + .perm-lines")).toBeNull();
+      document.body.innerHTML = "";
+      scrolling({ args: false });
+      card(asking("Bash", "Wait\nsleep 5", args));
+      expect(root.querySelector(".perm-lines")).toBeNull();
+    });
+
+    it("shows a single long or multi-line argument of an MCP call as a block, not as one line", () => {
+      const code = "import os\nprint(os.getcwd())\nprint('done')";
+      card(asking("mcp__py__run", "mcp__py__run", { code }));
+      expect(text(".perm-args pre")).toBe(argsText(JSON.stringify({ code }))!.text);
+      expect(root.querySelector(".perm-what")).toBeNull();
+      document.body.innerHTML = "";
+      const long = { code: "x".repeat(450) };
+      card(asking("mcp__py__run", "mcp__py__run", long));
+      expect(text(".perm-args pre")).toContain("x".repeat(450));
+      // One object argument is told by the row as `key: {json}` and cut at 400 as well.
+      document.body.innerHTML = "";
+      const object = { options: { list: Array.from({ length: 60 }, (_, i) => `item-${i}`) } };
+      card(asking("mcp__py__run", "mcp__py__run", object));
+      expect(text(".perm-args pre")).toContain("item-59");
+      expect(root.querySelector(".perm-what")).toBeNull();
+    });
+
+    it("keeps the description line with the arguments of a request from an old worker that has no call to read them from", () => {
+      const line = 'mcp__chat__send {"to":"bob","message":"hi"}';
+      card(asking("mcp__chat__send", line));
+      expect(text(".perm-sub")).toBe(`send (chat) · ${line}`);
+    });
+
+    it("falls back to the description when the arguments have no command or are not JSON", () => {
+      card(asking("Bash", "List the folder\nls /tmp", { foo: 1 }));
+      expect(text(".perm-what")).toBe("$ ls /tmp");
+      expect(text(".perm-sub")).toBe("Bash · List the folder");
+      expect(root.querySelector(".perm-args")).toBeNull();
+      card(asking("Bash", "List the folder\nls /tmp", "not json"));
+      expect(text(".perm-what")).toBe("$ ls /tmp");
+    });
+
+    it("shows every argument of an MCP call as indented JSON instead of the frame", () => {
+      const args = { to: "bob", message: "hi there", channel: "ops" };
+      card(asking("mcp__chat__send", `mcp__chat__send ${JSON.stringify(args)}`, args));
+      expect(text(".perm-args pre")).toBe(argsText(JSON.stringify(args))!.text);
+      expect(root.querySelector(".perm-what")).toBeNull();
+      expect(text(".perm-sub")).toBe("send (chat)");
+    });
+
+    it("keeps the frame for a call with one argument", () => {
+      card(asking("mcp__probe-bench__home", "mcp__probe-bench__home", { axis: "z" }));
+      expect(text(".perm-what pre")).toBe('axis: "z"');
+      expect(root.querySelector(".perm-args")).toBeNull();
+    });
+
+    it("shows what a Bash call has besides its command under the command", () => {
+      const args = { description: "Wait", command: "sleep 5", timeout: 5000 };
+      card(asking("Bash", "Wait\nsleep 5", args));
+      expect(text(".perm-what")).toBe("$ sleep 5");
+      expect(text(".perm-args pre")).toBe(argsText(JSON.stringify(args), ["command", "description"])!.text);
+      expect(text(".perm-args pre")).toContain('"timeout": 5000');
+      expect(text(".perm-args pre")).not.toContain("sleep");
+    });
+
+    it("says what Always allow and Always in this session grant, on the line under the buttons and in the tooltips", () => {
+      card(ev("event.approval.request.grants"));
+      const lines = [...root.querySelectorAll(".perm-grants li")].map((l) => l.textContent);
+      expect(lines).toEqual([
+        "Always in this session — Bash(npm test *) and this exact call, until the agent's process ends",
+        "Always allow — writes Bash(npm test *) to .claude/settings.local.json at the root of the session's git repository (outside one, of its folder): every Claude Code session there",
+      ]);
+      expect(root.querySelector(".perm-grants code")!.textContent).toBe("Bash(npm test *)");
+      const title = (id: string) => root.querySelector(`[data-option="${id}"]`)!.getAttribute("title");
+      expect(title("session")).toBe(
+        "Allows Bash(npm test *) and this exact call until the agent's process ends.",
+      );
+      expect(title("always")).toBe(
+        "Writes Bash(npm test *) to .claude/settings.local.json at the root of the session's git repository (outside one, of its folder): every Claude Code session there.",
+      );
+      expect(title("once")).toBe("Allow once");
+    });
+
+    it("says only the exact call when a session grant has no rules; without a grant the tooltip is the label and no line shows", () => {
+      card(
+        ev("event.approval.request.grants", (e) => {
+          e.payload.options[1].grant = { place: "session", exact: true };
+          e.payload.options.splice(2, 1);
+        }),
+      );
+      expect(text(".perm-grants li")).toBe("Always in this session — only this exact call, until the agent's process ends");
+      document.body.innerHTML = "";
+      card(ev("event.approval.request"));
+      expect(root.querySelector(".perm-grants")).toBeNull();
+      expect(root.querySelector('[data-option="allow_session"]')!.getAttribute("title")).toBe("Allow for this session");
+    });
+  });
+
   it("explains policy_hint allow and a path outside the workspace, nothing otherwise", () => {
     const req = (seq: number, id: string, description: string, hint?: string) =>
       ev("event.approval.request", (e) => {

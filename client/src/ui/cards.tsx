@@ -1306,8 +1306,9 @@ interface OtherAnswer {
  *  (`server`) is headed by the server, has its text above the questions, its link with Done in
  *  place of questions, no "Other", its required fields marked, and Decline. The options'
  *  previews (SPEC 0.207) are plain text, never rendered: on a desktop beside the options, the
- *  one of the option under the pointer or the keyboard focus, else of the chosen one, else the
- *  first one that has a preview; on a phone under the chosen option. */
+ *  one of the option last under the pointer while the pointer is over the question, or of the
+ *  option with the keyboard focus (kept when the focus moves into the preview), else of the
+ *  chosen one, else the first one that has a preview; on a phone under the chosen option. */
 export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.request'>; actions: ChatActions }) {
   const p = event.payload;
   const fate = actions.timeline.requestFate(p.request_id);

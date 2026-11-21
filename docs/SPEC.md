@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.185, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.197, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -364,7 +364,9 @@ from `session.state.background_tasks`, §5.4; 0 after a worker restart), `output
 0.122: the session's latest `tokens.rate`, §4; absent — 0, also after its worker disconnects),
 `paused_at` (nullable; since 0.160, migration `0050`: when the session was paused, then, once the
 hub itself stops its agent for the pause, when it did; a process that ends another way keeps the
-time of the pause; cleared on resume, §17.3), `room_mode` (nullable `conversation` | `council`;
+time of the pause; cleared on resume, §17.3), `pause_cut_turn` (since 0.197, migration `0054`:
+the pause stopped a turn that was running; false while the session is not paused, §17.3),
+`room_mode` (nullable `conversation` | `council`;
 since 0.172, migration `0051`: set only on a room, a session with no workspace, no worker and no
 agent whose agents are sessions of their own, §7.1.1) and `room_id` (nullable; since 0.172: on
 an agent's session, the room it belongs to, §7.1.1; the session is deleted with the room).
@@ -1823,12 +1825,13 @@ the rest is marked "later"):
   `409 archived`, driven from VS Code: `409 locked_vscode`, service session: `409 system_session`
 - `POST /api/sessions/{id}/pause`, `/resume` → the session object (since 0.160, `write` level,
   §17.3). `/pause` sets `paused_at` and, with no turn running, ends the agent's process at once
-  (`session.kill`); with one running, when it ends. `/resume` clears it; when the process was
-  stopped, it stores the note of the pause as a pending `user.message` and starts the agent
-  (`session.start` with `mode: resume`). A pause of a paused session and a resume of one that
-  is not paused change nothing; archived: `409 archived`, driven from VS Code: `409
-  locked_vscode`, service session: `409 system_session`; since 0.172 a room: `409 room` (it has
-  no agent; its agents' sessions are paused one by one, §7.1.1)
+  (`session.kill`); with one running (since 0.197), it stops that turn as `/stop` does and ends the
+  process when the turn has ended. `/resume` clears it and stores the note of the pause as a
+  pending `user.message` (since 0.197 also when the process was not stopped yet); when it was, it
+  starts the agent (`session.start` with `mode: resume`). A pause of a paused session and a resume
+  of one that is not paused change nothing; archived: `409 archived`, driven from VS Code: `409
+  locked_vscode`, service session: `409 system_session`; since 0.172 a room: `409 room` (it has no
+  agent; its agents' sessions are paused one by one, §7.1.1)
 - `POST /api/sessions/{id}/background` {call_id} → `{sent}` (since 0.125; `write` level, as
   `/stop`): `session.background` to the worker (§5.3), `sent: false` when the worker is not
   connected; nothing comes back of what the runtime did, the call leaves the session's
@@ -2537,8 +2540,9 @@ now and can move to the background (`POST .../background`), from `session.state`
 in the hub's memory; absent — none. The chat offers "Run in background" for such a call
 (§17.1).
 `paused_at` (since 0.160): §3 Session, §17.3; absent — not paused. While it is set and the
-session is still `running` or `waiting`, the chat header and the session's row say "Pausing
-after this turn" instead of the state.
+session is still `running` or `waiting` (the turn the pause stopped has not ended yet), the chat
+header and the session's row say "Pausing" (since 0.197; "Pausing after this turn" before) instead
+of the state.
 `activity` (since 0.179): what the agent waits on now (`retrying`, `compacting`, `thinking`),
 from `session.state` (§5.4), kept in the hub's memory; absent — none. The chat's activity line
 shows it in place of "Agent is working" (§17.1); a client ignores a `kind` it does not know.
@@ -3251,8 +3255,10 @@ The reply to an ask:
   Since 0.69 a turn on the question that ends with `status idle` and no final message (the
   user's "No" to a permission request ends it so, §8.1, as `POST /stop` does; or the turn
   ended by itself without text) fails the ask at once too: `unavailable`, "the turn of
-  <session> on the question ended without an answer"; before, it waited for the timeout. The
-  turn is the one the status names with `in_reply_to` (§4), not the target's last delivered
+  <session> on the question ended without an answer"; before, it waited for the timeout. Since
+  0.197 so does a turn whose final message is a text an interrupt cut off (`interrupted`, §4:
+  Stop, a pause, "No" to a permission request): that text is no reply. The turn is the one the
+  status names with `in_reply_to` (§4), not the target's last delivered
   input: the worker acks the next input outside its outbox (§5.2), so that ack may reach the
   hub before the `status idle` of the turn before it, and an ask queued behind that turn would
   fail as its own turn starts. A `status idle` without `in_reply_to` (an older worker, or a
@@ -6358,30 +6364,36 @@ send from a session in a lower mode (§7.1).
   inputs the old process did not take go to the new one after the start's `ack`.
 - Pause (since 0.160, `POST /api/sessions/{id}/pause`, §6; Claude Code has no pause of its own):
   the hub sets the session's `paused_at`. With no turn running it ends the agent's process at
-  once as a restart does (`session.kill`) and starts nothing; with a turn running it lets the
-  turn end and ends the process then, on the worker's `status` `idle` or `error`, or the
-  watchdog's turn loss. A kill the worker never got (its link was dead, it was away, the hub
-  restarted) goes after its next `hello` while the process was last reported alive. When the hub
-  ends the process itself, it sets `paused_at` again: the time the agent stopped. A process that
-  ends another way (a restart for a change of provider or browser, a worker restart, a crash)
-  leaves the time of the pause. The agent's background
-  subagents and commands, and what it set to wake it up, end with the process. While `paused_at`
-  is set the hub neither starts the agent nor delivers input to it, whatever asks for it (a
-  worker's `hello`, a process that stopped, a schedule, a peer message, a move): inputs typed
-  meanwhile wait in `pending`, and the session is `paused` once no turn runs (§17.1). A turn that
-  still runs gets the answers to its requests that its worker has not acknowledged, which after
-  a reconnect only a start's `ack` would send otherwise. A run of a `cron` schedule is skipped
-  (§16), a run of an `at` one is stored and waits; `hqc_ask` to the session is refused at once
-  with `unavailable` (§7.1; one queued before the pause waits out its timeout), `hqc_send` is
-  queued. Resume (`POST .../resume`) clears
-  `paused_at`. When the process was ended, the hub stores, as a pending `user.message` of the
-  user who resumed with `resume: true` (§4), the note `[hqc] You were paused at <HH:MM> UTC on
-  <YYYY-MM-DD> and are resumed now: <elapsed> passed.` (`<elapsed>`: the two largest units,
-  rounded down, a zero second one
-  left out: `45 s`, `12 min`, `1 h 20 min`, `3 d 2 h`), and starts the agent with `mode: resume`,
-  the same history; the note goes to it ahead of the inputs held during the pause. Resumed before
-  the turn the pause was asked during has ended, the agent was never stopped: no note, and the
-  held inputs go to it.
+  once as a restart does (`session.kill`) and starts nothing; with a turn running it stops the
+  turn at once as Stop does (since 0.197; before, it let the turn run to its end) and ends the
+  process when the turn has ended, on the worker's `status` `idle` or `error`, or the watchdog's
+  turn loss. A kill the worker never got (its link was dead, it was away, the hub restarted) goes
+  after its next `hello` while the process was last reported alive; so does (since 0.197) the
+  stop of a turn that still runs. When the hub ends the process itself, it sets `paused_at`
+  again: the time the agent stopped. A process that ends another way (a restart for a change of
+  provider or browser, a worker restart, a crash) leaves the time of the pause. The agent's
+  background subagents and commands, and what it set to wake it up, end with the process. While
+  `paused_at` is set the hub neither starts the agent nor delivers input to it, whatever asks for
+  it (a worker's `hello`, a process that stopped, a schedule, a peer message, a move): inputs
+  typed meanwhile wait in `pending`, and the session is `paused` once no turn runs (§17.1). A
+  turn that still runs gets the answers to its requests that its worker has not acknowledged,
+  which after a reconnect only a start's `ack` would send otherwise. A run of a `cron` schedule
+  is skipped (§16), a run of an `at` one is stored and waits; `hqc_ask` to the session is refused
+  at once with `unavailable` (§7.1; one queued before the pause waits out its timeout),
+  `hqc_send` is queued. Resume (`POST .../resume`) clears `paused_at`, and the hub stores, as a
+  pending `user.message` of the user who resumed with `resume: true` (§4), the note `[hqc] You
+  were paused at <HH:MM> UTC on <YYYY-MM-DD> and are resumed now: <elapsed> passed.`
+  (`<elapsed>`: the two largest units, rounded down, a zero second one left out: `45 s`,
+  `12 min`, `1 h 20 min`, `3 d 2 h`). Since 0.197, after a pause that stopped a running turn
+  (`pause_cut_turn`), the note goes on: `If the pause cut a step of your work (it shows as a tool
+  use the user rejected or interrupted), that was the pause, not the user: go on with the task
+  from where it stopped.` Claude Code shows the agent the step an interrupt cut as one the user
+  rejected, and without it a resumed agent took the pause for a refusal and stopped; after a
+  pause of an idle agent a rejected step is the user's own, and the note does not say it. The
+  note goes to the agent ahead of the inputs held during the pause. When the process was ended,
+  the hub starts the agent with `mode: resume`, the same history; resumed before the turn the
+  pause stopped has ended (since 0.197; before, such a turn ran on and got no note), the process
+  still runs and the note goes to it without a start.
 - Worker offline: input accumulates in the hub (`pending`), the session is `worker_offline`,
   delivery on connect in `seq` order. Open `approval`s on an offline worker
   stay open until it returns or until `expires_at`.
@@ -6665,6 +6677,27 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.185 → 0.197 (a pause stops the running turn at once)
+§6, §7.1, §17.3 (user decision, 2026-11-20: "pause should come at once; a turn may run for half
+an hour"): a pause during a turn let the turn run to its end, and only then the hub ended the
+agent's process, so the session could go on working for half an hour under "Pausing after this
+turn". `POST /api/sessions/{id}/pause` now stops a running turn as `POST /stop` does
+(`session.stop`, the session's open requests cancelled as Stop cancels them) and ends the process
+when that turn has ended, on the same `status` `idle` or `error` or turn loss as before. The
+finished steps of the turn stay in the transcript, and the resumed agent sees them. A stop the
+worker never got (its link was dead, it was away) is sent after its next `hello` while the turn
+still runs, as the kill already was. Resumed before the stopped turn has ended, the agent gets
+the note too (before, the turn ran on and needed none). The note now also says that a step the
+pause cut, which Claude Code shows the agent as a tool use the user rejected, was the pause, and
+to go on: on the test stand a resumed agent without it answered "You declined the run" and
+stopped. Only after a pause that stopped a turn: after a pause of an idle agent a rejected step is
+the user's own (Stop or "No" on a permission card), and the agent would have repeated it. §7.1: a
+final text an interrupt cut off (`interrupted`: Stop, a pause, "No" to a permission request) is
+no reply to an `hqc_ask`; the turn's `status idle` fails the ask as a turn without an answer
+(before, the asker got the cut text as the answer). The client says "Pausing" until the process
+ends. §3: `sessions.pause_cut_turn`, migration `0054_session_pause_cut` (0052 and 0053 are taken
+by open branches). No frame or worker change. 0.186–0.196 are taken by open branches.
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

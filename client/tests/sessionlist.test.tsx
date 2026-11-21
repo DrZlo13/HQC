@@ -117,12 +117,12 @@ describe('list logic', () => {
     expect(subLabel(busy)).toBe('Running');
   });
 
-  it('a paused session says Paused among the idle ones; paused during its turn, "Pausing after this turn"', () => {
+  it('a paused session says Paused among the idle ones; paused during its turn, "Pausing"', () => {
     const held = sess('held', 'Held build', 'paused', at(1), { paused_at: at(1) });
     expect(bucketOf(held)).toBe('idle');
     expect(subLabel(held)).toBe('Paused');
-    expect(subLabel(sess('run', 'Still running', 'running', at(1), { paused_at: at(1) }))).toBe('Pausing after this turn');
-    expect(subLabel(sess('ask', 'Still asking', 'waiting', at(1), { paused_at: at(1) }))).toBe('Pausing after this turn');
+    expect(subLabel(sess('run', 'Still running', 'running', at(1), { paused_at: at(1) }))).toBe('Pausing');
+    expect(subLabel(sess('ask', 'Still asking', 'waiting', at(1), { paused_at: at(1) }))).toBe('Pausing');
     expect(subLabel(sess('run', 'Still running', 'running', at(1)))).toBe('Running');
   });
 

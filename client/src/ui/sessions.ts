@@ -91,7 +91,8 @@ export function archivedLabel(s: SessionInfo, now: number): string {
   return s.archived_at ? `Archived ${formatDay(s.archived_at, now)}` : 'Archived';
 }
 
-/** Paused while its turn still runs: the agent stops when the turn ends (SPEC §17.3). */
+/** Paused while its turn still runs: the pause has stopped the turn, and the agent stops when it
+ *  ends (SPEC §17.3). */
 export function pausingAfterTurn(s: Pick<SessionInfo, 'state' | 'paused_at'>): boolean {
   return !!s.paused_at && (s.state === 'running' || s.state === 'waiting');
 }
@@ -101,13 +102,13 @@ export function subLabel(s: SessionInfo): string {
   let t: string;
   switch (s.state) {
     case 'waiting':
-      t = pausingAfterTurn(s) ? 'Pausing after this turn' : 'Waiting for reply';
+      t = pausingAfterTurn(s) ? 'Pausing' : 'Waiting for reply';
       break;
     case 'error':
       t = 'Error';
       break;
     case 'running':
-      t = pausingAfterTurn(s) ? 'Pausing after this turn' : 'Running';
+      t = pausingAfterTurn(s) ? 'Pausing' : 'Running';
       break;
     case 'paused':
       t = 'Paused';

@@ -895,10 +895,10 @@ describe('header', () => {
     expect($('.pill .pulse')).toBeNull();
   });
 
-  it('says "Pausing after this turn" while a paused session\'s turn runs, Paused once it is paused', async () => {
+  it('says "Pausing" while a paused session\'s turn runs, Paused once it is paused', async () => {
     let { app } = setup('running', { paused_at: '2026-11-15T09:00:00Z' });
     await mount(app);
-    expect($('.pill')!.textContent).toBe('Pausing after this turn');
+    expect($('.pill')!.textContent).toBe('Pausing');
     render(null, root);
 
     ({ app } = setup('paused', { paused_at: '2026-11-15T09:00:00Z' }));

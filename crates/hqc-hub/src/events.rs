@@ -522,8 +522,10 @@ async fn after_store(
             if source != Source::Hub {
                 // "Session N" gets a real title (T21).
                 crate::titles::after_first_answer(app, s);
-                // The reply to an `hqc_ask` (SPEC §7.1).
-                if let Some(input) = in_reply_to {
+                // The reply to an `hqc_ask` (SPEC §7.1). A text an interrupt cut off (Stop, a
+                // pause, "No" to a permission request) is no reply: the turn's `status idle`
+                // fails the ask (`peers::turn_stopped`).
+                if let Some(input) = in_reply_to.as_ref().filter(|_| !*interrupted) {
                     crate::peers::on_final(app, s, *input, text, (row.event_id, row.seq)).await?;
                 }
             }

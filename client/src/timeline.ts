@@ -62,9 +62,10 @@ export class Timeline {
   private readonly pending = new Map<string, PendingMessage>();
   private readonly echoed = new Set<string>();
   private readonly fates = new Map<string, RequestFate>();
-  /** The answers this client sent and the hub took, by request id, until the hub's
-   *  `*.response` or `*.cancel` event for the request arrives. */
-  private readonly answered = new Map<string, LocalApprovalResponse | ClarifyResponse>();
+  /** The answers this client sent and the hub took, with when the hub took them (this client's
+   *  clock), by request id, until the hub's `*.response` or `*.cancel` event for the request
+   *  arrives. */
+  private readonly answered = new Map<string, { response: LocalApprovalResponse | ClarifyResponse; at: number }>();
   private readonly results = new Map<string, EventOf<"tool.result">>();
   private readonly calls = new Map<string, EventOf<"tool.call">>();
   /** The first `system task_notification` by its `call_id`, and by its `task_id`. */
@@ -304,7 +305,7 @@ export class Timeline {
     // The event came before the reply of the POST: it is the answer already.
     const f = this.fates.get(requestId);
     if (f?.response || f?.cancel) return;
-    this.answered.set(requestId, response);
+    this.answered.set(requestId, { response, at: Date.now() });
     this.changed();
   }
 
@@ -319,7 +320,7 @@ export class Timeline {
     const f = this.fates.get(requestId);
     if (f?.response || f?.cancel) return f;
     const local = this.answered.get(requestId);
-    return local ? { ...f, response: local } : (f ?? {});
+    return local ? { ...f, response: local.response } : (f ?? {});
   }
 
   /** The first user's message after `seq`: a stored one, else one not stored yet (`failed`
@@ -366,15 +367,20 @@ export class Timeline {
 
   /** From when `call` counts as running, in ms: its `ts`, or the `ts` of the last answer to a
    *  request after it if later (a permission or a question it, or a subagent it runs, waited
-   *  for). */
+   *  for), or when the hub took this client's answer to such a request whose event has not
+   *  come yet. */
   runSince(call: EventOf<"tool.call">): number {
     const evs = this.events();
-    const since = Date.parse(call.ts);
+    let since = Date.parse(call.ts);
     for (let i = evs.length - 1; i >= 0 && evs[i].seq! > call.seq!; i--) {
       const e = evs[i];
-      if (e.type === "approval.response" || e.type === "clarify.response")
-        return Math.max(since, Date.parse(e.ts));
+      if (e.type === "approval.response" || e.type === "clarify.response") {
+        since = Math.max(since, Date.parse(e.ts));
+        break;
+      }
     }
+    for (const [id, local] of this.answered)
+      if ((this.requests.get(id)?.seq ?? 0) > call.seq!) since = Math.max(since, local.at);
     return since;
   }
 

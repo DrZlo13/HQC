@@ -233,6 +233,7 @@ export function Chat({
       ? async (requestId, f) => {
           await app.api.giveSecret(sessionId, f, requestId);
           t.markAnswered(requestId, { request_id: requestId, option_id: SECRET_GIVEN });
+          app.dropRequest({ session_id: sessionId, request_id: requestId });
         }
       : undefined,
     fork: !system && info?.workspace_id

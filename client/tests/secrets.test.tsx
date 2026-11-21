@@ -11,10 +11,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ApiError, type Api, type SecretFields } from '../src/api';
 import { AppState } from '../src/app';
-import { parseEvent, type HqcEvent, type SessionInfo } from '../src/proto';
+import { parseEvent, type EventOf, type HqcEvent, type OpenRequest, type SessionInfo } from '../src/proto';
 import { Timeline } from '../src/timeline';
 import { ChatItems, type ChatActions } from '../src/ui/cards';
 import { Chat } from '../src/ui/Chat';
+import { RequestsScreen } from '../src/ui/requests';
 import { RulesScreen } from '../src/ui/Rules';
 import { secretNameError } from '../src/ui/secrets';
 import type { HubSocket } from '../src/ws';
@@ -74,7 +75,7 @@ describe('the composer’s Secret', () => {
       sessions: vi.fn(async () => []),
       projects: vi.fn(async () => []),
       workspaces: vi.fn(async () => []),
-      giveSecret: vi.fn(async (_id: string, f: SecretFields) => {
+      giveSecret: vi.fn(async (_id: string, f: SecretFields, _requestId?: string) => {
         if (opts.fail) throw new ApiError(422, 'a wrong passphrase', 'secret_refused');
         return f.kind === 'secret'
           ? { note: NOTE, path: '$HQC_SECRETS/WIFI_PASS' }
@@ -115,8 +116,8 @@ describe('the composer’s Secret', () => {
   }
   const area = () => $<HTMLTextAreaElement>('.composer-input')!;
 
-  it("the card of a request closes when the secret was given, before the hub's event", async () => {
-    const asked = ev('event.approval.request', 1, (e) => {
+  const secretAsked = () =>
+    ev('event.approval.request', 1, (e) => {
       e.author = { kind: 'system' };
       e.payload = {
         request_id: 'toolu_1',
@@ -125,8 +126,23 @@ describe('the composer’s Secret', () => {
         options: [{ id: 'deny', label: 'Decline', canonical: 'deny' }],
         secret: { name: 'WIFI_PASS', kind: 'secret' },
       };
-    });
+    }) as EventOf<'approval.request'>;
+  const openSecret = (event: EventOf<'approval.request'>): OpenRequest => ({
+    session_id: 's1',
+    request_id: 'toolu_1',
+    kind: 'approval',
+    address: 'home/camera',
+    title: 'camera',
+    worker_id: 'wk1',
+    system: false,
+    event,
+    waiting: [],
+  });
+
+  it("the card of a request closes when the secret was given, before the hub's event", async () => {
+    const asked = secretAsked();
     const { app } = setup({ events: [asked] });
+    app.setRequests([openSecret(asked)]);
     await mount(app);
     await flush();
     await typeInto($<HTMLInputElement>('.secret-value')!, PASSWORD);
@@ -134,6 +150,22 @@ describe('the composer’s Secret', () => {
     await flush();
     expect($('section[aria-label="Secret request"]')).toBeNull();
     expect($('.secret-done')!.textContent).toContain('given');
+    expect(app.requests).toEqual([]);
+  });
+
+  it('a secret given on the Requests screen leaves the list at once', async () => {
+    const { api, app } = setup();
+    app.setRequests([openSecret(secretAsked())]);
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    await act(async () => render(<RequestsScreen app={app} />, root));
+    await typeInto($<HTMLInputElement>('.foreign-request .secret-value')!, PASSWORD);
+    await act(async () => buttonByText('Give')!.click());
+    await flush();
+    expect(api.giveSecret.mock.calls[0][0]).toBe('s1');
+    expect(api.giveSecret.mock.calls[0][2]).toBe('toolu_1');
+    expect($('.foreign-request')).toBeNull();
+    expect(app.requests).toEqual([]);
   });
 
   it('is not offered where the worker does not take secrets', async () => {

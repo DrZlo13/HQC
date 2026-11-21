@@ -5300,11 +5300,14 @@ agent's own questions are answered by anyone with `write`. The first answer wins
 request, every device sees the `approval.response` event, and the client removes the buttons. The
 client that sent the answer shows the request as answered once the hub took it (the reply of the
 `POST`), without waiting for the event, which may reach it late; a permission, a question, an MCP
-server's request and a secret given are all answered so, and the session shows as running meanwhile.
-A second answer (from another device) gets `409 request_closed`; no cancel event is written in that
-case. Expiry, `POST /stop`, a worker restart and archiving produce `approval.cancel`, and the client
-removes the buttons. On expiry and archiving the hub writes the `approval.cancel` event and sends
-the worker an `approval.response` frame with the `canonical: deny` option, so the adapter closes the
+server's request and a secret given are all answered so, the request leaves the Requests list, and
+the session's chat shows it as running meanwhile (the activity line counts a call from the answer,
+§17.1). A second answer (from another device) gets `409 request_closed`; no cancel event is written
+in that case. On such a `409` to a permission or a question, the client reads the session's newest
+events and shows the event that closed the request, when it is among them. Expiry, `POST /stop`,
+a worker restart and archiving produce `approval.cancel`, and the client removes the buttons. On
+expiry and archiving the hub writes the `approval.cancel` event and sends the worker an
+`approval.response` frame with the `canonical: deny` option, so the adapter closes the
 request in the runtime (§5.3; since 0.69 that deny also ends the runtime's turn, §8.1); on a worker
 restart, only the event (§5.2). On `POST /stop` the hub cancels with `stopped` the requests it holds
 itself (a move, §7; a secret), then sends `session.stop`. Since 0.161 it leaves the runtime's
@@ -6253,7 +6256,8 @@ with no separate events: `running` — a pulsing "Running" pill in the header an
 working" line at the bottom of the feed ("Running <command or tool> <time since the call's
 `ts`>" while the last `tool.call` has no `tool.result`, T26, since 0.132 once that call has run
 for 2 s, counted from its `ts` or from a later answer to a request after it (a permission or a
-question it, or a subagent it runs, waited for), since 0.161 only a call after the last end of a
+question it, or a subagent it runs, waited for; since 0.188 also an answer of this client whose
+event has not come yet, from when the hub took it), since 0.161 only a call after the last end of a
 turn, §6; since 0.177 the tool as the feed names it, `move (probe-bench)`, its paths relative to
 the session's folder; since 0.125, when that call is one
 of the session's `foreground_calls`, §6, the line ends with a small "Run in background" button,
@@ -6670,14 +6674,15 @@ without a hub each of these would have to be done peer-to-peer.
 ## 23. Change history
 
 ### 0.185 → 0.188 (a request answered from this client closes at once)
-§10.1: the card of a request closed only when the `approval.response` or `clarify.response` event
-came over the socket, and on our hub that took up to 10 s after the hub had taken the answer; the
-person pressed Answer again and got `409 request_closed`. The client now records the answer when
-the `POST` returns (also for a secret given) and shows the request as answered, with the session as
-running if the hub still says it waits; the hub's event, or a cancel, takes the record away when it
-comes. A `409 request_closed` makes the client fetch the newest events, so the card shows what became
-of the request. A button's action ignores a second press while its request is in flight. No hub
-change.
+§10.1, §17.1: the card of a request closed only when the `approval.response` or `clarify.response`
+event came over the socket, and on our hub that took up to 10 s after the hub had taken the answer;
+the person pressed Answer again and got `409 request_closed`. The client now records the answer
+when the `POST` returns (also for a secret given), shows the request as answered and drops it from
+the Requests list; its chat shows the session as running if the hub still says it waits, and the
+activity line counts the call from the answer. The hub's event, or a cancel, takes the record away
+when it comes. A `409 request_closed` to a permission or a question makes the client fetch the
+newest events, so the card shows what became of the request. A button's action ignores a second
+press while its request is in flight. No hub change.
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

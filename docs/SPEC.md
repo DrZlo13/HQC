@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.185, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.210, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2383,8 +2383,9 @@ card's label for a screen reader said "Subagent"), the call's `description`, the
 `subagent_type` dimmed (since 0.141 not on a phone screen 480 px wide or less, where the label
 leaves the task too little room; the type opens with the call's arguments) and a "background" chip
 when its `run_in_background` is true; its second the subagent's state: while the latest
-`subagents.live` (§4) has a row with the call's `call_id`, a pulsing dot, what it does now
-("Running" before any progress: the CLI's text often starts "Running …" itself) and, at the right,
+`subagents.live` (§4) has a row with the call's `call_id`, a pulsing dot, what it does now, alone,
+as the CLI's text often starts "Running …" itself ("Running" before any progress and, since 0.210,
+while what it does now is the call's task itself) and, at the right,
 the row's `<tokens> tokens · <n> tools · <run time>`, ticking every second as above the input; else
 as the first `system task_notification` of the call says it ended — the first with its `call_id`,
 else, after a background launch whose result names the subagent `agentId: <id>`, the first with that
@@ -2484,7 +2485,9 @@ the session's row of the list while it is above 0; a background subagent keeps i
 turn that started it has ended. Since 0.114, while it is above 0, the chat also shows the
 subagents of the latest `subagents.live` (§4) above the input, outside the feed's scroll, so they
 stay in view while the feed scrolls (the VS Code tab writes such lines into the chat, where they
-scroll away): a line each, `<task>: <what it does now>` (the task alone before any progress;
+scroll away): a line each, `<task>: <what it does now>` (the task alone before any progress, and
+since 0.210 while what it does now is the task itself, which 2.1.312 sends after a call of a tool
+that does not describe itself, ToolSearch or an MCP tool;
 since 0.179, while its request to the model API waits to be retried, `<task>: Retrying 2/10
 (529), next in 4 s`, "no response" in place of a status the attempt did not get) and
 at its right `<tokens> tokens · <n> tools · <run time>` (`155.3k tokens · 188 tools · 4m 13s`),
@@ -6665,6 +6668,13 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.185 → 0.210 (a subagent's line does not repeat its task)
+§6 client layout: 2.1.312 sends a subagent's `task_progress` on each of its tool calls, with the
+call's activity text as `description` (the row's `activity`), and the subagent's task itself when
+the tool has none (ToolSearch, an MCP tool), so the line above the input read "Agent: Review
+links, part A: Review links, part A" and the card in the feed had the task on both lines. An `activity` equal to the row's `description` is now shown as
+none: the task alone above the input, "Running" on the card.
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

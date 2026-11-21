@@ -188,6 +188,7 @@ function RowText({ row }: { row: Row }) {
 /** `age`: how long the list has been here; `asking`: as for `LiveSubagents`. */
 function agentRow(a: LiveSubagent, age: number, asking?: ReadonlySet<string>): Row {
   const waits = a.kind === 'wakeup' || a.kind === 'cron';
+  const activity = activityOf(a);
   return {
     key: a.task_id,
     prefix: a.kind ? PREFIX[a.kind] : '',
@@ -197,8 +198,8 @@ function agentRow(a: LiveSubagent, age: number, asking?: ReadonlySet<string>): R
       ? ': waiting for permission'
       : a.retry
         ? `: ${retryLabel(a.retry)}`
-        : a.activity
-          ? `${a.kind === 'cron' ? ' · ' : ': '}${a.activity}`
+        : activity
+          ? `${a.kind === 'cron' ? ' · ' : ': '}${activity}`
           : '',
     right: waits ? countdown(a.due_in_ms, age) : stats(a, a.duration_ms + Math.max(0, age)),
     timer: waits,
@@ -325,6 +326,13 @@ function appended(page: SubagentHistory, more: SubagentHistory): SubagentHistory
   const events = [...page.events, ...added];
   const drop = Math.max(0, events.length - MAX_SUBAGENT_HISTORY);
   return { events: events.slice(drop), truncated: page.truncated || drop > 0 };
+}
+
+/** What the subagent does now, none when it says nothing past its task: after a call of a tool
+ *  that does not describe itself (ToolSearch, an MCP tool), the CLI (2.1.312) sends the task
+ *  itself as what it does now. Also the status line of its card in the feed (cards.tsx). */
+export function activityOf(a: Pick<LiveSubagent, 'description' | 'activity'>): string | undefined {
+  return a.activity && a.activity !== a.description ? a.activity : undefined;
 }
 
 /** `155.3k tokens · 188 tools · 4m 13s`; what the subagent has not reported yet is left out,

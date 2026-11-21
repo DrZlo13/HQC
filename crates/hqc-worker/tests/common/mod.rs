@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use hqc_worker::adapter::fake::FakeAdapters;
+use hqc_worker::adapter::fake::{FakeAdapters, FakeCall};
 use hqc_worker::adapter::AdapterFactory;
 use hqc_worker::config::Config;
 use hqc_worker::connection::{ConnOptions, Status};
@@ -503,6 +503,17 @@ impl RunningWorker {
             .unwrap()
             .clone()
     }
+}
+
+/// Whether `call` ends the process of session `sid`: a kill, or a close of a process with
+/// nothing running.
+pub fn is_end(call: &FakeCall, sid: Uuid) -> bool {
+    *call == FakeCall::Kill(sid) || *call == FakeCall::Close(sid)
+}
+
+/// How many times the process of session `sid` was ended, either way.
+pub fn ends(calls: &[FakeCall], sid: Uuid) -> usize {
+    calls.iter().filter(|c| is_end(c, sid)).count()
 }
 
 pub fn start_worker(env: &Env, hub_url: &str, adapters: &FakeAdapters) -> RunningWorker {

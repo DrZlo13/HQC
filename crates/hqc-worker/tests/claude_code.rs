@@ -28,6 +28,7 @@ async fn hub_runs_a_claude_code_turn_with_an_approval() {
     let factory = ClaudeCodeAdapters::new(
         ClaudeOptions {
             config_dir: Some(claude_dir),
+            exit_grace: std::time::Duration::from_millis(50),
             ..ClaudeOptions::default()
         },
         Arc::new(claude.clone()),
@@ -185,7 +186,8 @@ async fn hub_runs_a_claude_code_turn_with_an_approval() {
         "again"
     );
 
-    // session.kill: SIGTERM, then `stopped`.
+    // session.kill of a quiet agent: its stdin is closed, the scripted CLI stays, so SIGTERM
+    // after `exit_grace`, then `stopped`.
     c.frame("session.kill", json!({"session_id": sid})).await;
     loop {
         let st = c.expect("session.state").await;
@@ -649,6 +651,7 @@ async fn secrets_and_keys_reach_the_running_agent() {
     let factory = ClaudeCodeAdapters::new(
         ClaudeOptions {
             config_dir: Some(env.dir.path().join("claude-config")),
+            exit_grace: std::time::Duration::from_millis(50),
             ssh: hqc_worker::ssh::Store::in_home(&home_path),
             mcp: Some(hqc_worker::adapter::claude_code::McpLaunch {
                 program: "/bin/hqc-worker".into(),

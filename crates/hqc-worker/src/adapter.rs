@@ -209,6 +209,14 @@ pub trait Adapter: Send {
     async fn stop(&mut self) -> anyhow::Result<()>;
     /// Terminate the process. Returns when it is gone.
     async fn kill(&mut self) -> anyhow::Result<()>;
+    /// Ends the process of a session with nothing running, letting it exit by itself where
+    /// the runtime can (Claude Code: its stdin is closed, so that it can report what it could
+    /// not write); a process that works (a turn, the runtime's own included, a subagent or a
+    /// background task) ends as with [`Adapter::kill`], which is also the default. Returns
+    /// when it is gone.
+    async fn close(&mut self) -> anyhow::Result<()> {
+        self.kill().await
+    }
     /// The runtime's process while it runs: its MCP server must descend from it (SPEC §7.2).
     /// `None`: no process is known, and the session's MCP server is refused.
     fn pid(&self) -> Option<u32> {

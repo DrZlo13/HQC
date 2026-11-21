@@ -150,6 +150,7 @@ fn options(config_dir: &std::path::Path) -> ClaudeOptions {
         config_dir: Some(config_dir.to_path_buf()),
         early_exit: Duration::from_millis(20),
         stop_grace: Duration::from_millis(100),
+        exit_grace: Duration::from_millis(50),
         ..ClaudeOptions::default()
     }
 }
@@ -194,9 +195,20 @@ impl Harness {
     }
 
     async fn start_with(claude: ScriptedClaude, claude_session: Uuid) -> Self {
+        Self::start_with_options(claude, claude_session, |_| {}).await
+    }
+
+    /// [`Harness::start_with`] over [`options`] as `tune` changes them.
+    async fn start_with_options(
+        claude: ScriptedClaude,
+        claude_session: Uuid,
+        tune: impl FnOnce(&mut ClaudeOptions),
+    ) -> Self {
         let work = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
-        let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+        let mut opts = options(config.path());
+        tune(&mut opts);
+        let factory = ClaudeCodeAdapters::new(opts, Arc::new(claude.clone()));
         let session_id = Uuid::now_v7();
         let spec = spec(session_id, work.path(), claude_session);
         let (tx, events) = mpsc::channel(1024);
@@ -1734,7 +1746,8 @@ async fn stop_interrupts_then_falls_back_to_sigint() {
         .filter(|l| l.contains("\"isReplay\": true") || l.contains("\"text_delta\""))
         .map(|l| format!("{l}\n"))
         .collect();
-    let mut h = Harness::start(&stream, fx.claude_session()).await;
+    let claude = ScriptedClaude::new(&stream).answering_interrupts();
+    let mut h = Harness::start_with(claude, fx.claude_session()).await;
     let input_id = Uuid::now_v7();
     h.adapter
         .input(&SessionInput {
@@ -1755,7 +1768,7 @@ async fn stop_interrupts_then_falls_back_to_sigint() {
     );
     assert_eq!(shape(&[h.next().await]), ["delta"]);
     h.adapter.stop().await.unwrap();
-    // The scripted CLI ignores the interrupt; after `stop_grace` the group gets SIGINT,
+    // The scripted CLI answers the interrupt but the turn does not end; after `stop_grace` the group gets SIGINT,
     // the process dies, and the exit is reported.
     let mut last = h.next().await;
     while matches!(last, AdapterEvent::Event(_)) {
@@ -1799,7 +1812,9 @@ async fn stop_escalates_to_sigterm_when_sigint_does_not_end_the_turn() {
         .filter(|l| l.contains("\"isReplay\": true") || l.contains("\"text_delta\""))
         .map(|l| format!("{l}\n"))
         .collect();
-    let claude = ScriptedClaude::new(&stream).ignoring(&[Sig::Interrupt]);
+    let claude = ScriptedClaude::new(&stream)
+        .answering_interrupts()
+        .ignoring(&[Sig::Interrupt]);
     let mut h = Harness::start_with(claude, fx.claude_session()).await;
     let input_id = Uuid::now_v7();
     h.adapter
@@ -1830,6 +1845,173 @@ async fn stop_escalates_to_sigterm_when_sigint_does_not_end_the_turn() {
         "{last:?}"
     );
     assert_eq!(h.claude.signals(), [Sig::Interrupt, Sig::Terminate]);
+}
+
+/// A CLI that does not answer the interrupt is hung: the group gets SIGTERM after
+/// `interrupt_answer`, far before the `stop_grace` that an answering CLI gets.
+#[tokio::test]
+async fn stop_kills_a_cli_that_does_not_answer_the_interrupt() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start_with_options(
+        ScriptedClaude::new(&running_turn(&fx)),
+        fx.claude_session(),
+        |o| {
+            o.stop_grace = Duration::from_secs(10);
+            o.interrupt_answer = Duration::from_millis(50);
+        },
+    )
+    .await;
+    start_the_turn(&mut h).await;
+    h.adapter.stop().await.unwrap();
+    let mut last = h.next().await;
+    while matches!(last, AdapterEvent::Event(_)) {
+        last = h.next().await;
+    }
+    assert!(
+        matches!(last, AdapterEvent::Exited { error: Some(_) }),
+        "{last:?}"
+    );
+    assert_eq!(h.claude.signals(), [Sig::Terminate]);
+}
+
+/// A CLI that answers the interrupt gets its `stop_grace` to end the turn, no signal before.
+#[tokio::test]
+async fn an_answered_interrupt_is_waited_for() {
+    let fx = fixture!("permission-allow");
+    let claude = ScriptedClaude::new(&running_turn(&fx)).answering_interrupts();
+    let mut h = Harness::start_with_options(claude, fx.claude_session(), |o| {
+        o.stop_grace = Duration::from_secs(10);
+        o.interrupt_answer = Duration::from_millis(50);
+    })
+    .await;
+    start_the_turn(&mut h).await;
+    h.adapter.stop().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(h.claude.signals(), []);
+}
+
+/// The echo of the prompt and a delta, then silence: a turn that never ends by itself.
+fn running_turn(fx: &Fixture) -> String {
+    fx.stream
+        .lines()
+        .filter(|l| l.contains("\"isReplay\": true") || l.contains("\"text_delta\""))
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
+/// Sends the input that starts the turn of [`running_turn`] and reads up to its delta.
+async fn start_the_turn(h: &mut Harness) {
+    let input_id = Uuid::now_v7();
+    h.adapter
+        .input(&SessionInput {
+            session_id: h.session_id,
+            event_id: input_id,
+            text: "hi".into(),
+            artifact_ids: vec![],
+            peer_prefix: vec![],
+            peer: None,
+            permission_cap: None,
+            schedule_id: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        h.next().await,
+        AdapterEvent::InputAccepted { event_id: input_id }
+    );
+    assert_eq!(shape(&[h.next().await]), ["delta"]);
+}
+
+const WRITES_LOST: &str = r#"{"type":"system","subtype":"session_writes_lost","error_code":"ENOSPC","lost":["transcript"],"uuid":"4f0e2d3c-1b2a-4c5d-8e9f-0a1b2c3d4e5f","session_id":"42e1f456-d428-4380-ad8a-473e21ef9ff7"}"#;
+
+/// The system lines of what `h` emitted since, by code.
+fn system_codes(h: &mut Harness) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Ok(ev) = h.events.try_recv() {
+        if let AdapterEvent::Event(e) = ev {
+            if let EventKind::System { code, .. } = e.kind {
+                out.push(code);
+            }
+        }
+    }
+    out
+}
+
+/// A process with nothing running is closed through its stdin: a CLI that exits on it says
+/// what it could not write, and gets no signal.
+#[tokio::test]
+async fn an_idle_close_ends_the_cli_through_its_stdin() {
+    let fx = fixture!("permission-allow");
+    let claude = ScriptedClaude::new(fx.stream).exiting_on_eof(WRITES_LOST);
+    let mut h = Harness::start_with(claude, fx.claude_session()).await;
+    h.turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
+        .await;
+    h.adapter.close().await.unwrap();
+    assert_eq!(h.claude.signals(), []);
+    assert_eq!(system_codes(&mut h), ["transcript_not_saved"]);
+}
+
+/// A CLI that is still there `exit_grace` after its stdin was closed is ended by SIGTERM.
+#[tokio::test]
+async fn a_close_the_cli_outlives_ends_in_sigterm() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start(fx.stream, fx.claude_session()).await;
+    h.turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
+        .await;
+    h.adapter.close().await.unwrap();
+    assert_eq!(h.claude.signals(), [Sig::Terminate]);
+}
+
+/// A turn is not left to finish: a close during one ends the process at once, as `kill` does
+/// (a CLI that would exit on its stdin's end is not given the time).
+#[tokio::test]
+async fn a_close_during_a_turn_is_a_kill() {
+    let fx = fixture!("permission-allow");
+    let claude = ScriptedClaude::new(&running_turn(&fx)).exiting_on_eof(WRITES_LOST);
+    let mut h = Harness::start_with(claude, fx.claude_session()).await;
+    start_the_turn(&mut h).await;
+    h.adapter.close().await.unwrap();
+    assert_eq!(h.claude.signals(), [Sig::Terminate]);
+}
+
+/// `system/session_writes_lost` (CLI 2.1.317) is a line when the transcript is among what
+/// was lost, worded by the error code; the global config alone is not.
+#[test]
+fn a_lost_transcript_write_is_a_feed_line() {
+    let line = |code: &str, lost: &str| {
+        format!(
+            r#"{{"type":"system","subtype":"session_writes_lost","error_code":"{code}","lost":{lost},"uuid":"4f0e2d3c-1b2a-4c5d-8e9f-0a1b2c3d4e5f"}}"#
+        )
+    };
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let lines = |core: &mut Core, l: String| system_events(&core.on_line(&l));
+    assert_eq!(
+        lines(&mut core, line("ENOSPC", r#"["transcript","global_config"]"#)),
+        [(
+            "transcript_not_saved".to_owned(),
+            "Transcript not saved: the disk is full (ENOSPC); resuming this session may miss part of its conversation. Free up space on the worker's disk".to_owned()
+        )]
+    );
+    assert_eq!(
+        lines(&mut core, line("EDQUOT", r#"["transcript"]"#)),
+        [(
+            "transcript_not_saved".to_owned(),
+            "Transcript not saved: the disk quota is used up (EDQUOT); resuming this session may miss part of its conversation. Free up space or raise the quota on the worker's disk".to_owned()
+        )]
+    );
+    assert_eq!(
+        lines(&mut core, line("EIO", r#"["transcript"]"#))[0].1,
+        "Transcript not saved: a write to the worker's disk failed (EIO); resuming this session may miss part of its conversation. Check the worker's disk"
+    );
+    assert_eq!(
+        lines(
+            &mut core,
+            r#"{"type":"system","subtype":"session_writes_lost","lost":["transcript"]}"#.to_owned()
+        )[0]
+            .1,
+        "Transcript not saved: a write to the worker's disk failed; resuming this session may miss part of its conversation. Check the worker's disk"
+    );
+    assert!(lines(&mut core, line("ENOSPC", r#"["global_config"]"#)).is_empty());
 }
 
 /// SPEC §8.1: every process, a new one and a resumed one, gets `initialize` with only
@@ -3448,7 +3630,7 @@ fn a_turn_the_cli_starts_by_itself_can_be_stopped() {
         &mut core,
         r#"{"type":"system","subtype":"init","model":"claude-haiku-5-5","permissionMode":"default","uuid":"fb2b6af8-8921-4277-a09e-61e710bfcdb2"}"#,
     );
-    let (req, turn) = core.interrupt().expect("the CLI's own turn runs");
+    let (req, turn, _) = core.interrupt().expect("the CLI's own turn runs");
     assert_eq!(writes(&[req])[0]["request"]["subtype"], "interrupt");
     assert!(core.turn_running(turn));
     play(
@@ -6533,7 +6715,7 @@ fn a_message_before_an_interrupt_is_carried() {
         ]),
     );
     let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
-    let (_, interrupted) = core.interrupt().expect("a turn runs");
+    let (_, interrupted, _) = core.interrupt().expect("a turn runs");
     out.extend(play(&mut core, &lines_of(&[
         lifecycle(&ub, "queued"),
         r#"{"type":"control_response","response":{"subtype":"success","request_id":"hqc-interrupt-1"}}"#.into(),
@@ -6609,7 +6791,7 @@ fn carried_messages_cancelled_after_the_result_end_their_turn() {
         result("error_during_execution"),
         lifecycle(&ua, "cancelled"),
     ])));
-    let (_, carried_turn) = core.interrupt().expect("the carried inputs' turn runs");
+    let (_, carried_turn, _) = core.interrupt().expect("the carried inputs' turn runs");
     out.extend(play(&mut core, &lifecycle(&ub, "cancelled")));
     assert!(core.can_inject(), "D is still carried");
     assert!(!core.turn_running(carried_turn));
@@ -8867,7 +9049,7 @@ async fn a_title_read_before_the_switch_does_not_stop_the_new_ones() {
     let stdin: std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>> = Box::pin(tokio::io::sink());
     let io = super::Io {
         session_id: Uuid::now_v7(),
-        stdin: tokio::sync::Mutex::new(stdin),
+        stdin: tokio::sync::Mutex::new(Some(stdin)),
         events: tx,
         signal: Box::new(|_: Sig| -> std::io::Result<()> { Ok(()) }),
         transcript: std::sync::Mutex::new(Some(old_path)),

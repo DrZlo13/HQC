@@ -1083,12 +1083,12 @@ async fn idle_agent_is_stopped_and_resumed_by_input() {
     adapters.accept_input(sid, a).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
-        !adapters.calls().contains(&FakeCall::Kill(sid)),
+        ends(&adapters.calls(), sid) == 0,
         "never idle during a turn"
     );
     adapters.end_turn(sid).await;
     adapters
-        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
+        .wait_for("idle close", |c| c.contains(&FakeCall::Close(sid)))
         .await;
     loop {
         let st = c.expect("session.state").await;
@@ -1121,13 +1121,11 @@ async fn idle_timeout_waits_for_subagents() {
     adapters.emit(sid, AdapterEvent::Subagents(1)).await;
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert!(
-        !adapters.calls().contains(&FakeCall::Kill(sid)),
+        ends(&adapters.calls(), sid) == 0,
         "never idle while a subagent runs"
     );
     adapters.emit(sid, AdapterEvent::Subagents(0)).await;
-    adapters
-        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
-        .await;
+    adapters.wait_for("idle kill", |c| ends(c, sid) > 0).await;
     w.stop().await;
 }
 
@@ -1148,13 +1146,11 @@ async fn idle_timeout_waits_for_background_tasks() {
     adapters.emit(sid, AdapterEvent::BackgroundTasks(1)).await;
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert!(
-        !adapters.calls().contains(&FakeCall::Kill(sid)),
+        ends(&adapters.calls(), sid) == 0,
         "never idle while the runtime lists a background task"
     );
     adapters.emit(sid, AdapterEvent::BackgroundTasks(0)).await;
-    adapters
-        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
-        .await;
+    adapters.wait_for("idle kill", |c| ends(c, sid) > 0).await;
     w.stop().await;
 }
 
@@ -1176,13 +1172,11 @@ async fn idle_timeout_waits_for_an_armed_wakeup() {
     adapters.emit(sid, AdapterEvent::Wakeup(Some(due))).await;
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert!(
-        !adapters.calls().contains(&FakeCall::Kill(sid)),
+        ends(&adapters.calls(), sid) == 0,
         "never idle before the wakeup is due"
     );
     adapters.emit(sid, AdapterEvent::Wakeup(None)).await;
-    adapters
-        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
-        .await;
+    adapters.wait_for("idle kill", |c| ends(c, sid) > 0).await;
     w.stop().await;
 }
 
@@ -1210,9 +1204,7 @@ async fn a_new_runtime_session_id_is_the_one_resumed() {
             break;
         }
     }
-    adapters
-        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
-        .await;
+    adapters.wait_for("idle kill", |c| ends(c, sid) > 0).await;
     let b = Uuid::now_v7();
     c.frame("session.input", input(sid, b, "B")).await;
     adapters
@@ -1249,7 +1241,7 @@ async fn idle_timeout_ignores_holders_of_other_transcripts() {
     std::fs::create_dir_all(&dir).unwrap();
     let started = Instant::now();
     let mut n = 0;
-    while !adapters.calls().contains(&FakeCall::Kill(sid)) {
+    while ends(&adapters.calls(), sid) == 0 {
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "an idle agent must be stopped while holders of other transcripts change"
@@ -1296,11 +1288,42 @@ async fn idle_timeout_forgets_the_background_tasks_of_a_killed_process() {
     adapters.accept_input(sid, e).await;
     adapters.end_turn(sid).await;
     adapters
-        .wait_for("idle kill of the resumed process", |c| {
-            c.iter().filter(|x| **x == FakeCall::Kill(sid)).count() == 2
-        })
+        .wait_for("idle kill of the resumed process", |c| ends(c, sid) == 2)
         .await;
     w.stop().await;
+}
+
+// `session.kill` closes a process with nothing running through its stdin (above) and kills
+// one that works: a subagent, a background task, a turn the runtime started by itself.
+#[tokio::test]
+async fn session_kill_kills_a_process_that_works() {
+    for case in ["subagent", "background task", "own turn"] {
+        let env = Env::new();
+        let adapters = FakeAdapters::new();
+        let mut hub = FakeHub::start().await;
+        let w = start_worker(&env, &hub.url(), &adapters);
+        let sid = Uuid::now_v7();
+        let mut c = hub.accept().await;
+        c.handshake().await;
+        start_session(&mut c, &env, sid).await;
+        match case {
+            "subagent" => {
+                adapters.emit(sid, AdapterEvent::Subagents(1)).await;
+                state_where(&mut c, sid, |st| st["payload"]["subagents"] == 1).await;
+            }
+            "background task" => {
+                adapters.emit(sid, AdapterEvent::BackgroundTasks(1)).await;
+                state_where(&mut c, sid, |st| st["payload"]["background_tasks"] == 1).await;
+            }
+            _ => adapters.set_own_turn(true),
+        }
+        c.frame("session.kill", json!({"session_id": sid})).await;
+        let calls = adapters
+            .wait_for("kill", |c| c.contains(&FakeCall::Kill(sid)))
+            .await;
+        assert!(!calls.contains(&FakeCall::Close(sid)), "{case}: {calls:?}");
+        w.stop().await;
+    }
 }
 
 // idle_timeout (SPEC §17.3): counts that come after the process was stopped (lines of a killed
@@ -1320,7 +1343,9 @@ async fn counts_after_the_process_stopped_are_dropped() {
     start_session(&mut c, &env, sid).await;
     c.frame("session.kill", json!({"session_id": sid})).await;
     adapters
-        .wait_for("kill", |c| c.contains(&FakeCall::Kill(sid)))
+        .wait_for("close of a quiet agent", |c| {
+            c.contains(&FakeCall::Close(sid))
+        })
         .await;
     adapters.emit(sid, AdapterEvent::BackgroundTasks(1)).await;
     adapters.emit(sid, AdapterEvent::Subagents(2)).await;
@@ -1337,9 +1362,7 @@ async fn counts_after_the_process_stopped_are_dropped() {
     adapters.accept_input(sid, e).await;
     adapters.end_turn(sid).await;
     adapters
-        .wait_for("idle kill of the resumed process", |c| {
-            c.iter().filter(|x| **x == FakeCall::Kill(sid)).count() == 2
-        })
+        .wait_for("idle kill of the resumed process", |c| ends(c, sid) == 2)
         .await;
     w.stop().await;
 }
@@ -1358,7 +1381,7 @@ async fn idle_timeout_ignores_reconnects() {
     c.handshake().await;
     start_session(&mut c, &env, sid).await;
     let started = Instant::now();
-    while !adapters.calls().contains(&FakeCall::Kill(sid)) {
+    while ends(&adapters.calls(), sid) == 0 {
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "an idle agent must be stopped while the worker reconnects"
@@ -1909,7 +1932,7 @@ async fn a_runtime_below_the_cap_takes_the_capped_input_at_once() {
         })
         .await;
     assert_eq!(switches(&calls), []);
-    assert!(!calls.contains(&FakeCall::Kill(sid)), "{calls:?}");
+    assert!(ends(&calls, sid) == 0, "{calls:?}");
     assert_eq!(adapters.start_modes(), [(sid, Auto)]);
     adapters.accept_input(sid, e).await;
     adapters.end_turn(sid).await;
@@ -1947,11 +1970,7 @@ async fn a_runtime_that_cannot_switch_is_restarted_in_ask() {
 
     // The process lost later starts in the session's mode for an input without a cap.
     c.frame("session.kill", json!({"session_id": sid})).await;
-    adapters
-        .wait_for("kill", |c| {
-            c.iter().filter(|x| **x == FakeCall::Kill(sid)).count() == 2
-        })
-        .await;
+    adapters.wait_for("kill", |c| ends(c, sid) == 2).await;
     let e2 = Uuid::now_v7();
     c.frame("session.input", input(sid, e2, "mine")).await;
     adapters
@@ -1983,9 +2002,7 @@ async fn a_stopped_agent_starts_in_ask_for_a_capped_input() {
     c.handshake().await;
     started_in(&mut c, &env, sid, "auto").await;
     c.frame("session.kill", json!({"session_id": sid})).await;
-    adapters
-        .wait_for("kill", |c| c.contains(&FakeCall::Kill(sid)))
-        .await;
+    adapters.wait_for("kill", |c| ends(c, sid) > 0).await;
 
     let e1 = Uuid::now_v7();
     c.frame("session.input", capped_input(sid, e1, "ask")).await;

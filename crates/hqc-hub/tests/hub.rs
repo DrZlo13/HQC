@@ -2010,6 +2010,7 @@ async fn pause_stops_an_idle_agent_and_resume_tells_it_first() {
     w.reply(&start["id"], "ack", json!({})).await;
     let note = w.expect("session.input").await;
     let text = note["payload"]["text"].as_str().unwrap();
+    // No turn ran, so the pause cut no step: a rejected step in the history is the user's own.
     assert!(
         text.starts_with("[hqc] You were paused at ") && text.ends_with(" passed."),
         "{text}"
@@ -2033,11 +2034,12 @@ async fn pause_stops_an_idle_agent_and_resume_tells_it_first() {
     hub.finish().await;
 }
 
-/// Paused during a turn (SPEC §17.3): the agent goes on, the session stays `running` with
-/// `paused_at`, and an input meanwhile waits on the hub; the worker's `status idle` ends the turn
-/// and brings `session.kill`, and `paused_at` becomes the time the agent stopped.
+/// Paused during a turn (SPEC §17.3): the turn is stopped at once with `session.stop`, the session
+/// stays `running` with `paused_at` until it ends, and an input meanwhile waits on the hub; the
+/// worker's `status idle` ends the turn and brings `session.kill`, and `paused_at` becomes the
+/// time the agent stopped.
 #[tokio::test]
-async fn pause_during_a_turn_stops_the_agent_when_the_turn_ends() {
+async fn pause_during_a_turn_stops_the_turn_then_the_agent() {
     let hub = TestHub::start().await;
     let (_, token) = hub.enroll("home-mac").await;
     let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
@@ -2062,6 +2064,8 @@ async fn pause_during_a_turn_stops_the_agent_when_the_turn_ends() {
         .await;
     assert_eq!((s, r["state"].as_str()), (200, Some("running")), "{r}");
     let asked: chrono::DateTime<Utc> = r["paused_at"].as_str().unwrap().parse().unwrap();
+    let stop = w.expect("session.stop").await;
+    assert_eq!(stop["payload"]["session_id"], sid);
     let (s, r) = hub
         .post(
             &format!("/api/sessions/{sid}/input"),
@@ -2089,13 +2093,29 @@ async fn pause_during_a_turn_stops_the_agent_when_the_turn_ends() {
         .await;
     let stopped: chrono::DateTime<Utc> = v["paused_at"].as_str().unwrap().parse().unwrap();
     assert!(stopped > asked, "{asked} {stopped}");
+
+    // The pause cut the turn, so the note says the cut step was the pause's.
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/resume"), json!({}))
+        .await;
+    assert_eq!(s, 200, "{r}");
+    let start = w.expect("session.start").await;
+    w.reply(&start["id"], "ack", json!({})).await;
+    let note = w.expect("session.input").await;
+    let text = note["payload"]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("[hqc] You were paused at ")
+            && text.contains(" passed. If the pause cut a step of your work"),
+        "{text}"
+    );
     hub.finish().await;
 }
 
-/// Resumed before its turn ended (SPEC §17.3): the agent was never stopped, so neither a note nor
-/// `session.start`: the input held meanwhile goes to it, and the turn's end stops nothing.
+/// Resumed before the turn the pause stopped has ended (SPEC §17.3): the process still runs, so
+/// no `session.start`; the note goes to it, then the input held meanwhile, and the turn's end
+/// stops nothing.
 #[tokio::test]
-async fn resume_before_the_turn_ended_sends_no_note() {
+async fn resume_before_the_stopped_turn_ended_sends_the_note_first() {
     let hub = TestHub::start().await;
     let (_, token) = hub.enroll("home-mac").await;
     let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
@@ -2119,6 +2139,7 @@ async fn resume_before_the_turn_ended_sends_no_note() {
         .post(&format!("/api/sessions/{sid}/pause"), json!({}))
         .await;
     assert_eq!(s, 200, "{r}");
+    w.expect("session.stop").await;
     let (s, r) = hub
         .post(
             &format!("/api/sessions/{sid}/input"),
@@ -2134,15 +2155,79 @@ async fn resume_before_the_turn_ended_sends_no_note() {
         .await;
     assert_eq!((s, r["state"].as_str()), (200, Some("running")), "{r}");
     assert!(r["paused_at"].is_null(), "{r}");
+    let note = w.expect("session.input").await;
+    let text = note["payload"]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("[hqc] You were paused at ")
+            && text.contains(" passed. If the pause cut a step of your work"),
+        "{note}"
+    );
     let si = w.expect("session.input").await;
     assert_eq!(si["payload"]["event_id"], held);
     w.event(agent_event(&sid, "status", json!({"state": "idle"})))
         .await;
     w.expect_silence(Duration::from_millis(300)).await;
     let events = hub.events(&sid).await;
-    assert!(
-        events.iter().all(|e| e["payload"]["resume"] != true),
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["payload"]["resume"] == true)
+            .count(),
+        1,
         "{events:?}"
+    );
+    hub.finish().await;
+}
+
+/// Paused during a turn while its worker is away (SPEC §17.3): the stop could not go, so a
+/// reconnect with the same `boot_id` (the process and its turn live) sends it, and the turn's
+/// end then brings the kill.
+#[tokio::test]
+async fn a_pause_during_a_turn_while_the_worker_is_away_stops_the_turn_on_its_reconnect() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("pause-turn-away").await;
+    ack_start(&mut w, &sid).await;
+    let state = json!({"session_id": sid, "process_state": "running", "locked_by": "hqc"});
+    w.send("session.state", state).await;
+    w.expect("ack").await;
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": "go"}))
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let si = w.expect("session.input").await;
+    w.reply(
+        &si["id"],
+        "ack",
+        json!({"event_id": r["event"]["event_id"]}),
+    )
+    .await;
+    hub.wait_session(&sid, "running", |v| v["state"] == "running")
+        .await;
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/pause"), json!({}))
+        .await;
+    assert_eq!(s, 200, "{r}");
+
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let stop = w.expect("session.stop").await;
+    assert_eq!(stop["payload"]["session_id"], sid);
+    w.expect_silence(Duration::from_millis(300)).await;
+    w.send(
+        "event",
+        json!({"event": agent_event(&sid, "status", json!({"state": "idle"}))}),
+    )
+    .await;
+    let mut got = vec![w.recv().await, w.recv().await];
+    got.sort_by_key(|f| f["type"].as_str().unwrap().to_string());
+    assert_eq!(
+        (got[0]["type"].as_str(), got[1]["type"].as_str()),
+        (Some("ack"), Some("session.kill")),
+        "{got:?}"
     );
     hub.finish().await;
 }
@@ -2197,8 +2282,8 @@ async fn a_pause_while_the_worker_is_away_stops_the_agent_on_its_reconnect() {
     hub.finish().await;
 }
 
-/// A session paused while the turn of its input "go" runs (SPEC §17.3): `(hub, worker, worker
-/// token, session id)`.
+/// A session paused while the turn of its input "go" runs, its worker sent the pause's
+/// `session.stop` (SPEC §17.3): `(hub, worker, worker token, session id)`.
 async fn paused_during_a_turn(
     timing: hqc_hub::config::Timing,
 ) -> (TestHub, FakeWorker, String, String) {
@@ -2224,6 +2309,7 @@ async fn paused_during_a_turn(
         .post(&format!("/api/sessions/{sid}/pause"), json!({}))
         .await;
     assert_eq!((s, r["state"].as_str()), (200, Some("running")), "{r}");
+    w.expect("session.stop").await;
     (hub, w, token, sid)
 }
 

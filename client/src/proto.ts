@@ -1327,6 +1327,9 @@ export interface Me {
   look: LookName;
   /** The project bar's order, the same on every device. */
   project_sort: ProjectSort;
+  /** The share of a usage window, in percent, from which the chat shows the limit bar above the
+   *  input: the hub's `HQC_LIMIT_NOTICE_PERCENT`, 0 no bar; absent from hubs before it (70). */
+  limit_notice_percent?: number;
 }
 
 /** The fields of the hub's session object (SPEC §6) the client uses. */
@@ -1464,6 +1467,7 @@ export function parseMe(v: unknown): Me {
     theme: oneOf(o, 'theme', THEME_NAMES) ?? 'warm',
     look: oneOf(o, 'look', LOOK_NAMES) ?? 'spacious',
     project_sort: oneOf(o, 'project_sort', PROJECT_SORT_NAMES) ?? 'custom',
+    limit_notice_percent: optNum(o, 'limit_notice_percent'),
   };
 }
 

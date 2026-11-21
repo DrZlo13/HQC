@@ -3549,3 +3549,23 @@ async fn all_sessions_are_the_union_of_the_projects_lists() {
     assert!(times.windows(2).all(|w| w[0] >= w[1]), "{times:?}");
     hub.finish().await;
 }
+
+/// SPEC §6: `/api/me` carries the hub's `HQC_LIMIT_NOTICE_PERCENT`, from which the chat shows
+/// the limit bar (70 by default, `0` no bar); its `PATCH` answers with the same object.
+#[tokio::test]
+async fn me_carries_the_limit_bar_threshold_of_the_hub() {
+    let hub = TestHub::start().await;
+    let (_, me) = hub.get("/api/me").await;
+    assert_eq!(me["limit_notice_percent"], 70);
+    hub.finish().await;
+    let hub = TestHub::start_limited(hqc_hub::config::Limits {
+        limit_notice_percent: 0,
+        ..Default::default()
+    })
+    .await;
+    let (_, me) = hub.get("/api/me").await;
+    assert_eq!(me["limit_notice_percent"], 0);
+    let (s, me) = hub.patch("/api/me", json!({"look": "compact"})).await;
+    assert_eq!((s, &me["limit_notice_percent"]), (200, &json!(0)), "{me}");
+    hub.finish().await;
+}

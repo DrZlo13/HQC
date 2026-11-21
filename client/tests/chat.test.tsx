@@ -631,6 +631,37 @@ describe('model', () => {
     expect($('.limit-notice + .composer-wrap')).not.toBeNull();
   });
 
+  it("takes the bar's threshold from the hub (SPEC 0.196)", async () => {
+    const { app, api } = setup('idle');
+    const soon = Math.floor(Date.now() / 1000) + 2 * 3600;
+    const limits = { five_hour: { utilization: 0.85, resets_at: soon }, reported_at: '' };
+    const workers = vi.fn(async () => [{ id: 'wk1', name: 'drzlo-mac', limits }]);
+    (api as any).workers = workers;
+    // At 90 % a window at 85 % says nothing.
+    app.me = { ...app.me!, limit_notice_percent: 90 };
+    await mount(app);
+    await act(async () => new Promise((r) => setTimeout(r, 10)));
+    expect($('.limit-notice')).toBeNull();
+    expect(limitNotice({ ...limits, status: 'rejected', rate_limit_type: 'five_hour', resets_at: soon }, Date.now(), 90)).toMatch(
+      /^You've hit your 5-hour limit/,
+    );
+    expect(limitNotice({ five_hour: { utilization: 0.6, resets_at: soon }, reported_at: '' }, Date.now(), 50)).toMatch(
+      /^You've used 60% of your 5-hour limit/,
+    );
+  });
+
+  it('shows no limit bar on a hub with HQC_LIMIT_NOTICE_PERCENT=0, not even a hit limit (SPEC 0.196)', async () => {
+    const { app, api } = setup('idle');
+    const soon = Math.floor(Date.now() / 1000) + 2 * 3600;
+    const limits = { status: 'rejected', rate_limit_type: 'five_hour', resets_at: soon, reported_at: '' };
+    const workers = vi.fn(async () => [{ id: 'wk1', name: 'drzlo-mac', limits }]);
+    (api as any).workers = workers;
+    app.me = { ...app.me!, limit_notice_percent: 0 };
+    await mount(app);
+    await act(async () => new Promise((r) => setTimeout(r, 10)));
+    expect($('.limit-notice')).toBeNull();
+  });
+
   it('shows no limit bar in a session on a provider, whose model is not on the subscription (SPEC 0.179)', async () => {
     const { app, api } = setup('idle');
     const soon = Math.floor(Date.now() / 1000) + 2 * 3600;

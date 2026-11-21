@@ -59,9 +59,9 @@ use crate::{
 pub const MAX_BUFFER_MESSAGES: i64 = 50;
 /// ... and at most this many bytes of their texts.
 pub const MAX_BUFFER_BYTES: i64 = 64 * 1024;
-/// Chain limits (SPEC §7.1): nested asks, and peer messages in one chain.
+/// Asks nested in one chain (SPEC §7.1); the limits of its messages are the hub's
+/// [`crate::config::Limits`] (`peer_hops_per_chain`, `peer_messages_per_chain`).
 pub const MAX_DEPTH: u8 = 3;
-pub const MAX_HOPS: u8 = 20;
 
 /// `system.code` of messages dropped from a full send buffer (SPEC §4).
 pub const PEER_EVICTED: &str = "peer_evicted";
@@ -482,7 +482,13 @@ pub(crate) async fn outgoing_chain(
 ) -> Result<Chain, McpError> {
     let turn = call_chain(app, caller, c).await.map_err(internal)?;
     let from = address(app, caller).await.map_err(internal)?;
-    next_chain(turn, ask, sender_mode(caller), &from)
+    next_chain(
+        turn,
+        ask,
+        sender_mode(caller),
+        &from,
+        app.config.limits.peer_hops_per_chain,
+    )
 }
 
 /// The mode of session `s` for a cap: the lower of what the user asked for (T38) and what its
@@ -518,13 +524,14 @@ pub fn chain_cap(
 
 /// The chain of a new message from a turn with chain `turn`, sent by `from` running in
 /// `mode`: a human's turn starts one, `hops` grows on every message and `depth` on every
-/// ask; over a limit is an error, which only a human's turn gets past (SPEC §7.1). The cap
-/// is [`chain_cap`].
+/// ask; over a limit ([`MAX_DEPTH`] asks, `max_hops` messages: the hub's `peer_hops_per_chain`)
+/// is an error, which only a human's turn gets past (SPEC §7.1). The cap is [`chain_cap`].
 pub fn next_chain(
     turn: Option<Chain>,
     ask: bool,
     mode: PermissionMode,
     from: &str,
+    max_hops: u8,
 ) -> Result<Chain, McpError> {
     let c = moved_on(turn, ask, mode, from);
     if c.depth > MAX_DEPTH {
@@ -533,10 +540,10 @@ pub fn next_chain(
             format!("asks nest at most {MAX_DEPTH} deep in one chain; a person has to continue it"),
         ));
     }
-    if c.hops > MAX_HOPS {
+    if c.hops > max_hops {
         return Err(err(
             error_code::LIMIT_EXCEEDED,
-            format!("one chain carries at most {MAX_HOPS} messages between sessions; a person has to continue it"),
+            format!("one chain carries at most {max_hops} messages between sessions; a person has to continue it"),
         ));
     }
     Ok(c)
@@ -1506,9 +1513,11 @@ pub async fn after_hello(app: &AppState, worker_id: Uuid) -> anyhow::Result<()> 
 mod tests {
     use super::*;
 
+    const HOPS: u8 = crate::config::DEFAULT_PEER_HOPS_PER_CHAIN;
+
     #[test]
     fn chains() {
-        let next = |turn, ask| next_chain(turn, ask, PermissionMode::Auto, "p/a");
+        let next = |turn, ask| next_chain(turn, ask, PermissionMode::Auto, "p/a", HOPS);
         let first = next(None, false).unwrap();
         assert_eq!((first.depth, first.hops), (0, 1));
         let ask = next(None, true).unwrap();
@@ -1531,14 +1540,14 @@ mod tests {
             next(Some(deep), true).unwrap_err().code,
             error_code::LIMIT_EXCEEDED
         );
-        let long = Chain {
-            hops: MAX_HOPS,
-            ..on
-        };
+        let long = Chain { hops: HOPS, ..on };
         assert_eq!(
-            next(Some(long), false).unwrap_err().code,
+            next(Some(long.clone()), false).unwrap_err().code,
             error_code::LIMIT_EXCEEDED
         );
+        // The limit is the hub's setting: under a higher one the same chain goes on.
+        let further = next_chain(Some(long), false, PermissionMode::Auto, "p/a", HOPS + 1).unwrap();
+        assert_eq!(further.hops, HOPS + 1);
     }
 
     // T39: `auto` only if the sender and every session up the chain run in `auto`.
@@ -1549,17 +1558,17 @@ mod tests {
         // A human's turn has no cap: the sender's mode decides.
         let human = input_chain(Uuid::now_v7(), Uuid::now_v7(), None, None);
         assert_eq!(human.permission_cap, None);
-        let a = next_chain(Some(human.clone()), true, Auto, "p/a").unwrap();
+        let a = next_chain(Some(human.clone()), true, Auto, "p/a", HOPS).unwrap();
         assert_eq!(cap(&a), (Some(Auto), Some("p/a".into())));
-        let a = next_chain(Some(human), true, Ask, "p/a").unwrap();
+        let a = next_chain(Some(human), true, Ask, "p/a", HOPS).unwrap();
         assert_eq!(cap(&a), (Some(Ask), Some("p/a".into())));
         // Along the chain: Auto -> Ask -> Auto stays Ask, named by the first one in Ask.
-        let ab = next_chain(None, true, Auto, "p/a").unwrap();
-        let bc = next_chain(Some(ab), true, Ask, "p/b").unwrap();
+        let ab = next_chain(None, true, Auto, "p/a", HOPS).unwrap();
+        let bc = next_chain(Some(ab), true, Ask, "p/b", HOPS).unwrap();
         assert_eq!(cap(&bc), (Some(Ask), Some("p/b".into())));
-        let cd = next_chain(Some(bc), true, Auto, "p/c").unwrap();
+        let cd = next_chain(Some(bc), true, Auto, "p/c", HOPS).unwrap();
         assert_eq!(cap(&cd), (Some(Ask), Some("p/b".into())));
-        let de = next_chain(Some(cd), false, Ask, "p/d").unwrap();
+        let de = next_chain(Some(cd), false, Ask, "p/d", HOPS).unwrap();
         assert_eq!(
             cap(&de),
             (Some(Ask), Some("p/b".into())),
@@ -1570,7 +1579,7 @@ mod tests {
             serde_json::from_value(json!({"chain_id": Uuid::now_v7(), "depth": 1, "hops": 1}))
                 .unwrap();
         assert_eq!(
-            cap(&next_chain(Some(old), false, Auto, "p/a").unwrap()),
+            cap(&next_chain(Some(old), false, Auto, "p/a", HOPS).unwrap()),
             (Some(Auto), Some("p/a".into()))
         );
     }
@@ -1583,26 +1592,26 @@ mod tests {
         use PermissionMode::{AllowAll, Ask, Auto};
         let cap = |c: &Chain| (c.permission_cap, c.capped_by.clone());
         let human = input_chain(Uuid::now_v7(), Uuid::now_v7(), None, None);
-        let a = next_chain(Some(human), false, AllowAll, "p/a").unwrap();
+        let a = next_chain(Some(human), false, AllowAll, "p/a", HOPS).unwrap();
         assert_eq!(cap(&a), (Some(AllowAll), None));
-        let b = next_chain(Some(a.clone()), false, AllowAll, "p/b").unwrap();
+        let b = next_chain(Some(a.clone()), false, AllowAll, "p/b", HOPS).unwrap();
         assert_eq!(cap(&b), (Some(AllowAll), None));
         // Allow all -> Auto -> Allow all stays Auto, named by the first one in Auto.
-        let c = next_chain(Some(b), false, Auto, "p/c").unwrap();
+        let c = next_chain(Some(b), false, Auto, "p/c", HOPS).unwrap();
         assert_eq!(cap(&c), (Some(Auto), Some("p/c".into())));
-        let d = next_chain(Some(c), false, AllowAll, "p/d").unwrap();
+        let d = next_chain(Some(c), false, AllowAll, "p/d", HOPS).unwrap();
         assert_eq!(cap(&d), (Some(Auto), Some("p/c".into())));
-        let e = next_chain(Some(d), false, Auto, "p/e").unwrap();
+        let e = next_chain(Some(d), false, Auto, "p/e", HOPS).unwrap();
         assert_eq!(
             cap(&e),
             (Some(Auto), Some("p/c".into())),
             "the first Auto names it"
         );
         // Ask below an Auto cap lowers it further and names itself.
-        let f = next_chain(Some(e), false, Ask, "p/f").unwrap();
+        let f = next_chain(Some(e), false, Ask, "p/f", HOPS).unwrap();
         assert_eq!(cap(&f), (Some(Ask), Some("p/f".into())));
         assert_eq!(
-            cap(&next_chain(Some(f), false, AllowAll, "p/g").unwrap()),
+            cap(&next_chain(Some(f), false, AllowAll, "p/g", HOPS).unwrap()),
             (Some(Ask), Some("p/f".into()))
         );
         // T40: a buffered Auto cap lowers a person's input (no cap of its own) and an input
@@ -1618,7 +1627,7 @@ mod tests {
             cap(&input_chain(s, i, Some(own), buffered())),
             (Some(Auto), Some("p/c".into()))
         );
-        let asked = next_chain(None, true, Ask, "p/x").unwrap();
+        let asked = next_chain(None, true, Ask, "p/x", HOPS).unwrap();
         let own = serde_json::to_value(&asked).unwrap();
         assert_eq!(
             cap(&input_chain(s, i, Some(own), buffered())),

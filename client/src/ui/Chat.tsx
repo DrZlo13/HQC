@@ -167,6 +167,9 @@ export function Chat({
   // The usage limits of the session's worker account (SPEC §6), for the bar above the input
   // and the "More" menu.
   const loadLimits = async () => (await app.api.workers()).find((w) => w.id === info?.worker_id)?.limits ?? undefined;
+  // From which share of a window the bar shows: the hub's setting, 70 % from a hub before it and
+  // until /api/me is in.
+  const limitPercent = app.me?.limit_notice_percent ?? 70;
 
   // Read cursor: whatever is on screen while the tab is visible counts as read.
   useEffect(() => {
@@ -769,9 +772,10 @@ export function Chat({
           {notice}
         </div>
       )}
-      {/* A session on a provider does not run on the subscription the limits are of. */}
-      {!system && info?.worker_id && !info.provider && (
-        <LimitBar load={loadLimits} refresh={`${info.worker_id} ${state}`} />
+      {/* A session on a provider does not run on the subscription the limits are of; a hub with
+          HQC_LIMIT_NOTICE_PERCENT=0 shows no bar. */}
+      {!system && info?.worker_id && !info.provider && limitPercent > 0 && (
+        <LimitBar load={loadLimits} refresh={`${info.worker_id} ${state}`} percent={limitPercent} />
       )}
       {/* The list also holds the agent's background commands, which only background_tasks counts. */}
       {/* The wakeups and cron jobs of the agent and the session's schedules wait while it is idle. */}

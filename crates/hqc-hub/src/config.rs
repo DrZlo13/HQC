@@ -173,6 +173,9 @@ pub struct Limits {
     pub schedule_runs_per_owner_hour: usize,
     /// Bytes a worker uploads with `PUT /worker/artifacts` per hour.
     pub worker_upload_bytes_per_hour: u64,
+    /// The share of a usage window, in percent, from which the chat shows the limit bar above
+    /// the input (`Me::limit_notice_percent`, SPEC §6), `0` no bar; `HQC_LIMIT_NOTICE_PERCENT`.
+    pub limit_notice_percent: u8,
 }
 
 impl Default for Limits {
@@ -202,6 +205,7 @@ impl Default for Limits {
             search_concurrency: 4,
             schedule_runs_per_owner_hour: 60,
             worker_upload_bytes_per_hour: 2_000_000_000,
+            limit_notice_percent: DEFAULT_LIMIT_NOTICE_PERCENT,
         }
     }
 }
@@ -357,6 +361,19 @@ pub fn peer_hops_per_chain_from(v: Option<&str>) -> anyhow::Result<u8> {
     }
 }
 
+pub const DEFAULT_LIMIT_NOTICE_PERCENT: u8 = 70;
+
+/// `HQC_LIMIT_NOTICE_PERCENT`: a whole number from 0 to 100, unset =
+/// [`DEFAULT_LIMIT_NOTICE_PERCENT`]; `0` shows no limit bar.
+pub fn limit_notice_percent_from(v: Option<&str>) -> anyhow::Result<u8> {
+    match v.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(DEFAULT_LIMIT_NOTICE_PERCENT),
+        Some(v) => v.parse::<u8>().ok().filter(|n| *n <= 100).with_context(|| {
+            format!("HQC_LIMIT_NOTICE_PERCENT={v}: expected a whole number from 0 to 100")
+        }),
+    }
+}
+
 impl Config {
     /// Variables: `HQC_DATABASE_URL`, `HQC_HUB_LISTEN`, `HQC_ACCESS_TEAM_DOMAIN`,
     /// `HQC_ACCESS_AUD`, `HQC_OIDC_ISSUER`, `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL`,
@@ -364,7 +381,8 @@ impl Config {
     /// `HQC_VAPID_PUBLIC`, `HQC_VAPID_SUBJECT`, `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`,
     /// `HQC_ARTIFACT_DIR`, `HQC_ARTIFACT_PUBLIC_BASE`, `HQC_ARTIFACT_KEY`,
     /// `HQC_ARTIFACT_RETENTION_DAYS`, `HQC_PUBLIC_ORIGINS`, `HQC_CLIENT_IP_HEADER`,
-    /// `HQC_MIRROR_SESSIONS_PER_DAY`, `HQC_PEER_MESSAGES_PER_CHAIN`, `HQC_PEER_HOPS_PER_CHAIN`.
+    /// `HQC_MIRROR_SESSIONS_PER_DAY`, `HQC_PEER_MESSAGES_PER_CHAIN`, `HQC_PEER_HOPS_PER_CHAIN`,
+    /// `HQC_LIMIT_NOTICE_PERCENT`.
     pub fn from_env() -> anyhow::Result<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let database_url = var("HQC_DATABASE_URL").context("HQC_DATABASE_URL is not set")?;
@@ -432,6 +450,9 @@ impl Config {
                 )?,
                 peer_hops_per_chain: peer_hops_per_chain_from(
                     var("HQC_PEER_HOPS_PER_CHAIN").as_deref(),
+                )?,
+                limit_notice_percent: limit_notice_percent_from(
+                    var("HQC_LIMIT_NOTICE_PERCENT").as_deref(),
                 )?,
                 ..Limits::default()
             },
@@ -641,6 +662,17 @@ mod tests {
         assert_eq!(peer_hops_per_chain_from(Some("254")).unwrap(), 254);
         for bad in ["0", "255", "300", "-1", "1k"] {
             assert!(peer_hops_per_chain_from(Some(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn limit_notice_percent_variable() {
+        assert_eq!(limit_notice_percent_from(None).unwrap(), 70);
+        assert_eq!(limit_notice_percent_from(Some("0")).unwrap(), 0);
+        assert_eq!(limit_notice_percent_from(Some("95")).unwrap(), 95);
+        assert_eq!(limit_notice_percent_from(Some("100")).unwrap(), 100);
+        for bad in ["101", "-1", "70%"] {
+            assert!(limit_notice_percent_from(Some(bad)).is_err(), "{bad}");
         }
     }
 

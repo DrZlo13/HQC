@@ -1,6 +1,7 @@
 // The usage limits of a session's worker account, in the chat's "More" menu under the model
 // (SPEC §6): the 5-hour and the 7-day window, as the worker last reported them; and above the
-// input a bar while a window is at 70 % or the account has hit a limit.
+// input a bar while a window is at the hub's share (`Me.limit_notice_percent`, 70 % by default)
+// or the account has hit a limit.
 
 import { useEffect, useState } from 'preact/hooks';
 
@@ -40,9 +41,10 @@ const LIMIT_NAMES: Record<string, string> = {
 
 /** The bar's text, as the VS Code tab words it: "You've hit your 5-hour limit · resets 18:00"
  *  once the account is `rejected`, else "You've used 82% of your weekly limit · resets …" for
- *  the fuller window at 70 % or more; nothing below, and nothing for a limit or a window that
- *  has reset since it was reported (one without a reset time counts as current). */
-export function limitNotice(l: WorkerLimits, now = Date.now()): string | undefined {
+ *  the fuller window at `percent` (the hub's `limit_notice_percent`) or more; nothing below, and
+ *  nothing for a limit or a window that has reset since it was reported (one without a reset
+ *  time counts as current). */
+export function limitNotice(l: WorkerLimits, now = Date.now(), percent = 70): string | undefined {
   const current = (resetsAt?: number | null) => !resetsAt || resetsAt * 1000 > now;
   if (l.status === 'rejected' && current(l.resets_at)) {
     const name = (l.rate_limit_type && LIMIT_NAMES[l.rate_limit_type]) || 'usage limit';
@@ -50,7 +52,7 @@ export function limitNotice(l: WorkerLimits, now = Date.now()): string | undefin
   }
   const windows = (['five_hour', 'seven_day'] as const).flatMap((k) => {
     const w = l[k];
-    return w && w.utilization >= 0.7 && current(w.resets_at) ? [{ k, w }] : [];
+    return w && w.utilization >= percent / 100 && current(w.resets_at) ? [{ k, w }] : [];
   });
   const top = windows.sort((a, b) => b.w.utilization - a.w.utilization)[0];
   if (!top) return undefined;
@@ -63,10 +65,12 @@ export function limitNotice(l: WorkerLimits, now = Date.now()): string | undefin
 export function LimitBar({
   load,
   refresh,
+  percent,
   now = Date.now,
 }: {
   load: () => Promise<WorkerLimits | undefined>;
   refresh: unknown;
+  percent: number;
   now?: () => number;
 }) {
   const [limits, setLimits] = useState<WorkerLimits | undefined>();
@@ -80,7 +84,7 @@ export function LimitBar({
       live = false;
     };
   }, [refresh]);
-  const text = limits && limitNotice(limits, now());
+  const text = limits && limitNotice(limits, now(), percent);
   if (!text) return null;
   return (
     <div class={`limit-notice ${limits.status === 'rejected' ? 'limit-notice-hit' : ''}`} role="status">

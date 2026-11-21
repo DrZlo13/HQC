@@ -1554,6 +1554,30 @@ describe("tool groups (T26)", () => {
     expect(a.textContent).toBe("https://xn--githb-7ve.com/login");
   });
 
+  it("shows a failed call's error once when its short text is the start of its result", async () => {
+    const t = new Timeline();
+    const failed = (seq: number, call_id: string, result_preview: string, error_text: string) =>
+      ev("event.tool.result", (e) => {
+        e.seq = seq;
+        e.payload = { call_id, result_preview, error: true, error_text, duration_ms: 1000 };
+      });
+    t.apply(call(1, "a", "Bash", { command: "ls /nonexistent" }));
+    t.apply(failed(2, "a", "Exit code 2\nls: /nonexistent: No such file or directory", "Exit code 2\nls: /none"));
+    t.apply(call(3, "b", "Bash", { command: "cargo test" }));
+    t.apply(failed(4, "b", "test result: FAILED. 41 passed; 1 failed", "1 test failed"));
+    show(t);
+    const g = root.querySelector(".tool-group")!;
+    await act(async () => g.querySelector<HTMLButtonElement>(".tool-group-head")!.click());
+    const [same, other] = [...g.querySelectorAll("details.tool-row")];
+    // One text cut at two lengths: the block alone.
+    expect(same.querySelector(".tool-row-body .error-text")).toBeNull();
+    expect(same.querySelectorAll(".tool-row-body .pre")[1]!.textContent).toBe(
+      "Exit code 2\nls: /nonexistent: No such file or directory",
+    );
+    // A short text of its own (another runtime): both.
+    expect(other.querySelector(".tool-row-body .error-text")!.textContent).toBe("1 test failed");
+  });
+
   it("shows a result without its call as a group of its own", () => {
     const t = new Timeline();
     t.apply(ev("event.tool.result"));

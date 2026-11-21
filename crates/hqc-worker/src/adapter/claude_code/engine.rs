@@ -219,6 +219,9 @@ pub const CONTEXT_COMPACTED_TEXT: &str = "Context compacted";
 /// `result` with a `terminal_reason` `aborted_*` (SPEC §4, §8.1).
 pub const TURN_INTERRUPTED: &str = "turn_interrupted";
 pub const TURN_INTERRUPTED_TEXT: &str = "Interrupted";
+/// The [`TURN_ENDED_EARLY`] text of a turn whose answer the API stopped over a possible prompt
+/// injection (`stop_reason` `prompt_injection_risk`), after the Claude app's warning.
+pub const PROMPT_INJECTION_TEXT: &str = "Turn ended early: prompt_injection_risk · the content the agent read may contain a prompt injection; review it before continuing";
 /// `system.code` of a turn the CLI ended early for another reason: an error `result`, or a
 /// `terminal_reason` other than `completed`, `background_requested` and `tool_deferred` (SPEC
 /// §4, §8.1).
@@ -3096,11 +3099,16 @@ fn limits(info: &Value) -> Option<hqc_proto::frame::Limits> {
 /// [`TURN_INTERRUPTED`]; any other but those three, or an error result (`subtype` other than `success`, `is_error: true`) → [`TURN_ENDED_EARLY`]
 /// "Turn ended early: " with the reason (the subtype without one), `api_error_status` and
 /// `errors`. Not the `result` text: with `is_error: true` it is the CLI's own reply, which
-/// came as its `assistant` line already.
+/// came as its `assistant` line already. A `result` whose answer the API stopped over a
+/// possible prompt injection (`stop_reason` `prompt_injection_risk`, a value of the API the CLI
+/// passes on as is), an error one too → [`TURN_ENDED_EARLY`] with that reason.
 fn turn_end_line(v: &Value) -> Option<(&'static str, String)> {
     let reason = v["terminal_reason"].as_str();
     if reason.is_some_and(|r| r.starts_with("aborted_")) {
         return Some((TURN_INTERRUPTED, TURN_INTERRUPTED_TEXT.into()));
+    }
+    if v["stop_reason"] == "prompt_injection_risk" {
+        return Some((TURN_ENDED_EARLY, PROMPT_INJECTION_TEXT.into()));
     }
     let subtype = v["subtype"].as_str().unwrap_or("");
     let error = subtype != "success" || v["is_error"] == true;

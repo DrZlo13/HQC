@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use super::engine::{
     next_cron_fire, record_event_id, resurrected_cron_jobs, Action, Core, COMMAND_TEXT_LIMIT,
-    CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT,
+    CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT, PROMPT_INJECTION_TEXT,
 };
 use super::process::{CommandSpec, OsSpawner, Sig};
 use super::scripted::ScriptedClaude;
@@ -3418,6 +3418,14 @@ fn a_turn_that_ended_early_says_why() {
         json!({"subtype": "success", "is_error": false, "result": "OK", "terminal_reason": "completed"})
     )
     .is_empty());
+    // A completed turn whose answer the API stopped over a possible prompt injection.
+    assert_eq!(
+        end(
+            json!({"subtype": "success", "is_error": false, "result": "", "terminal_reason": "completed",
+            "stop_reason": "prompt_injection_risk"})
+        ),
+        early(PROMPT_INJECTION_TEXT)
+    );
     assert!(
         end(json!({"subtype": "success", "is_error": false, "result": "", "num_turns": 0}))
             .is_empty()

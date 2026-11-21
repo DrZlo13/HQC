@@ -192,8 +192,8 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
           ))}
         </div>
         <p class="muted">
-          Where "Search in …" of the menu of text selected in a chat searches, in a new tab. On this
-          device.
+          Where the "Search in …" button of a message searches the text selected in it, in a new tab.
+          On this device.
         </p>
 
         <ProvidersSection app={app} />

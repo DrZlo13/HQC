@@ -13,6 +13,7 @@ import { parseEvent, type HqcEvent } from '../src/proto';
 import { Timeline } from '../src/timeline';
 import { ChatItems, type ChatActions } from '../src/ui/cards';
 import { formatTime } from '../src/ui/labels';
+import { WEB_SEARCHES } from '../src/websearch';
 
 interface Fixture {
   asker_id: string;
@@ -124,6 +125,13 @@ describe('the answering session (esp/session-5)', () => {
 });
 
 describe('the asking session (esp/session-4)', () => {
+  it('the sent message and its reply have Search, Copy and Quote, in this order, in their heads', async () => {
+    const { el } = await feed(exchange.asker, { findSession: sessions(exchange, 'esp/session-4', 'esp/session-5'), quote: vi.fn(), webSearch: WEB_SEARCHES[0] });
+    const [s, r] = blocks(el);
+    for (const b of [s, r])
+      expect([...b.querySelectorAll('.relay-when .msg-buttons button')].map((x) => x.getAttribute('aria-label'))).toEqual(['Search in Google', 'Copy', 'Quote']);
+  });
+
   it('"↗ Sent to · delivered" with the file it handed over and "↙ Reply from" with Open / Download', async () => {
     const peerMessage = vi.fn(async (sid: string, seq: number) =>
       sid === exchange.helper_id && seq === 2 ? ev(exchange.helper, 2) : undefined,

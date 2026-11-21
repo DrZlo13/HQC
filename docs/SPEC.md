@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.185, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.202, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -584,7 +584,7 @@ the client renders only them. The "source" column is the component that produces
 | `model_fallback` | worker (adapter) | since 0.179: the runtime went on with another model (unavailable, overloaded, or with the user's consent); `text` "<model> → <other model>" and the runtime's words after a colon (§8.1) |
 | `model_refusal_fallback` | worker (adapter) | since 0.179: the model refused and another model answered; `text` as for `model_fallback`; the refused answer is taken back by a `retraction` (§8.1) |
 | `model_refusal` | worker (adapter) | since 0.179: the model refused and no other model answered; `text` is the runtime's, or "<model> refused to answer" and the API's explanation (§8.1) |
-| `model_not_switched` | worker (adapter) | since 0.179: the runtime refused a switch to the model the user chose; `text` gives its reason and the model it kept, `model` that model, which the hub makes the session's model (`agent.model`) when it is a name hqc takes from the user (§6, §8.1) |
+| `model_not_switched` | worker (adapter) | since 0.179: the runtime refused a switch to the model the user chose (since 0.202 also the model it was started with, Claude Code's `model_restriction`, §8.1); `text` gives its reason and the model it kept, `model` that model, which the hub makes the session's model (`agent.model`) when it is a name hqc takes from the user (§6, §8.1) |
 | `mcp_not_connected` | worker (adapter) | since 0.179: MCP servers of the agent that are not connected and not turned off; `text` "MCP servers not connected: <name> (<status>), …", given when that list changes (§8.1) |
 | `plugin_errors` | worker (adapter) | since 0.179: plugins of the runtime that did not load in full; `text` "Plugin errors: <plugin>: <message>; …", given when that list changes (§8.1) |
 | `agent_start_failed` | hub | the agent failed to start 3 times in a row (or non-retryably); `pending` inputs became `failed` (§5.2) |
@@ -4348,7 +4348,11 @@ turn's `system` `model_refusal_fallback` (`original_model`, `fallback_model`,
 until its `result`, how many content blocks each record of the main agent had, and sends a
 `retraction` with the event ids it derived from those records (as for every event of a record)
 before the new answer's events; a held text among them is dropped, never sent; ids retracted
-once are not named again. `model_refusal_fallback` is then `system model_refusal_fallback`
+once are not named again. Since 0.202 a `user` line's `retracted_message_uuids` (2.1.325: only on
+the message that asks the model again after a response whose tool call the CLI could not parse,
+naming that response's frames, which the CLI dropped; "Remove them on receipt") gives the same
+`retraction` at once: the next answer's `supersedes` names them again, but a turn stopped before
+it brings none. `model_refusal_fallback` is then `system model_refusal_fallback`
 "<original> → <fallback>: <content>", and the turn's `usage` names the fallback model unless its
 `scope` is `local` (a subagent's, a side question's or a background fork's answer came from it;
 `session` or none: the session's model is swapped). These lines are not held for the turn's
@@ -4563,11 +4567,21 @@ and the next model call of the same turn already uses the new model (the turn's 
 both). Since 0.179 an `error` answer (2.1.312, read in the CLI's code: `error`, `error_code`
 and `model`, the model it kept) gives `system model_not_switched` with the error as the reason
 and that `model`; the worker keeps the model as the session's, so a `session.model` naming it
-switches nothing, and the hub makes it the session's `agent.model` (§4). Only a refusal of the
-latest `set_model` the adapter sent does: one of an earlier request, after which the user chose
-another model, is only logged, since the model it names is not the one asked for last. So is one
-whose `model` is the model asked for: the CLI's fixed "set_model failed" can follow a switch that
-applied, "so it names the model too" (2.1.312).
+switches nothing, and the hub makes it the session's `agent.model` (§4). Since 0.202 the same for
+a `system/informational` with `model_restriction` (2.1.325: the CLI refused the model asked for,
+at the start or at a later pick, and runs on another; `requested_model`, `effective_model`): `system
+model_not_switched` "Model not switched: <requested> is not available. The agent runs on
+<effective>" with `model` the effective one, in place of the `runtime_notice` its `content` would
+give, and the turn's `usage` names it from then on; so the chat header shows the model that
+answers, not the one chosen. When it refuses a pick (`at: switch`) of the latest `set_model`'s
+model, the CLI sends this line and then the request's `error` with `error_code`
+`restricted_by_org`; that error gives no second line. One `at: switch` of another model, after the
+adapter sent a `set_model`, is about an earlier pick, and its `effective_model` may be outdated
+("a later switch can outdate it"): it is only logged. For an `error` answer, only a refusal of
+the latest `set_model` the adapter sent gives the line: one of an earlier request, after which the
+user chose another model, is only logged, since the model it names is not the one asked for last.
+So is one whose `model` is the model asked for: the CLI's fixed "set_model failed" can follow a
+switch that applied, "so it names the model too" (2.1.312).
 
 Limits (since 0.81). The CLI writes a `rate_limit_event` before each turn's answer (2.1.310):
 `rate_limit_info.unifiedWindows.{five_hour, seven_day}` with `utilization` and `resetsAt`; the
@@ -6665,6 +6679,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.185 → 0.202 (a dropped answer at once; the model the CLI runs on)
+§4, §8.1: a response whose tool call the CLI could not parse stayed in the feed until the next
+answer's `supersedes` (and for good when the turn was stopped first); the `user` line that asks
+again names it in `retracted_message_uuids` (2.1.325), which now retracts it at once. When the CLI
+refused the model asked for and ran on another (`system/informational` with `model_restriction`,
+2.1.325), the chat header kept the model chosen; it is now a `system model_not_switched` line with
+the effective model, which the worker and the hub keep as the session's; one about an earlier
+pick is only logged, and the `restricted_by_org` error that follows the line of a pick gives no
+second one. 0.186–0.201 are taken by other open branches.
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

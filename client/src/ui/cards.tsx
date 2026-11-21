@@ -241,6 +241,8 @@ function gutter(b: Block, actions: ChatActions): Gutter {
         case 'agent.message':
           return e.payload.runtime ? { full: true } : { mark: mark('dot', <span class="feed-dot" />) };
         case 'agent.delta':
+          // The thinking being written is marked as the `agent.thinking` it becomes.
+          if (e.payload.thinking) return { mark: mark('fold', <IconChevron size={12} />) };
           return { mark: mark('dot', <span class="feed-dot" />) };
         case 'agent.thinking':
           return { mark: mark('fold', <IconChevron size={12} />) };
@@ -415,6 +417,7 @@ export function EventView({ event, actions, queued }: { event: HqcEvent; actions
     case 'user.message':
       return <UserMessage event={event} actions={actions} queued={queued} />;
     case 'agent.delta':
+      if (event.payload.thinking) return <Thinking event={event} />;
       return <StreamingMessage text={event.payload.text} />;
     case 'subagents.live':
     case 'schedules.live':
@@ -944,7 +947,8 @@ export function StreamingMessage({ text }: { text: string }) {
   );
 }
 
-function Thinking({ event }: { event: EventOf<'agent.thinking'> }) {
+/** The thinking, stored or being written: drawn the same, so nothing moves when it is stored. */
+function Thinking({ event }: { event: EventOf<'agent.thinking' | 'agent.delta'> }) {
   return (
     <details class="thinking">
       <summary>

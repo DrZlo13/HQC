@@ -3651,7 +3651,7 @@ fn a_new_request_drops_the_text_of_an_abandoned_attempt() {
         events(&emitted(a))
             .into_iter()
             .filter_map(|e| match &e.kind {
-                EventKind::AgentDelta { text, reset } => Some((text.clone(), *reset)),
+                EventKind::AgentDelta { text, reset, .. } => Some((text.clone(), *reset)),
                 _ => None,
             })
             .collect()
@@ -3688,6 +3688,82 @@ fn a_new_request_drops_the_text_of_an_abandoned_attempt() {
     );
 }
 
+/// An attempt the CLI abandoned while it was thinking: its thinking goes with it, as the VS
+/// Code tab drops every row of the attempt (`retireAbandonedStreamedRows`); once saved it stays.
+#[test]
+fn a_new_request_drops_the_thinking_of_an_abandoned_attempt() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let ev = |e: Value| {
+        json!({"type": "stream_event", "parent_tool_use_id": null, "event": e,
+            "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+    };
+    let start = ev(json!({"type": "message_start", "message": {"id": "msg_01"}})).to_string();
+    let thought = ev(json!({"type": "content_block_delta", "index": 0,
+        "delta": {"type": "thinking_delta", "thinking": "Let me think"}}))
+    .to_string();
+    let saved = json!({"type": "assistant", "message": {"id": "msg_01",
+        "model": "claude-haiku-5-5", "role": "assistant",
+        "content": [{"type": "thinking", "thinking": "Let me think"}]},
+        "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+    .to_string();
+    let resets = |a: Vec<Action>| -> usize {
+        events(&emitted(a))
+            .iter()
+            .filter(|e| matches!(e.kind, EventKind::AgentDelta { reset: true, .. }))
+            .count()
+    };
+    play(&mut core, &start);
+    play(&mut core, &thought);
+    assert_eq!(
+        resets(play(&mut core, &start)),
+        1,
+        "the abandoned attempt's"
+    );
+    assert_eq!(resets(play(&mut core, &start)), 0, "dropped once");
+    play(&mut core, &thought);
+    play(&mut core, &saved);
+    assert_eq!(
+        resets(play(&mut core, &start)),
+        0,
+        "a saved thinking took it up"
+    );
+    // A stream broken while thinking that the CLI retried without one: the response comes as an
+    // assistant of another `message.id`, and the thinking so far is dropped before it.
+    let said = |id: &str, content: Value| {
+        json!({"type": "assistant", "message": {"id": id, "model": "claude-haiku-5-5",
+            "role": "assistant", "content": content},
+            "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+        .to_string()
+    };
+    play(&mut core, &thought);
+    assert_eq!(
+        resets(play(
+            &mut core,
+            &said("msg_02", json!([{"type": "text", "text": "Here it is."}]))
+        )),
+        1,
+        "a reply without a stream"
+    );
+    // An empty saved thinking sends no agent.thinking; the saved text after it ends the
+    // thinking being written.
+    play(&mut core, &start);
+    play(&mut core, &thought);
+    play(
+        &mut core,
+        &said(
+            "msg_01",
+            json!([{"type": "thinking", "thinking": ""}, {"type": "text", "text": "Here."}]),
+        ),
+    );
+    assert_eq!(
+        resets(play(&mut core, &start)),
+        0,
+        "a saved text took it up"
+    );
+}
+
 /// A stream broken after some text that the CLI retried without one (2.1.312: "Error
 /// streaming, falling back to non-streaming mode"): no `message_start` comes, the response
 /// arrives as an `assistant` of another `message.id`, and the text written so far is dropped
@@ -3718,7 +3794,7 @@ fn a_reply_without_a_stream_drops_the_text_of_an_abandoned_attempt() {
         events(&emitted(a))
             .into_iter()
             .map(|e| match &e.kind {
-                EventKind::AgentDelta { text, reset } => format!("delta {text:?} {reset}"),
+                EventKind::AgentDelta { text, reset, .. } => format!("delta {text:?} {reset}"),
                 EventKind::AgentMessage { text, .. } => format!("message {text:?}"),
                 _ => "other".into(),
             })
@@ -3949,6 +4025,7 @@ fn nul_never_reaches_an_event() {
     assert!(kinds.contains(&EventKind::AgentDelta {
         text: "d\u{FFFD}".into(),
         reset: false,
+        thinking: false,
     }));
     let mut seen = 0;
     for k in &kinds {
@@ -3970,6 +4047,49 @@ fn nul_never_reaches_an_event() {
         seen += 1;
     }
     assert_eq!(seen, 3, "{kinds:?}");
+}
+
+/// SPEC §8.1: with `--thinking-display summarized` the CLI streams the thinking as it is
+/// written, `thinking_delta` chunks with text (2.1.312): each is an `agent.delta` with
+/// `thinking`; an empty chunk (an older CLI, the recorded fixtures) gives nothing, and the
+/// answer's text stays a plain delta.
+#[test]
+fn thinking_chunks_are_thinking_deltas() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let chunk = |delta: Value| {
+        json!({"type":"stream_event","parent_tool_use_id":null,"event":{
+            "type":"content_block_delta","index":0,"delta":delta},
+            "thinking_display":"summarized"})
+        .to_string()
+    };
+    let mut kinds = vec![];
+    for l in [
+        chunk(json!({"type":"thinking_delta","thinking":"I'm checking wh"})),
+        chunk(json!({"type":"thinking_delta","thinking":""})),
+        chunk(json!({"type":"thinking_delta","thinking":"ether 1001"})),
+        chunk(json!({"type":"text_delta","text":"Yes."})),
+    ] {
+        for e in emitted(core.on_line(&l)) {
+            if let AdapterEvent::Event(e) = e {
+                kinds.push(e.kind);
+            }
+        }
+    }
+    let delta = |text: &str, thinking| EventKind::AgentDelta {
+        text: text.into(),
+        reset: false,
+        thinking,
+    };
+    assert_eq!(
+        kinds,
+        [
+            delta("I'm checking wh", true),
+            delta("ether 1001", true),
+            delta("Yes.", false),
+        ]
+    );
 }
 
 /// SPEC §8.1: Claude Code's own cross-session messaging by the worker config. By default the

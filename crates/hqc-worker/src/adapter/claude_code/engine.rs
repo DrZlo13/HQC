@@ -3,12 +3,12 @@
 //! `session` rules live exactly as long as the process (SPEC §8.1).
 //!
 //! Mapping (SPEC §4, §8.1, docs/notes/claude-control-protocol.md):
-//! - `stream_event` `text_delta` → `agent.delta`; deltas (text, thinking, tool input at four
-//!   characters a token, redacted thinking at its `estimated_tokens`), then `message_delta`'s
-//!   `usage.output_tokens` for the token rate ([`Core::take_output_tokens`], [`super::rate`]);
-//!   after text deltas no assistant text took up, a `message_start` or an `assistant` of
-//!   another `message.id` than the one streamed → `agent.delta` with `reset: true`
-//!   ([`Core::live_text`]);
+//! - `stream_event` `text_delta` → `agent.delta`, `thinking_delta` with text → `agent.delta`
+//!   with `thinking`; deltas (text, thinking, tool input at four characters a token, redacted
+//!   thinking at its `estimated_tokens`), then `message_delta`'s `usage.output_tokens` for the
+//!   token rate ([`Core::take_output_tokens`], [`super::rate`]); after text deltas no
+//!   assistant text took up, a `message_start` or an `assistant` of another `message.id` than
+//!   the one streamed → `agent.delta` with `reset: true` ([`Core::live_text`]);
 //! - `assistant` text → `agent.message`, held until the next element: another assistant
 //!   block or a tool result makes it `final: false`, `result` makes it `final: true`; an
 //!   input written during a turn the CLI started by itself leaves it held; a text that is the
@@ -579,6 +579,9 @@ pub struct Core {
     /// clients show text that no `agent.message` will cover if the CLI abandons the attempt
     /// ([`Core::on_stream_event`], [`Core::on_assistant`]).
     live_text: bool,
+    /// The same for the main agent's thinking deltas since its last saved thinking or text: an
+    /// abandoned attempt often breaks while it thinks, and its thinking must go with it.
+    live_thinking: bool,
     /// `message.id` of the main agent's latest `message_start`: the response being streamed.
     streamed_id: Option<String>,
     /// `session_id` of the latest `system/init`: its subagents' transcripts are in its folder.
@@ -669,6 +672,7 @@ impl Core {
             streamed_estimated: 0,
             streamed: 0,
             live_text: false,
+            live_thinking: false,
             streamed_id: None,
             cli_session: None,
             foreground: BTreeMap::new(),
@@ -1585,11 +1589,13 @@ impl Core {
                 self.streamed_id = ev["message"]["id"].as_str().map(str::to_owned);
                 // A new request of the model after text no assistant text took up: the CLI
                 // abandoned the attempt that wrote it (a stream that broke, then a retry), as the
-                // VS Code tab takes it (`web:163707`); the hub and clients drop it.
-                if std::mem::take(&mut self.live_text) {
+                // VS Code tab takes it (`web:163707`); the hub and clients drop it, and the
+                // thinking written with it.
+                if std::mem::take(&mut self.live_text) | std::mem::take(&mut self.live_thinking) {
                     return vec![self.emit_new(EventKind::AgentDelta {
                         text: String::new(),
                         reset: true,
+                        thinking: false,
                     })];
                 }
             }
@@ -1623,16 +1629,28 @@ impl Core {
         let estimate = self.streamed_estimated + self.streamed_chars / 4;
         self.output_tokens += estimate - self.streamed;
         self.streamed = estimate;
-        if delta["type"] == "text_delta" {
-            if let Some(t) = delta["text"].as_str().filter(|t| !t.is_empty()) {
-                self.live_text = true;
-                return vec![self.emit_new(EventKind::AgentDelta {
+        // A thinking chunk carries text only with `--thinking-display summarized` (2.1.312); an
+        // empty one gives nothing.
+        let (field, thinking) = match delta["type"].as_str() {
+            Some("text_delta") => ("text", false),
+            Some("thinking_delta") => ("thinking", true),
+            _ => return vec![],
+        };
+        match delta[field].as_str().filter(|t| !t.is_empty()) {
+            Some(t) => {
+                if thinking {
+                    self.live_thinking = true;
+                } else {
+                    self.live_text = true;
+                }
+                vec![self.emit_new(EventKind::AgentDelta {
                     text: text(t),
                     reset: false,
-                })];
+                    thinking,
+                })]
             }
+            None => vec![],
         }
-        vec![]
     }
 
     fn on_assistant(&mut self, v: &Value) -> Vec<Action> {
@@ -1653,11 +1671,16 @@ impl Core {
         // non-streaming mode", 2.1.312), which brings no `message_start`; as the VS Code tab
         // takes it (`web:171092`), the text so far is dropped first.
         let id = v["message"]["id"].as_str();
-        if self.live_text && !synthetic && id.is_some() && id != self.streamed_id.as_deref() {
-            self.live_text = false;
+        if (self.live_text || self.live_thinking)
+            && !synthetic
+            && id.is_some()
+            && id != self.streamed_id.as_deref()
+        {
+            (self.live_text, self.live_thinking) = (false, false);
             out.push(self.emit_new(EventKind::AgentDelta {
                 text: String::new(),
                 reset: true,
+                thinking: false,
             }));
         }
         for (i, block) in blocks(v).iter().enumerate() {
@@ -1673,7 +1696,8 @@ impl Core {
                         tracing::info!(session_id = %self.session_id, "runtime message");
                     }
                     self.held = Some((id, text(t), synthetic, aborted, refusal));
-                    self.live_text = false;
+                    // A saved text ends the live thinking too, on the hub and in clients.
+                    (self.live_text, self.live_thinking) = (false, false);
                 }
                 Some("tool_use") => {
                     out.extend(self.flush(false));
@@ -1695,6 +1719,7 @@ impl Core {
                         continue;
                     }
                     out.extend(self.flush(false));
+                    self.live_thinking = false;
                     out.push(self.emit(id, EventKind::AgentThinking { text: text(t) }));
                 }
                 _ => {}

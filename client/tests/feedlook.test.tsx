@@ -350,6 +350,21 @@ describe('the one-column gutter', () => {
     expect(root.querySelector('.feed-mark:not([aria-hidden=true])')).toBeNull();
   });
 
+  it('the thinking being written has the mark of the thinking it becomes (SPEC §6)', () => {
+    const { timeline, draw } = show([user(1, 'Run the tests')]);
+    timeline.apply(ev('event.agent.delta', (e) => (e.payload = { text: 'Checking', thinking: true })));
+    draw();
+    const marks = () =>
+      [...root.querySelectorAll<HTMLElement>('.feed-block')].map((b) => {
+        const m = [...b.children].find((c) => c.classList.contains('feed-mark'));
+        return m ? m.className.replace('feed-mark feed-mark-', '') : null;
+      });
+    expect(marks()).toEqual([null, 'fold']);
+    timeline.apply(ev('event.agent.thinking', (e) => ((e.seq = 2), (e.payload.text = 'Checking.'))));
+    draw();
+    expect(marks()).toEqual([null, 'fold']);
+  });
+
   it('styles.css shows the marks and the gutter only in one column, and drops the marks the items carry', () => {
     expect(rule('.feed-mark')).toMatch(/display: none;/);
     expect(rule(':root.feed-column .feed-mark')).toMatch(/position: absolute;/);

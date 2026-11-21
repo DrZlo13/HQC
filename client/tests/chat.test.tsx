@@ -2555,6 +2555,31 @@ describe('an input that came while the agent writes (SPEC §6)', () => {
     await writing([first, meanwhile(2), answer, idle]);
     expect(under(block('written meanwhile'))).toBe(false);
   });
+
+  it('the thinking written after the text being written stands under it, unfolded, above the inputs written meanwhile', async () => {
+    const call = ev('event.tool.call', 2);
+    const done = ev('event.tool.result', 3, (e) => (e.payload = { call_id: 'toolu_01', result_preview: 'ok', error: false }));
+    const { push } = await writing([first, call, done]);
+    await act(async () =>
+      push(
+        ev('event.agent.delta', 0, (e) => {
+          delete e.seq;
+          e.payload = { text: 'Weighing it', thinking: true };
+        }),
+      ),
+    );
+    await act(async () => push(meanwhile(4)));
+    const live = $('details.thinking')!;
+    expect(live.querySelector('summary')!.textContent).toBe('Thinking · Weighing it');
+    expect(under(live)).toBe(true);
+    expect(live.compareDocumentPosition(block('written meanwhile')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('one that came during the thinking before the text stays above it', async () => {
+    const thought = ev('event.agent.thinking', 3, (e) => (e.payload = { text: 'Checking' }));
+    await writing([first, meanwhile(2), thought]);
+    expect(under(block('written meanwhile'))).toBe(false);
+  });
 });
 
 // SPEC §6: the client keeps the chats used most recently in memory.

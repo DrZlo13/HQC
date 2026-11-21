@@ -340,8 +340,9 @@ pub enum EventKind {
         /// owner.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schedule_id: Option<Uuid>,
-        /// Set by the hub: the agent's text was being written when the input came, so clients
-        /// show it under that text (since SPEC 0.108); absent when false.
+        /// Set by the hub: the agent's text or, since SPEC 0.206, its thinking was being
+        /// written when the input came, so clients show it under that text (since SPEC 0.108);
+        /// absent when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         during_text: bool,
         /// The runtime took it into the turn already running (SPEC §17.2): the hub sets it
@@ -354,9 +355,14 @@ pub enum EventKind {
     AgentDelta {
         text: String,
         /// The runtime abandoned the attempt that wrote the text so far (since SPEC 0.161): the
-        /// hub and clients drop that text; `text` is empty. Absent when false.
+        /// hub and clients drop that text, and the thinking being written with it; `text` is
+        /// empty. Absent when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         reset: bool,
+        /// A piece of the agent's thinking being written, not of its answer (since SPEC
+        /// 0.206); absent when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        thinking: bool,
     },
     /// The subagents the agent runs now, the whole list in the order they started, then (since
     /// SPEC 0.127) its background shell commands, and (since SPEC 0.169) its Monitor watchers,
@@ -528,8 +534,9 @@ pub enum EventKind {
         /// downloaded into the target's inbox like a user's attachments (SPEC §12).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         artifact_ids: Vec<Uuid>,
-        /// Set by the hub: the agent's text was being written when the message came, so
-        /// clients show it under that text (since SPEC 0.108); absent when false.
+        /// Set by the hub: the agent's text or, since SPEC 0.206, its thinking was being
+        /// written when the message came, so clients show it under that text (since SPEC
+        /// 0.108); absent when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         during_text: bool,
     },

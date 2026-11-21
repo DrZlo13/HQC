@@ -2,11 +2,11 @@
 //! [`hqc_proto::client_frame`].
 //!
 //! - `subscribe {session_id, after_seq?}` — stored events with `seq > after_seq` (default 0),
-//!   the answer being written as one `agent.delta` ([`AppState::live_text`]), the latest
-//!   `subagents.live` ([`AppState::live_agents`]), the session's `schedules.live`, unless
-//!   it is empty ([`crate::schedules::live_event`]), then `subscribed {session_id, last_seq}`,
-//!   then the live stream: stored events, `agent.delta`, `subagents.live` and
-//!   `schedules.live` (no `seq`), `delivery` changes of inputs;
+//!   the thinking and the answer being written, each as one `agent.delta`
+//!   ([`AppState::live_text`]), the latest `subagents.live` ([`AppState::live_agents`]), the
+//!   session's `schedules.live`, unless it is empty ([`crate::schedules::live_event`]), then
+//!   `subscribed {session_id, last_seq}`, then the live stream: stored events, `agent.delta`,
+//!   `subagents.live` and `schedules.live` (no `seq`), `delivery` changes of inputs;
 //! - `unsubscribe {session_id}`;
 //! - `subscribe_summary` — `summary {sessions}` for every session of the user, then
 //!   `session.summary {session}` whenever one of them changes; with it `requests {requests}`,
@@ -158,9 +158,9 @@ impl Client {
                     return false;
                 }
                 // After the backfill: the text is ended before its `agent.message` is stored.
-                let (text, next) = self.app.live_text(session_id);
+                let (texts, next) = self.app.live_text(session_id);
                 self.live_from.insert(session_id, next);
-                if let Some(event) = text {
+                for event in texts {
                     if !self.send(ServerFrame::Event { event }).await {
                         return false;
                     }

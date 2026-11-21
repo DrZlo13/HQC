@@ -70,12 +70,20 @@ export class Timeline {
     EventOf<"approval.request" | "clarify.request">
   >();
   private readonly listeners = new Set<() => void>();
+  /** `seq` of a stored `agent.thinking` that ended a thinking being written -> that thinking's
+   *  item key, so the feed keeps its block and a block the user opened stays open. */
+  private readonly keys = new Map<number, string>();
+  /** Thinkings written so far, which name their items (`t<n>`). */
+  private thinkings = 0;
+  /** The item key of the thinking being written. */
+  private thinkingKey = "";
   private sorted: HqcEvent[] | null = [];
   lastSeq = 0;
   /** Events before this `seq` are not loaded yet (`ChatSession` loads the newest page first);
    *  0 once the history is in. */
   olderFrom = 0;
-  /** Text of `agent.delta` since the last `agent.message` or `reset`. */
+  /** Text of the answer's `agent.delta` (not the thinking's) since the last `agent.message` or
+   *  `reset`. */
   streaming = "";
   /** The subagents of the latest `subagents.live`. */
   liveAgents: LiveSubagent[] = [];
@@ -85,6 +93,9 @@ export class Timeline {
    *  `due_in_ms` were counted then. */
   liveSchedules: LiveSchedule[] = [];
   liveSchedulesAt = 0;
+  /** The thinking being written: the first `agent.delta` with `thinking` since the last
+   *  `agent.thinking`, `agent.message` or `reset`, with the text of all of them (SPEC §6). */
+  thinking: EventOf<"agent.delta"> | null = null;
   version = 0;
 
   onChange(fn: () => void): () => void {
@@ -116,8 +127,17 @@ export class Timeline {
 
   private applyQuiet(ev: HqcEvent, advance = true): void {
     if (ev.type === "agent.delta") {
-      // `reset`: the runtime abandoned the attempt that wrote the text so far (SPEC §4).
-      this.streaming = ev.payload.reset ? "" : this.streaming + ev.payload.text;
+      // `reset`: the runtime abandoned the attempt that wrote the text so far, and the thinking
+      // with it (SPEC §4).
+      if (ev.payload.reset) {
+        this.streaming = "";
+        this.thinking = null;
+      } else if (!ev.payload.thinking) this.streaming += ev.payload.text;
+      else {
+        if (!this.thinking) this.thinkingKey = `t${++this.thinkings}`;
+        const text = (this.thinking?.payload.text ?? "") + ev.payload.text;
+        this.thinking = { ...(this.thinking ?? ev), payload: { ...ev.payload, text } };
+      }
       return;
     }
     if (ev.type === "subagents.live") {
@@ -178,10 +198,21 @@ export class Timeline {
         }
         break;
       case "agent.message":
-        if (fresh) this.streaming = "";
+        if (fresh) {
+          this.streaming = "";
+          this.thinking = null;
+        }
+        break;
+      case "agent.thinking":
+        // It takes the place of the thinking being written, and its key.
+        if (fresh && this.thinking) this.keys.set(ev.seq, this.thinkingKey);
+        if (fresh) this.thinking = null;
         break;
       case "status":
-        if (fresh && ev.payload.state !== "running") this.streaming = "";
+        if (fresh && ev.payload.state !== "running") {
+          this.streaming = "";
+          this.thinking = null;
+        }
         break;
       case "tool.call":
         this.calls.set(ev.payload.call_id, ev);
@@ -212,8 +243,12 @@ export class Timeline {
       }
       case "retraction":
         for (const id of ev.payload.event_ids) this.retracted.add(id);
-        // The answer being written was taken back too: no message ends it (SPEC 0.179).
-        if (fresh) this.streaming = "";
+        // The answer being written was taken back too: no message ends it (SPEC 0.179), nor
+        // the thinking being written.
+        if (fresh) {
+          this.streaming = "";
+          this.thinking = null;
+        }
         break;
     }
   }
@@ -434,8 +469,9 @@ export class Timeline {
    *  subagents and schedules may have ended meanwhile (the next subscribe brings the hub's
    *  lists). */
   reset(): void {
-    if (!this.streaming && !this.liveAgents.length && !this.liveSchedules.length) return;
+    if (!this.streaming && !this.thinking && !this.liveAgents.length && !this.liveSchedules.length) return;
     this.streaming = "";
+    this.thinking = null;
     this.liveAgents = [];
     this.liveSchedules = [];
     this.changed();
@@ -453,7 +489,7 @@ export class Timeline {
   items(): Item[] {
     const bySeq: Item[] = this.events().map((e) => ({
       kind: "event",
-      key: `e${e.seq}`,
+      key: this.keys.get(e.seq!) ?? `e${e.seq}`,
       event: e,
     }));
     for (const inv of this.invalid) {
@@ -464,25 +500,27 @@ export class Timeline {
       else bySeq.splice(at, 0, item);
     }
     const out = placeQueued(bySeq);
-    // An input that came while the agent's text was being written stands under that text
-    // (SPEC §6): the `agent.message` goes above the inputs with `during_text` right before it
-    // in `seq` order, never above the input it answers. A final one takes the `usage` right
-    // after it along, which the feed draws in its block, and the line that says how the turn
-    // ended (`turn_interrupted`, `turn_ended_early`), which the worker sends after that `usage`.
-    // An input `placeQueued` moved after the turn it waited through is no longer there: its own
-    // turn's text stays under it.
+    // An input that came while the agent's text or thinking was being written stands under it
+    // (SPEC §6): the `agent.message` or `agent.thinking` goes above the inputs with
+    // `during_text` right before it in `seq` order, never above the input it answers. A final
+    // message takes the `usage` right after it along, which the feed draws in its block, and
+    // the line that says how the turn ended (`turn_interrupted`, `turn_ended_early`), which the
+    // worker sends after that `usage`. An input `placeQueued` moved after the turn it waited
+    // through is no longer there: its own turn's text stays under it.
     let floor = 0;
     for (let i = 0; i < out.length; i++) {
       const a = out[i];
-      if (a.kind !== "event" || a.event.type !== "agent.message") continue;
+      if (a.kind !== "event") continue;
+      if (a.event.type !== "agent.message" && a.event.type !== "agent.thinking") continue;
+      const message = a.event.type === "agent.message" ? a.event : undefined;
       let n = 1;
-      if (a.event.payload.final) {
+      if (message?.payload.final) {
         const u = out[i + n];
         if (u?.kind === "event" && u.event.type === "usage") n++;
         const end = out[i + n];
         if (end?.kind === "event" && isTurnEndLine(end.event)) n++;
       }
-      const answers = a.event.payload.in_reply_to;
+      const answers = message?.payload.in_reply_to;
       let at = i;
       while (at > floor) {
         const prev = out[at - 1];
@@ -492,6 +530,14 @@ export class Timeline {
       if (at < i) out.splice(at, 0, ...out.splice(i, n));
       floor = i + n;
       i += n - 1;
+    }
+    // The thinking being written stands after the stored events, above the inputs that came
+    // while it was written and those still waiting for a turn of their own, before the
+    // messages not stored yet.
+    if (this.thinking) {
+      let at = out.length;
+      while (at > floor && underThinking(out[at - 1])) at--;
+      out.splice(at, 0, { kind: "event", key: this.thinkingKey, event: this.thinking });
     }
     for (const p of this.pending.values()) {
       out.push({ kind: "pending", key: `p-${p.client_op_id}`, pending: p });
@@ -507,13 +553,22 @@ export class Timeline {
   }
 }
 
-/** A stored input the hub marked as come while the agent's text was being written (SPEC §6). */
+/** A stored input the hub marked as come while the agent's text or thinking was being written
+ *  (SPEC §6). */
 export function duringText(it: Item): boolean {
   return (
     it.kind === "event" &&
     (it.event.type === "user.message" || it.event.type === "peer.message") &&
     it.event.payload.during_text === true
   );
+}
+
+/** An input that stands under the thinking being written: one that came while it was written,
+ *  unless `placeQueued` moved it after the turn it waited through, or one still waiting for a
+ *  turn of its own, as under the text being written. */
+function underThinking(it: Item): boolean {
+  if (it.kind !== "event") return false;
+  return it.queued ? it.event.delivery === "pending" : duringText(it);
 }
 
 /** The line the worker sends after a turn's `usage` when the turn did not complete (SPEC §4). */

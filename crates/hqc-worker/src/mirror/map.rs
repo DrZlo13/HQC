@@ -1218,6 +1218,7 @@ mod tests {
                 options: Some(vec!["Feed".into(), "Search".into(), "Settings".into()]),
                 option_descriptions: Some(vec!["The chat feed".into(), "".into(), "".into()]),
                 multi: Some(true),
+                option_previews: None,
                 required: false,
                 input: None,
             }

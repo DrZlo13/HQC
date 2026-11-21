@@ -31,7 +31,8 @@
 //!   speaker's turn, with none of its inputs from the room still waiting for its worker, moves
 //!   the circle on ([`decide`]): its latest post since it became the speaker wakes the next agent
 //!   after it, with its files and capped to the posting agent's mode where that is below its own,
-//!   until [`MAX_HOPS`] posts follow the owner's or a non-member's last message (then one `system
+//!   until the hub's hops limit of posts ([`crate::config::Limits::peer_hops_per_chain`], 20 by
+//!   default) follow the owner's or a non-member's last message (then one `system
 //!   room_stopped`); else its pass hands the last post, the owner's message or a non-member's on
 //!   to the next agent, until every agent but its author passed; else the room stops
 //!   (`room_stopped`). Its runtime's own reply, an input from the room that fails delivery and
@@ -55,7 +56,7 @@ use crate::{
     db::{self, EventRow, InputRow, SessionRow},
     delivery, events,
     mcp::once_id,
-    peers::{self, MAX_HOPS},
+    peers,
 };
 
 /// `system.code` in a room whose agents stopped waking each other (SPEC §4).
@@ -853,9 +854,9 @@ async fn runtime_line(
 }
 
 /// The speaker `s`'s post `post` in conversation `room`, at the end of its turn ([`decide`]): it
-/// wakes the next agent after `s`, with its files and cap, while at most [`MAX_HOPS`] posts follow
-/// the owner's or a non-member's last message before it; past them the room gets `system
-/// room_stopped` instead.
+/// wakes the next agent after `s`, with its files and cap, while at most the hub's hops limit
+/// (`peer_hops_per_chain`) of posts follow the owner's or a non-member's last message before it;
+/// past them the room gets `system room_stopped` instead.
 async fn after_post(
     app: &AppState,
     room: &SessionRow,
@@ -884,7 +885,7 @@ async fn after_post(
     .bind(since)
     .fetch_one(&app.db)
     .await?;
-    let max = i64::from(MAX_HOPS);
+    let max = i64::from(app.config.limits.peer_hops_per_chain);
     if n > max {
         let whose = match sender {
             Some(from) => format!("{from}'s"),

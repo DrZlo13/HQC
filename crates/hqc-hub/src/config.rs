@@ -153,8 +153,12 @@ pub struct Limits {
     /// Peer messages (`hqc_send`, `hqc_ask`, the prompt of `hqc_spawn`) a session sends per
     /// minute.
     pub peer_messages_per_session_min: usize,
-    /// Peer messages in one chain, in total (SPEC §7.1).
+    /// Peer messages in one chain, in total (SPEC §7.1); `HQC_PEER_MESSAGES_PER_CHAIN`.
     pub peer_messages_per_chain: i64,
+    /// Peer messages one after another in one chain (its `hops`), and posts of a room's
+    /// conversation after the owner's or a non-member's message (SPEC §7.1, §7.1.1);
+    /// `HQC_PEER_HOPS_PER_CHAIN`.
+    pub peer_hops_per_chain: u8,
     /// Sessions spawned in one chain (SPEC §7.1) ...
     pub spawns_per_chain: i64,
     /// ... and per owner in the last hour.
@@ -189,7 +193,8 @@ impl Default for Limits {
             mcp_calls_per_worker_min: 300,
             open_asks_per_session: 5,
             peer_messages_per_session_min: 20,
-            peer_messages_per_chain: 50,
+            peer_messages_per_chain: DEFAULT_PEER_MESSAGES_PER_CHAIN,
+            peer_hops_per_chain: DEFAULT_PEER_HOPS_PER_CHAIN,
             spawns_per_chain: 5,
             spawns_per_hour: 20,
             searches_per_owner_min: 30,
@@ -314,6 +319,44 @@ pub fn mirror_sessions_per_day_from(v: Option<&str>) -> anyhow::Result<i64> {
     }
 }
 
+pub const DEFAULT_PEER_MESSAGES_PER_CHAIN: i64 = 50;
+
+/// `HQC_PEER_MESSAGES_PER_CHAIN`: a whole number of messages from 1, unset =
+/// [`DEFAULT_PEER_MESSAGES_PER_CHAIN`].
+pub fn peer_messages_per_chain_from(v: Option<&str>) -> anyhow::Result<i64> {
+    match v.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(DEFAULT_PEER_MESSAGES_PER_CHAIN),
+        Some(v) => v
+            .parse::<u32>()
+            .ok()
+            .filter(|n| *n > 0)
+            .map(i64::from)
+            .with_context(|| {
+                format!(
+                    "HQC_PEER_MESSAGES_PER_CHAIN={v}: expected a whole number of messages from 1"
+                )
+            }),
+    }
+}
+
+pub const DEFAULT_PEER_HOPS_PER_CHAIN: u8 = 20;
+
+/// `HQC_PEER_HOPS_PER_CHAIN`: a whole number from 1 to 254, unset =
+/// [`DEFAULT_PEER_HOPS_PER_CHAIN`]. A chain's `hops` stops growing at 255, so a limit of 255
+/// would never be passed.
+pub fn peer_hops_per_chain_from(v: Option<&str>) -> anyhow::Result<u8> {
+    match v.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(DEFAULT_PEER_HOPS_PER_CHAIN),
+        Some(v) => v
+            .parse::<u8>()
+            .ok()
+            .filter(|n| (1..=254).contains(n))
+            .with_context(|| {
+                format!("HQC_PEER_HOPS_PER_CHAIN={v}: expected a whole number from 1 to 254")
+            }),
+    }
+}
+
 impl Config {
     /// Variables: `HQC_DATABASE_URL`, `HQC_HUB_LISTEN`, `HQC_ACCESS_TEAM_DOMAIN`,
     /// `HQC_ACCESS_AUD`, `HQC_OIDC_ISSUER`, `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL`,
@@ -321,7 +364,7 @@ impl Config {
     /// `HQC_VAPID_PUBLIC`, `HQC_VAPID_SUBJECT`, `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`,
     /// `HQC_ARTIFACT_DIR`, `HQC_ARTIFACT_PUBLIC_BASE`, `HQC_ARTIFACT_KEY`,
     /// `HQC_ARTIFACT_RETENTION_DAYS`, `HQC_PUBLIC_ORIGINS`, `HQC_CLIENT_IP_HEADER`,
-    /// `HQC_MIRROR_SESSIONS_PER_DAY`.
+    /// `HQC_MIRROR_SESSIONS_PER_DAY`, `HQC_PEER_MESSAGES_PER_CHAIN`, `HQC_PEER_HOPS_PER_CHAIN`.
     pub fn from_env() -> anyhow::Result<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let database_url = var("HQC_DATABASE_URL").context("HQC_DATABASE_URL is not set")?;
@@ -383,6 +426,12 @@ impl Config {
             limits: Limits {
                 mirror_sessions_per_day: mirror_sessions_per_day_from(
                     var("HQC_MIRROR_SESSIONS_PER_DAY").as_deref(),
+                )?,
+                peer_messages_per_chain: peer_messages_per_chain_from(
+                    var("HQC_PEER_MESSAGES_PER_CHAIN").as_deref(),
+                )?,
+                peer_hops_per_chain: peer_hops_per_chain_from(
+                    var("HQC_PEER_HOPS_PER_CHAIN").as_deref(),
                 )?,
                 ..Limits::default()
             },
@@ -577,6 +626,22 @@ mod tests {
         assert_eq!(mirror_sessions_per_day_from(Some("5000")).unwrap(), 5000);
         assert!(mirror_sessions_per_day_from(Some("-1")).is_err());
         assert!(mirror_sessions_per_day_from(Some("1k")).is_err());
+    }
+
+    #[test]
+    fn peer_chain_variables() {
+        assert_eq!(peer_messages_per_chain_from(None).unwrap(), 50);
+        assert_eq!(peer_messages_per_chain_from(Some(" ")).unwrap(), 50);
+        assert_eq!(peer_messages_per_chain_from(Some("200")).unwrap(), 200);
+        for bad in ["0", "-1", "1k"] {
+            assert!(peer_messages_per_chain_from(Some(bad)).is_err(), "{bad}");
+        }
+        assert_eq!(peer_hops_per_chain_from(None).unwrap(), 20);
+        assert_eq!(peer_hops_per_chain_from(Some(" 80 ")).unwrap(), 80);
+        assert_eq!(peer_hops_per_chain_from(Some("254")).unwrap(), 254);
+        for bad in ["0", "255", "300", "-1", "1k"] {
+            assert!(peer_hops_per_chain_from(Some(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -1198,3 +1198,61 @@ async fn chains_are_limited() {
     assert_ne!(last["chain_id"], first["chain_id"]);
     assert_eq!((&last["depth"], &last["hops"]), (&json!(0), &json!(1)));
 }
+
+/// SPEC §7.1, §20: the hops limit is the hub's `HQC_PEER_HOPS_PER_CHAIN`: at five, a send from a
+/// turn whose chain has four hops goes, and one from a chain of five is refused, naming five.
+#[tokio::test]
+async fn the_hops_limit_is_the_hub_s_setting() {
+    let hub = TestHub::start_limited(hqc_hub::config::Limits {
+        peer_hops_per_chain: 5,
+        ..Default::default()
+    })
+    .await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (a, ta) = started(&hub, &mut w, "Asker", None).await;
+    let (b, tb) = started(&hub, &mut w, "Helper", None).await;
+    let (c, _) = started(&hub, &mut w, "Third", None).await;
+    for s in [&a, &b, &c] {
+        hub.buffer_sends(s).await;
+    }
+    // A asks B; B's turn runs on that question, so B's sends continue its chain.
+    let (_, input) = ask_same_worker(
+        &mut w,
+        &ta,
+        json!({"text": "q", "session": "personal/helper"}),
+    )
+    .await;
+    ack_input(&mut w, &input).await;
+    hub.wait_session(&b, "B's turn", |v| v["state"] == "running")
+        .await;
+    let set = |hops: i32| {
+        let ev = input["payload"]["event_id"].as_str().unwrap().to_string();
+        let db = hub.app.db.clone();
+        async move {
+            sqlx::query(
+                "UPDATE events SET chain = jsonb_set(chain, '{hops}', to_jsonb($2::int))
+                 WHERE event_id = $1",
+            )
+            .bind(ev.parse::<Uuid>().unwrap())
+            .bind(hops)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+    };
+    let send = json!({"text": "s", "session": "personal/third"});
+    set(4).await;
+    let r = fast(&mut w, &tb, "hqc_send", send.clone()).await;
+    assert!(r.get("result").is_some(), "{r}");
+    set(5).await;
+    let r = fast(&mut w, &tb, "hqc_send", send).await;
+    assert_eq!(code(&r), "limit_exceeded");
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("at most 5 messages"),
+        "{r}"
+    );
+}

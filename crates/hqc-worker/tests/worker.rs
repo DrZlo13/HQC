@@ -317,8 +317,8 @@ async fn outbox_survives_reconnect_and_restart() {
 
 /// A delta queued before a stored event goes to the hub before it (SPEC §5.2): the last chunks
 /// of a thinking come from the CLI with its `agent.thinking`, and the hub opens a new thinking
-/// from a chunk that comes after it. Many times: with both queues ready, the order was a coin
-/// toss.
+/// from a chunk that comes after it. Many times: with both the outbox wake and a direct frame
+/// ready, which branch the loop takes is a coin toss.
 #[tokio::test]
 async fn a_delta_goes_before_a_stored_event_queued_after_it() {
     let mut hub = FakeHub::start().await;

@@ -3729,6 +3729,39 @@ fn a_new_request_drops_the_thinking_of_an_abandoned_attempt() {
         0,
         "a saved thinking took it up"
     );
+    // A stream broken while thinking that the CLI retried without one: the response comes as an
+    // assistant of another `message.id`, and the thinking so far is dropped before it.
+    let said = |id: &str, content: Value| {
+        json!({"type": "assistant", "message": {"id": id, "model": "claude-haiku-5-5",
+            "role": "assistant", "content": content},
+            "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+        .to_string()
+    };
+    play(&mut core, &thought);
+    assert_eq!(
+        resets(play(
+            &mut core,
+            &said("msg_02", json!([{"type": "text", "text": "Here it is."}]))
+        )),
+        1,
+        "a reply without a stream"
+    );
+    // An empty saved thinking sends no agent.thinking; the saved text after it ends the
+    // thinking being written.
+    play(&mut core, &start);
+    play(&mut core, &thought);
+    play(
+        &mut core,
+        &said(
+            "msg_01",
+            json!([{"type": "thinking", "thinking": ""}, {"type": "text", "text": "Here."}]),
+        ),
+    );
+    assert_eq!(
+        resets(play(&mut core, &start)),
+        0,
+        "a saved text took it up"
+    );
 }
 
 /// A stream broken after some text that the CLI retried without one (2.1.312: "Error

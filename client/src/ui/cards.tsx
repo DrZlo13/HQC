@@ -1337,9 +1337,10 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
   const href = p.url ? safeHref(p.url) : null;
 
   const point = (q: ClarifyQuestion, i: number) => setPointed((pt) => ({ ...pt, [q.id]: i }));
-  const unpoint = (q: ClarifyQuestion, i: number) =>
+  // Without an option, whichever one is pointed at.
+  const unpoint = (q: ClarifyQuestion, i?: number) =>
     setPointed((pt) => {
-      if (pt[q.id] !== i) return pt;
+      if (!(q.id in pt) || (i !== undefined && pt[q.id] !== i)) return pt;
       const rest = { ...pt };
       delete rest[q.id];
       return rest;
@@ -1451,10 +1452,20 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
         // chosen one, else the first one that has a preview.
         const beside =
           previews && !phone ? (pointed[q.id] ?? (chosen >= 0 ? chosen : previews.findIndex((v) => v))) : undefined;
-        const hoverOf = (i: number) =>
-          beside === undefined ? {} : { onMouseEnter: () => point(q, i), onMouseLeave: () => unpoint(q, i) };
+        // The pointed option stays while the pointer is over the question, so its preview can be
+        // scrolled and selected; the Other row and leaving the question let it go.
+        const hoverOf = (i: number) => (beside === undefined ? {} : { onMouseEnter: () => point(q, i) });
+        // Focus that moves into the preview column (a scrollable <pre>) keeps the option too.
         const focusOf = (i: number) =>
-          beside === undefined ? {} : { onFocus: () => point(q, i), onBlur: () => unpoint(q, i) };
+          beside === undefined
+            ? {}
+            : {
+                onFocus: () => point(q, i),
+                onBlur: (e: FocusEvent) => {
+                  const to = e.relatedTarget as Element | null;
+                  if (!to?.closest('.question-preview')) unpoint(q, i);
+                },
+              };
         const choices = (
           <>
             {q.options?.map((o, i) => {
@@ -1483,7 +1494,7 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
               );
             })}
             {!!q.options?.length && p.server === undefined && (
-              <div class="choice choice-other">
+              <div class="choice choice-other" onMouseEnter={beside === undefined ? undefined : () => unpoint(q)}>
                 {q.multi ? <input type="checkbox" {...other} /> : <input type="radio" {...other} />}
                 {/* Typing into the field chooses Other, as in the tab. */}
                 <input
@@ -1510,7 +1521,7 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
               <span class="question-text">{q.text}</span>
             </legend>
             {previews && beside !== undefined ? (
-              <div class="question-split">
+              <div class="question-split" onMouseLeave={() => unpoint(q)}>
                 <div class="question-choices">{choices}</div>
                 {/* Every preview in one cell, only the current one visible: the column is as tall
                     as the tallest preview, so the options do not move under the pointer. */}

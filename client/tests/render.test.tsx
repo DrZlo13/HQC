@@ -3310,15 +3310,33 @@ describe("the feed like the Claude Code tab", () => {
       act(() => void labelOf(v).dispatchEvent(new MouseEvent(type)));
     await pointer("Tabs", "mouseenter");
     expect(visible()).toEqual([TABS]);
+    // The pointer leaves the option for the preview column: the preview stays, to be scrolled.
+    await pointer("Tabs", "mouseleave");
+    expect(visible()).toEqual([TABS]);
     // The option under the pointer has no preview: none is visible.
     await pointer("One page", "mouseenter");
     expect(visible()).toEqual([]);
-    await pointer("One page", "mouseleave");
+    // The Other row and leaving the question let the pointed option go.
+    const enter = (el: Element, type: string) =>
+      act(() => void el.dispatchEvent(new MouseEvent(type)));
+    await enter(split.querySelector(".choice-other")!, "mouseenter");
+    expect(visible()).toEqual([MARKUP]);
+    await pointer("Tabs", "mouseenter");
+    await enter(split, "mouseleave");
     expect(visible()).toEqual([MARKUP]);
     await act(() => radio("Tabs").click());
     expect(visible()).toEqual([TABS]);
     await act(() => void radio("Sidebar").dispatchEvent(new FocusEvent("focus")));
     expect(visible()).toEqual([MARKUP]);
+    // Focus moving into the preview keeps the option; elsewhere it lets it go.
+    await act(
+      () =>
+        void radio("Sidebar").dispatchEvent(
+          new FocusEvent("blur", { relatedTarget: pres()[0] }),
+        ),
+    );
+    expect(visible()).toEqual([MARKUP]);
+    await act(() => void radio("Sidebar").dispatchEvent(new FocusEvent("focus")));
     await act(() => void radio("Sidebar").dispatchEvent(new FocusEvent("blur")));
     expect(visible()).toEqual([TABS]);
     expect(root.querySelectorAll(".question-choices .choice-preview")).toHaveLength(0);

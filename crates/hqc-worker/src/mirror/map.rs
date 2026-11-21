@@ -15,7 +15,9 @@
 //! - `assistant` `tool_use` → `tool.call`, non-empty `thinking` → `agent.thinking`;
 //! - `assistant` text with `model` `<synthetic>` (the CLI's own reply) → `agent.message`
 //!   with `runtime: true`, and with `stop_reason` `refusal` (its reply to a model refusal)
-//!   also `refusal: true`;
+//!   also `refusal: true`; none for "No response requested." without `isApiErrorMessage`,
+//!   the placeholder it writes on a resume for a turn that ended without a reply (lost or
+//!   interrupted);
 //! - `user` with `origin.kind` `task-notification` (a background task ended; the CLI writes
 //!   `<task-notification>…<summary>…</summary>` as its text), and an `attachment`
 //!   `queued_command` with `commandMode: task-notification` (one that came while a turn ran,
@@ -64,6 +66,9 @@ const INTERRUPTED: [&str; 2] = [
     "[Request interrupted by user]",
     "[Request interrupted by user for tool use]",
 ];
+
+/// The text of the CLI's synthetic reply to a turn cut short (2.1.312).
+const NO_RESPONSE_REQUESTED: &str = "No response requested.";
 
 /// A main-chain record of a background task's notification: a `user` record, or an
 /// `attachment` of a task's end that came while a turn ran ([`queued_notification`]).
@@ -587,6 +592,13 @@ fn assistant(m: &Message, in_reply_to: Option<Uuid>) -> Vec<Event> {
                 if t.is_empty() || t == NO_CONTENT {
                     continue;
                 }
+                // The CLI's placeholder for a turn that ended without a reply (its process died
+                // in it, or it was interrupted), written when it resumes the session; it draws
+                // nothing for it (2.1.312). The same text as an API error (its fallback for a
+                // rate limit) is a reply.
+                if synthetic && !m.is_api_error_message && t == NO_RESPONSE_REQUESTED {
+                    continue;
+                }
                 EventKind::AgentMessage {
                     text: text(t),
                     r#final: end_turn,
@@ -837,6 +849,57 @@ mod tests {
                 runtime: true,
                 interrupted: false,
                 refusal: true,
+            }]
+        );
+    }
+
+    /// The placeholder the CLI writes on a resume for a turn that ended without a reply, here
+    /// one its process died in (as 2.1.312 wrote it, `usage` left out), gives no event; the
+    /// same text as an API error (the CLI's fallback for a rate limit it has no message for) is
+    /// the runtime's reply as before, and the same text from the model is the model's reply.
+    #[test]
+    fn no_event_for_the_placeholder_of_a_lost_turn() {
+        let line = r#"{"parentUuid":"494211ff-e578-4ed6-bb4d-680bf8839a23","isSidechain":false,"type":"assistant","uuid":"a68165ca-6dc2-4024-8035-b3fbe88ac90b","timestamp":"2026-11-18T14:12:06.366Z","message":{"diagnostics":null,"id":"7744a738-9837-48b6-90c3-82f9dc476aee","container":null,"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence","stop_sequence":"","type":"message","content":[{"type":"text","text":"No response requested."}],"context_management":null},"isApiErrorMessage":false,"userType":"external","entrypoint":"claude-vscode","sessionId":"a1549bad-5506-401b-8133-8ba8b51e0867","version":"2.1.312"}"#;
+        let rec = hqc_claude_jsonl::parse_line(line).unwrap();
+        let evs = record_events(&rec, Some(Uuid::now_v7()));
+        assert!(evs.is_empty(), "{evs:?}");
+
+        let error = line.replace(
+            r#""isApiErrorMessage":false"#,
+            r#""error":"rate_limit","isApiErrorMessage":true"#,
+        );
+        let rec = hqc_claude_jsonl::parse_line(&error).unwrap();
+        let prompt = Uuid::now_v7();
+        assert_eq!(
+            record_events(&rec, Some(prompt))
+                .iter()
+                .map(|e| e.kind.clone())
+                .collect::<Vec<_>>(),
+            [EventKind::AgentMessage {
+                text: "No response requested.".into(),
+                r#final: false,
+                in_reply_to: Some(prompt),
+                runtime: true,
+                interrupted: false,
+                refusal: false,
+            }]
+        );
+
+        // A model may end its turn with this very text: its own reply stays.
+        let model = line.replace(r#""model":"<synthetic>""#, r#""model":"claude-opus-5-5""#);
+        let rec = hqc_claude_jsonl::parse_line(&model).unwrap();
+        assert_eq!(
+            record_events(&rec, Some(prompt))
+                .iter()
+                .map(|e| e.kind.clone())
+                .collect::<Vec<_>>(),
+            [EventKind::AgentMessage {
+                text: "No response requested.".into(),
+                r#final: false,
+                in_reply_to: Some(prompt),
+                runtime: false,
+                interrupted: false,
+                refusal: false,
             }]
         );
     }

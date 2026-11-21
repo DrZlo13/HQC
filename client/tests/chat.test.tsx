@@ -2473,6 +2473,175 @@ describe('history', () => {
     });
     expect(blocks().length).toBe(120);
   });
+
+  describe("the user's own scroll", () => {
+    const CHROMIUM = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
+    // Fake clocks for the settle, `performance.now()` included, after the chat is mounted.
+    const clock = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const tick = (ms: number) => act(async () => void (await vi.advanceTimersByTimeAsync(ms)));
+    const on = (target: EventTarget, e: Event) => act(async () => void target.dispatchEvent(e));
+    const touch = (type: string, y?: number) =>
+      Object.assign(new Event(type, { bubbles: true }), { touches: y === undefined ? [] : [{ clientY: y }] });
+    const pointer = (type: string, pointerType: string) =>
+      Object.assign(new Event(type, { bubbles: true }), { pointerId: 1, pointerType, button: 0, ctrlKey: false });
+    const scrollTo = (scroller: HTMLElement, top: number) =>
+      act(async () => {
+        scroller.scrollTop = top;
+        scroller.dispatchEvent(new Event('scroll'));
+      });
+    /** The feed `height()` px high in a 600 px window, the chat mounted at its bottom. */
+    async function feedOf(height: () => number) {
+      vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains('timeline') ? height() : 0;
+      });
+      vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains('timeline') ? 600 : 0;
+      });
+      const { app } = setup('idle', { history: long });
+      await mount(app);
+      await settle();
+      return root.querySelector<HTMLElement>('.timeline')!;
+    }
+    const next = (seq: number) => act(async () => subscriber!.onEvent(ev('event.agent.message', seq, (e) => (e.payload.text = `more ${seq}`))));
+    const blocksHigh = () => root.querySelectorAll('.feed-block').length * 100;
+
+    it('while the agent writes, a wheel up lets go of the bottom though the feed grew under it', async () => {
+      vi.spyOn(Object.getPrototypeOf(navigator), 'userAgent', 'get').mockReturnValue(CHROMIUM);
+      let height = 5000;
+      const scroller = await feedOf(() => height);
+      await scrollTo(scroller, 4400);
+      clock();
+      try {
+        // The wheel, and the answer grows by 200 px before the browser's scroll event for it
+        // came: a position set now would drop the rest of the smooth scroll.
+        await on(scroller, new WheelEvent('wheel', { deltaY: -100 }));
+        height = 5200;
+        await next(451);
+        expect(scroller.scrollTop).toBe(4400);
+        await scrollTo(scroller, 4000);
+        height = 5400;
+        await next(452);
+        await tick(450);
+        expect(scroller.scrollTop).toBe(4000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a wheel down does not let the move up the browser made as the feed changed go of the bottom', async () => {
+      let height = 5000;
+      const scroller = await feedOf(() => height);
+      await scrollTo(scroller, 4400);
+      clock();
+      try {
+        await on(scroller, new WheelEvent('wheel', { deltaY: 100 }));
+        // As in the test of the images above: delivered after the feed grew again.
+        height = 6000;
+        await scrollTo(scroller, 4100);
+        await tick(450);
+        await next(451);
+        expect(scroller.scrollTop).toBe(6000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a key that scrolls holds the follow back and lets go of the bottom on its way up; a key in a field does neither', async () => {
+      vi.spyOn(Object.getPrototypeOf(navigator), 'userAgent', 'get').mockReturnValue(CHROMIUM);
+      let height = 5000;
+      const scroller = await feedOf(() => height);
+      await scrollTo(scroller, 4400);
+      const field = root.querySelector<HTMLTextAreaElement>('textarea')!;
+      clock();
+      try {
+        await on(field, new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+        height = 5200;
+        await next(451);
+        expect(scroller.scrollTop).toBe(5200);
+        await scrollTo(scroller, 4600);
+        await on(document.body, new KeyboardEvent('keydown', { key: 'PageUp', bubbles: true }));
+        height = 5400;
+        await next(452);
+        expect(scroller.scrollTop).toBe(4600);
+        await scrollTo(scroller, 4000);
+        await tick(450);
+        await next(453);
+        expect(scroller.scrollTop).toBe(4000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('the scrollbar held down holds the follow back until it is let go', async () => {
+      vi.spyOn(Object.getPrototypeOf(navigator), 'userAgent', 'get').mockReturnValue(CHROMIUM);
+      let height = 5000;
+      const scroller = await feedOf(() => height);
+      await scrollTo(scroller, 4400);
+      clock();
+      try {
+        await on(scroller, pointer('pointerdown', 'mouse'));
+        height = 5200;
+        await next(451);
+        await tick(450);
+        expect(scroller.scrollTop).toBe(4400);
+        await on(window, pointer('pointerup', 'mouse'));
+        await tick(450);
+        expect(scroller.scrollTop).toBe(5200);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('in WebKit a finger and its fling hold the older blocks back until the scroll settles', async () => {
+      const scroller = await feedOf(blocksHigh);
+      expect(blocks().length).toBe(60);
+      expect(scroller.scrollTop).toBe(6000);
+      clock();
+      try {
+        await on(scroller, touch('touchstart', 100));
+        // The browser cancels the finger's pointer once the touch turns into a scroll.
+        await on(scroller, pointer('pointercancel', 'touch'));
+        await on(scroller, touch('touchmove', 400));
+        await scrollTo(scroller, 300);
+        // The finger rests on the feed longer than the scroll takes to settle.
+        await tick(450);
+        expect(blocks().length).toBe(60);
+        await on(scroller, touch('touchend'));
+        // The fling goes on with scroll events only.
+        await tick(300);
+        await scrollTo(scroller, 200);
+        await tick(300);
+        await scrollTo(scroller, 100);
+        expect(blocks().length).toBe(60);
+        expect(scroller.scrollTop).toBe(100);
+        await tick(450);
+        expect(blocks().length).toBe(120);
+        expect(scroller.scrollTop).toBe(6100);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('in WebKit the bounce that comes after the last wheel event holds the older blocks back too', async () => {
+      const scroller = await feedOf(blocksHigh);
+      clock();
+      try {
+        await on(scroller, new WheelEvent('wheel', { deltaY: -100 }));
+        await scrollTo(scroller, 500);
+        await tick(300);
+        // The feed hit its top and bounces back, 600 ms after the last wheel event.
+        await scrollTo(scroller, 0);
+        await tick(300);
+        await scrollTo(scroller, 20);
+        expect(blocks().length).toBe(60);
+        await tick(450);
+        expect(blocks().length).toBe(120);
+        expect(scroller.scrollTop).toBe(6020);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });
 
 describe('read cursor', () => {

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.185, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.209, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -578,6 +578,7 @@ the client renders only them. The "source" column is the component that produces
 | `task_notification` | worker (adapter; mirror) | since 0.69: a background task of the agent (a shell command, a subagent) finished or stopped; `text` is the runtime's summary of it (§8.1, §9.1). It comes when the task ends, before the answer of the turn the runtime then starts by itself. Since 0.135 `call_id` is the `call_id` of the `tool.call` that started the task, `status` how it ended as the runtime says it (Claude Code: `completed`, `failed`, `stopped`) and `task_id` the runtime's id of the task (Claude Code: a subagent's `agentId`), each absent when the runtime does not say; the card of a subagent's `Agent` call takes its end from it, and a subagent's notification (by `call_id` or by the `agentId` of its background launch, with a `status` that ends it) stands in the feed as the subagent's end card (§6). Since 0.181 `usage` is what the task spent (Claude Code: the notification's `usage`), absent when the runtime does not say, the end card shows it (§6), and the task's output file follows the notification as an `attachment` (§8.1) (adapter only: a mirrored session's notification has neither `usage` nor the attachment). The client folds any other into a "Background task ·" line ("Background task failed ·" for `status` `failed`, "Background task stopped ·" for `stopped`, since 0.181) with the whole text on one line, without its Markdown marks, dimmed in italics like the start of a thinking, cut with an ellipsis where the line ends, and (since 0.181) with `usage` at its right end as `· <tokens> tokens · <n> tools · <run time>`, as the row above the input has it (§6); opened, it shows all of it as Markdown |
 | `context_compacted` | worker (adapter; since 0.162 mirror) | since 0.69: the runtime compacted the session's context (`/compact`); since 0.118 `text` is the summary the runtime wrote, "Context compacted" without one (§8.1); since 0.162 the mirror gives the same line from the transcript's `compact_boundary` and its summary (§9.1); the client folds the summary into a "Context compacted" line that opens to all of it as Markdown, and draws one with the fixed text as a divider. Since 0.179 the adapter's carries, when the runtime said, `trigger` (`auto` \| `manual`), `pre_tokens` (the context's tokens before) and `post_tokens` (after; absent when the runtime did not count them) — the mirror's carries none of them —, and the client's line reads "Context compacted · auto · 153k tokens freed", leaving out what is absent |
 | `compaction_failed` | worker (adapter) | since 0.179: a compaction the runtime started failed; `text` is "Compaction failed: " and the runtime's error, "Compaction failed" without one (§8.1) |
+| `transcript_not_saved` | worker (adapter) | since 0.209: the CLI reported `system/session_writes_lost` with the session's transcript among what it could not write (`error_code` `ENOSPC`: "the disk is full", `EDQUOT`: "the disk quota is used up", another or no code: "a write to the worker's disk failed", the code named in the brackets when there is one, the fix "Check the worker's disk"); `text` "Transcript not saved: the disk is full (ENOSPC); resuming this session may miss part of its conversation. Free up space on the worker's disk", the quota's fix being "Free up space or raise the quota on the worker's disk"; the worker is not named, the chat header shows it. The client shows it as any other text line. The CLI sends the frame only when it exits with status 0 (§8.1, `close`), so a process that is killed reports nothing; a frame that lost only the global config is written to the worker's log, with no line (§8.1) |
 | `conversation_cleared` | worker (adapter) | since 0.162: `/clear` started a new conversation in the same agent process, with a new transcript (Claude Code: `conversation_reset`, §8.1); `text` "Conversation cleared"; the session goes on in the new transcript, and the agent no longer has what was before the line in its context |
 | `command_output` | worker (mirror) | since 0.162: what a slash command printed (`/context`, `/cost` and the like), from the transcript (Claude Code: `<local-command-stdout>` and `<local-command-stderr>`, §9.1); `text` is the output, at most 4096 bytes |
 | `runtime_notice` | worker (adapter) | since 0.179: a message of the runtime or of one of its hooks ("Stop hook says: …", a setting applied in part); `text` is the message as is (§8.1) |
@@ -4597,8 +4598,14 @@ adapter counts it as its own input (§9.3), so the mirror imports no prompt from
 Interrupting a turn (`session.stop`): the adapter sends `control_request {subtype:
 "interrupt"}` to stdin; the CLI ends the turn with a `result` record with `subtype:
 error_during_execution`, the partial reply text comes as a separate `assistant` record, and
-the process stays alive (checked on 2.1.308). If there is no `result` within 10 s, the process
-group gets SIGINT; the CLI exits on it, and the next input brings the process up via `--resume`.
+the process stays alive (checked on 2.1.308). Since 0.209 the adapter also waits for the CLI's
+`control_response` to the `interrupt` (2.1.312 answers it in its input handler, ahead of the
+turn's `result`; not checked live): a CLI that has not answered within 2 s while the turn runs
+is hung, and the process group gets SIGTERM, SIGKILL 5 s later, as a kill does; the Claude app
+waits 1.5 s for that answer. The process is lost with its turn as when it dies (§17.3:
+`agent_exited`, `turn_lost`), and the next input resumes the transcript. After an answer: if
+there is no `result` within 10 s, the process group gets SIGINT; the CLI exits on it, and
+the next input brings the process up via `--resume`.
 Since 0.143, if the turn still runs 10 s after the SIGINT (a process stuck in a tool call that
 the signal does not end), the group gets SIGTERM, and SIGKILL 5 s later, as a kill does: Stop
 ends a stuck session together with the commands it started.
@@ -4612,6 +4619,15 @@ agents/workflows (Stop only aborts the turn)"; it still stops observer agents; c
 aborted_tools`). One background task is stopped alone with the CLI's `stop_task` (below). The reply
 cut off is an `assistant` record with `aborted: true` and gives `agent.message` with `interrupted:
 true`; the turn ends with `system turn_interrupted` (above).
+
+A write the CLI could not make (since 0.209): `system/session_writes_lost` `{error_code:
+"ENOSPC" | "EDQUOT", lost: ["transcript" | "global_config", ...], transcript_session_ids?}`, in the
+schema of 2.1.317 and later (2.1.312 has no such subtype; not checked on 2.1.318). The CLI
+sends it only when it exits with status 0, which it does when its stdin is closed and its last
+turn did not end in an error (by the 2.1.325 binary; after a Stop it exits with 1 and the frame
+does not come), so the worker closes a quiet process's stdin instead of sending SIGTERM (§17.3).
+With `transcript` among `lost` the adapter writes `system transcript_not_saved` (§4); with
+`global_config` alone the worker's log gets a warning and the chat nothing.
 
 Stopping one task (since 0.161, the VS Code tab's stop of a background task, which
 `perTaskStopAffordance` declares): the adapter marks every row of `subagents.live`
@@ -6351,6 +6367,17 @@ send from a session in a lower mode (§7.1).
   timeout counts from the later of its last activity and that time, so a wakeup that never
   starts keeps the agent at most `idle_timeout` past it; the wakeup lives in the process and
   dies with it, which before 0.162 an idle unload did before it fired.
+- Since 0.209 the worker ends a process with nothing running by closing the CLI's stdin: a CLI
+  with nothing to do exits on it, with status 0, and then reports what it could not write
+  (`system/session_writes_lost`, `system transcript_not_saved`, §4); SIGTERM was sent before and
+  the CLI never exited so. One that is still there 5 s later gets SIGTERM, SIGKILL 5 s after that.
+  This is the idle unload; `session.kill` (restart, pause after a turn, archive, deleting a
+  session or a project) when no turn runs (the CLI's own included) and neither a subagent nor a
+  background task is listed; and a move with no background task listed, which this way lets the
+  transcript be written out before it is moved. Every other end is SIGTERM to the process group,
+  SIGKILL after 5 s, as before: `session.kill` with work going on, a move with background tasks,
+  a change of the permission cap, the hand-over to VS Code (§9.3: it stops at once) and the
+  worker's shutdown (10 s for all its agents); a turn running when the close is asked ends so too.
 - Restart (since 0.130, `POST /api/sessions/{id}/restart`, §6): the hub sends `session.kill` and
   right after it `session.start` with `mode: resume`: the process ends and starts again at once,
   resuming its transcript, so its MCP servers and settings are read anew. A turn that runs is
@@ -6665,6 +6692,21 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.185 → 0.209 (a lost transcript write is shown, a quiet CLI exits by itself, Stop ends a hung CLI)
+§4, §8.1, §17.3: Claude Code 2.1.317 and later write `system/session_writes_lost` (`error_code`
+`ENOSPC` or `EDQUOT`, `lost`: `transcript`, `global_config`) when the disk was full, but only on
+exiting with status 0, which a CLI that the worker ended with SIGTERM never did, and the adapter
+dropped the line: a full disk lost the transcript without a word. The adapter now writes `system
+transcript_not_saved` when `lost` has `transcript` (only the log, when the global config alone was
+lost), and ends a process with nothing running (the idle unload, `session.kill` of a quiet
+session, a move with no background task) by closing its stdin, so that it can exit and report,
+falling back to SIGTERM after 5 s; a process in a turn, with subagents or background tasks, and
+the other ends stay as they were. And Stop waited 10 s for the turn's end, SIGINT, 10 s, SIGTERM,
+5 s, SIGKILL, 25 s in all, for a CLI that does not even answer the `interrupt`: it now waits 2 s
+for that answer, and a CLI that gave none while the turn ran gets SIGTERM, SIGKILL 5 s later; one
+that answered goes the way it did. Only the worker changes. 0.186–0.208 are taken by other open
+branches.
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

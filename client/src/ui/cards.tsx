@@ -72,7 +72,7 @@ import {
   oneLine,
   count,
 } from './labels';
-import { elapsed, stats } from './LiveSubagents';
+import { activityOf, elapsed, stats } from './LiveSubagents';
 import { CodeBlock, CopyButton, Markdown, markdownLine, safeHref } from './Markdown';
 import { asker, PermissionBlock } from './permission';
 import { PeerMessageBlock, ReplyFromBlock, ReplyToBlock, SentBlock } from './relay';
@@ -1193,13 +1193,14 @@ function SubagentCard({ block, actions }: { block: Extract<Block, { kind: 'subag
   const task = typeof args.description === 'string' ? args.description : '';
   let status: ComponentChildren;
   switch (s.state) {
-    case 'running':
+    case 'running': {
+      const activity = s.live && activityOf(s.live);
       status = (
         <>
           <span class="pulse-dot" aria-hidden="true" />
           {/* What it does now says it runs: the CLI's often starts "Running …" itself. */}
-          {s.live?.activity ? (
-            <span class="subagent-activity">{s.live.activity}</span>
+          {activity ? (
+            <span class="subagent-activity">{activity}</span>
           ) : (
             <span class="subagent-state">Running</span>
           )}
@@ -1211,6 +1212,7 @@ function SubagentCard({ block, actions }: { block: Extract<Block, { kind: 'subag
         </>
       );
       break;
+    }
     case 'background':
       status = <span class="subagent-state">In background</span>;
       break;

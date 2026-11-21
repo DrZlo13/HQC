@@ -29,6 +29,8 @@ pub enum FakeCall {
     },
     Stop(Uuid),
     Kill(Uuid),
+    /// A process with nothing running ended through [`Adapter::close`].
+    Close(Uuid),
     Approval {
         request_id: String,
         option_id: String,
@@ -326,6 +328,11 @@ impl Adapter for FakeAdapter {
 
     async fn kill(&mut self) -> anyhow::Result<()> {
         self.record(FakeCall::Kill(self.session_id));
+        Ok(())
+    }
+
+    async fn close(&mut self) -> anyhow::Result<()> {
+        self.record(FakeCall::Close(self.session_id));
         Ok(())
     }
 

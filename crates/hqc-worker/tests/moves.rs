@@ -147,10 +147,7 @@ async fn a_running_session_moves_after_its_turn() {
 
     started(&mut c, start_in(&env, sid, &other)).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        !adapters.calls().contains(&FakeCall::Kill(sid)),
-        "not during the turn"
-    );
+    assert!(ends(&adapters.calls(), sid) == 0, "not during the turn");
     assert!(from.is_file());
 
     adapters.end_turn(sid).await;
@@ -160,6 +157,10 @@ async fn a_running_session_moves_after_its_turn() {
         })
         .await;
     assert_eq!(workdirs(&adapters), [ws.clone(), other.clone()]);
+    // Nothing runs after the turn: the process is closed through its stdin, not killed.
+    let calls = adapters.calls();
+    assert!(calls.contains(&FakeCall::Close(sid)), "{calls:?}");
+    assert!(!calls.contains(&FakeCall::Kill(sid)), "{calls:?}");
     let to = place(&env, &other);
     assert!(to.is_file() && !from.exists(), "{}", to.display());
     assert!(to
@@ -233,7 +234,8 @@ async fn input_during_a_waiting_move_goes_to_the_new_folder() {
         .await;
     assert_eq!(workdirs(&adapters), [ws, other]);
     let at = |call: &FakeCall| calls.iter().position(|c| c == call).unwrap();
-    assert!(at(&FakeCall::Kill(sid)) < at(&b_input), "{calls:?}");
+    let end = calls.iter().position(|c| is_end(c, sid)).unwrap();
+    assert!(end < at(&b_input), "{calls:?}");
     w.stop().await;
 }
 
@@ -280,7 +282,7 @@ async fn a_cancelled_move_lets_the_held_input_go() {
     adapters
         .wait_for("B into A's turn", |c| c.contains(&injected))
         .await;
-    assert_eq!(count_kills(&adapters, sid), 0);
+    assert_eq!(ends(&adapters.calls(), sid), 0);
     assert_eq!(workdirs(&adapters), [ws]);
     w.stop().await;
 }
@@ -326,7 +328,7 @@ async fn a_move_waits_for_a_background_subagent() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(
-            count_kills(&adapters, sid),
+            ends(&adapters.calls(), sid),
             0,
             "{case}: not while the subagent runs"
         );
@@ -340,7 +342,7 @@ async fn a_move_waits_for_a_background_subagent() {
         adapters.emit(sid, AdapterEvent::Subagents(0)).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(
-            count_kills(&adapters, sid),
+            ends(&adapters.calls(), sid),
             0,
             "{case}: not at the subagent's end"
         );
@@ -355,7 +357,7 @@ async fn a_move_waits_for_a_background_subagent() {
             // The runtime's own turn on the subagent's result begins (`before`) and ends.
             adapters.set_own_turn(true);
             tokio::time::sleep(Duration::from_millis(100)).await;
-            assert_eq!(count_kills(&adapters, sid), 0, "{case}: not during it");
+            assert_eq!(ends(&adapters.calls(), sid), 0, "{case}: not during it");
             adapters.set_own_turn(false);
             adapters.end_turn(sid).await;
         }
@@ -366,7 +368,8 @@ async fn a_move_waits_for_a_background_subagent() {
             .await;
         assert_eq!(workdirs(&adapters), [ws, other]);
         let at = |x: &FakeCall| calls.iter().position(|c| c == x).unwrap();
-        assert!(at(&FakeCall::Kill(sid)) < at(&given(b)), "{calls:?}");
+        let end = calls.iter().position(|c| is_end(c, sid)).unwrap();
+        assert!(end < at(&given(b)), "{calls:?}");
         adapters.accept_input(sid, b).await;
         let r = reply_to(&mut c, &fb.unwrap()).await;
         assert_eq!(r["type"], "ack", "{r}");
@@ -394,7 +397,7 @@ async fn a_move_waits_for_a_turn_the_runtime_starts_by_itself() {
     started(&mut c, start_in(&env, sid, &other)).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
-        count_kills(&adapters, sid),
+        ends(&adapters.calls(), sid),
         0,
         "not during the runtime's own turn"
     );
@@ -486,6 +489,10 @@ async fn a_move_stops_background_commands_and_tells_the_agent() {
             adapters.start_specs().len() == 2
         })
         .await;
+    // Background commands die with the process: it is killed, not left to exit by itself.
+    let calls = adapters.calls();
+    assert!(calls.contains(&FakeCall::Kill(sid)), "{calls:?}");
+    assert!(!calls.contains(&FakeCall::Close(sid)), "{calls:?}");
     /// Input `text` goes to the runtime, which takes it: the text it got.
     async fn given(c: &mut HubConn, adapters: &FakeAdapters, sid: Uuid, text: &str) -> String {
         let e = Uuid::now_v7();
@@ -691,16 +698,8 @@ async fn the_mirror_does_not_import_a_moved_transcript_again() {
         .maybe("mirror.event", Duration::from_millis(1500))
         .await
         .is_none());
-    assert_eq!(count_kills(&adapters, sid), 1, "only the move's");
+    assert_eq!(ends(&adapters.calls(), sid), 1, "only the move's");
     w.stop().await;
-}
-
-fn count_kills(adapters: &FakeAdapters, sid: Uuid) -> usize {
-    adapters
-        .calls()
-        .iter()
-        .filter(|c| **c == FakeCall::Kill(sid))
-        .count()
 }
 
 /// A transcript the worker does not move: one written outside `allowed_roots`, or one of two

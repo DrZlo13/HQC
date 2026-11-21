@@ -1358,7 +1358,7 @@ impl Session {
                 }
                 _ = sleep_until_opt(idle_deadline), if idle_deadline.is_some() => {
                     tracing::info!(session_id = %self.id, "idle timeout, stopping the agent");
-                    self.kill_process("idle timeout").await;
+                    self.close_process("idle timeout").await;
                 }
                 _ = sleep_until_opt(lowering_deadline), if lowering_deadline.is_some() => {
                     self.restart_lowered("the runtime did not confirm the turn's mode in time").await;
@@ -1509,7 +1509,13 @@ impl Session {
             Cmd::Kill { id } => {
                 // Queued inputs stay `pending` in the hub and come again after `hello`.
                 self.queue.clear();
-                self.kill_process("session.kill").await;
+                // Nothing running: the process may exit by itself and report what it could
+                // not write; with work going on it is killed.
+                if self.quiet() {
+                    self.close_process("session.kill").await;
+                } else {
+                    self.kill_process("session.kill").await;
+                }
                 self.link.reply(&id, ack(None));
             }
             Cmd::PermissionMode { id, mode } => {
@@ -1793,7 +1799,13 @@ impl Session {
         self.stopped_by_move += self.background_tasks;
         // A Stop the old process got cancels nothing the new one drops (`end_turn`).
         self.stop_asked = false;
-        self.kill_process("moved to another folder").await;
+        // A process with background tasks is killed (they die with it); any other lets its
+        // transcript be written out before it is moved.
+        if self.quiet() {
+            self.close_process("moved to another folder").await;
+        } else {
+            self.kill_process("moved to another folder").await;
+        }
         if let Err(e) = self.ensure_running().await {
             if !waits(&e) {
                 self.fail_queue(&e);
@@ -2688,7 +2700,27 @@ impl Session {
         self.kill_process("continued in VS Code").await;
     }
 
+    /// Nothing runs in the process: no turn (the runtime's own included), no subagent, no
+    /// background task. Such a process may exit by itself ([`Adapter::close`]); any other is
+    /// killed.
+    fn quiet(&self) -> bool {
+        self.turn.is_none()
+            && !self.adapter.runs_own_turn()
+            && self.subagents == 0
+            && self.background_tasks == 0
+    }
+
     async fn kill_process(&mut self, why: &str) {
+        self.end_process(why, false).await;
+    }
+
+    /// [`Session::kill_process`] for a process with nothing running: it is let to exit by
+    /// itself ([`Adapter::close`]).
+    async fn close_process(&mut self, why: &str) {
+        self.end_process(why, true).await;
+    }
+
+    async fn end_process(&mut self, why: &str, close: bool) {
         // A session that waits for a slot leaves the line: a restart that needs one again
         // joins it at its end.
         self.waiting_slot = false;
@@ -2696,7 +2728,12 @@ impl Session {
             return;
         }
         self.set_state(ProcessState::Stopping);
-        if let Err(e) = self.adapter.kill().await {
+        let ended = if close {
+            self.adapter.close().await
+        } else {
+            self.adapter.kill().await
+        };
+        if let Err(e) = ended {
             tracing::warn!(session_id = %self.id, "kill ({why}) failed: {e:#}");
         }
         if let Some(t) = self.turn.take() {

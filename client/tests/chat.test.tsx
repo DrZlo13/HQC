@@ -1248,6 +1248,12 @@ describe('live subagents', () => {
       ],
       ['Agent: Reply with number', '1s'],
     ]);
+    // What a phone hides (styles.css, SPEC 0.195): the word "tokens" and the tool calls; the
+    // count and the run time stay.
+    expect([...root.querySelectorAll('.live-agents-stats :is(.stats-word, .stats-tools)')].map((s) => s.textContent)).toEqual([
+      ' tokens',
+      ' · 188 tools',
+    ]);
     // Pinned: outside the feed's scroller, right above the input.
     expect($('.timeline .live-agents')).toBeNull();
     expect($('.live-agents + .composer-wrap')).not.toBeNull();

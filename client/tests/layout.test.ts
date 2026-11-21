@@ -101,6 +101,16 @@ describe('layout widths', () => {
     expect(rule('.chat-spawned a:focus-visible, .chat-path .btn-copy:focus-visible')['outline-offset']).toBe('-2px');
   });
 
+  it('a phone leaves "started", "finished", the "background" chip, the word "tokens" and the tool calls off a subagent\'s cards and rows', () => {
+    // Checked in Chromium and WebKit at 390px (SPEC 0.195); render.test.tsx and chat.test.tsx
+    // check what stands in these elements.
+    expect(
+      rule('.layout-phone .subagent-verb, .layout-phone .subagent-chip, .layout-phone .stats-word, .layout-phone .stats-tools')[
+        'display'
+      ],
+    ).toBe('none');
+  });
+
   it("an option's box keeps its 18px beside a long description, the Other field takes the rest", () => {
     expect(rule('.choice input')['flex']).toBe('none');
     expect(rule('.choice-other .input')['flex']).toBe('1');

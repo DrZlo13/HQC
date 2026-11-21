@@ -70,9 +70,11 @@
 //!   of a wakeup or a cron fire changes them;
 //! - `system` `background_tasks_changed` (`tasks`: the CLI's list of the session's running
 //!   background tasks, subagents and commands, its subagents' too) →
-//!   [`AdapterEvent::BackgroundTasks`] with the number of those not `ambient` when it changes;
-//!   a task with `ambient: true` there or in its `task_started` is none of the above (no
-//!   activity, the SDK says), nor a subagent as the `parent_task_id` of another task;
+//!   [`AdapterEvent::BackgroundTasks`] with the number of those neither `ambient` nor
+//!   `off_host` when it changes; a task with `ambient: true` there or in its `task_started`
+//!   is none of the above (no activity, the SDK says), nor a subagent as the `parent_task_id`
+//!   of another task; one with `off_host: true` there is not counted either (2.1.325, a cloud
+//!   session: its work runs outside the process);
 //! - `system` `task_started` with `is_backgrounded: false`, `task_type` `local_bash` or
 //!   `local_agent`, a `tool_use_id`, no `skip_transcript: true`, no `owned_by_subagent:
 //!   true` and no `parent_task_id` (a Bash call or a subagent of the agent itself in the
@@ -480,7 +482,8 @@ pub struct Core {
     /// A `background_tasks_changed` lowered [`Core::running_subagents`] below the count last
     /// reported: the next line of another kind reports it.
     recount: bool,
-    /// `tasks` of the latest `system` `background_tasks_changed`, without the `ambient` ones.
+    /// `tasks` of the latest `system` `background_tasks_changed`, without the `ambient` and the
+    /// `off_host` ones.
     background: Vec<Value>,
     /// The `task_id`s the CLI marked `ambient: true`, in a `task_started` or the list: none is
     /// a subagent, also as the `parent_task_id` of a task ([`Core::parent`]; 2.1.312 runs a
@@ -1830,7 +1833,13 @@ impl Core {
                 .iter()
                 .filter_map(|t| t["task_id"].as_str().map(str::to_owned)),
         );
-        self.background = tasks.into_iter().cloned().collect();
+        // Nor is an `off_host` one (2.1.325, a cloud session): its work runs outside the process,
+        // which need not stay up for it.
+        self.background = tasks
+            .into_iter()
+            .filter(|t| t["off_host"] != true)
+            .cloned()
+            .collect();
         let mut out = Vec::new();
         let n = self.background_work();
         if n != before {
@@ -1909,7 +1918,8 @@ impl Core {
     /// (`skip_transcript`) and every live-update watcher, such as the one that follows the
     /// comments on a page the agent published with the Artifact tool (`monitor_ws`,
     /// `persistent`, no timeout, so it stays for the whole process). The SDK tells hosts to
-    /// leave them out of activity, and the VS Code tab does.
+    /// leave them out of activity, and the VS Code tab does. Nor the ones marked `off_host: true`
+    /// (2.1.325, a cloud session: the work runs outside the process).
     fn background_work(&self) -> u32 {
         u32::try_from(self.background.len()).unwrap_or(u32::MAX)
     }

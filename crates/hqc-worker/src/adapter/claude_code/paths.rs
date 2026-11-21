@@ -71,6 +71,14 @@ pub fn transcript_path(config_dir: &Path, workdir: &Path, session: &Uuid) -> Pat
         .join(format!("{session}.jsonl"))
 }
 
+/// The folder of the subagents' transcripts of session `session`: `agent-<id>.jsonl` and
+/// `agent-<id>.meta.json`, beside the session's own transcript.
+pub fn subagents_dir(config_dir: &Path, workdir: &Path, session: &Uuid) -> PathBuf {
+    transcript_path(config_dir, workdir, session)
+        .with_extension("")
+        .join("subagents")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

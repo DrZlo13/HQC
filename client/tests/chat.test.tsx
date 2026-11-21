@@ -27,6 +27,7 @@ import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, modelName, shownModel } from '../src/u
 import { limitNotice } from '../src/ui/limits';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
 import { Chat, withQuote } from '../src/ui/Chat';
+import { firstSentences } from '../src/ui/selection';
 import { LiveSubagents } from '../src/ui/LiveSubagents';
 import { WEB_SEARCHES, storedWebSearch } from '../src/websearch';
 
@@ -46,6 +47,11 @@ afterEach(() => {
   // Drafts stay on the device (`hqc.drafts`), from one test to the next too.
   localStorage.clear();
 });
+
+/** The Copy button, not the other buttons of the strip, which have the class too. */
+const COPY = '.btn-copy:not(.btn-msg-search):not(.btn-msg-quote):not(.btn-to-quick):not(.btn-fork)';
+/** A Search button that is shown (not the hidden slot a message keeps for it). */
+const SEARCH = '.btn-msg-search:not(.btn-msg-search-idle)';
 
 const HISTORY = [
   ev('event.user.message', 1, (e) => (e.payload.artifact_ids = [])),
@@ -1498,6 +1504,39 @@ describe('live subagents', () => {
     }
   });
 
+  it("a subagent's history has the message buttons too: Quote and Copy take the selection there, Search shows", async () => {
+    const { api, app } = setup('running', { subagents: 1, background_tasks: 1, history: HISTORY.slice(0, 3) });
+    await mount(app);
+    api.subagentHistory.mockImplementation(async () => ({
+      events: [
+        ev('event.agent.message', 0, (e) => {
+          delete e.seq;
+          e.event_id = '0199f3a2-7c10-7000-8000-0000000002e4';
+          e.payload = { text: 'The import keeps the power nets.', final: false };
+        }),
+      ],
+      truncated: false,
+    }));
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [{ task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000, call_id: 'toolu_ag' }]))));
+    await act(async () => void root.querySelector<HTMLButtonElement>('button.live-agents-opens')!.click());
+    await act(async () => void (await new Promise((r) => setTimeout(r, 0))));
+    const panel = $('.live-agents-history')!;
+    const text = document.createTreeWalker(panel, NodeFilter.SHOW_TEXT);
+    let node: Node | null = text.nextNode();
+    while (node && node.textContent !== 'The import keeps the power nets.') node = text.nextNode();
+    await act(async () => {
+      const r = document.createRange();
+      r.setStart(node!, 4);
+      r.setEnd(node!, 10);
+      document.getSelection()!.removeAllRanges();
+      document.getSelection()!.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    expect(panel.querySelector(`.msg-agent ${SEARCH}`)).not.toBeNull();
+    await act(async () => void panel.querySelector<HTMLButtonElement>('.msg-agent .btn-msg-quote')!.click());
+    expect(($('.composer-input') as HTMLTextAreaElement).value).toBe('> import\n\n');
+  });
+
   it('fetches an open history again after its last event, appends what came since, and takes a whole page in its place', async () => {
     const { api, app } = setup('running', { subagents: 1 });
     await mount(app);
@@ -1961,6 +2000,66 @@ describe('quick messages', () => {
     expect(items()).toEqual([]);
     expect($('.quick-edit')!.textContent).toBe('No quick messages yet — add them in project settings');
     expect($('.quick-edit a')!.getAttribute('href')).toBe('#/p/p1/settings');
+  });
+
+  describe('added from a message', () => {
+    const TEXT = (HISTORY[0] as EventOf<'user.message'>).payload.text;
+    const PROJECT = { id: 'p1', name: 'hqc', slug: 'hqc', description: '', is_personal: false, color: 'teal' as const, created_at: '2026-10-01T00:00:00Z' };
+    /** The kept list is `kept`, the hub's is `hub`; `patchProject` answers with the list sent. */
+    async function chatWith(kept: string[], hub: string[]) {
+      const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+      app.projects.set('p1', { ...PROJECT, quick_messages: kept });
+      Object.assign(api, {
+        project: vi.fn(async () => ({ ...PROJECT, quick_messages: hub })),
+        patchProject: vi.fn(async (_id: string, p: { quick_messages: string[] }) => ({ ...PROJECT, quick_messages: p.quick_messages })),
+      });
+      await mount(app);
+      return api as unknown as { project: ReturnType<typeof vi.fn>; patchProject: ReturnType<typeof vi.fn> };
+    }
+    const button = () => $('.msg-user .btn-to-quick') as HTMLButtonElement;
+    const press = () => act(async () => button().click());
+
+    it('a message of the user has the button right before fork; the agent\'s has none', async () => {
+      await chatWith([], []);
+      const acts = [...$('.msg-user .msg-buttons')!.querySelectorAll('button')];
+      expect(acts.map((b) => b.getAttribute('aria-label'))).toEqual(['Search in Google', 'Copy', 'Quote', 'Add to quick messages', 'Fork from here']);
+      expect($('.msg-agent .btn-to-quick')).toBeNull();
+    });
+
+    it('adds the text at the end of the hub\'s list, then is a check', async () => {
+      const api = await chatWith(['Continue'], ['Continue', 'Added on the phone']);
+      expect(button().disabled).toBe(false);
+      await press();
+      await vi.waitFor(() => expect(api.patchProject).toHaveBeenCalledTimes(1));
+      expect(api.project).toHaveBeenCalledWith('p1');
+      expect(api.patchProject).toHaveBeenCalledWith('p1', { quick_messages: ['Continue', 'Added on the phone', TEXT] });
+      await vi.waitFor(() => expect(button().getAttribute('aria-label')).toBe('In quick messages'));
+      expect(button().disabled).toBe(true);
+      expect(button().getAttribute('title')).toBe('In quick messages');
+    });
+
+    it('a text already in the list is a check', async () => {
+      await chatWith([TEXT], [TEXT]);
+      expect(button().getAttribute('aria-label')).toBe('In quick messages');
+      expect(button().disabled).toBe(true);
+    });
+
+    it('a text another device added meanwhile sends nothing and is a check', async () => {
+      const api = await chatWith([], [TEXT]);
+      await press();
+      await vi.waitFor(() => expect(button().getAttribute('aria-label')).toBe('In quick messages'));
+      expect(api.patchProject).not.toHaveBeenCalled();
+    });
+
+    it('a refusal of the hub is said, and the button works again', async () => {
+      const api = await chatWith([], []);
+      api.patchProject.mockRejectedValueOnce(new Error('too long'));
+      await press();
+      await vi.waitFor(() => expect(root.textContent).toContain('Not added to quick messages: too long'));
+      expect(button().disabled).toBe(false);
+      await press();
+      await vi.waitFor(() => expect(api.patchProject).toHaveBeenCalledTimes(2));
+    });
   });
 });
 
@@ -2782,82 +2881,244 @@ describe('Quote', () => {
     for (let n = w.nextNode(); n; n = w.nextNode()) if (n.textContent === text) return n;
     throw new Error(`no text «${text}»`);
   };
-  const select = (node: Node | null) =>
+  /** Selects `node`'s text from `from` to `to` (all of it by default), or nothing. */
+  const select = (node: Node | null, from = 0, to?: number) =>
     act(async () => {
       const sel = document.getSelection()!;
       sel.removeAllRanges();
       if (node) {
         const r = document.createRange();
-        r.selectNodeContents(node);
+        r.setStart(node, from);
+        r.setEnd(node, to ?? node.textContent!.length);
         sel.addRange(r);
       }
       document.dispatchEvent(new Event('selectionchange'));
     });
-
-  /** A right click on `node` (a text node's element): whether the browser's menu was kept. */
-  const rightClick = async (node: Node) => {
-    let kept = true;
-    await act(() => {
-      kept = (node.parentElement ?? (node as Element)).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 300, clientY: 200 }));
-    });
-    return kept;
+  const agentButton = (cls: string) => $(`.msg-agent .msg-buttons ${cls}`) as HTMLButtonElement | null;
+  const withAgentText = (text: string) => [HISTORY[0], ev('event.agent.message', 2, (e) => (e.payload.text = text)), ...HISTORY.slice(2, 3)];
+  const clipboard = () => {
+    const writeText = vi.fn(async (_: string) => {});
+    vi.stubGlobal('isSecureContext', true);
+    Object.defineProperty(window.navigator, 'clipboard', { value: { writeText }, configurable: true });
+    return writeText;
   };
 
-  it('on a computer quotes the selected text from the client\'s menu on a right click, after the draft, and focuses the field', async () => {
+  it('quotes the text selected in a message from its Quote icon, after the draft, and focuses the field', async () => {
     const { app } = setup('idle');
     await mount(app);
     await act(() => {
       area().value = 'Look at this';
       area().dispatchEvent(new Event('input', { bubbles: true }));
     });
-    await select(textNode('All tests pass.'));
-    // No floating button on a computer: the menu has it.
-    expect($('.btn-quote')).toBeNull();
-    expect(await rightClick(textNode('All tests pass.')), 'the browser\'s menu is not shown').toBe(false);
-    expect([...document.querySelectorAll('.ctx-menu [role="menuitem"]')].map((b) => b.textContent!.trim())).toEqual(['Quote', 'Copy', 'Search in Google']);
-    // Its own class: the floating button's style (fixed, shifted) is not the item's.
-    expect($('.ctx-menu .btn-quote')).toBeNull();
-    await act(() => $('.ctx-menu .menu-quote')!.click());
-    expect(area().value).toBe('Look at this\n\n> All tests pass.\n\n');
+    await select(textNode('All tests pass.'), 4, 9);
+    expect(agentButton('.btn-msg-quote')!.getAttribute('aria-label')).toBe('Quote');
+    await act(() => agentButton('.btn-msg-quote')!.click());
+    expect(area().value).toBe('Look at this\n\n> tests\n\n');
     expect(document.activeElement).toBe(area());
     expect(area().selectionStart).toBe(area().value.length);
     expect(document.getSelection()!.rangeCount).toBe(0);
-    expect($('.ctx-menu')).toBeNull();
     // The next quote goes after the first.
     await select(textNode('All tests pass.'));
-    await rightClick(textNode('All tests pass.'));
-    await act(() => $('.ctx-menu .menu-quote')!.click());
-    expect(area().value).toBe('Look at this\n\n> All tests pass.\n\n> All tests pass.\n\n');
+    await act(() => agentButton('.btn-msg-quote')!.click());
+    expect(area().value).toBe('Look at this\n\n> tests\n\n> All tests pass.\n\n');
+    // The pill and the menu of the old Quote are gone.
+    expect($('.btn-quote')).toBeNull();
+    expect($('.ctx-menu')).toBeNull();
   });
 
-  it('copies the selected text from the same menu', async () => {
-    const writeText = vi.fn(async (_: string) => {});
-    vi.stubGlobal('isSecureContext', true);
-    Object.defineProperty(window.navigator, 'clipboard', { value: { writeText }, configurable: true });
-    const { app } = setup('idle');
+  it('quotes the first two sentences of a message with nothing selected, with «…» when more follows', async () => {
+    const { app } = setup('idle', { history: withAgentText('First one. Second one! Third one? Fourth.') });
     await mount(app);
-    await select(textNode('All tests pass.'));
-    await rightClick(textNode('All tests pass.'));
-    await act(async () => $('.ctx-menu .btn-copy-selection')!.click());
-    expect(writeText).toHaveBeenCalledWith('All tests pass.');
+    await act(() => agentButton('.btn-msg-quote')!.click());
+    expect(area().value).toBe('> First one. Second one! …\n\n');
+    await act(() => {
+      area().value = '';
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    // A selection in another message does not count: this one is quoted by its text.
+    await select(textNode('Run the tests', '.msg-user'), 0, 3);
+    await act(() => agentButton('.btn-msg-quote')!.click());
+    expect(area().value).toBe('> First one. Second one! …\n\n');
+  });
+
+  it('quotes a short message whole, without «…»', async () => {
+    const { app } = setup('idle', { history: withAgentText('One. Two.') });
+    await mount(app);
+    await act(() => agentButton('.btn-msg-quote')!.click());
+    expect(area().value).toBe('> One. Two.\n\n');
+  });
+
+  const twoParagraphs = () => [HISTORY[0], ev('event.agent.message', 2, (e) => (e.payload.text = 'Para one.\n\nPara two.')), HISTORY[3]];
+  const selectRange = (from: [Node, number], to: [Node, number]) =>
+    act(async () => {
+      const r = document.createRange();
+      r.setStart(...from);
+      r.setEnd(...to);
+      document.getSelection()!.removeAllRanges();
+      document.getSelection()!.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+
+  it('a triple click, which ends at the start of the next block, is the message\'s paragraph only', async () => {
+    const writeText = clipboard();
+    const { app } = setup('idle', { history: twoParagraphs() });
+    await mount(app);
+    const next = $('.msg-agent')!.closest('.feed-block')!.nextElementSibling!;
+    await selectRange([textNode('Para two.'), 0], [next, 0]);
+    expect(document.querySelectorAll(SEARCH).length).toBe(1);
+    expect(agentButton(SEARCH)).not.toBeNull();
+    await act(async () => agentButton(COPY)!.click());
+    expect(writeText).toHaveBeenLastCalledWith('Para two.');
+    await act(() => agentButton('.btn-msg-quote')!.click());
+    expect(area().value).toBe('> Para two.\n\n');
     vi.unstubAllGlobals();
   });
 
-  it('searches the selected text on the web from the same menu, with the search picked in Settings', async () => {
+  it('quotes the paragraphs of a clipped range on separate lines, and a range that enters a message leaves its time out', async () => {
+    const { app } = setup('idle', { history: twoParagraphs() });
+    await mount(app);
+    const next = $('.msg-agent')!.closest('.feed-block')!.nextElementSibling!;
+    await selectRange([textNode('Para one.'), 0], [next, 0]);
+    await act(() => agentButton('.btn-msg-quote')!.click());
+    expect(area().value).toBe('> Para one.\n>\n> Para two.\n\n');
+    await act(() => {
+      area().value = '';
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    // From outside any message into the middle of one: its time (and buttons) are not text.
+    await selectRange([$('.feed')!, 0], [textNode('Para two.'), 4]);
+    await act(() => agentButton('.btn-msg-quote')!.click());
+    expect(area().value).toBe('> Para one.\n>\n> Para\n\n');
+  });
+
+  it('puts a space before «…» after a sentence mark, and skips the blank line between paragraphs', () => {
+    expect(firstSentences('Done.\n\nThe tests pass. Next.')).toBe('Done.\n\nThe tests pass. …');
+    expect(firstSentences('Done.\n\nThe tests pass.')).toBe('Done.\n\nThe tests pass.');
+    expect(firstSentences('One. Two. Three')).toBe('One. Two. …');
+    expect(firstSentences('one\n\ntwo\n\nthree')).toBe('one\n\ntwo…');
+  });
+
+  it('lets go of a held press the browser took over (pointercancel), and reads the selection anew at a press', async () => {
+    // Without the open request of HISTORY: on a phone it would take the composer's place.
+    vi.stubGlobal('matchMedia', (media: string) => ({ matches: true, media, addEventListener: () => {}, removeEventListener: () => {} }));
+    try {
+      const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
+      // The chat never hears of the selection changing: only a press tells it.
+      const add = document.addEventListener.bind(document);
+      vi.spyOn(document, 'addEventListener').mockImplementation(((type: string, ...rest: [any]) => {
+        if (type !== 'selectionchange') add(type, ...rest);
+      }) as typeof document.addEventListener);
+      await mount(app, true);
+      const row = $('.msg-agent .msg-buttons')!;
+      const press = () =>
+        act(() => void row.querySelector('.btn-msg-quote, .btn-copy')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
+      // A selection the chat has not heard of: the press reads it.
+      await act(() => {
+        const r = document.createRange();
+        r.selectNodeContents(textNode('All tests pass.'));
+        document.getSelection()!.removeAllRanges();
+        document.getSelection()!.addRange(r);
+      });
+      expect(row.querySelector(SEARCH)).toBeNull();
+      await press();
+      expect(row.querySelector(SEARCH)).not.toBeNull();
+      await select(null);
+      expect(row.querySelector(SEARCH), 'held').not.toBeNull();
+      await act(() => void document.dispatchEvent(new Event('pointercancel')));
+      expect(row.querySelector(SEARCH), 'let go').toBeNull();
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('quotes the earlier selection when iOS has cleared it before the press', async () => {
+    vi.stubGlobal('matchMedia', (media: string) => ({ matches: true, media, addEventListener: () => {}, removeEventListener: () => {} }));
+    // The chat hears of the selection once, as it changed; what the test does after is not heard.
+    let heard: (() => void) | undefined;
+    const add = document.addEventListener.bind(document);
+    vi.spyOn(document, 'addEventListener').mockImplementation(((type: string, ...rest: [any]) => {
+      if (type === 'selectionchange') heard = rest[0];
+      else add(type, ...rest);
+    }) as typeof document.addEventListener);
+    try {
+      const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
+      await mount(app, true);
+      const row = $('.msg-agent .msg-buttons')!;
+      await act(() => {
+        const r = document.createRange();
+        r.setStart(textNode('All tests pass.'), 4);
+        r.setEnd(textNode('All tests pass.'), 9);
+        document.getSelection()!.removeAllRanges();
+        document.getSelection()!.addRange(r);
+        heard!();
+      });
+      expect(row.querySelector(SEARCH)).not.toBeNull();
+      // Cleared before the pointerdown reached the page.
+      document.getSelection()!.removeAllRanges();
+      await act(() => void row.querySelector('.btn-msg-quote')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
+      expect(row.querySelector(SEARCH), 'still offered').not.toBeNull();
+      await act(() => row.querySelector<HTMLButtonElement>('.btn-msg-quote')!.click());
+      expect(area().value).toBe('> tests\n\n');
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('a range across two messages is the first one\'s part, held by the first only', async () => {
+    const { app } = setup('idle', { history: twoParagraphs() });
+    await mount(app);
+    await selectRange([textNode('Para two.'), 5], [[...root.querySelectorAll('.msg-user .msg-text')].pop()!.firstChild!, 3]);
+    expect(document.querySelectorAll(SEARCH).length).toBe(1);
+    expect(agentButton(SEARCH)).not.toBeNull();
+    await act(() => agentButton('.btn-msg-quote')!.click());
+    expect(area().value).toBe('> two.\n\n');
+  });
+
+  it('has Search, Copy and Quote on the user\'s message, the Search slot hidden until it holds a selection', async () => {
+    const { app } = setup('idle');
+    await mount(app);
+    const labels = () =>
+      [...$('.msg-user .msg-buttons')!.querySelectorAll('button')].map((b) => b.getAttribute('aria-label')).filter((l) => l !== 'Fork from here');
+    const slot = () => $('.msg-user .btn-msg-search') as HTMLElement;
+    expect(labels()).toEqual(['Search in Google', 'Copy', 'Quote']);
+    expect(slot().classList.contains('btn-msg-search-idle')).toBe(true);
+    await select(textNode('Run the tests', '.msg-user'));
+    expect(labels()).toEqual(['Search in Google', 'Copy', 'Quote']);
+    expect(slot().classList.contains('btn-msg-search-idle')).toBe(false);
+  });
+
+  it('copies the text selected in the message, else the whole message', async () => {
+    const writeText = clipboard();
+    const { app } = setup('idle');
+    await mount(app);
+    await act(async () => agentButton(COPY)!.click());
+    expect(writeText).toHaveBeenLastCalledWith('All tests pass.');
+    await select(textNode('All tests pass.'), 4, 9);
+    await act(async () => agentButton(COPY)!.click());
+    expect(writeText).toHaveBeenLastCalledWith('tests');
+    vi.unstubAllGlobals();
+  });
+
+  it('offers Search only in the message that holds the selection, with the search picked in Settings', async () => {
     const open = vi.fn();
     vi.stubGlobal('open', open);
     const { app } = setup('idle');
     await mount(app);
-    await select(textNode('All tests pass.'));
-    await rightClick(textNode('All tests pass.'));
-    await act(async () => $('.ctx-menu .menu-web-search')!.click());
-    expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=All%20tests%20pass.', '_blank', 'noopener');
-    expect($('.ctx-menu')).toBeNull();
+    expect($(SEARCH)).toBeNull();
+    await select(textNode('All tests pass.'), 4, 9);
+    expect(document.querySelectorAll(SEARCH).length).toBe(1);
+    expect(agentButton(SEARCH)!.title).toBe('Search in Google');
+    await act(async () => agentButton(SEARCH)!.click());
+    expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=tests', '_blank', 'noopener');
+    // Text outside the feed is not a message's.
+    await select(textNode('test 12', '.chat-head'));
+    expect($(SEARCH)).toBeNull();
     await act(() => app.setWebSearch(WEB_SEARCHES.find((w) => w.id === 'yandex')!));
     await select(textNode('All tests pass.'));
-    await rightClick(textNode('All tests pass.'));
-    expect($('.ctx-menu .menu-web-search')!.textContent!.trim()).toBe('Search in Yandex');
-    await act(async () => $('.ctx-menu .menu-web-search')!.click());
+    expect(agentButton(SEARCH)!.title).toBe('Search in Yandex');
+    await act(async () => agentButton(SEARCH)!.click());
     expect(open).toHaveBeenLastCalledWith('https://yandex.ru/search/?text=All%20tests%20pass.', '_blank', 'noopener');
     // Kept on this device: a reload starts with it.
     expect(storedWebSearch().id).toBe('yandex');
@@ -2865,47 +3126,73 @@ describe('Quote', () => {
     vi.unstubAllGlobals();
   });
 
-  it('leaves the browser\'s menu to a right click without a selection, outside the feed, or without a composer', async () => {
-    const { app } = setup('idle');
-    await mount(app);
-    expect(await rightClick(textNode('All tests pass.')), 'nothing selected').toBe(true);
-    await select(textNode('test 12', '.chat-head'));
-    expect(await rightClick(textNode('test 12', '.chat-head'))).toBe(true);
-    expect($('.ctx-menu')).toBeNull();
-    render(null, root);
+  it('keeps a press that clears the selection (a phone\'s tap): the buttons stay and act on the text held', async () => {
+    try {
+      const open = vi.fn();
+      vi.stubGlobal('open', open);
+      // The message's buttons are a phone's row where the screen is narrow (`useIsPhone`).
+      vi.stubGlobal('matchMedia', (media: string) => ({ matches: true, media, addEventListener: () => {}, removeEventListener: () => {} }));
+      // Without the open request of HISTORY: on a phone it would take the composer's place.
+      const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
+      await mount(app, true);
+      const row = $('.msg-agent .msg-buttons')!;
+      // A phone's usage line holds them, the time line none.
+      expect($('.msg-agent .msg-time .msg-buttons')).toBeNull();
+      expect($('.msg-agent > .meta .msg-buttons')).not.toBeNull();
+      await select(textNode('All tests pass.'), 4, 9);
+      const search = row.querySelector<HTMLButtonElement>(SEARCH)!;
+      const quote = row.querySelector<HTMLButtonElement>('.btn-msg-quote')!;
+      /** A pointer press on `el`: whether it was cancelled, which keeps a mouse's selection. */
+      const press = async (el: Element) => {
+        let cancelled = false;
+        await act(() => {
+          cancelled = !el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+        });
+        return cancelled;
+      };
+      expect(await press(quote), 'a mouse press keeps the selection and the focus').toBe(true);
+      await select(null);
+      expect(row.querySelector(SEARCH), 'still there, though the selection is gone').toBe(search);
+      await act(() => quote.click());
+      expect(area().value).toBe('> tests\n\n');
+      expect(row.querySelector(SEARCH), 'gone with the selection after the click').toBeNull();
+      await select(textNode('All tests pass.'), 4, 9);
+      await press(row.querySelector(SEARCH)!);
+      await select(null);
+      await act(() => row.querySelector<HTMLButtonElement>(SEARCH)!.click());
+      expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=tests', '_blank', 'noopener');
+      // A press elsewhere lets go of the held text.
+      await select(textNode('All tests pass.'), 0, 3);
+      await press(quote);
+      await select(null);
+      await act(() => void $('.chat-head')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })));
+      expect(row.querySelector(SEARCH)).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 
+  it('has no Quote without a composer, but Search, and no pill or client menu anywhere', async () => {
     const locked = setup('locked_vscode');
     await mount(locked.app);
     await select(textNode('All tests pass.'));
-    expect(await rightClick(textNode('All tests pass.'))).toBe(true);
-    expect($('.ctx-menu')).toBeNull();
+    expect(agentButton(COPY)).not.toBeNull();
+    expect(agentButton('.btn-msg-quote')).toBeNull();
+    // Search needs no input.
+    expect(agentButton(SEARCH)).not.toBeNull();
+    expect($('.btn-quote')).toBeNull();
   });
 
-  it('on a phone offers the button only for text in the feed, while selected, and keeps the browser\'s menu', async () => {
-    const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
-    await mount(app, true);
-    await select(textNode('test 12', '.chat-head'));
-    expect($('.btn-quote')).toBeNull();
+  it('leaves the browser\'s menu to a right click, on a selection too', async () => {
+    const { app } = setup('idle');
+    await mount(app);
     await select(textNode('All tests pass.'));
-    expect($('.btn-quote')!.textContent).toBe('Quote');
-    expect(await rightClick(textNode('All tests pass.')), 'no client menu on a phone').toBe(true);
+    let kept = false;
+    await act(() => {
+      kept = textNode('All tests pass.').parentElement!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    });
+    expect(kept, 'not prevented').toBe(true);
     expect($('.ctx-menu')).toBeNull();
-    await select(null);
-    expect($('.btn-quote'), 'gone with the selection').toBeNull();
-  });
-
-  it('on a phone a tap that clears the selection still quotes it', async () => {
-    // Without the open request of HISTORY: on a phone it would take the composer's place.
-    const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
-    await mount(app, true);
-    await select(textNode('All tests pass.'));
-    const btn = $('.btn-quote')!;
-    await act(() => void btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
-    await select(null);
-    expect($('.btn-quote')).toBe(btn);
-    await act(() => btn.click());
-    expect(area().value).toBe('> All tests pass.\n\n');
-    expect($('.btn-quote')).toBeNull();
   });
 
   it('quotes every line, a blank one as a bare «>», after a blank line', () => {

@@ -453,10 +453,21 @@ function FilePath({ path, children }: { path: string; children: ComponentChildre
   );
 }
 
-/** Puts `text` into the clipboard as is and says so for a moment. `withText`: the caption
- *  next to the icon (code blocks), otherwise the icon alone. `icon`: the result as an icon in
- *  the same button, which keeps its size (a message's hover column), not as a caption. */
-export function CopyButton({ text, label = 'Copy', withText, icon }: { text: string; label?: string; withText?: boolean; icon?: boolean }) {
+/** Puts `text` into the clipboard as is and says so for a moment; a function gives the text
+ *  at the click. `withText`: the caption next to the icon (code blocks), otherwise the icon
+ *  alone. `icon`: the result as an icon in the same button, which keeps its size (a message's
+ *  buttons), not as a caption. */
+export function CopyButton({
+  text,
+  label = 'Copy',
+  withText,
+  icon,
+}: {
+  text: string | (() => string);
+  label?: string;
+  withText?: boolean;
+  icon?: boolean;
+}) {
   const [state, setState] = useState<'idle' | 'done' | 'failed'>('idle');
   useEffect(() => {
     if (state === 'idle') return;
@@ -471,7 +482,7 @@ export function CopyButton({ text, label = 'Copy', withText, icon }: { text: str
       aria-label={icon ? said : label}
       title={icon ? said : label}
       onClick={(e) =>
-        copyText(text, (e.currentTarget as HTMLElement).ownerDocument).then(
+        copyText(typeof text === 'function' ? text() : text, (e.currentTarget as HTMLElement).ownerDocument).then(
           () => setState('done'),
           () => setState('failed'),
         )

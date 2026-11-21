@@ -1,5 +1,5 @@
-// "Search in …" of the menu of text selected in the feed (SPEC §6): the web search a person
-// picks in Settings, kept on this device.
+// "Search in …" of a message's buttons (SPEC §6): the web search a person picks in Settings,
+// kept on this device.
 
 export interface WebSearch {
   id: string;

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.185, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.205, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2424,7 +2424,8 @@ caret when the chat opens, once its newest page is in, unless a request waits fo
 approval in the feed, or the session `waiting`), another field has the focus, or a menu or the
 slid-out column is open; on a phone only when the chat replaces a new session's window. An open chat
 stays at its bottom while its images load: only a scroll up lets go of the bottom, and a move up
-while the feed's scroll range changed is the browser's, not a scroll up (since 0.164).
+while the feed's scroll range changed is the browser's, not a scroll up (since 0.164), unless it
+comes in the user's own scroll up (since 0.205).
 
 than the text, and an open thinking block is prose in the feed's font. A call without a
 `tool.result` is running (a pulsing dot) until its turn ends; since 0.161 one with an end of a
@@ -2442,13 +2443,19 @@ for an answer (an open approval in the feed, or the session `waiting`), another 
 focus, or a menu or the slid-out column is open; on a phone only when the chat replaces a new
 session's window. An open chat stays at its bottom while its images load: only a scroll up lets
 go of the bottom, and a move up while the feed's scroll range changed is the browser's, not a
-scroll up (since 0.164). In WebKit outside Chromium (Safari, the macOS app), while the user's own
-wheel or trackpad scroll of the feed goes on, momentum included, until 400 ms after its last wheel
-event, the chat sets no scroll position of its own: it neither follows the bottom nor renders
-older blocks, so a scroll up stops at the top of the rendered blocks until the gesture settles.
-Once it settles, the chat follows the bottom if the feed still holds it and something moved it
-meanwhile, and renders the 60 older blocks if the feed is still within 400 px of its top (since
-0.136).
+scroll up (since 0.164), unless it comes in the user's own scroll up (since 0.205). The user's own
+scroll of the feed is a wheel or trackpad, a finger, or the main button pressed on the feed's own
+element (its scrollbar, its padding and the margins beside the column) while they are down, or a
+scrolling key outside a field, and it goes on while scroll events follow within 400 ms of the last
+of them (momentum, a bounce at an edge); it goes up or down as its last input did (the wheel's
+sign, the finger's way, the key; the pressed button counts as up). While it goes on the chat does
+not follow the bottom (since 0.205: Chromium drops the rest of a smooth wheel scroll when the page
+sets a position). In WebKit outside Chromium (Safari, the macOS app, every browser on an iPhone),
+while it goes on, the chat sets no scroll position of its own: it neither follows the bottom nor
+renders older blocks, so a scroll up stops at the top of the rendered blocks until the scroll
+settles (since 0.136 for a wheel, since 0.205 for the rest). Once it settles, the chat follows the
+bottom if the feed still holds it and something moved it meanwhile, and renders the 60 older
+blocks if the feed is still within 400 px of its top.
 
 Messages between sessions in the feed (since 0.54, T51; mockups `Session`, `AskingSession`,
 `MSession2`): violet blocks (`--relay`) with an arrow, ↗ for what left this session and ↙
@@ -6665,6 +6672,31 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.185 → 0.205 (a scroll up stays where the user took it)
+§6 client layout: while the agent wrote an answer, a scroll up of the feed was taken back to the
+new text. A move up let go of the bottom only while the feed's scroll range stayed (0.164), and an
+answer being written changes it between any two scroll events; in Chromium the chat also followed
+the bottom on every piece of the answer, which drops the rest of a smooth wheel scroll before its
+scroll event comes. A move up in the user's own scroll up (a wheel or trackpad, a finger, the
+main button pressed on the feed's own element, a scrolling key, and the scroll events that follow
+within 400 ms) now lets go of the bottom whatever the range did; a scroll down keeps the range
+rule, so the browser's move as images load still does not let go under it. While the user's
+scroll goes on, the chat does not follow the bottom. A finger is told by its touch events: a
+browser cancels its pointer once the touch turns into a scroll.
+On an iPhone a scroll up near the top of the rendered feed also jumped screens up into older
+history: 0.136 held positions back only while wheel events came, so under a finger and its fling
+the chat rendered 60 older blocks and set the position that keeps the view in the middle of the
+scroll, where WebKit loses it. A finger and its fling, and a bounce at the top that comes after
+the last wheel event, now hold them back too.
+Checked on a test install. Safari of an iOS 26.1 simulator, flicks up with a finger over a
+300-turn chat: when the older blocks came in, the block at the top of the window went from event
+543 to event 483 before, in 2 of 2 runs, and stayed after, in 2 of 2. Playwright 1.49, an answer
+of about 900 words being written, twelve wheel steps of 60 px up: Chromium was back at the bottom
+within 160 ms before and stayed 760–990 px above it after, in 2 of 2 runs each; WebKit stayed
+above it before and after. A WKWebView of macOS (Safari 27.2) with trackpad gestures, momentum
+included, sent to the view: neither the jump nor the pull back happens before or after.
+0.186–0.204 are taken by other pull requests.
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

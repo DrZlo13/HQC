@@ -33,8 +33,8 @@ export function moveTo(order: string[], id: string, to: number): string[] {
   return out;
 }
 
-/** Renames a session by a prompt: the list's menu and the chat's "⋯" both ask this way. A
- *  refusal goes to `notice` (the list's, or the chat's own). */
+/** Renames a session by a prompt, from the list's menu (the chat renames its title in place). A
+ *  refusal goes to `notice`, the list's. */
 export function renameByPrompt(app: AppState, s: SessionInfo, notice: (message: string) => void): void {
   const title = prompt(s.room_mode ? 'Rename the room' : 'Rename the session', s.title)?.trim();
   if (!title || title === s.title) return;
@@ -94,6 +94,34 @@ export function archivedLabel(s: SessionInfo, now: number): string {
 /** Paused while its turn still runs: the agent stops when the turn ends (SPEC §17.3). */
 export function pausingAfterTurn(s: Pick<SessionInfo, 'state' | 'paused_at'>): boolean {
   return !!s.paused_at && (s.state === 'running' || s.state === 'waiting');
+}
+
+/** "Pause" (SPEC §17.3), beside Stop in the chat header and in the list's menu: offered while
+ *  the agent works — a turn runs, input is queued or it waits on a request — not for an idle
+ *  session, whose agent is already free to unload; not for one paused already, an archived or a
+ *  service session, nor a room, which has no pause of its own. */
+export function canPause(s: SessionInfo): boolean {
+  return (
+    !s.archived &&
+    !s.system &&
+    !s.room_mode &&
+    !s.paused_at &&
+    (s.state === 'running' || s.state === 'waiting' || s.state === 'queued')
+  );
+}
+
+/** "Restart session" (SPEC 0.130), in the chat's "More" and the list's menu: not for an archived
+ *  or a service session, a room, one VS Code holds, one whose worker is offline, nor a paused one
+ *  (its process stays down until Resume). */
+export function restartableSession(s: SessionInfo): boolean {
+  return (
+    !s.archived &&
+    !s.system &&
+    !s.room_mode &&
+    !s.paused_at &&
+    s.state !== 'locked_vscode' &&
+    s.state !== 'worker_offline'
+  );
 }
 
 /** The line under the title. */

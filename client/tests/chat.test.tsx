@@ -126,8 +126,11 @@ function setup(
     background: vi.fn(async () => {}),
     // POST /api/sessions/{id}/tasks/{task_id}/stop.
     stopTask: vi.fn(async () => {}),
-    // POST /api/sessions/{id}/stop.
+    // POST /api/sessions/{id}/stop, /pause, /resume, /restart.
     stop: vi.fn(async () => {}),
+    pauseSession: vi.fn(async () => {}),
+    resumeSession: vi.fn(async () => {}),
+    restartSession: vi.fn(async () => {}),
     // GET /api/sessions/{id}/subagents/{task_id}/history: nothing done yet unless a test says.
     subagentHistory: vi.fn(
       async (_id: string, _task: string, _after?: string): Promise<SubagentHistory> => ({ events: [], truncated: false }),
@@ -204,13 +207,15 @@ async function mount(app: AppState, phone = false) {
 const $ = (sel: string) => root.querySelector<HTMLElement>(sel);
 const button = (text: string) => [...root.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === text);
 
-// T38: the session's permission mode in the header, and the switch in "More".
+// T38: the session's permission mode in the header, a pill whose menu switches it.
 describe('permission mode', () => {
   const mark = () => ({ auto: $('.perm-auto')?.textContent, ask: $('.perm-ask')?.textContent });
+  /** The mode pill pressed: the switch's buttons over the menu's items. */
   const menu = async () => {
-    await act(async () => $('.btn-more')!.click());
-    return [...root.querySelectorAll<HTMLButtonElement>('.menu-item')];
+    await act(async () => $('.btn-mode-pill')!.click());
+    return [...root.querySelectorAll<HTMLButtonElement>('.ctx-menu .mode-switch button')];
   };
+  const pressed = () => [...root.querySelectorAll('.ctx-menu .mode-switch [aria-pressed="true"]')].map((b) => b.textContent);
 
   it('marks Auto, shows Ask, and what the worker runs over what was asked', async () => {
     let { app } = setup('idle', { permission_mode: 'auto', effective_permission_mode: 'auto' });
@@ -243,17 +248,19 @@ describe('permission mode', () => {
     vi.stubGlobal('confirm', confirm);
     try {
       let items = await menu();
-      expect(items.map((b) => b.textContent)).toContain('Switch to Auto');
-      await act(async () => items.find((b) => b.textContent === 'Switch to Auto')!.click());
+      expect(items.map((b) => b.textContent)).toEqual(['Ask', 'Auto', 'Allow all']);
+      expect(pressed()).toEqual(['Ask']);
+      await act(async () => items.find((b) => b.textContent === 'Auto')!.click());
       expect(confirm).toHaveBeenCalledWith(AUTO_CONFIRM);
       expect(AUTO_CONFIRM).toContain("deny list is the only limit");
       expect(AUTO_CONFIRM.includes('\n')).toBe(false);
       expect(api.patchSession).not.toHaveBeenCalled();
+      expect($('.ctx-menu')).toBeNull();
 
       confirm.mockReturnValue(true);
       items = await menu();
       await act(async () => {
-        items.find((b) => b.textContent === 'Switch to Auto')!.click();
+        items.find((b) => b.textContent === 'Auto')!.click();
         await new Promise((r) => setTimeout(r, 10));
       });
       expect(api.patchSession).toHaveBeenCalledWith('s1', { permission_mode: 'auto' });
@@ -261,9 +268,9 @@ describe('permission mode', () => {
 
       confirm.mockClear();
       items = await menu();
-      expect(items.map((b) => b.textContent)).toContain('Switch to Ask');
+      expect(pressed()).toEqual(['Auto']);
       await act(async () => {
-        items.find((b) => b.textContent === 'Switch to Ask')!.click();
+        items.find((b) => b.textContent === 'Ask')!.click();
         await new Promise((r) => setTimeout(r, 10));
       });
       expect(confirm).not.toHaveBeenCalled();
@@ -360,8 +367,8 @@ describe('permission mode', () => {
     vi.stubGlobal('confirm', confirm);
     try {
       let items = await menu();
-      expect(items.map((b) => b.textContent)).toEqual(['Rename', 'Schedules', 'Move to project…', 'Switch to Ask', 'Switch to Allow all']);
-      await act(async () => items.find((b) => b.textContent === 'Switch to Allow all')!.click());
+      expect(pressed()).toEqual(['Auto']);
+      await act(async () => items.find((b) => b.textContent === 'Allow all')!.click());
       expect(confirm).toHaveBeenCalledWith(ALLOW_ALL_CONFIRM);
       expect(ALLOW_ALL_CONFIRM.includes('\n')).toBe(false);
       expect(api.patchSession).not.toHaveBeenCalled();
@@ -369,13 +376,19 @@ describe('permission mode', () => {
       confirm.mockReturnValue(true);
       items = await menu();
       await act(async () => {
-        items.find((b) => b.textContent === 'Switch to Allow all')!.click();
+        items.find((b) => b.textContent === 'Allow all')!.click();
         await new Promise((r) => setTimeout(r, 10));
       });
       expect(api.patchSession).toHaveBeenCalledWith('s1', { permission_mode: 'allow_all' });
       expect($('.perm-allow-all')!.textContent).toBe('Allow all');
-      items = await menu();
-      expect(items.map((b) => b.textContent)).toEqual(['Rename', 'Schedules', 'Move to project…', 'Switch to Ask', 'Switch to Auto']);
+      await menu();
+      expect(pressed()).toEqual(['Allow all']);
+      // The pressed one only closes the menu.
+      confirm.mockClear();
+      await act(async () => root.querySelector<HTMLButtonElement>('.ctx-menu .btn-mode-allow_all')!.click());
+      expect($('.ctx-menu')).toBeNull();
+      expect(confirm).not.toHaveBeenCalled();
+      expect(api.patchSession).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -403,62 +416,150 @@ describe('permission mode', () => {
     );
     expect(mark().auto).toBe('Auto');
   });
+
+  it('is a round pill with a chevron that opens its menu under it; with no mode known it says Default; archived, the mark alone', async () => {
+    let { app } = setup('idle', { permission_mode: 'auto', effective_permission_mode: 'auto' });
+    await mount(app);
+    const pill = $('.chat-meta button.btn-mode-pill')!;
+    expect(pill.classList.contains('perm-auto')).toBe(true);
+    expect(pill.classList.contains('pill')).toBe(false);
+    expect(pill.getAttribute('aria-label')).toBe('Permission mode: Auto');
+    expect(pill.getAttribute('aria-haspopup')).toBe('menu');
+    expect(pill.querySelector('svg')).not.toBeNull();
+    await act(async () => pill.click());
+    expect($('.ctx-menu')!.getAttribute('aria-label')).toBe('Permission mode');
+    expect(pill.getAttribute('aria-expanded')).toBe('true');
+    // The switch stands over the items, the session's own mode pressed and focused.
+    expect($('.ctx-menu > .menu-top .mode-switch')).not.toBeNull();
+    expect(document.activeElement).toBe($('.ctx-menu .btn-mode-auto'));
+    await act(async () => pill.click());
+    expect($('.ctx-menu')).toBeNull();
+    render(null, root);
+
+    ({ app } = setup('idle'));
+    await mount(app);
+    expect($('.btn-mode-pill')!.textContent).toBe('Default');
+    await act(async () => $('.btn-mode-pill')!.click());
+    expect(root.querySelectorAll('.ctx-menu .mode-switch [aria-pressed="true"]')).toHaveLength(0);
+    render(null, root);
+
+    ({ app } = setup('idle', { permission_mode: 'auto', effective_permission_mode: 'auto' }));
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true, state: 'archived' });
+    await mount(app);
+    expect($('button.btn-mode-pill')).toBeNull();
+    expect($('span.btn-mode-pill.perm-auto')!.textContent).toBe('Auto');
+    expect($('span.btn-mode-pill svg')).toBeNull();
+  });
 });
 
-// The session's model in "More": a choice PATCHes at once, a typed name when it is done; `null`
-// goes back to the runtime's default.
+// The session's model in the header's model pill: a pick PATCHes at once, a typed name on
+// Enter; `null` goes back to the runtime's default.
 describe('model', () => {
-  const field = <E extends HTMLElement = HTMLSelectElement>(name: string) =>
-    root.querySelector<E>(`.menu-settings [name=${name}]`);
-  const set = (name: string, value: string) =>
+  const open = () => act(async () => $('.btn-model-pill')!.click());
+  /** The menu's own items, not its flyout's. */
+  const items = () => [...root.querySelector('.ctx-menu')!.querySelectorAll<HTMLElement>(':scope > .menu-item')];
+  const labels = () => items().map((i) => i.querySelector('.menu-label')!.textContent);
+  const item = (sel: string) => root.querySelector<HTMLButtonElement>(`.ctx-menu ${sel}`)!;
+  const pick = (sel: string) =>
     act(async () => {
-      const el = field<HTMLInputElement>(name)!;
-      el.value = value;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+      item(sel).click();
       await new Promise((r) => setTimeout(r, 10));
     });
-  const open = () => act(async () => $('.btn-more')!.click());
+  /** The mouse on a family: its versions in a flyout. */
+  const hover = (sel: string) => act(async () => void item(sel).dispatchEvent(new MouseEvent('mouseenter')));
+  const flyout = () => [...root.querySelectorAll('.ctx-flyout .menu-item')].map((i) => i.querySelector('.menu-label')!.textContent);
+  const name = () => root.querySelector<HTMLInputElement>('.ctx-menu input[name=model_name]');
+  const type = (value: string) =>
+    act(async () => {
+      name()!.value = value;
+      name()!.dispatchEvent(new Event('input', { bubbles: true }));
+      name()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 10));
+    });
 
-  it('switches the model: an alias at once, another name once typed, the default as null', async () => {
+  it('switches the model from its pill: a family picks its alias, a version from its submenu, another name on Enter, the default as null', async () => {
     const { app, api } = setup('running');
     await mount(app);
+    // The model of the last turn, as the header named it.
+    const pill = $('.chat-meta button.btn-model-pill')!;
+    expect(pill.textContent).toBe('Opus 5.5');
+    expect(pill.getAttribute('aria-label')).toBe('Model: Opus 5.5');
+    expect(pill.classList.contains('pill')).toBe(false);
     await open();
-    expect(field('model')!.value).toBe('');
-    expect([...field('model')!.options].map((o) => o.textContent)).toEqual([
-      "Claude Code's default",
-      'Opus',
-      'Sonnet',
-      'Haiku',
-      'Fable',
-      'Opus 5.5',
-      'Opus 5',
-      'Opus 4.8',
-      'Opus 4.7',
-      'Opus 4.6',
-      'Sonnet 5.5',
-      'Sonnet 5',
-      'Sonnet 4.6',
-      'Haiku 5.5',
-      'Haiku 4.5',
-      'Fable 5.2',
-      'Fable 5.1',
-      'Fable 5',
-      'Another model…',
-    ]);
-    await set('model', 'sonnet');
+    expect($('.ctx-menu')!.getAttribute('aria-label')).toBe('Model');
+    // A family each, its versions in its submenu; no flat list of versions.
+    expect(labels()).toEqual(["Claude Code's default", 'Opus', 'Sonnet', 'Haiku', 'Fable', 'Another model…']);
+    expect(item('.btn-model-default').getAttribute('aria-checked')).toBe('true');
+    expect($('.ctx-menu .btn-model-claude-opus-4-8')).toBeNull();
+    await hover('.btn-model-sonnet');
+    expect(flyout()).toEqual(['Sonnet 5.5', 'Sonnet 5', 'Sonnet 4.6']);
+    await pick('.btn-model-sonnet');
     expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: 'sonnet' });
     expect(app.sessions.get('s1')!.model).toBe('sonnet');
-    expect(field('model')!.value).toBe('sonnet');
+    expect($('.ctx-menu')).toBeNull();
+    expect($('.btn-model-pill')!.textContent).toBe('Sonnet');
 
-    await set('model', 'custom');
-    expect(api.patchSession).toHaveBeenCalledTimes(1);
-    await set('model_name', ' claude-opus-5-5 ');
-    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: 'claude-opus-5-5' });
+    await open();
+    await hover('.btn-model-opus');
+    expect(flyout()).toEqual(['Opus 5.5', 'Opus 5', 'Opus 4.8', 'Opus 4.7', 'Opus 4.6']);
+    await pick('.btn-model-claude-opus-4-8');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: 'claude-opus-4-8' });
+    expect($('.btn-model-pill')!.textContent).toBe('Opus 4.8');
 
-    await set('model', '');
+    await open();
+    await pick('.btn-model-custom');
+    expect(api.patchSession).toHaveBeenCalledTimes(2);
+    // An empty name does nothing; one typed goes on Enter, trimmed.
+    await type('  ');
+    expect(api.patchSession).toHaveBeenCalledTimes(2);
+    expect(name()).not.toBeNull();
+    await type(' claude-opus-4-1 ');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: 'claude-opus-4-1' });
+    expect($('.ctx-menu')).toBeNull();
+
+    await open();
+    await pick('.btn-model-default');
     expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: null });
-    expect(field('model_name')).toBeNull();
+  });
+
+  it('marks the family of the model, with the version on it; another name typed is "Another model…"; the entry the session has only closes the menu, a family checked for a version picks its alias', async () => {
+    let { app, api } = setup('idle', { model: 'claude-opus-4-8' });
+    await mount(app);
+    await open();
+    expect(item('.btn-model-opus').getAttribute('aria-checked')).toBe('true');
+    expect(item('.btn-model-opus .menu-detail').textContent).toBe('4.8');
+    expect(item('.btn-model-sonnet').getAttribute('aria-checked')).toBe('false');
+    expect(item('.btn-model-sonnet .menu-detail')).toBeNull();
+    await hover('.btn-model-opus');
+    expect(item('.ctx-flyout .btn-model-claude-opus-4-8').getAttribute('aria-checked')).toBe('true');
+    await pick('.ctx-flyout .btn-model-claude-opus-4-8');
+    expect($('.ctx-menu')).toBeNull();
+    expect(api.patchSession).not.toHaveBeenCalled();
+    // The family itself, checked for its version, is its alias.
+    await open();
+    await pick('.btn-model-opus');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: 'opus' });
+    render(null, root);
+
+    // The alias checks its family without a version; picked again, it only closes the menu.
+    ({ app, api } = setup('idle', { model: 'fable' }));
+    await mount(app);
+    await open();
+    expect(item('.btn-model-fable').getAttribute('aria-checked')).toBe('true');
+    expect(item('.btn-model-fable .menu-detail')).toBeNull();
+    await pick('.btn-model-fable');
+    expect($('.ctx-menu')).toBeNull();
+    expect(api.patchSession).not.toHaveBeenCalled();
+    render(null, root);
+
+    ({ app } = setup('idle', { model: 'claude-sonnet-4-5' }));
+    await mount(app);
+    expect($('.btn-model-pill')!.textContent).toBe('Sonnet 4.5');
+    await open();
+    expect(item('.btn-model-custom').getAttribute('aria-checked')).toBe('true');
+    expect(items().filter((i) => i.getAttribute('aria-checked') === 'true')).toHaveLength(1);
+    await pick('.btn-model-custom');
+    expect(name()!.value).toBe('claude-sonnet-4-5');
   });
 
   it('switches to a provider the session\'s worker allows, after a confirmation, and back to a Claude model', async () => {
@@ -472,49 +573,54 @@ describe('model', () => {
     await mount(app);
     await open();
     // Only the worker's providers, under the Claude models.
-    const options = [...field('model')!.options].map((o) => o.textContent);
-    expect(options.slice(-1)).toEqual(['Qwen 3.8 (local)']);
-    expect(options).not.toContain('GLM');
+    expect(labels().slice(-1)).toEqual(['Qwen 3.8 (local)']);
+    expect(labels()).not.toContain('GLM');
     // Declined: nothing changes.
-    await set('model', 'provider:pr1');
+    await pick('.btn-model-provider');
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(api.patchSession).not.toHaveBeenCalled();
     confirm.mockReturnValue(true);
-    await set('model', 'provider:pr1');
+    await open();
+    await pick('.btn-model-provider');
     expect(api.patchSession).toHaveBeenLastCalledWith('s1', { provider_id: 'pr1' });
     expect(app.sessions.get('s1')!.provider?.label).toBe('Qwen 3.8 (local)');
-    // The header names the provider and shows no cost.
-    expect($('.chat-provider')!.textContent).toBe('Qwen 3.8 (local)');
+    // The pill names the provider, and the header shows no cost.
+    expect($('.btn-model-pill')!.textContent).toBe('Qwen 3.8 (local)');
     expect($('.chat-cost')).toBeNull();
-    expect(field('model')!.value).toBe('provider:pr1');
+    await open();
+    expect(item('.btn-model-provider').getAttribute('aria-checked')).toBe('true');
+    expect(item('.btn-model-opus').getAttribute('aria-checked')).toBe('false');
     // A Claude model leaves the provider in the same PATCH.
-    await set('model', 'opus');
+    await pick('.btn-model-opus');
     expect(api.patchSession).toHaveBeenLastCalledWith('s1', { provider_id: null, model: 'opus' });
     expect(app.sessions.get('s1')!.provider).toBeUndefined();
     vi.unstubAllGlobals();
   });
 
-  it('gives the agent the browser after a confirmation and takes it away, only on a worker that gives one', async () => {
-    const { app, api } = setup('running');
+  it('gives the agent the browser from the mode pill\'s menu after a confirmation and takes it away, only on a worker that gives one', async () => {
+    const { app, api } = setup('running', { effective_permission_mode: 'ask' });
     const confirm = vi.fn(() => false);
     vi.stubGlobal('confirm', confirm);
-    // A worker without `browser`: no item.
+    const modeMenu = () => act(async () => $('.btn-mode-pill')!.click());
+    // A worker without `browser`: no item, the switch alone.
     await mount(app);
-    await open();
+    await modeMenu();
+    expect($('.ctx-menu .mode-switch')).not.toBeNull();
     expect($('.btn-browser')).toBeNull();
-    await open();
+    await modeMenu();
     // GET /api/workers: this worker's worker.toml has `browser = true`.
     Object.assign(api, { workers: vi.fn(async () => [{ id: 'wk1', name: 'drzlo-mac', browser: true }]) });
     await act(() => app.loadWorkers());
-    await open();
-    expect($('.btn-browser-on')!.textContent).toBe('Browser: off · Give the browser');
+    await modeMenu();
+    expect($('.ctx-menu .btn-browser-on')!.textContent).toBe('Browser: off · Give the browser');
+    expect($('.ctx-menu .btn-browser-on')!.getAttribute('title')).toBe('The agent restarts with your Chrome on its worker');
     // Declined: nothing changes.
     await act(async () => $('.btn-browser-on')!.click());
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(String((confirm.mock.calls[0] as unknown[])[0])).toContain('Give the agent your browser?');
     expect(api.patchSession).not.toHaveBeenCalled();
     confirm.mockReturnValue(true);
-    await open();
+    await modeMenu();
     await act(async () => $('.btn-browser-on')!.click());
     expect(api.patchSession).toHaveBeenLastCalledWith('s1', { browser: true });
     expect(app.sessions.get('s1')!.browser).toBe(true);
@@ -522,7 +628,7 @@ describe('model', () => {
     expect($('.chat-browser')!.textContent).toBe('Browser');
     expect($('.chat-browser')!.getAttribute('title')).toContain('The agent has your Chrome on');
     // And off again.
-    await open();
+    await modeMenu();
     expect($('.btn-browser-off')!.textContent).toBe('Browser: on · Turn off');
     await act(async () => $('.btn-browser-off')!.click());
     expect(String((confirm.mock.calls.at(-1) as unknown[])[0])).toBe('The agent restarts without the browser.');
@@ -531,10 +637,10 @@ describe('model', () => {
     vi.unstubAllGlobals();
   });
 
-  it('the header names a model switched to since the last turn at once', async () => {
+  it('the pill names a model switched to since the last turn at once', async () => {
     const { app } = setup('running', { model: 'fable' });
     await mount(app);
-    expect($('.chat-model')!.textContent).toBe('Fable');
+    expect($('.btn-model-pill')!.textContent).toBe('Fable');
     expect(shownModel('opus', 'claude-opus-5-5')).toBe('claude-opus-5-5');
     expect(shownModel('claude-fable-5-1', 'claude-fable-5-1')).toBe('claude-fable-5-1');
     expect(shownModel(undefined, 'claude-opus-5-5')).toBe('claude-opus-5-5');
@@ -544,10 +650,50 @@ describe('model', () => {
     expect(modelName('qwen3.8-27b:q4_K')).toBe('qwen3.8-27b:q4_K');
   });
 
+  it('says Default before any turn named a model; archived, it is the name alone; a room and the service session have no pills', async () => {
+    let { app } = setup('idle', { history: [HISTORY[0]] });
+    await mount(app);
+    expect($('.btn-model-pill')!.textContent).toBe('Default');
+    render(null, root);
+
+    ({ app } = setup('idle'));
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true, state: 'archived' });
+    await mount(app);
+    expect($('button.btn-model-pill')).toBeNull();
+    expect($('span.btn-model-pill')!.textContent).toBe('Opus 5.5');
+    expect($('span.btn-model-pill svg')).toBeNull();
+    render(null, root);
+
+    ({ app } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]] }));
+    await mount(app);
+    expect($('.btn-model-pill, .btn-mode-pill')).toBeNull();
+    render(null, root);
+
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    await act(async () => {
+      render(<Chat app={setup('idle').app} sessionId="sys" />, root);
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect($('.chat-system-note')).not.toBeNull();
+    expect($('.btn-model-pill, .btn-mode-pill')).toBeNull();
+    render(null, root);
+
+    // On a phone neither has a line of pills.
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    await act(async () => {
+      render(<Chat app={setup('idle').app} sessionId="sys" phone />, root);
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect($('.chat-system-note')).not.toBeNull();
+    expect($('.chat-pills')).toBeNull();
+  });
+
   it('shows the model the runtime kept once it refused a switch (SPEC 0.179)', async () => {
     const { app, api } = setup('idle', { model: 'claude-nope' });
     await mount(app);
-    expect($('.chat-model')!.textContent).toBe('claude-nope');
+    expect($('.btn-model-pill')!.textContent).toBe('claude-nope');
     // GET /api/sessions/{id}: the model the hub took from the line.
     api.session.mockImplementation(async () => ({ ...app.sessions.get('s1')!, model: 'claude-opus-5-5', commands: undefined }));
     const fetched = api.session.mock.calls.length;
@@ -556,10 +702,10 @@ describe('model', () => {
       await new Promise((r) => setTimeout(r, 10));
     });
     expect(api.session).toHaveBeenCalledTimes(fetched + 1);
-    expect($('.chat-model')!.textContent).toBe('Opus 5.5');
+    expect($('.btn-model-pill')!.textContent).toBe('Opus 5.5');
   });
 
-  it('shows the usage limits of the session\'s worker under the model', async () => {
+  it('shows the usage limits of the session\'s worker under the model menu\'s items', async () => {
     const { app, api } = setup('idle');
     const soon = Math.floor(Date.now() / 1000) + 2 * 3600;
     (api as any).workers = vi.fn(async () => [
@@ -577,7 +723,7 @@ describe('model', () => {
     await mount(app);
     await open();
     await act(async () => new Promise((r) => setTimeout(r, 10)));
-    const rows = [...root.querySelectorAll('.menu-settings .limit-row')].map((r) => [
+    const rows = [...root.querySelectorAll('.ctx-menu > .menu-bottom .limit-row')].map((r) => [
       r.querySelector('.limit-name')!.textContent,
       r.querySelector('.limit-pct')!.textContent,
     ]);
@@ -588,6 +734,8 @@ describe('model', () => {
     expect(root.querySelectorAll('.limit-high')).toHaveLength(1);
     const week = root.querySelectorAll('.limit-reset')[1].textContent!;
     expect(week).toMatch(/^resets \S+ \d/);
+    // Under the items: the last thing in the menu.
+    expect($('.ctx-menu')!.lastElementChild!.classList.contains('menu-bottom')).toBe(true);
   });
 
   it('shows no limits while the worker has reported none', async () => {
@@ -658,52 +806,19 @@ describe('model', () => {
     );
   });
 
-  // SPEC 0.168: the versions under "Versions"; a name the menu does not list is typed.
-  it('a version is chosen as an alias is, and shows as chosen; another name shows as typed', async () => {
-    let { app, api } = setup('idle');
-    await mount(app);
-    await open();
-    expect(field('model')!.querySelector('optgroup')!.label).toBe('Versions');
-    await set('model', 'claude-opus-4-8');
-    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: 'claude-opus-4-8' });
-    expect(field('model')!.value).toBe('claude-opus-4-8');
-    expect(field('model_name')).toBeNull();
-    render(null, root);
-
-    ({ app } = setup('idle', { model: 'claude-fable-5' }));
-    await mount(app);
-    await open();
-    expect(field('model')!.value).toBe('claude-fable-5');
-    expect(field('model_name')).toBeNull();
-    render(null, root);
-
-    ({ app } = setup('idle', { model: 'claude-sonnet-4-5' }));
-    await mount(app);
-    await open();
-    expect(field('model')!.value).toBe('custom');
-    expect(field<HTMLInputElement>('model_name')!.value).toBe('claude-sonnet-4-5');
-  });
-
-  it('shows what the hub refused', async () => {
-    const { app, api } = setup('idle');
-    api.patchSession.mockRejectedValueOnce(new Error('model must be 1..64 characters of A-Z a-z 0-9 . _ : -'));
-    await mount(app);
-    await open();
-    await set('model', 'custom');
-    await set('model_name', 'a b');
-    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: 'a b' });
-    expect($('.notice')!.textContent).toContain('Not changed: model must be');
-  });
 });
 
 // SPEC 0.168: the runtime's reply to a model refusal offers another model while no message of the
-// user came after it; the choice switches the session as "More" does.
+// user came after it; the choice switches the session as the model pill does.
 describe('a refusal of the model', () => {
   const REFUSAL =
     "API Error: Opus 5.5's safeguards flagged this session. Claude Code can't respond to your last message with Opus 5.5. Try rephrasing the request in a new session or change your model.";
   const reply = (seq: number, refusal = true) =>
     ev('event.agent.message', seq, (e) => (e.payload = { text: REFUSAL, final: true, runtime: true, refusal }));
   const offer = () => $('.line-refusal .btn-switch-model');
+  /** The mouse on Opus: its versions in a flyout beside it. */
+  const opusVersions = () =>
+    act(async () => void root.querySelector('.ctx-menu .btn-model-opus')!.dispatchEvent(new MouseEvent('mouseenter')));
 
   it('offers "Switch model" under the last one; a version picked switches the session and the line says so', async () => {
     const { app, api } = setup('idle', { history: [HISTORY[0], reply(2)] });
@@ -711,9 +826,12 @@ describe('a refusal of the model', () => {
     expect($('.line-refusal')!.textContent).toBe(`${REFUSAL}Switch model`);
     await act(async () => offer()!.click());
     const items = [...root.querySelectorAll<HTMLButtonElement>('.ctx-menu .menu-item')].map((b) => b.textContent);
-    expect(items).toContain('Opus 4.8');
+    // The families, each with its versions in a submenu.
+    expect(items).toEqual(['Opus', 'Sonnet', 'Haiku', 'Fable', 'Another model…']);
     // A running agent is not switched to the default: it is not offered.
     expect(items).not.toContain("Claude Code's default");
+    await opusVersions();
+    expect([...root.querySelectorAll('.ctx-flyout .menu-item')].map((b) => b.textContent)).toContain('Opus 4.8');
     await act(async () => {
       root.querySelector<HTMLButtonElement>('.ctx-menu .btn-model-claude-opus-4-8')!.click();
       await new Promise((r) => setTimeout(r, 10));
@@ -728,6 +846,7 @@ describe('a refusal of the model', () => {
     const { app } = setup('idle', { history: [HISTORY[0], reply(2)] });
     await mount(app);
     await act(async () => offer()!.click());
+    await opusVersions();
     await act(async () => {
       root.querySelector<HTMLButtonElement>('.ctx-menu .btn-model-claude-opus-4-8')!.click();
       await new Promise((r) => setTimeout(r, 10));
@@ -799,6 +918,8 @@ describe('a refusal of the model', () => {
     const { app, api } = setup('idle', { history: [HISTORY[0], reply(2)], model: 'claude-opus-4-8' });
     await mount(app);
     await act(async () => offer()!.click());
+    expect(root.querySelector('.ctx-menu .btn-model-opus')!.getAttribute('aria-checked')).toBe('true');
+    await opusVersions();
     const checked = root.querySelector<HTMLButtonElement>('.ctx-menu .btn-model-claude-opus-4-8')!;
     expect(checked.getAttribute('aria-checked')).toBe('true');
     await act(async () => {
@@ -952,30 +1073,41 @@ describe('header', () => {
     expect($('.activity')!.textContent).toBe('Agent is working');
   });
 
-  it('shows the state, worker, path, model and cost of the session, "Stop" and "More"', async () => {
-    const { app } = setup('waiting');
+  it('shows the state, the mode and model pills, the worker, path and cost of the session, "Stop" and "More"', async () => {
+    const { app } = setup('waiting', { effective_permission_mode: 'ask' });
     await mount(app);
     expect($('.chat-title')!.textContent).toBe('test 12');
     expect($('.pill')!.textContent).toBe('Waiting for permission');
     expect($('.pill .pulse')).toBeNull();
-    const meta = $('.chat-meta')!.textContent!;
-    expect(meta).toContain('drzlo-mac');
+    // The pills next to the state; the worker after them reads as where the session runs.
+    expect([...$('.chat-meta')!.children].map((c) => c.classList[0])).toEqual([
+      'state',
+      'btn-mode-pill',
+      'btn-model-pill',
+      'chat-worker',
+      'sep',
+      'chat-path',
+      'sep',
+      'chat-cost',
+    ]);
+    expect($('.chat-worker')!.textContent).toBe('on drzlo-mac');
     expect($('.chat-path .mono')!.textContent).toBe('~/work/hqc');
     // The row is one line and the path may end in an ellipsis: the whole of it on hover.
     expect($('.chat-path .mono')!.getAttribute('title')).toBe('~/work/hqc');
     expect($('.chat-path button')!.getAttribute('aria-label')).toBe('Copy path');
-    // The model of the last usage that names one, the sum of cost_usd.
-    expect($('.chat-model')!.textContent).toBe('Opus 5.5');
+    // The model of the last usage that names one, in its pill; the sum of cost_usd.
+    expect($('.btn-mode-pill')!.textContent).toBe('Ask');
+    expect($('.btn-model-pill')!.textContent).toBe('Opus 5.5');
     expect($('.chat-cost')!.textContent).toBe('$0.07 this session');
     expect(button('Stop')).toBeDefined();
     await act(async () => $('.btn-more')!.click());
-    // T50: archiving is on the list's rows, not in the header.
+    // T50: archiving is on the list's rows, not in the header; the title is renamed in place, the
+    // mode and the model have their pills.
     expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual([
-      'Rename',
       'Schedules',
       'Move to project…',
-      'Switch to Auto',
-      'Switch to Allow all',
+      'Folder rules',
+      'Restart session',
     ]);
   });
 
@@ -992,7 +1124,9 @@ describe('header', () => {
     expect($('.chat.chat-archived .feed')).not.toBeNull();
     expect($('.chat textarea')).toBeNull();
     await act(async () => $('.btn-more')!.click());
-    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Schedules']);
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Schedules', 'Folder rules']);
+    // Read-only: its title is not renamed.
+    expect($('.btn-rename-title')).toBeNull();
     render(null, root);
 
     // Archived before the hub kept the time: no time.
@@ -1012,20 +1146,33 @@ describe('header', () => {
     expect($('.chat-spawned a')!.getAttribute('href')).toBe('#/s/s0');
     expect($('.chat-spawned a')!.getAttribute('title')).toBe('hqc/planner');
     expect($('.chat-meta .chat-spawned'), 'in the meta row on a computer').not.toBeNull();
+    // "started by <address> on <worker>": the machine after the address says where it runs.
+    expect($('.chat-meta .chat-spawned + .chat-worker')!.textContent).toBe('on drzlo-mac');
   });
 
-  it('on a phone "started by" is the header\'s last line, not in the meta row', async () => {
-    // Beside a running session's four buttons the meta row has no room for the address.
-    const { app } = setup('running', { spawned_by: { session_id: 's0', address: 'mpv-sendspin/session-4' } });
+  it('on a phone "started by" stands after the pills, on their line, not in the meta row nor on a line of its own', async () => {
+    let { app } = setup('running', { spawned_by: { session_id: 's0', address: 'mpv-sendspin/session-4' } });
     await mount(app, true);
     expect($('.chat-meta .chat-spawned')).toBeNull();
-    const line = $('.chat-head > .chat-spawned')!;
-    expect($('.chat-head')!.lastElementChild).toBe(line);
-    expect(line.textContent).toBe('started by mpv-sendspin/session-4');
-    expect(line.querySelector('a')!.getAttribute('href')).toBe('#/s/s0');
+    expect($('.chat-head > .chat-spawned')).toBeNull();
+    expect([...$('.chat-head')!.children].map((c) => c.classList[0])).toEqual(['chat-head-top', 'chat-meta', 'chat-pills']);
+    expect([...$('.chat-pills')!.children].map((c) => c.classList[0])).toEqual(['btn-mode-pill', 'btn-model-pill', 'chat-spawned']);
+    const by = $('.chat-pills > .chat-spawned')!;
+    expect(by.textContent).toBe('started by mpv-sendspin/session-4');
+    expect(by.querySelector('a')!.getAttribute('href')).toBe('#/s/s0');
+    render(null, root);
+
+    // Without pills (a room an agent made) "started by" is the line alone, under the room's
+    // agents, which stay right under its state.
+    ({ app } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]], spawned_by: { session_id: 's0', address: 'hqc/planner' } }));
+    const room = app.sessions.get('s1')!;
+    app.sessions.set('m1', { ...room, id: 'm1', title: 'Opus', slug: 'opus', room_mode: undefined, spawned_by: undefined, room_id: 's1', state: 'idle' });
+    await mount(app, true);
+    expect([...$('.chat-head')!.children].map((c) => c.classList[0])).toEqual(['chat-head-top', 'chat-meta', 'chat-room-agents', 'chat-pills']);
+    expect([...$('.chat-pills')!.children].map((c) => c.classList[0])).toEqual(['chat-spawned']);
   });
 
-  it('a room: its mode in place of the model, its agents linked with their states, an agent\'s post as its message; no model or permission switch', async () => {
+  it('a room: its mode in place of the pills, its agents linked with their states, an agent\'s post as its message; no model or permission switch', async () => {
     const post = ev('event.peer.message', 2, (e) => {
       e.payload = { from_session_id: 'm1', from: 'glazes/opus', mode: 'send', text: 'Cone 6 is **fine**' };
       delete e.chain;
@@ -1044,7 +1191,7 @@ describe('header', () => {
     member('m9', 'Elsewhere', { room_id: 'r9' });
     await mount(app);
     expect($('.chat-room')!.textContent).toBe('Room · Council');
-    expect($('.chat-model')).toBeNull();
+    expect($('.btn-mode-pill, .btn-model-pill')).toBeNull();
     expect([...root.querySelectorAll('.chat-room-agent')].map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
       ['Opus · Waiting for reply', '#/s/m1'],
       ['Sonnet · Running', '#/s/m2'],
@@ -1062,14 +1209,17 @@ describe('header', () => {
     expect(names[0].style.color).not.toBe(names[1].style.color);
     expect([...root.querySelectorAll('.room-post-model')].map((m) => m.textContent)).toEqual(['Opus 5.5', 'Sonnet 5.5']);
     expect($('.room-post .text strong')!.textContent).toBe('fine');
-    // Its menu has Rename only: no model or permission switch.
-    await act(async () => $('.btn-more')!.click());
-    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Rename']);
+    // No "More": no schedules or move for a room, and its title is renamed in place.
+    expect($('.btn-more')).toBeNull();
+    expect($('.btn-rename-title')).not.toBeNull();
     render(null, root);
 
-    // A phone's header says the same.
+    // A phone's header says the same: the room's mode on the state's line, no line of pills, its
+    // agents' line.
     await mount(app, true);
-    expect($('.chat-room')!.textContent).toBe('Room · Council');
+    expect($('.chat-meta > .chat-room')!.textContent).toBe('Room · Council');
+    expect([...$('.chat-head')!.children].map((c) => c.classList[0])).toEqual(['chat-head-top', 'chat-meta', 'chat-room-agents']);
+    expect($('.chat-pills')).toBeNull();
     expect(root.querySelectorAll('.chat-room-agent')).toHaveLength(2);
   });
 
@@ -1138,47 +1288,129 @@ describe('header', () => {
     expect(app.chat('m1').isOpen).toBe(false);
   });
 
-  it('a room without a workspace has Rename in "More" on a computer and a phone, and Retry after it on a phone; an archived room has no button but that Retry', async () => {
-    const { app } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]] });
+  it('a room has no "More" on a computer, nor on a phone with nothing to show; there Retry brings it; an archived room has none', async () => {
+    const { app, api } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]] });
     app.sessions.set('s1', { ...app.sessions.get('s1')!, workspace_id: undefined, worker_id: undefined });
+    // The hub's answer about the session, which an idle one asks for, has no workspace either.
+    api.session.mockImplementation(async () => ({ ...app.sessions.get('s1')! }));
     const items = () => [...root.querySelectorAll('.menu-item')].map((b) => b.textContent);
     await mount(app);
-    await act(async () => $('.btn-more')!.click());
-    expect(items()).toEqual(['Rename']);
+    expect($('.btn-more')).toBeNull();
     render(null, root);
     await mount(app, true);
-    await act(async () => $('.btn-more')!.click());
-    expect(items()).toEqual(['Rename']);
+    expect($('.btn-more')).toBeNull();
     render(null, root);
     app.sessions.set('s1', { ...app.sessions.get('s1')!, state: 'error' });
     await mount(app, true);
     await act(async () => $('.btn-more')!.click());
-    expect(items()).toEqual(['Rename', 'Retry']);
+    expect(items()).toEqual(['Retry']);
     render(null, root);
     app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true, state: 'archived' });
     await mount(app);
     expect($('.btn-more')).toBeNull();
   });
 
-  it('"Rename" in the "More" of a room asks for a title and renames it; a refusal goes to the chat\'s notice', async () => {
-    const { app, api } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]] });
+  it('renames in place: the pencil after the title opens a field; Enter or a press away saves the name trimmed, Esc keeps the old one, an empty or unchanged one sends nothing; a refusal goes to the notice', async () => {
+    const { app, api } = setup('idle');
     api.patchSession.mockImplementation(async (_id: string, patch: SessionPatch) => ({ ...app.sessions.get('s1')!, title: patch.title ?? '' }) as never);
     await mount(app);
-    const ask = vi.fn(() => ' Glaze review ' as string | null);
-    vi.stubGlobal('prompt', ask);
-    const rename = async () => {
-      await act(async () => $('.btn-more')!.click());
-      await act(async () => $('.btn-rename')!.click());
+    const pencil = () => $('.chat-title .btn-rename-title')!;
+    const field = () => root.querySelector<HTMLInputElement>('.chat-title input.chat-title-input');
+    const edit = async (value: string) => {
+      await act(async () => pencil().click());
+      await act(async () => {
+        field()!.value = value;
+        field()!.dispatchEvent(new Event('input', { bubbles: true }));
+      });
     };
-    await rename();
-    expect(ask).toHaveBeenCalledWith('Rename the room', 'test 12');
+    const key = (k: string) =>
+      act(async () => {
+        const e = new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true });
+        field()!.dispatchEvent(e);
+        // Handled by the field: a request's card in the chat skips a prevented Enter or Esc.
+        expect(e.defaultPrevented).toBe(true);
+        await new Promise((r) => setTimeout(r, 10));
+      });
+    expect(pencil().getAttribute('aria-label')).toBe('Rename');
+    await act(async () => pencil().click());
+    // The field in the title's place, with the title, selected for typing.
+    expect(field()!.value).toBe('test 12');
+    expect(document.activeElement).toBe(field());
+    expect($('.chat-title .btn-rename-title')).toBeNull();
+    await act(async () => {
+      field()!.value = 'Other';
+      field()!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await key('Escape');
+    expect(field()).toBeNull();
+    expect($('.chat-title')!.textContent).toBe('test 12');
+    await edit('   ');
+    await key('Enter');
+    await edit('test 12 ');
+    await key('Enter');
+    expect(api.patchSession).not.toHaveBeenCalled();
+    await edit('  Network sync ');
+    await key('Enter');
+    expect(api.patchSession).toHaveBeenCalledTimes(1);
+    expect(api.patchSession).toHaveBeenCalledWith('s1', { title: 'Network sync' });
+    expect(field()).toBeNull();
+    expect($('.chat-title')!.textContent).toBe('Network sync');
+    // A press away saves too, once.
+    await edit('Net');
+    await act(async () => {
+      field()!.dispatchEvent(new FocusEvent('blur'));
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(api.patchSession).toHaveBeenCalledTimes(2);
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { title: 'Net' });
+    api.patchSession.mockRejectedValueOnce(new Error('the title is taken'));
+    await edit('Other');
+    await key('Enter');
+    expect($('.notice')!.textContent).toBe('Not renamed: the title is taken');
+    // A title that changes while the field is open (the agent names the session) is not put
+    // back by a press away with the field unchanged.
+    const calls = api.patchSession.mock.calls.length;
+    await act(async () => pencil().click());
+    expect(field()!.value).toBe('Net');
+    await act(async () => {
+      app.sessions.set('s1', { ...app.sessions.get('s1')!, title: 'Named by the agent' });
+      (app as unknown as { changed(): void }).changed();
+    });
+    await act(async () => {
+      field()!.dispatchEvent(new FocusEvent('blur'));
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(api.patchSession).toHaveBeenCalledTimes(calls);
+    expect($('.chat-title')!.textContent).toBe('Named by the agent');
+    // Not in "More" any more.
+    await act(async () => $('.btn-more')!.click());
+    expect($('.menu .btn-rename')).toBeNull();
+  });
+
+  it('on a phone a tap on the title edits it; a room is renamed in place too', async () => {
+    const { app, api } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]] });
+    api.patchSession.mockImplementation(async (_id: string, patch: SessionPatch) => ({ ...app.sessions.get('s1')!, title: patch.title ?? '' }) as never);
+    await mount(app, true);
+    // No pencil on a phone: the title itself takes the tap.
+    expect($('.btn-rename-title')).toBeNull();
+    await act(async () => $('.chat-title')!.click());
+    const field = root.querySelector<HTMLInputElement>('.chat-title input.chat-title-input')!;
+    expect(field.value).toBe('test 12');
+    await act(async () => {
+      field.value = ' Glaze review ';
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 10));
+    });
     expect(api.patchSession).toHaveBeenCalledWith('s1', { title: 'Glaze review' });
     expect($('.chat-title')!.textContent).toBe('Glaze review');
-    api.patchSession.mockRejectedValueOnce(new Error('the title is taken'));
-    ask.mockReturnValue('Other');
-    await rename();
-    expect($('.notice')!.textContent).toBe('Not renamed: the title is taken');
-    vi.unstubAllGlobals();
+    render(null, root);
+
+    // An archived one: a tap does nothing.
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true, state: 'archived' });
+    await mount(app, true);
+    await act(async () => $('.chat-title')!.click());
+    expect($('.chat-title input')).toBeNull();
   });
 
   it("a room's header shows the sum of its agents' costs as \"this room\", not an agent on a provider's; the phone's \"More\" too", async () => {
@@ -1220,6 +1452,162 @@ describe('header', () => {
     await mount(app);
     expect($('.pill')!.textContent).toBe('Idle');
     expect(button('Stop')).toBeUndefined();
+  });
+
+  it('offers Pause right before Stop while the agent works, on a computer and a phone; not when idle, archived or in a room', async () => {
+    const wait = () => act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    for (const state of ['running', 'waiting', 'queued'] as const) {
+      const { app, api } = setup(state);
+      await mount(app);
+      const pause = $('.btn-pause')!;
+      expect(pause.textContent).toBe('Pause');
+      expect(pause.nextElementSibling!.classList.contains('btn-stop')).toBe(true);
+      await act(async () => pause.click());
+      expect(api.pauseSession).toHaveBeenCalledWith('s1');
+      render(null, root);
+      await mount(app, true);
+      expect($('.btn-pause')!.getAttribute('aria-label')).toBe('Pause after this turn');
+      expect($('.btn-pause')!.nextElementSibling!.classList.contains('btn-stop')).toBe(true);
+      render(null, root);
+    }
+    let { app, api } = setup('idle');
+    await mount(app);
+    expect($('.btn-pause')).toBeNull();
+    render(null, root);
+    ({ app } = setup('running', { room_mode: 'conversation', commands: [], history: [HISTORY[0]] }));
+    await mount(app);
+    expect($('.btn-pause')).toBeNull();
+    render(null, root);
+    ({ app } = setup('running'));
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true });
+    await mount(app);
+    expect($('.btn-pause')).toBeNull();
+    render(null, root);
+
+    // A refusal goes to the chat's notice.
+    ({ app, api } = setup('running'));
+    api.pauseSession.mockRejectedValueOnce(new Error('the worker is offline'));
+    await mount(app);
+    await act(async () => $('.btn-pause')!.click());
+    await wait();
+    expect($('.notice')!.textContent).toBe('Not paused: the worker is offline');
+  });
+
+  it("a paused session has Resume in Pause's place, before Stop while its turn still runs; not when archived", async () => {
+    let { app, api } = setup('running', { paused_at: '2026-11-15T09:00:00Z' });
+    await mount(app);
+    expect($('.btn-pause')).toBeNull();
+    const resume = $('.btn-resume')!;
+    expect(resume.textContent).toBe('Resume');
+    expect(resume.nextElementSibling!.classList.contains('btn-stop')).toBe(true);
+    api.resumeSession.mockRejectedValueOnce(new Error('the session is not paused'));
+    await act(async () => {
+      resume.click();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(api.resumeSession).toHaveBeenCalledWith('s1');
+    expect($('.notice')!.textContent).toBe('Not resumed: the session is not paused');
+    render(null, root);
+
+    ({ app, api } = setup('paused', { paused_at: '2026-11-15T09:00:00Z' }));
+    await mount(app, true);
+    expect($('.btn-resume')!.getAttribute('aria-label')).toBe('Resume');
+    expect($('.btn-stop')).toBeNull();
+    await act(async () => $('.btn-resume')!.click());
+    expect(api.resumeSession).toHaveBeenCalledWith('s1');
+    render(null, root);
+
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true, state: 'archived' });
+    await mount(app);
+    expect($('.btn-resume')).toBeNull();
+    expect($('.btn-pause')).toBeNull();
+  });
+
+  it('"Restart session" in "More" restarts the agent, a refusal to the notice; not for a paused session or one VS Code holds', async () => {
+    let { app, api } = setup('idle');
+    await mount(app);
+    const items = () => [...root.querySelectorAll('.menu-item')].map((b) => b.textContent);
+    await act(async () => $('.btn-more')!.click());
+    expect(items()).toContain('Restart session');
+    await act(async () => $('.menu .btn-restart')!.click());
+    expect(api.restartSession).toHaveBeenCalledWith('s1');
+    expect($('.menu')).toBeNull();
+    api.restartSession.mockRejectedValueOnce(new Error('the worker is offline'));
+    await act(async () => $('.btn-more')!.click());
+    await act(async () => {
+      $('.menu .btn-restart')!.click();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect($('.notice')!.textContent).toBe('Not restarted: the worker is offline');
+    render(null, root);
+
+    ({ app } = setup('paused', { paused_at: '2026-11-15T09:00:00Z' }));
+    await mount(app);
+    await act(async () => $('.btn-more')!.click());
+    expect(items()).not.toContain('Restart session');
+    render(null, root);
+
+    ({ app } = setup('locked_vscode', { held_by: { entrypoint: 'claude-vscode', status: 'idle' } }));
+    await mount(app);
+    await act(async () => $('.btn-more')!.click());
+    expect(items()).not.toContain('Restart session');
+  });
+
+  it('"Folder rules" is a link in "More" to the rules of the session\'s folder, not a button of the header', async () => {
+    const { app } = setup('idle');
+    await mount(app);
+    expect(root.querySelector('.btn-folder-rules')).toBeNull();
+    await act(async () => $('.btn-more')!.click());
+    const link = root.querySelector<HTMLAnchorElement>('.menu a.btn-folder-rules')!;
+    expect(link.textContent).toBe('Folder rules');
+    expect(link.getAttribute('href')).toBe('#/p/p1/rules/w1?session=s1');
+    expect(link.getAttribute('title')).toBe('Rules for ~/work/hqc');
+  });
+
+  it('on a phone the header is three lines: "‹", the title and the buttons, the state, the pills; "More" says where the session runs, "<worker> · <folder>" with the copy button', async () => {
+    const { app } = setup('running', { effective_permission_mode: 'allow_all', subagents: 2, model: 'claude-haiku-5-5' });
+    await mount(app, true);
+    expect([...$('.chat-head')!.children].map((c) => c.classList[0])).toEqual(['chat-head-top', 'chat-meta', 'chat-pills']);
+    expect($('.chat-head-main')).toBeNull();
+    // Line 1: the buttons on the title's line, after it.
+    expect([...$('.chat-head-top')!.children].map((c) => c.getAttribute('aria-label') ?? c.classList[0])).toEqual([
+      'Back to sessions',
+      'chat-title',
+      'Pause after this turn',
+      'Stop the agent',
+      'menu-box',
+    ]);
+    // The state's line: the state at its full text and the subagents; no worker or folder.
+    expect([...$('.chat-meta')!.children].map((c) => c.classList[0])).toEqual(['state', 'chat-agents']);
+    expect($('.chat-meta .state')!.textContent).toBe('Running');
+    expect($('.chat-meta')!.textContent).not.toContain('drzlo-mac');
+    // The pills' line: the mode, then the model, each with its chevron.
+    const pills = [...$('.chat-pills')!.children];
+    expect(pills.map((c) => [c.classList[0], c.textContent])).toEqual([
+      ['btn-mode-pill', 'Allow all'],
+      ['btn-model-pill', 'Haiku 5.5'],
+    ]);
+    expect(pills.every((p) => p.querySelector('svg'))).toBe(true);
+    await act(async () => $('.btn-more')!.click());
+    const place = $('.menu-info .menu-place')!;
+    expect(place.querySelector('.mono')!.textContent).toBe('drzlo-mac · ~/work/hqc');
+    expect(place.querySelector('button')!.getAttribute('aria-label')).toBe('Copy path');
+    expect($('.menu-info')!.firstElementChild).toBe(place);
+  });
+
+  it("on a phone the mode and model pills are on their own line, as pills of their own and not the state's", async () => {
+    const { app } = setup('idle', { effective_permission_mode: 'auto', model: 'claude-sonnet-5-5' });
+    await mount(app, true);
+    const mode = $('.chat-pills > .btn-mode-pill')!;
+    const model = $('.chat-pills > .btn-model-pill')!;
+    expect(mode.textContent).toBe('Auto');
+    expect(model.textContent).toBe('Sonnet 5.5');
+    // `.chat-phone .pill` shrinks the state's pill; these are not it.
+    expect(mode.classList.contains('pill')).toBe(false);
+    expect(model.classList.contains('pill')).toBe(false);
+    await act(async () => model.click());
+    // The menu over a backdrop on a phone.
+    expect($('.ctx-menu')).not.toBeNull();
   });
 });
 
@@ -1615,7 +2003,9 @@ describe('live subagents', () => {
 
 describe('the request card through the chat', () => {
   it('folds the tool call into the card, explains, and takes Enter', async () => {
-    const { api, app } = setup('waiting');
+    // Asked 42 s before this test, not before the file loaded: the tests ahead of it take time.
+    const asked = new Date(Date.now() - 42_000).toISOString();
+    const { api, app } = setup('waiting', { history: HISTORY.map((e) => (e.seq === 6 ? { ...e, ts: asked } : e)) });
     await mount(app);
     expect($('.tool-group')).toBeNull();
     expect($('.perm-what')!.textContent).toBe('$ ls /');
@@ -1665,12 +2055,13 @@ describe('the VS Code strip instead of the composer (SPEC §9.3)', () => {
     expect(root.textContent).not.toContain('read-only');
   });
 
-  it('on a phone too the machine is named once, in the pill: the line beside it has only the folder', async () => {
+  it('on a phone too the machine is named once, in the pill: "More" has the folder without it', async () => {
     const { app } = setup('locked_vscode', { held_by: { entrypoint: 'claude-vscode', status: 'idle' }, history: HISTORY.slice(0, 3) });
     await mount(app, true);
     expect($('.pill')!.textContent).toBe('In VS Code on drzlo-mac');
     expect($('.chat-meta')!.textContent!.split('drzlo-mac')).toHaveLength(2);
-    expect($('.chat-where')!.textContent).not.toContain('drzlo-mac');
+    await act(async () => $('.btn-more')!.click());
+    expect($('.menu-place .mono')!.textContent).toBe('~/work/hqc');
     expect($('.lockbar.lockbar-held')).not.toBeNull();
   });
 
@@ -1974,10 +2365,11 @@ describe('phone (Mobile-Session)', () => {
     expect($('.composer')).toBeNull();
     expect($('a[aria-label="Back to sessions"]')!.getAttribute('href')).toBe('#/p/p1');
     expect($('button[aria-label="Stop the agent"]')).not.toBeNull();
-    // "More" on a phone also has the path, the model and the cost.
+    // "More" on a phone also has where it runs and the cost; the model is a pill of the header.
     await act(async () => $('.btn-more')!.click());
-    expect($('.menu-info')!.textContent).toContain('~/work/hqc');
-    expect($('.menu-info')!.textContent).toContain('Opus 5.5');
+    expect($('.menu-info')!.textContent).toContain('drzlo-mac · ~/work/hqc');
+    expect($('.menu-info')!.textContent).not.toContain('Opus 5.5');
+    expect($('.chat-pills .btn-model-pill')!.textContent).toBe('Opus 5.5');
     await act(async () => $('.btn-more')!.click());
 
     await act(async () => button('Reply with text instead')!.click());

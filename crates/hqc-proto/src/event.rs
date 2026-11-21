@@ -340,7 +340,7 @@ pub enum EventKind {
         /// owner.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schedule_id: Option<Uuid>,
-        /// Set by the hub: the agent's text or, since SPEC 0.117, its thinking was being
+        /// Set by the hub: the agent's text or, since SPEC 0.206, its thinking was being
         /// written when the input came, so clients show it under that text (since SPEC 0.108);
         /// absent when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -360,7 +360,7 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         reset: bool,
         /// A piece of the agent's thinking being written, not of its answer (since SPEC
-        /// 0.117); absent when false.
+        /// 0.206); absent when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         thinking: bool,
     },
@@ -534,7 +534,7 @@ pub enum EventKind {
         /// downloaded into the target's inbox like a user's attachments (SPEC §12).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         artifact_ids: Vec<Uuid>,
-        /// Set by the hub: the agent's text or, since SPEC 0.117, its thinking was being
+        /// Set by the hub: the agent's text or, since SPEC 0.206, its thinking was being
         /// written when the message came, so clients show it under that text (since SPEC
         /// 0.108); absent when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]

@@ -120,7 +120,7 @@ export interface UserMessage {
   artifact_ids: Uuid[];
   /** The hub cron sent it for this schedule, on the owner's behalf (SPEC §16). */
   schedule_id?: Uuid;
-  /** Set by the hub: the agent's text or, since SPEC 0.117, its thinking was being written when
+  /** Set by the hub: the agent's text or, since SPEC 0.206, its thinking was being written when
    *  it came, so it stands under that text (SPEC §6, since 0.108). Absent = false. */
   during_text?: boolean;
   /** The runtime took it into the turn already running (SPEC §17.2); the hub sets it on
@@ -132,7 +132,7 @@ export interface AgentDelta {
   /** Since 0.161: the runtime abandoned the attempt that wrote the text so far, which the client
    *  drops, and the thinking being written with it; `text` is empty. Absent = false. */
   reset?: boolean;
-  /** A piece of the agent's thinking being written, not of its answer (SPEC §4, since 0.117).
+  /** A piece of the agent's thinking being written, not of its answer (SPEC §4, since 0.206).
    *  Absent = false. */
   thinking?: boolean;
 }

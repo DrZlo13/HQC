@@ -234,19 +234,16 @@ describe("the thinking being written (SPEC §6)", () => {
     expect(root.querySelector(".msg-streaming")!.textContent).toBe("Yes.");
   });
 
-  it("after a tool call is a row of its group, and a row the user opened stays open", () => {
+  it("after a tool call stands under its folded group, not in it, and joins it when stored", () => {
     const t = new Timeline();
     t.applyAll([call(1, "c1", "Bash", { command: "ls" }), result(2, "c1")]);
     t.apply(thinking("Checking"));
     const { draw } = show(t);
-    expect(buildFeed(t.items(), t).map((b) => b.kind)).toEqual(["tools"]);
-    act(() => root.querySelector<HTMLButtonElement>(".tool-group-head")!.click());
-    const row = () => root.querySelector<HTMLDetailsElement>(".tool-group-body details.thinking")!;
-    expect(row().querySelector("summary")!.textContent).toBe("Thinking · Checking");
-    act(() => {
-      row().setAttribute("open", "");
-      row().dispatchEvent(new Event("toggle"));
-    });
+    expect(buildFeed(t.items(), t).map((b) => b.kind)).toEqual(["tools", "item"]);
+    // Seen without opening the group.
+    const live = root.querySelector<HTMLDetailsElement>("details.thinking")!;
+    expect(live.closest(".tool-group")).toBeNull();
+    expect(live.querySelector("summary")!.textContent).toBe("Thinking · Checking");
 
     t.apply(
       ev("event.agent.thinking", (e) => {
@@ -255,9 +252,11 @@ describe("the thinking being written (SPEC §6)", () => {
       }),
     );
     draw();
-    expect(root.querySelectorAll("details.thinking")).toHaveLength(1);
-    expect(row().hasAttribute("open")).toBe(true);
-    expect(row().querySelector(".thinking-text")!.textContent).toBe("Checking.");
+    // Stored, a row of the group of the calls before it, as any stored thinking.
+    expect(buildFeed(t.items(), t).map((b) => b.kind)).toEqual(["tools"]);
+    expect(root.querySelector("details.thinking")).toBeNull();
+    act(() => root.querySelector<HTMLButtonElement>(".tool-group-head")!.click());
+    expect(root.querySelector(".tool-group-body details.thinking .thinking-text")!.textContent).toBe("Checking.");
   });
 
   const ends: [string, (t: Timeline) => void][] = [

@@ -16,8 +16,7 @@ import { oneLine } from './labels';
 export type ToolRow =
   /** `unfinished`: a call without a result whose turn ended after it (SPEC §6). */
   | { kind: 'call'; key: string; call?: EventOf<'tool.call'>; result?: EventOf<'tool.result'>; unfinished?: boolean }
-  /** The thinking, stored or being written (an `agent.delta` with `thinking`). */
-  | { kind: 'thinking'; key: string; event: EventOf<'agent.thinking' | 'agent.delta'> };
+  | { kind: 'thinking'; key: string; event: EventOf<'agent.thinking'> };
 
 /** An `hqc_send` / `hqc_ask` call of this session's agent and its result (T51). */
 export interface PeerCall {
@@ -188,14 +187,16 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
         } else group.rows.push({ kind: 'call', key: it.key, result: e });
         continue;
       }
-      // The thinking being written (the timeline's only `agent.delta` item) stands where its
-      // `agent.thinking` will.
       case 'agent.thinking':
-      case 'agent.delta':
         if (group) {
           group.rows.push({ kind: 'thinking', key: it.key, event: e });
           continue;
         }
+        break;
+      // The thinking being written (the timeline's only `agent.delta` item) is a block of its
+      // own, never a row of a folded group of calls: it is there to be read while it is
+      // written. Stored, it joins the group before it as above.
+      case 'agent.delta':
         break;
       case 'approval.request': {
         let g = group as Extract<Block, { kind: 'tools' }> | null;

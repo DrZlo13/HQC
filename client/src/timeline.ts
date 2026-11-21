@@ -531,9 +531,9 @@ export class Timeline {
       floor = i + n;
       i += n - 1;
     }
-    // The thinking being written stands where its `agent.thinking` will: after the stored
-    // events, above the inputs that came while it was written and those still waiting for a
-    // turn of their own, before the messages not stored yet.
+    // The thinking being written stands after the stored events, above the inputs that came
+    // while it was written and those still waiting for a turn of their own, before the
+    // messages not stored yet.
     if (this.thinking) {
       let at = out.length;
       while (at > floor && underThinking(out[at - 1])) at--;

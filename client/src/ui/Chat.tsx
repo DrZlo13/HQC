@@ -263,7 +263,7 @@ export function Chat({
   const items = !loaded ? [] : requestsOnly ? onlyRequests(t.items()) : t.items();
   const blocks = buildFeed(items, t);
   // While the agent's text is being written, the inputs that came meanwhile and the messages
-  // not stored yet stand under it (SPEC §6).
+  // not stored yet stand under it (SPEC §6), and so does the thinking being written.
   const under = t.streaming ? blocks.splice(underText(blocks, t)) : [];
   if (from.current === undefined && blocks.length) from.current = blockSeq(blocks[Math.max(0, blocks.length - SHOWN)]) ?? 0;
   const start = firstShown(blocks, from.current ?? 0);
@@ -1655,7 +1655,8 @@ function firstShown(blocks: ReturnType<typeof buildFeed>, from: number): number 
 
 /** Index of the first of the last blocks that are inputs come while the text being written now
  *  was (`during_text`, stored after the last event that ended a text or a thinking), inputs
- *  waiting for a turn of their own (`queued`, still `pending`) or messages not stored yet. */
+ *  waiting for a turn of their own (`queued`, still `pending`) or messages not stored yet, and
+ *  the thinking being written above them. */
 function underText(blocks: ReturnType<typeof buildFeed>, t: Timeline): number {
   const evs = t.events();
   let ended = 0;
@@ -1675,5 +1676,10 @@ function underText(blocks: ReturnType<typeof buildFeed>, t: Timeline): number {
     if (!(it.kind === 'pending' || queued || (it.kind === 'event' && duringText(it) && it.event.seq! > ended))) break;
     i--;
   }
+  // The thinking being written, which the timeline puts right above those inputs. A text shown
+  // as being written while a thinking is written came before that thinking: the worker holds a
+  // text until the next block of the response is stored. So the thinking goes under it.
+  const prev = blocks[i - 1];
+  if (prev?.kind === 'item' && prev.item.kind === 'event' && prev.item.event.type === 'agent.delta') i--;
   return i;
 }

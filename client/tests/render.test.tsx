@@ -272,6 +272,10 @@ describe("the thinking being written (SPEC §6)", () => {
     ],
     ["an answer stored", (t) => t.apply(ev("event.agent.message", withSeq(2)))],
     ["a dropped socket", (t) => t.reset()],
+    // The runtime abandoned the attempt that wrote it (SPEC §4).
+    ["a reset", (t) => t.apply(ev("event.agent.delta.reset"))],
+    // The runtime took back what it was writing: no stored thinking ends it then.
+    ["a retraction", (t) => t.apply(ev("event.retraction"))],
   ];
   for (const [what, end] of ends) {
     it(`ends with ${what}`, () => {
@@ -756,6 +760,16 @@ describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
     expect(root.querySelector(".relay-when")!.textContent).toBe(
       `${formatTime("2026-10-22T10:00:00Z")} · queued`,
     );
+  });
+
+  it("stands under the thinking being written, as do one written during it and a message not stored yet", () => {
+    const t = new Timeline();
+    t.applyAll([input(1, 1.2), call(2, "a", "Bash", { command: "make" }), input(3), result(4, "a")]);
+    t.apply(ev("event.agent.delta", (e) => (e.payload = { text: "Checking", thinking: true })));
+    t.apply(input(5, undefined, (e) => (e.payload.during_text = true)));
+    // The inputs above carry the example's `op-1`.
+    t.addPending("op-2", "typed while it thinks");
+    expect(order(t)).toEqual(["e1", "e2", "e4", "t1", "e3", "e5", "p-op-2"]);
   });
 
   it("keeps its place: sent while no turn ran, joined to the turn, or mirrored", () => {

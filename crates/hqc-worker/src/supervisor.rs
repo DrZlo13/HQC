@@ -78,11 +78,11 @@
 //!   model does the same. A switch the runtime refuses leaves the model it kept
 //!   ([`AdapterEvent::ModelKept`]). A session on a provider (SPEC 0.144) keeps the provider's
 //!   model: the hub changes a provider with a restart.
-//! - `idle_timeout` (SPEC §17.3): an idle process (no turn, no subagent running, no
-//!   background task the runtime lists: [`AdapterEvent::BackgroundTasks`]) is killed, the
-//!   next input resumes it; one whose agent armed a wakeup ([`AdapterEvent::Wakeup`]) is idle
-//!   only from the wakeup's time on. A reconnect and a holder report (`Cmd::Resync`,
-//!   `Cmd::Held`) are no activity of the agent.
+//! - `idle_timeout` (SPEC §17.3): an idle process (no turn, the runtime's own included:
+//!   [`Adapter::runs_own_turn`]; no subagent running, no background task the runtime lists:
+//!   [`AdapterEvent::BackgroundTasks`]) is killed, the next input resumes it; one whose agent
+//!   armed a wakeup ([`AdapterEvent::Wakeup`]) is idle only from the wakeup's time on. A
+//!   reconnect and a holder report (`Cmd::Resync`, `Cmd::Held`) are no activity of the agent.
 //! - `max_sessions`: at most that many agent processes at once; one more start is
 //!   `agent_start_failed`, retryable.
 //! - Workspaces hqc makes and deletes (T45): `workspace.create` is acked at once and runs in
@@ -1374,9 +1374,12 @@ impl Session {
     fn idle_deadline(&self) -> Option<Instant> {
         let t = self.idle_timeout?;
         // A background subagent or command outlives the turn and may be silent for long (a
-        // build). An armed wakeup dies with the process: the agent is idle from its time on.
+        // build). A turn the runtime started by itself is a turn as well: it is silent while it
+        // waits for an approval or an answer, or runs a long command. An armed wakeup dies with
+        // the process: the agent is idle from its time on.
         (self.state == ProcessState::Running
             && self.turn.is_none()
+            && !self.adapter.runs_own_turn()
             && self.injected.is_empty()
             && self.lowering.is_none()
             && self.queue.is_empty()

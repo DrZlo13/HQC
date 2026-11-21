@@ -189,7 +189,8 @@ pub trait Adapter: Send {
     }
     /// Whether the runtime runs a turn it started by itself, with no input of ours (Claude
     /// Code: from `system/init` after a background task's end until its `result`, which ends
-    /// it with [`AdapterEvent::TurnEnded`]); a move waits for it (SPEC §5.3). By default never.
+    /// it with [`AdapterEvent::TurnEnded`]); a move (SPEC §5.3) and `idle_timeout` (SPEC
+    /// §17.3) wait for it. By default never.
     fn runs_own_turn(&self) -> bool {
         false
     }

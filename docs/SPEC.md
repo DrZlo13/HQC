@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.185, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.203, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -4335,6 +4335,14 @@ Since 0.179 the CLI's notices are feed lines (`system`, §4; fields read in the 
 `suggestion` | `warning`; its own and its hooks' messages, "Stop hook says: …") of a level other
 than `info`, which the terminal shows only in its transcript view, and `system` `notification`
 (`key`, `text`, `priority`) → `system runtime_notice` with the text; an empty text gives none.
+Since 0.203 the CLI's Stop-hook notices give no line. The `notification` `stop-hook-error`
+("Stop hook error occurred · ctrl+o to see", a key of the terminal; the CLI sends it the first
+time in a row a Stop hook blocks the end of the turn, and when a Stop hook fails: an exit code
+other than 0 and 2, or an error running it; the hook's output is only in the terminal's
+transcript view) gives none, as the VS Code tab and the desktop app show none; so a failing Stop
+hook leaves no trace in the feed either. `stop-hook-block-cap` gives none (it repeats the
+`informational` line of the same cap, which stays). As in the desktop app, the `informational`
+"Stop hook failed: " with no reason after it gives none; one with a reason stays.
 `system` `model_fallback` and `model_consent_fallback` (`original_model`, `fallback_model`,
 `content`) → `system model_fallback` "<original> → <fallback>: <content>", and the turn's `usage`
 names the fallback model from then on (until the next `system/init`). `system`
@@ -6665,6 +6673,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.185 → 0.203 (the CLI's Stop-hook notices are not lines)
+§8.1: when a Stop hook of the owner sent the agent back to work (the first block in a row) or
+failed, the feed got the CLI's "Stop hook error occurred · ctrl+o to see" — a key of the terminal
+that does nothing in hqc — and a hook that hit the block cap gave its warning twice. The worker
+drops the `notification`s `stop-hook-error` and `stop-hook-block-cap`, as the VS Code tab (no
+`notification` at all) and the desktop app do, and, as the desktop app does, the
+`informational` "Stop hook failed: " with no reason; the cap's `informational` line stays. A
+failing Stop hook now leaves no trace in the feed, as in both. 0.186–0.202 are taken by other
+open branches.
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

@@ -5874,6 +5874,143 @@ fn a_refused_answer_is_retracted() {
     );
 }
 
+/// SPEC §8.1 (0.202): the message that asks the model again after a response whose tool call
+/// the CLI could not parse (2.1.325) names that response's records in `retracted_message_uuids`:
+/// their events are retracted at once, before any next answer.
+#[test]
+fn an_answer_the_cli_dropped_is_retracted_when_it_asks_again() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let [t, c, again] = std::array::from_fn::<Uuid, 3, _>(|_| Uuid::new_v4());
+    let assistant = |u: Uuid, content: Value| {
+        json!({"type": "assistant", "parent_tool_use_id": null, "uuid": u,
+            "message": {"model": "claude-opus-5-5", "role": "assistant", "content": content}})
+        .to_string()
+    };
+    play(
+        &mut core,
+        &[
+            assistant(t, json!([{"type": "text", "text": "Writing it."}])),
+            assistant(
+                c,
+                json!([{"type": "tool_use", "id": "toolu_x", "name": "Write", "input": {}}]),
+            ),
+        ]
+        .join("\n"),
+    );
+    let a = core.on_line(
+        &json!({"type": "user", "parent_tool_use_id": null, "uuid": again, "isSynthetic": true,
+            "retracted_message_uuids": [t, c],
+            "message": {"role": "user", "content": [{"type": "text",
+                "text": "Your tool call could not be parsed. Try again."}]}})
+        .to_string(),
+    );
+    let retracted: Vec<Vec<Uuid>> = a
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => match &e.kind {
+                EventKind::Retraction { event_ids } => Some(event_ids.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        retracted,
+        [vec![record_event_id(&t, 0), record_event_id(&c, 0)]]
+    );
+}
+
+/// SPEC §4, §8.1 (0.202): the CLI refused the model asked for and runs on another
+/// (`system/informational` with `model_restriction`, 2.1.325): a `system model_not_switched`
+/// line with the model it runs on, kept as the session's, not the notice's own text.
+#[test]
+fn a_restricted_model_is_a_line_and_the_kept_model() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let line = json!({"type": "system", "subtype": "informational", "level": "warning",
+        "content": "claude-opus-4-1 is not available on your plan; using claude-sonnet-5-5",
+        "model_restriction": {"requested_model": "claude-opus-4-1",
+            "effective_model": "claude-sonnet-5-5", "at": "start"},
+        "uuid": Uuid::new_v4(), "session_id": "s"});
+    let a = core.on_line(&line.to_string());
+    let [Action::Emit(AdapterEvent::Event(e)), Action::Emit(AdapterEvent::ModelKept(kept))] =
+        a.as_slice()
+    else {
+        panic!("{a:?}");
+    };
+    assert_eq!(kept, "claude-sonnet-5-5");
+    assert!(
+        matches!(&e.kind, EventKind::System { code, text, model, .. }
+            if code == "model_not_switched"
+                && text == "Model not switched: claude-opus-4-1 is not available. The agent runs on claude-sonnet-5-5"
+                && model.as_deref() == Some("claude-sonnet-5-5")),
+        "{e:?}"
+    );
+}
+
+/// SPEC §8.1 (0.202): a pick of a model the organization does not allow (2.1.325): the CLI sends
+/// the `model_restriction` line and then the `restricted_by_org` error of the `set_model`; one
+/// line in all.
+#[test]
+fn a_refused_pick_of_a_restricted_model_is_one_line() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let id = match core.set_model("claude-opus-4-1") {
+        Action::Write(v) => v["request_id"].as_str().unwrap().to_owned(),
+        a => panic!("{a:?}"),
+    };
+    let notice = json!({"type": "system", "subtype": "informational", "level": "warning",
+        "content": "claude-opus-4-1 is not available; using claude-sonnet-5-5",
+        "model_restriction": {"requested_model": "claude-opus-4-1",
+            "effective_model": "claude-sonnet-5-5", "at": "switch"},
+        "uuid": Uuid::new_v4(), "session_id": "s"});
+    let a = core.on_line(&notice.to_string());
+    assert!(
+        matches!(a.as_slice(), [
+            Action::Emit(AdapterEvent::Event(_)),
+            Action::Emit(AdapterEvent::ModelKept(m)),
+        ] if m == "claude-sonnet-5-5"),
+        "{a:?}"
+    );
+    let error = |id: &str| {
+        json!({"type": "control_response", "response": {"subtype": "error",
+            "request_id": id, "error": "Model claude-opus-4-1 is restricted",
+            "error_code": "restricted_by_org", "model": "claude-sonnet-5-5"}})
+        .to_string()
+    };
+    assert!(core.on_line(&error(&id)).is_empty());
+    // The same pick again: the CLI notices a model once until a switch applies, so only the
+    // error comes, and it gives the line.
+    let again = match core.set_model("claude-opus-4-1") {
+        Action::Write(v) => v["request_id"].as_str().unwrap().to_owned(),
+        a => panic!("{a:?}"),
+    };
+    let a = core.on_line(&error(&again));
+    assert!(
+        matches!(a.as_slice(), [
+            Action::Emit(AdapterEvent::Event(e)),
+            Action::Emit(AdapterEvent::ModelKept(m)),
+        ] if m == "claude-sonnet-5-5"
+            && matches!(&e.kind, EventKind::System { code, .. } if code == "model_not_switched")),
+        "{a:?}"
+    );
+}
+
+/// SPEC §8.1 (0.202): a `model_restriction` line of an earlier pick, after the user picked
+/// another model, gives neither a line nor its model.
+#[test]
+fn a_restriction_of_an_earlier_pick_is_only_logged() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    core.set_model("claude-opus-4-1");
+    core.set_model("claude-sonnet-5");
+    let notice = json!({"type": "system", "subtype": "informational", "level": "warning",
+        "content": "claude-opus-4-1 is not available; using claude-opus-5-5",
+        "model_restriction": {"requested_model": "claude-opus-4-1",
+            "effective_model": "claude-opus-5-5", "at": "switch"},
+        "uuid": Uuid::new_v4(), "session_id": "s"});
+    assert!(core.on_line(&notice.to_string()).is_empty());
+}
+
 /// SPEC §4, §8.1: the CLI refused a model switch of ours (2.1.312: `error` with `error_code`
 /// and `model`, the model it kept, cli:1509084): a `system model_not_switched` line with the
 /// reason and that `model`, and the supervisor keeps it as the session's model.

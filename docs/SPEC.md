@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.185, 2026-11-19. Status: the architecture agreed after six reviews and a survey of
+Version 0.204, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -3615,8 +3615,8 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   `tools/call`, `notifications/cancelled`; another method gets `-32601`, an unlisted tool
   `-32602`. Hand-written (no MCP SDK crate) since 0.33, T30.
 - `initialize` gives `instructions` (since 0.66): that the tools act with the owner's rights,
-  that the user reads the session in the hqc chat, two requirements (since 0.126) and a third
-  (since 0.176), and every
+  that the user reads the session in the hqc chat, two requirements (since 0.126), a third
+  (since 0.176) and a fourth (since 0.204), and every
   other tool by its use (`hqc_proto::mcp::INSTRUCTIONS`, a test checks each tool is named). The
   requirements: in every session the agent calls `hqc_rename` without `session` (its own
   session) with a short title the moment it understands what the work is, usually on the first
@@ -3651,6 +3651,22 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   session's `hqc_send`; on "New session" it called `hqc_spawn` with its own project and a brief,
   answered with one line and the address and ended its turn; on "Do it here" haiku did the task
   there. Haiku asked on 2 of 5, taking a small script or a letter for "one small edit".
+  The fourth: when the user asks how a subagent the agent started is doing, what it has done or
+  what it is thinking, and when the agent reports its progress itself, the agent reads the
+  subagent with `hqc_read` (`subagent` is the `agentId` from the result of its Agent call,
+  `thinking: true` adds its thinking, §7) and does not judge it by the files it changed. The
+  requirement also says why the agent may: the result of a background Agent call (Claude Code
+  2.1.312) calls the `agentId` an internal ID not to mention and says "If the user asks for
+  progress, say the agent is still running", since the subagent's output file would overflow the
+  context. Named only in the tool list, `hqc_read` was not used for it: asked "?" about its
+  coder, Opus 5.5 reported which files had changed, said it had not read the coder's thinking,
+  and read it only when told it had a tool for it. With Claude Code 2.1.312 and Sonnet 5.5, a
+  background subagent of six 10 s steps and "how is the subagent doing?" 45 s later (checked on
+  2026-11-21): without the requirement 0 of 3 read it, each answering that it was still running;
+  with it 3 of 3 read it and told the step it was on; asked "did you read its thinking?", 2 of 2
+  called `hqc_read` with `thinking: true`. With Sonnet 5.5 a turn that read a subagent's
+  thinking ended in a refusal ("Sonnet 5.5's safeguards flagged this message") in 3 of 3 runs,
+  with and without the requirement; Opus 5.5 read and used it (2026-11-20).
   Claude Code keeps
   server instructions in the system prompt while the tools wait behind `ToolSearch` (§8.1), so
   the agent knows them from the first turn; without them it did not attach files unasked
@@ -6665,6 +6681,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.203 → 0.204 (the agent reads its subagent with hqc_read)
+§7.2: asked how its coder was doing, an agent reported which files had changed, and asked whether
+it had read the coder's thinking, said no; `hqc_read` with `subagent` was in the instructions only
+as an entry of the tool list, and the result of a background Agent call tells the model to answer
+that the agent is still running. The instructions of the hqc MCP server now require `hqc_read`
+whenever the user asks about a subagent's progress or thinking or the agent reports it, and say
+that the `agentId` the Agent result calls internal is its argument. Text only. 0.186–0.203 are
+taken by other branches.
 
 ### 0.184 → 0.185 (the worker's Claude Code signed in from hqc)
 §5.3, §6, §4, §3 Worker: an expired sign-in of a worker's Claude Code meant going to the machine

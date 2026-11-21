@@ -41,18 +41,7 @@ impl SessionRules {
             input: input.clone(),
         });
         for s in suggested {
-            if s["toolName"].as_str() != Some(tool) {
-                continue;
-            }
-            let rule = match s.get("ruleContent").and_then(Value::as_str) {
-                // A whole command-running tool for the rest of the session would approve
-                // every command; only the exact input is remembered then.
-                None if EXEC_TOOLS.contains(&tool) => None,
-                None => Some(Rule::Tool(tool.into())),
-                Some(c) if tool == "Bash" => bash_rule(c),
-                Some(_) => None,
-            };
-            if let Some(r) = rule {
+            if let Some(r) = taken(tool, s) {
                 self.push(r);
             }
         }
@@ -89,6 +78,48 @@ impl SessionRules {
             self.0.push(r);
         }
     }
+}
+
+/// The rule `add` takes from one suggestion for `tool`, if it takes any.
+fn taken(tool: &str, suggestion: &Value) -> Option<Rule> {
+    if suggestion["toolName"].as_str() != Some(tool) {
+        return None;
+    }
+    match suggestion.get("ruleContent").and_then(Value::as_str) {
+        // A whole command-running tool for the rest of the session would approve
+        // every command; only the exact input is remembered then.
+        None if EXEC_TOOLS.contains(&tool) => None,
+        None => Some(Rule::Tool(tool.into())),
+        Some(c) if tool == "Bash" => bash_rule(c),
+        Some(_) => None,
+    }
+}
+
+/// The rules `add` takes from `suggested`, as the CLI writes a rule: `toolName` or
+/// `toolName(ruleContent)`. Not the exact input, which `add` always remembers.
+pub fn shown(tool: &str, suggested: &[Value]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for rule in suggested.iter().filter_map(|s| taken(tool, s)) {
+        let text = match rule {
+            Rule::Exact { .. } => continue,
+            Rule::Tool(t) => t,
+            Rule::BashPrefix(p) => format!("Bash({p} *)"),
+            Rule::BashExact(e) => format!("Bash({e})"),
+        };
+        if !out.contains(&text) {
+            out.push(text);
+        }
+    }
+    out
+}
+
+/// A rule of a suggestion, `{toolName, ruleContent?}`, as the CLI writes it.
+pub fn rule_text(rule: &Value) -> Option<String> {
+    let tool = rule["toolName"].as_str()?;
+    Some(match rule.get("ruleContent").and_then(Value::as_str) {
+        Some(c) => format!("{tool}({c})"),
+        None => tool.to_owned(),
+    })
 }
 
 fn bash_rule(content: &str) -> Option<Rule> {
@@ -171,6 +202,61 @@ mod tests {
         let ps = json!({"command": "dir"});
         r.add("PowerShell", &ps, &[json!({"toolName": "PowerShell"})]);
         assert!(!r.matches("PowerShell", &json!({"command": "del x"})));
+    }
+
+    #[test]
+    fn shown_lists_what_add_takes() {
+        let bash_forms = [
+            json!({"toolName": "Bash", "ruleContent": "git status:*"}),
+            json!({"toolName": "Bash", "ruleContent": "touch hqc-marker *"}),
+            json!({"toolName": "Bash", "ruleContent": "npm test"}),
+            json!({"toolName": "Bash", "ruleContent": "*"}),
+            json!({"toolName": "Bash", "ruleContent": "a * b"}),
+            json!({"toolName": "Bash", "ruleContent": "a | b *"}),
+            json!({"toolName": "Bash"}),
+            json!({"toolName": "Read", "ruleContent": "/w/**"}),
+        ];
+        assert_eq!(
+            shown("Bash", &bash_forms),
+            [
+                "Bash(git status *)",
+                "Bash(touch hqc-marker *)",
+                "Bash(npm test)"
+            ]
+        );
+        // What is shown is what a session rule then allows, besides the exact call.
+        let mut r = SessionRules::default();
+        r.add("Bash", &bash("ls"), &bash_forms);
+        assert_eq!(r.len(), 1 + 3);
+
+        let file_forms = [
+            json!({"toolName": "Write", "ruleContent": "/w/**"}),
+            json!({"toolName": "Bash", "ruleContent": "ls *"}),
+        ];
+        assert!(shown("Write", &file_forms).is_empty());
+        assert_eq!(
+            shown("WebSearch", &[json!({"toolName": "WebSearch"})]),
+            ["WebSearch"]
+        );
+        assert!(shown("PowerShell", &[json!({"toolName": "PowerShell"})]).is_empty());
+        let mut r = SessionRules::default();
+        r.add("Write", &json!({}), &file_forms);
+        assert_eq!(r.len(), 1);
+        r.add("WebSearch", &json!({}), &[json!({"toolName": "WebSearch"})]);
+        assert_eq!(r.len(), 1 + 2);
+    }
+
+    #[test]
+    fn rule_text_forms() {
+        assert_eq!(
+            rule_text(&json!({"toolName": "Bash", "ruleContent": "npm test:*"})).as_deref(),
+            Some("Bash(npm test:*)")
+        );
+        assert_eq!(
+            rule_text(&json!({"toolName": "WebSearch"})).as_deref(),
+            Some("WebSearch")
+        );
+        assert_eq!(rule_text(&json!({"ruleContent": "x"})), None);
     }
 
     #[test]

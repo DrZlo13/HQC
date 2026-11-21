@@ -136,6 +136,25 @@ describe('the request of a waited-on session in the asking session', () => {
     expect(card.getAttribute('aria-label')).toBe('Request of Check the build on llm-server');
   });
 
+  it("shows the whole script of B's request from its arguments, not its last line", async () => {
+    const script = "cat > x.py <<'EOF'\nprint(1)\nEOF\npython3 x.py";
+    const requests = REQUESTS.map((r) => {
+      if (r.event.type !== 'approval.request' || r.request_id !== 'req-7') return r;
+      const payload = {
+        ...r.event.payload,
+        tool: 'Bash',
+        description: `Run the script\n${script}`,
+        args_preview: JSON.stringify({ description: 'Run the script', command: script }),
+      };
+      return { ...r, event: { ...r.event, payload } } as OpenRequest;
+    });
+    const { app } = setup(requests);
+    await mount(<Chat app={app} sessionId={A} />);
+    const card = $('.foreign-request')!;
+    expect(card.querySelector('.perm .perm-what')!.textContent).toBe(`$ ${script}`);
+    expect(card.querySelector('.perm .perm-sub')!.textContent).toBe('Bash · Run the script');
+  });
+
   it('answers into B, and disappears once answered', async () => {
     const { api, app } = setup();
     await mount(<Chat app={app} sessionId={A} />);

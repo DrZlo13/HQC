@@ -86,11 +86,9 @@ describe('mock scenario', () => {
     const resp = await waitFor(chat, () => find(chat, 'approval.response', start));
     expect(resp.type === 'approval.response' && resp.payload.option_id).toBe(once.id);
     expect(chat.timeline.requestFate(req.payload.request_id).response).toBeDefined();
-    // First answer wins: a second one is refused and writes nothing (SPEC §10.1).
-    await expect(chat.approve(req.payload.request_id, once.id)).rejects.toMatchObject({
-      status: 409,
-      code: 'request_closed',
-    });
+    // First answer wins: a second one is refused and writes nothing (SPEC §10.1); the chat takes
+    // that as the request being closed, not as an error.
+    await expect(chat.approve(req.payload.request_id, once.id)).resolves.toBeUndefined();
 
     const final = await waitFor(chat, () =>
       chat.timeline.events().find((e) => e.type === 'agent.message' && e.payload.final && e.seq! > start),

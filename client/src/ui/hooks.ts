@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useState } from 'preact/hooks';
+import { useEffect, useReducer, useRef, useState } from 'preact/hooks';
 
 /** Re-renders the component whenever `subscribe` fires. */
 export function useSubscription(subscribe: (fn: () => void) => () => void, deps: unknown[]): void {
@@ -59,12 +59,19 @@ export function useIsNarrow(): boolean {
 export function useAction() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set at once, not through state: two clicks before a re-render send one request.
+  const running = useRef(false);
   const run = (fn: () => Promise<void>) => {
+    if (running.current) return;
+    running.current = true;
     setBusy(true);
     setError(null);
     fn()
       .catch((e: Error) => setError(e.message))
-      .finally(() => setBusy(false));
+      .finally(() => {
+        running.current = false;
+        setBusy(false);
+      });
   };
   return { busy, error, run };
 }

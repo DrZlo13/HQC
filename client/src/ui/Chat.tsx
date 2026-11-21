@@ -21,7 +21,7 @@ import { IconArchive, IconAttach, IconBolt, IconKey, IconBack, IconCode, IconCop
 import { MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatCost, homePath, modeConfirm, modelName, shownModel } from './labels';
 import { LiveSubagents } from './LiveSubagents';
 import { CopyButton } from './Markdown';
-import { PermissionBlock } from './permission';
+import { PermissionBlock, SECRET_GIVEN } from './permission';
 import { MoveSession } from './ProjectSettings';
 import { WaitedRequests } from './requests';
 import { SchedulesPanel } from './Schedules';
@@ -130,6 +130,9 @@ export function Chat({
   // The worker's service session (SPEC §10.2): requests and log lines, no input.
   const system = info?.system ?? false;
   const t = chat.timeline;
+  // The state comes over the socket, late after an answer of this client: the request is
+  // closed already, and the agent is not waiting for it.
+  const answeredState = state === 'waiting' && t.answeredLocally() && t.openRequests().length === 0 ? 'running' : state;
   // A room's agents: their chats stay open while the room's is, the newest page and the live
   // events only, for the running command each one's activity line names.
   const room = info?.room_mode;
@@ -185,8 +188,15 @@ export function Chat({
   const sheetRequest = phone && !requestsOnly ? firstApproval?.payload.request_id : undefined;
   const actions: ChatActions = {
     timeline: t,
-    approve: (r, o, m) => chat.approve(r, o, m),
-    answer: (r, a, x) => chat.answer(r, a, x),
+    // Answered here: the Requests list drops it now, as when answered there (`App.closing`).
+    approve: async (r, o, m) => {
+      await chat.approve(r, o, m);
+      app.dropRequest({ session_id: sessionId, request_id: r });
+    },
+    answer: async (r, a, x) => {
+      await chat.answer(r, a, x);
+      app.dropRequest({ session_id: sessionId, request_id: r });
+    },
     // Only where the input is: the hub refuses one of an archived session or one VS Code holds.
     send:
       !system && !info?.archived && state !== 'locked_vscode'
@@ -220,7 +230,11 @@ export function Chat({
       : undefined,
     peerMessage,
     giveSecret: !system && app.takesSecrets(info?.worker_id)
-      ? async (requestId, f) => void (await app.api.giveSecret(sessionId, f, requestId))
+      ? async (requestId, f) => {
+          await app.api.giveSecret(sessionId, f, requestId);
+          t.markAnswered(requestId, { request_id: requestId, option_id: SECRET_GIVEN });
+          app.dropRequest({ session_id: sessionId, request_id: requestId });
+        }
       : undefined,
     fork: !system && info?.workspace_id
       ? (e) =>
@@ -489,7 +503,7 @@ export function Chat({
   }
   // Running, as in the list, while a background subagent or task works after the turn; a room,
   // as in the list, with its agents' state (and Stop stops them all).
-  const shown = info?.room_mode ? app.shown(info).state : info && atWorkAfterTurn(info) ? 'running' : state;
+  const shown = info?.room_mode ? app.shown(info).state : info && atWorkAfterTurn(info) ? 'running' : answeredState;
   const pill = <StatePill state={shown} timeline={t} where={locked ? `In ${holder}${worker ? ` on ${worker}` : ''}` : undefined} pausing={!!info && pausingAfterTurn(info)} />;
   const agents = agentsLabel(info?.subagents);
   const conn = app.offline && <span class="conn-lost">offline</span>;
@@ -749,7 +763,7 @@ export function Chat({
           <FeedBlocks blocks={under} actions={actions} />
           {!system && !room && (
             <ActivityLine
-              state={state}
+              state={answeredState}
               timeline={t}
               root={path}
               foreground={info?.foreground_calls}

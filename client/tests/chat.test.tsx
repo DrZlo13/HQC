@@ -8,12 +8,13 @@ import { render } from 'preact';
 import { act } from 'preact/test-utils';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Api, type SessionPatch } from '../src/api';
+import { Api, ApiError, type SessionPatch } from '../src/api';
 import { AppState } from '../src/app';
 import {
   parseEvent,
   type HeldBy,
   type HqcEvent,
+  type OpenRequest,
   type PermissionMode,
   type EventOf,
   type RoomMode,
@@ -1625,6 +1626,52 @@ describe('the request card through the chat', () => {
     expect($('.perm-timer')!.textContent).toMatch(/^waiting 0:4\d$/);
     await act(async () => void document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
     expect(api.approve.mock.calls[0].slice(0, 3)).toEqual(['s1', 'req-1', 'allow']);
+  });
+});
+
+describe("an answer of this client, before the hub's state and events come", () => {
+  const enter = () => act(async () => void document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+  const settle = () => act(async () => void (await new Promise((r) => setTimeout(r, 50))));
+
+  it('the pill and the activity line do not wait for the closed request', async () => {
+    const { app } = setup('waiting');
+    await mount(app);
+    await settle();
+    expect($('.pill')!.textContent).toBe('Waiting for permission');
+    await enter();
+    await settle();
+    expect($('.pill')!.textContent).toBe('Running');
+    expect(root.textContent).not.toContain('Waiting for approval');
+    // The call waited 42 s for the answer: it counts as running from the answer, so the line
+    // does not name it at once (SPEC §17.1).
+    expect($('.activity')!.textContent).toBe('Agent is working');
+  });
+
+  it('the Requests list drops a request answered in its chat', async () => {
+    const { app } = setup('waiting');
+    const asked = HISTORY.find((e) => e.type === 'approval.request') as EventOf<'approval.request'>;
+    const open: OpenRequest = { session_id: 's1', request_id: 'req-1', kind: 'approval', address: 'hqc/s1', title: 'hqc', system: false, event: asked, waiting: [] };
+    app.setRequests([open]);
+    await mount(app);
+    await settle();
+    await enter();
+    await settle();
+    expect(app.requests).toEqual([]);
+  });
+
+  it('a request closed from another device shows what became of it, not an error', async () => {
+    const history = [...HISTORY];
+    const { api, app } = setup('waiting', { history });
+    await mount(app);
+    await settle();
+    api.approve.mockImplementation(async () => {
+      history.push(ev('event.approval.response', 8, (e) => (e.payload = { request_id: 'req-1', option_id: 'deny', by: 'u2' })));
+      throw new ApiError(409, 'the request is already closed', 'request_closed');
+    });
+    await enter();
+    await act(async () => {});
+    expect($('.perm .error-text')).toBeNull();
+    expect($('.perm-done-row .outcome')!.textContent).toContain('denied');
   });
 });
 

@@ -497,7 +497,7 @@ export class AppState {
     this.dropRequest(r);
   }
 
-  private dropRequest(r: OpenRequest): void {
+  dropRequest(r: Pick<OpenRequest, 'session_id' | 'request_id'>): void {
     const left = this.requests.filter((x) => x.session_id !== r.session_id || x.request_id !== r.request_id);
     if (left.length !== this.requests.length) this.setRequests(left);
   }

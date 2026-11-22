@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.204, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
+Version 0.205, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -584,7 +584,7 @@ the client renders only them. The "source" column is the component that produces
 | `turn_lost` | hub | the turn was lost: the agent process stopped mid-turn, the worker restarted, or there have been no turn events from the worker for a long time (watchdog, "no events for N s"; §17.3) |
 | `agent_exited` | worker | the agent process exited on its own with an error or mid-turn (§17.3) |
 | `policy_denied` | worker | a tool call was rejected by a `deny` rule from the worker's `[permissions]`, without asking the owner (§8.1, §14); the client shows "Blocked by worker policy" |
-| `task_notification` | worker (adapter; mirror) | since 0.69: a background task of the agent (a shell command, a subagent) finished or stopped; `text` is the runtime's summary of it (§8.1, §9.1). It comes when the task ends, before the answer of the turn the runtime then starts by itself. Since 0.135 `call_id` is the `call_id` of the `tool.call` that started the task, `status` how it ended as the runtime says it (Claude Code: `completed`, `failed`, `stopped`) and `task_id` the runtime's id of the task (Claude Code: a subagent's `agentId`), each absent when the runtime does not say; the card of a subagent's `Agent` call takes its end from it, and a subagent's notification (by `call_id` or by the `agentId` of its background launch, with a `status` that ends it) stands in the feed as the subagent's end card (§6). Since 0.181 `usage` is what the task spent (Claude Code: the notification's `usage`), absent when the runtime does not say, the end card shows it (§6), and the task's output file follows the notification as an `attachment` (§8.1) (adapter only: a mirrored session's notification has neither `usage` nor the attachment). The client folds any other into a "Background task ·" line ("Background task failed ·" for `status` `failed`, "Background task stopped ·" for `stopped`, since 0.181) with the whole text on one line, without its Markdown marks, dimmed in italics like the start of a thinking, cut with an ellipsis where the line ends, and (since 0.181) with `usage` at its right end as `· <tokens> tokens · <n> tools · <run time>`, as the row above the input has it (§6); opened, it shows all of it as Markdown. Since 0.186 the output file the notification is followed by (an `attachment` of kind `text`, named `<task_id>.output` after the notification of that `task_id`) is drawn inside the line, under its text once the line is opened, not as a block of its own; one in a turn that answers a question stays with that turn's attachments in its "Reply to" block (§6), and one whose line is not loaded is a card |
+| `task_notification` | worker (adapter; mirror) | since 0.69: a background task of the agent (a shell command, a subagent) finished or stopped; `text` is the runtime's summary of it (§8.1, §9.1). It comes when the task ends, before the answer of the turn the runtime then starts by itself. Since 0.135 `call_id` is the `call_id` of the `tool.call` that started the task, `status` how it ended as the runtime says it (Claude Code: `completed`, `failed`, `stopped`) and `task_id` the runtime's id of the task (Claude Code: a subagent's `agentId`), each absent when the runtime does not say; the card of a subagent's `Agent` call takes its end from it, and a subagent's notification (by `call_id` or by the `agentId` of its background launch, with a `status` that ends it) stands in the feed as the subagent's end card (§6). Since 0.181 `usage` is what the task spent (Claude Code: the notification's `usage`), absent when the runtime does not say, the end card shows it (§6), and the task's output file follows the notification as an `attachment` (§8.1) (adapter only: a mirrored session's notification has neither `usage` nor the attachment). The client folds any other into a "Background task ·" line ("Background task failed ·" for `status` `failed`, "Background task stopped ·" for `stopped`, since 0.181) with the whole text on one line, without its Markdown marks, dimmed in italics like the start of a thinking, cut with an ellipsis where the line ends, and (since 0.181) with `usage` at its right end as `· <tokens> tokens · <n> tools · <run time>`, as the row above the input has it (§6; since 0.205 on a phone `· <tokens> · <run time>`); opened, it shows all of it as Markdown. Since 0.186 the output file the notification is followed by (an `attachment` of kind `text`, named `<task_id>.output` after the notification of that `task_id`) is drawn inside the line, under its text once the line is opened, not as a block of its own; one in a turn that answers a question stays with that turn's attachments in its "Reply to" block (§6), and one whose line is not loaded is a card |
 | `context_compacted` | worker (adapter; since 0.162 mirror) | since 0.69: the runtime compacted the session's context (`/compact`); since 0.118 `text` is the summary the runtime wrote, "Context compacted" without one (§8.1); since 0.162 the mirror gives the same line from the transcript's `compact_boundary` and its summary (§9.1); the client folds the summary into a "Context compacted" line that opens to all of it as Markdown, and draws one with the fixed text as a divider. Since 0.179 the adapter's carries, when the runtime said, `trigger` (`auto` \| `manual`), `pre_tokens` (the context's tokens before) and `post_tokens` (after; absent when the runtime did not count them) — the mirror's carries none of them —, and the client's line reads "Context compacted · auto · 153k tokens freed", leaving out what is absent |
 | `compaction_failed` | worker (adapter) | since 0.179: a compaction the runtime started failed; `text` is "Compaction failed: " and the runtime's error, "Compaction failed" without one (§8.1) |
 | `transcript_not_saved` | worker (adapter) | since 0.201: the CLI reported `system/session_writes_lost` with the session's transcript among what it could not write (`error_code` `ENOSPC`: "the disk is full", `EDQUOT`: "the disk quota is used up", another or no code: "a write to the worker's disk failed", the code named in the brackets when there is one, the fix "Check the worker's disk"); `text` "Transcript not saved: the disk is full (ENOSPC); resuming this session may miss part of its conversation. Free up space on the worker's disk", the quota's fix being "Free up space or raise the quota on the worker's disk"; the worker is not named, the chat header shows it. The client shows it as any other text line. The CLI sends the frame only when it exits with status 0 (§8.1, `close`), so a process that is killed reports nothing; a frame that lost only the global config is written to the worker's log, with no line (§8.1) |
@@ -2432,11 +2432,13 @@ it. Its first line is a small agent icon, "Agent started:" dimmed (since 0.141; 
 card's label for a screen reader said "Subagent"), the call's `description`, the call's
 `subagent_type` dimmed (since 0.141 not on a phone screen 480 px wide or less, where the label
 leaves the task too little room; the type opens with the call's arguments) and a "background" chip
-when its `run_in_background` is true; its second the subagent's state: while the latest
+when its `run_in_background` is true (since 0.205 on a phone the label is "Agent:" and the chip is
+left out, for the room of the task); its second the subagent's state: while the latest
 `subagents.live` (§4) has a row with the call's `call_id`, a pulsing dot, what it does now, alone,
 as the CLI's text often starts "Running …" itself ("Running" before any progress and, since 0.202,
-while what it does now is the call's task itself) and, at the right,
-the row's `<tokens> tokens · <n> tools · <run time>`, ticking every second as above the input; else
+while what it does now is the call's task itself) and, at the right, the row's `<tokens> tokens ·
+<n> tools · <run time>` (since 0.205 on a phone `<tokens> · <run time>`, without the word "tokens"
+and the tool calls), ticking every second as above the input; else
 as the first `system task_notification` of the call says it ended — the first with its `call_id`,
 else, after a background launch whose result names the subagent `agentId: <id>`, the first with that
 `task_id` (after a restart the CLI reports a subagent cut off by it without the call's id; a later
@@ -2458,12 +2460,12 @@ command's or a Monitor's notification keeps its line; since 0.186 the output fil
 uploaded after it (§8.1) is drawn inside that line, under its text once the line is opened,
 not as a card of its own); and at the result of a subagent that ran in
 the foreground, any result of the call but a background launch's. Its first line is the state's mark
-(a check, a cross, a square when stopped), "Agent finished:" dimmed (since 0.141), the task, "done",
-"failed" or "stopped", since 0.181 the notification's `usage` as `<tokens> tokens · <n> tools`
-(§4), and, on the call's first end only, the run time from the call to the end (a later one, a
-SendMessage that continued the subagent, would count from the call); its second the end's text,
-the notification's or
-the result's (an error's `error_text`; a done one's without the CLI's trailer, from the last
+(a check, a cross, a square when stopped), "Agent finished:" dimmed (since 0.141; since 0.205
+"Agent:" on a phone), the task, "done", "failed" or "stopped", since 0.181 the notification's
+`usage` as `<tokens> tokens · <n> tools` (§4; since 0.205 on a phone `<tokens>`), and, on the
+call's first end only, the run time from the call to the end (a later one, a SendMessage that
+continued the subagent, would count from the call); its second the end's text, the notification's
+or the result's (an error's `error_text`; a done one's without the CLI's trailer, from the last
 `agentId: <id> (use SendMessage …)` line that the `<usage>` block follows), on one line without its
 Markdown marks; a click on the head opens the whole text as Markdown. In the Compact look the
 start's mark is a pulsing dot while it runs, a check when done, a cross when it failed or stopped
@@ -2589,8 +2591,9 @@ since 0.202 while what it does now is the task itself, which 2.1.312 sends after
 that does not describe itself, ToolSearch or an MCP tool;
 since 0.179, while its request to the model API waits to be retried, `<task>: Retrying 2/10
 (529), next in 4 s`, "no response" in place of a status the attempt did not get) and
-at its right `<tokens> tokens · <n> tools · <run time>` (`155.3k tokens · 188 tools · 4m 13s`),
-what was not reported yet left out, the run time ticking every second from `duration_ms`; a long
+at its right `<tokens> tokens · <n> tools · <run time>` (`155.3k tokens · 188 tools · 4m 13s`;
+since 0.205 on a phone `155.3k · 4m 13s`, for the room of the task), what was not reported yet left
+out, the run time ticking every second from `duration_ms`; a long
 line is cut with an ellipsis. Since 0.181 a subagent's line is `<task>: waiting for permission`
 while an open `approval.request` of the chat names its `task_id` in `subagent` (§4). A subagent's
 line goes when it ends; a dropped socket, and a chat
@@ -6921,6 +6924,15 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
+### 0.204 → 0.205 (a subagent's cards and rows on a phone: the task before the counts)
+§6, §4: on a phone a subagent's start card cut its task to a few letters, as "Agent started:",
+the type and the "background" chip took its first line, and `<tokens> tokens · <n> tools` crowded
+what the subagent does now off the second; its row above the input cut the task the same way, and
+so did its end card, its label "Agent finished:" and the counts taking the room. On a phone
+both cards now say "Agent:", the start card without the chip, and the start card, the end card,
+the row above the input and a background task's line show the token count without the word
+"tokens" and the run time, without the tool calls (`155.3k · 4m 13s`). A computer is unchanged.
+0.186–0.194 are taken by other pull requests.
 ### 0.203 → 0.204 (a message's Search, Copy and Quote are buttons of its own, and Add to quick messages)
 §6: Search, Copy and Quote of selected text were the client's menu of a right click on a computer
 and a "Quote" button under the selection on a phone, which a phone's own selection menu covered.

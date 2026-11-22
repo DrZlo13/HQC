@@ -4018,6 +4018,16 @@ a.relay-peer {
     display: none;
   }
 }
+/* A phone: both cards say "Agent:", without "started" or "finished", the start card without the
+   "background" chip, and the cards, a subagent's row above the input and a background task's line
+   leave out the word "tokens" and the tool calls, so the task and what it does now have the room;
+   the token count and the run time stay. */
+.layout-phone .subagent-verb,
+.layout-phone .subagent-chip,
+.layout-phone .stats-word,
+.layout-phone .stats-tools {
+  display: none;
+}
 
 .card-unknown {
   border-style: dashed;

@@ -77,7 +77,7 @@ import {
   oneLine,
   count,
 } from './labels';
-import { activityOf, elapsed, stats } from './LiveSubagents';
+import { activityOf, elapsed, stats, Stats } from './LiveSubagents';
 import { CodeBlock, CopyButton, Markdown, markdownLine, safeHref } from './Markdown';
 import { asker, PermissionBlock } from './permission';
 import { PeerMessageBlock, ReplyFromBlock, ReplyToBlock, SentBlock } from './relay';
@@ -610,9 +610,9 @@ const TASK_END_LABELS = new Map([
  *  "… stopped ·" by its `status`) and its whole text on one line, without Markdown marks, cut
  *  where the line ends (a first line alone, often a heading like "### Summary", read as the
  *  whole message), dimmed in italics like the Thinking line's start of its text, then what it
- *  spent, when the runtime says, as the subagents' row above the input has it; open, the text
- *  as Markdown, then the output file the worker uploaded for the task (SPEC §8.1), a card as
- *  any attachment. */
+ *  spent, when the runtime says, as the subagents' row above the input has it (on a phone the
+ *  token count and the run time); open, the text as Markdown, then the output file the worker
+ *  uploaded for the task (SPEC §8.1), a card as any attachment. */
 function TaskNotification({
   note,
   files,
@@ -634,7 +634,7 @@ function TaskNotification({
         <IconChevron size={12} />
         <span class="fold-label">{TASK_END_LABELS.get(note.status ?? '') ?? 'Background task ·'}</span>
         <span class="fold-peek">{peek}</span>
-        {usage && <span class="fold-stats">· {stats(usage, usage.duration_ms)}</span>}
+        {usage && <Stats cls="fold-stats" a={usage} ms={usage.duration_ms} lead="· " />}
       </summary>
       <Markdown class="fold-text" text={text} />
       {files.map((f) => (
@@ -1349,10 +1349,12 @@ function withLinks(text: string): ComponentChildren {
 
 /** A subagent the agent started (its `Agent` call): a card of its own in the project's colour,
  *  not a row of a tool group, two lines that never wrap, a long text cut. The head: the agent
- *  icon, "Agent started:", the task, the subagent's type (not on a screen 480 px wide or less)
- *  and whether it was sent to the background; under it the subagent's state: running ("Running", or what it does now) with its
- *  tokens, tool calls and run time (ticking), in the background, done with its run time, failed
- *  with the error, stopped. The head opens the call's arguments and result. */
+ *  icon, "Agent started:" ("Agent:" on a phone), the task, the subagent's type (not on a screen
+ *  480 px wide or less) and whether it was sent to the background (not on a phone); under it the
+ *  subagent's state: running ("Running", or what it does now) with its tokens (on a phone the
+ *  count without the word), tool calls (not on a phone) and run time (ticking), in the
+ *  background, done with its run time, failed with the error, stopped. The head opens the call's
+ *  arguments and result. */
 function SubagentCard({ block, actions }: { block: Extract<Block, { kind: 'subagent' }>; actions: ChatActions }) {
   const [open, setOpen] = useState(false);
   const { call, result } = block;
@@ -1374,11 +1376,11 @@ function SubagentCard({ block, actions }: { block: Extract<Block, { kind: 'subag
           ) : (
             <span class="subagent-state">Running</span>
           )}
-          <span class="subagent-stats">
-            {s.live
-              ? stats(s.live, s.live.duration_ms + Math.max(0, t - actions.timeline.liveAgentsAt))
-              : elapsed(t - Date.parse(call.ts))}
-          </span>
+          <Stats
+            cls="subagent-stats"
+            a={s.live ?? {}}
+            ms={s.live ? s.live.duration_ms + Math.max(0, t - actions.timeline.liveAgentsAt) : t - Date.parse(call.ts)}
+          />
         </>
       );
       break;
@@ -1413,7 +1415,9 @@ function SubagentCard({ block, actions }: { block: Extract<Block, { kind: 'subag
         <span class="subagent-icon">
           <IconAgent />
         </span>
-        <span class="subagent-label">Agent started:</span>
+        <span class="subagent-label">
+          Agent<span class="subagent-verb"> started</span>:
+        </span>
         {task && <span class="subagent-task">{task}</span>}
         {type && <span class="subagent-type">{type}</span>}
         {args.run_in_background === true && <span class="subagent-chip">background</span>}
@@ -1429,14 +1433,16 @@ function SubagentCard({ block, actions }: { block: Extract<Block, { kind: 'subag
 
 /** Where a subagent ended (its notification, or the result of one that ran in the
  *  foreground): a lighter card of the start card's family, two lines that never wrap. The
- *  head: the state's mark, "Agent finished:", the task, "done", "failed" or "stopped", the
- *  tokens and tool calls its notification's `usage` says (since 0.181) and, on the call's first
- *  end, the run time from the call; under it the end's text on one line, without Markdown
- *  marks; the head opens the whole text as Markdown. */
+ *  head: the state's mark, "Agent finished:" ("Agent:" on a phone), the task, "done", "failed"
+ *  or "stopped", the tokens and tool calls its notification's `usage` says (since 0.181; on a
+ *  phone the token count alone) and, on the call's first end, the run time from the call; under
+ *  it the end's text on one line, without Markdown marks; the head opens the whole text as
+ *  Markdown. */
 function SubagentEndCard({ block }: { block: Extract<Block, { kind: 'subagent-end' }> }) {
   const [open, setOpen] = useState(false);
   const e = subagentEnd(block.call, block.end);
-  const spent = stats((block.end.type === 'system' && block.end.payload.usage) || {}, block.first ? e.ms : undefined);
+  const usage = (block.end.type === 'system' && block.end.payload.usage) || {};
+  const ms = block.first ? e.ms : undefined;
   const args = callArgs(block.call.payload.args_preview);
   const task = typeof args.description === 'string' ? args.description : '';
   // A report runs to tens of KB; its first 2000 characters are wider than any window.
@@ -1453,10 +1459,12 @@ function SubagentEndCard({ block }: { block: Extract<Block, { kind: 'subagent-en
             <StateMark state={e.state === 'done' ? 'ok' : 'error'} />
           )}
         </span>
-        <span class="subagent-label">Agent finished:</span>
+        <span class="subagent-label">
+          Agent<span class="subagent-verb"> finished</span>:
+        </span>
         {task && <span class="subagent-task">{task}</span>}
         <span class="subagent-state">{e.state}</span>
-        {spent && <span class="subagent-stats">{spent}</span>}
+        {stats(usage, ms) && <Stats cls="subagent-stats" a={usage} ms={ms} />}
         <span class="chevron">
           <IconChevron />
         </span>

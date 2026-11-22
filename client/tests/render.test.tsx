@@ -21,6 +21,7 @@ import {
   type ChatActions,
 } from "../src/ui/cards";
 import { CANONICAL_LABELS, formatTime } from "../src/ui/labels";
+import { Stats } from "../src/ui/LiveSubagents";
 import { argsText, buildFeed, cutJson, relativePaths, subagentState } from "../src/ui/feed";
 
 const WIRE = join(import.meta.dirname, "../../crates/hqc-proto/examples/wire");
@@ -59,6 +60,16 @@ function show(timeline: Timeline, over: Partial<ChatActions> = {}) {
     );
   draw();
   return { actions, draw };
+}
+
+/** What a phone shows of `el`: its text without what styles.css hides there (layout.test.ts
+ *  checks that rule). */
+const PHONE_HIDDEN = ".subagent-verb, .subagent-chip, .stats-word, .stats-tools";
+function onPhone(el: Element): string {
+  if (el.matches(PHONE_HIDDEN)) return "";
+  const copy = el.cloneNode(true) as Element;
+  copy.querySelectorAll(PHONE_HIDDEN).forEach((n) => n.remove());
+  return copy.textContent ?? "";
 }
 
 const withSeq = (seq: number) => (e: any) => {
@@ -2045,6 +2056,10 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
       expect(card.querySelector(".subagent-state")).toBeNull();
       expect(card.querySelector(".subagent-activity")!.textContent).toBe("Running Verify the samples");
       expect(card.querySelector(".subagent-stats")!.textContent).toBe("155.3k tokens · 188 tools · 4m 13s");
+      // A phone: "Agent:", the token count without the word and the run time (SPEC 0.205); the
+      // chip goes by its class, whose rule layout.test.ts checks.
+      expect(onPhone(card.querySelector(".subagent-label")!)).toBe("Agent:");
+      expect(onPhone(card.querySelector(".subagent-stats")!)).toBe("155.3k · 4m 13s");
       await act(async () => {
         clock += 2000;
         vi.advanceTimersByTime(1000);
@@ -2248,6 +2263,24 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
     expect(again.querySelector(".subagent-stats")).toBeNull();
   });
 
+  it("a phone keeps the token count and the run time of what a subagent spent, not the tool calls (SPEC 0.205)", () => {
+    const draw = (a: { total_tokens?: number; tool_uses?: number }, ms?: number) => {
+      root = document.createElement("div");
+      document.body.appendChild(root);
+      act(() => render(<Stats cls="s" a={a} ms={ms} />, root));
+      const s = root.querySelector(".s")!;
+      return [s.textContent, onPhone(s)];
+    };
+    expect(draw({ total_tokens: 155300, tool_uses: 188 }, 253000)).toEqual(["155.3k tokens · 188 tools · 4m 13s", "155.3k · 4m 13s"]);
+    expect(draw({ total_tokens: 155300, tool_uses: 188 })).toEqual(["155.3k tokens · 188 tools", "155.3k"]);
+    expect(draw({ total_tokens: 155300 }, 253000)).toEqual(["155.3k tokens · 4m 13s", "155.3k · 4m 13s"]);
+    expect(draw({ total_tokens: 155300 })).toEqual(["155.3k tokens", "155.3k"]);
+    // The tool calls first: their separator goes with them.
+    expect(draw({ tool_uses: 188 }, 253000)).toEqual(["188 tools · 4m 13s", "4m 13s"]);
+    expect(draw({ tool_uses: 188 })).toEqual(["188 tools", ""]);
+    expect(draw({}, 253000)).toEqual(["4m 13s", "4m 13s"]);
+  });
+
   it("says what the subagent spent at its end, when its notification says (SPEC 0.181)", () => {
     const spent = (e: HqcEvent) => {
       (e.payload as any).usage = { total_tokens: 155300, tool_uses: 188, duration_ms: 253000 };
@@ -2263,6 +2296,12 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
     expect(first.querySelector(".subagent-stats")!.textContent).toBe("155.3k tokens · 188 tools · 1m 0s");
     // A later end has no run time from the call.
     expect(again.querySelector(".subagent-stats")!.textContent).toBe("155.3k tokens · 188 tools");
+    // A phone: "Agent:" and the token count without the word, with the run time on the first end
+    // (SPEC 0.205).
+    expect(first.querySelector(".subagent-label")!.textContent).toBe("Agent finished:");
+    expect(onPhone(first.querySelector(".subagent-label")!)).toBe("Agent:");
+    expect(onPhone(first.querySelector(".subagent-stats")!)).toBe("155.3k · 1m 0s");
+    expect(onPhone(again.querySelector(".subagent-stats")!)).toBe("155.3k");
   });
 
   it("a request for a call of the same batch keeps its call across a subagent's end card", () => {
@@ -3155,6 +3194,8 @@ describe("the feed like the Claude Code tab", () => {
       null,
       "· 155.3k tokens · 188 tools · 4m 13s",
     ]);
+    // A phone: the token count without the word, and the run time (SPEC 0.205).
+    expect(onPhone(folds[0].querySelector(".fold-stats")!)).toBe("· 155.3k · 4m 13s");
   });
 
   it("peeks at a subagent's Markdown report without its marks and shows it open as Markdown", () => {
@@ -3390,7 +3431,7 @@ describe("the feed like the Claude Code tab", () => {
     });
   const TABS = raw("event.clarify.request.preview").payload.questions[0]
     .option_previews[1];
-  const onPhone = () =>
+  const phoneMedia = () =>
     vi.stubGlobal("matchMedia", (media: string) => ({
       matches: true,
       media,
@@ -3468,7 +3509,7 @@ describe("the feed like the Claude Code tab", () => {
   });
 
   it("on a phone opens the chosen option's preview under it, as text", async () => {
-    onPhone();
+    phoneMedia();
     try {
       const t = new Timeline();
       t.apply(previewed());
@@ -3507,7 +3548,7 @@ describe("the feed like the Claude Code tab", () => {
     await act(() => radio("Hub").click());
     none();
     render(null, root);
-    onPhone();
+    phoneMedia();
     try {
       show(t);
       await act(() => radio("Hub").click());

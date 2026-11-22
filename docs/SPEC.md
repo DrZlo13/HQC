@@ -7222,7 +7222,7 @@ Resume" as the tooltip on a computer, while since 0.191 a pause stops a running 
 They are now "Pause session" and "The agent stops now; messages wait for Resume". The 0.206
 record said "More" held Pause before it; it held, besides Schedules and Move to project…, the
 mode, the model, Rename and the browser, Pause was only in the row's menu, and Folder rules and
-Restart session came into "More" with 0.206. Client only. 0.210 is taken by #164.
+Restart session came into "More" with 0.206. Client only.
 
 ### 0.208 → 0.209 (publish a page or a file at a public link)
 §7, §7.2: the tool `hqc_publish(path, caption?)` (issue #7). The worker packs a folder with

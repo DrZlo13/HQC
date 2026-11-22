@@ -30,12 +30,17 @@ import { archivedLabel, atWorkAfterTurn, pausingAfterTurn, renameByPrompt } from
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
 /** Blocks of the feed rendered on open; scrolling to the top adds `SHOWN` more. */
 const SHOWN = 60;
-/** How long after its last wheel event the user's own scroll counts as still going: a
- *  trackpad's momentum sends wheel events to its end, and its bounce at an edge moves the feed
- *  some 300 ms after the last one. */
-const WHEEL_SETTLE_MS = 400;
-/** WebKit as in Safari and the macOS app applies a wheel gesture's steps to the position the
- *  feed had and drops one the page set in between; Chromium applies them to the new one. */
+/** How long the user's own scroll counts as still going after its last input, or after the last
+ *  scroll event that came while it went: a trackpad's momentum sends wheel events to its end, a
+ *  finger's fling and a bounce at an edge move the feed with scroll events only. */
+const SCROLL_SETTLE_MS = 400;
+/** Keys that scroll the feed when the focus is not in a field. */
+const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ']);
+/** Of them, the ones that scroll up (and Shift with the space). */
+const UP_KEYS = new Set(['ArrowUp', 'PageUp', 'Home']);
+/** WebKit as in Safari, the macOS app and every browser on an iPhone applies the steps of the
+ *  user's scroll (a wheel gesture, a finger and its fling) to the position the feed had and
+ *  drops one the page set in between; Chromium applies them to the new one. */
 const losesScrollInGesture = () => {
   const ua = navigator.userAgent;
   return /AppleWebKit/.test(ua) && !/Chrome\/|Chromium\/|Edg\//.test(ua);
@@ -316,22 +321,57 @@ export function Chat({
   // after the feed grew (an image loaded) and before it is followed: far from the bottom then,
   // but the user did not leave it.
   const lastTop = useRef(0);
-  // The feed's scroll range (`scrollHeight - clientHeight`) at that position: a move up counts
-  // only if the range stayed. A feed that got shorter (the names of images giving way to the
-  // images not loaded yet) moves the position up by itself, and WebKit delivers that scroll
-  // after the images loaded and the feed grew again, far from the bottom.
+  // The feed's scroll range (`scrollHeight - clientHeight`) at that position: a move up that is
+  // not the user's own scroll counts only if the range stayed. A feed that got shorter (the
+  // names of images giving way to the images not loaded yet) moves the position up by itself,
+  // and WebKit delivers that scroll after the images loaded and the feed grew again, far from
+  // the bottom.
   const lastRange = useRef(0);
-  // The user's own wheel or trackpad scroll, momentum included, while it goes on the chat does
-  // not set the feed's position: WebKit applies the gesture's next step to the position it had,
-  // so a position set in between is lost. The older blocks rendered above a feed scrolled near
-  // its top then landed with their height lost, thousands of pixels above the bottom, and the
-  // drop read as a scroll up. What the gesture held up (`more`; a render or resize that would
-  // have followed the bottom, `heldBack`) is done once it settles, on the render the settle asks
-  // for. Only in WebKit: elsewhere no wheel event is counted.
-  const wheelAt = useRef(-Infinity);
-  const wheeling = () => performance.now() - wheelAt.current < WHEEL_SETTLE_MS;
+  // The user's own scroll: a wheel or trackpad, a finger on the feed (`touching`) or a pointer
+  // pressed on the feed's own element, its scrollbar (`barHeld`), while they are down, a key,
+  // and the momentum and bounce after them, for as long as scroll events follow within
+  // SCROLL_SETTLE_MS. A move up in it lets go of the bottom whatever the range did when the
+  // user scrolls up (`upward`, the direction of its last input): an answer being written grows the
+  // feed under it. A scroll down keeps the range rule, so a move the browser makes as images load
+  // does not let go of the bottom under it.
+  const userAt = useRef(-Infinity);
+  const touching = useRef(false);
+  const barHeld = useRef<number | undefined>(undefined);
+  const upward = useRef(false);
+  const userScrolling = () =>
+    touching.current || barHeld.current !== undefined || performance.now() - userAt.current < SCROLL_SETTLE_MS;
+  // While it goes on, the chat does not follow the bottom: Chromium drops the rest of a smooth
+  // wheel scroll the page set a position in, so an answer being written took each scroll up back
+  // down before its scroll event came. In WebKit the chat sets no position at all: WebKit
+  // applies the scroll's next step to the position it had, so a position set in between is lost.
+  // The older blocks rendered above a feed scrolled near its top then landed with their height
+  // lost, thousands of pixels above where the user was. What the scroll held up (`more`; a
+  // render or resize that would have followed the bottom, `heldBack`) is done once it settles,
+  // on the render the settle asks for.
+  const holding = () => losesScrollInGesture() && userScrolling();
   const more = useRef(false);
   const heldBack = useRef(false);
+  const settle = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  /** `goesUp`: the input's direction; a scroll event without an input keeps the last one. */
+  const userScrolled = (goesUp?: boolean) => {
+    if (goesUp !== undefined) upward.current = goesUp;
+    userAt.current = performance.now();
+    clearTimeout(settle.current);
+    // The timer is the end of the scroll (a later input or scroll event would have reset it),
+    // even if it fires a fraction of a millisecond before `performance.now()` says so.
+    settle.current = setTimeout(() => {
+      // Still down: the release starts the timer again.
+      if (touching.current || barHeld.current !== undefined) return;
+      userAt.current = -Infinity;
+      // The next scroll gives its own direction with its first input.
+      upward.current = false;
+      // A render with nothing held would pull a feed scrolled a little up, still counted at
+      // its bottom, back down.
+      if (!heldBack.current && !more.current) return;
+      heldBack.current = false;
+      grow((n) => n + 1);
+    }, SCROLL_SETTLE_MS);
+  };
   // Blocks added above keep what is on screen in place: the distance to the bottom stays.
   const keep = useRef<number | undefined>(undefined);
   const showMore = (seq: number | undefined) => {
@@ -344,16 +384,19 @@ export function Chat({
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el) return;
-    // Set by a `showMore` of this same task, before any wheel event could come in between.
+    // Set by a `showMore` of this same task, before any input could come in between.
     if (keep.current !== undefined) {
       el.scrollTop = el.scrollHeight - keep.current;
       keep.current = undefined;
     }
-    if (wheeling()) {
+    if (holding()) {
       heldBack.current = true;
       return;
     }
-    if (stick.current) el.scrollTop = el.scrollHeight;
+    if (stick.current) {
+      if (userScrolling()) heldBack.current = true;
+      else el.scrollTop = el.scrollHeight;
+    }
     const wanted = more.current;
     more.current = false;
     // A feed shorter than its window cannot be scrolled to the top, so the scroll below never
@@ -364,28 +407,67 @@ export function Chat({
   });
   useEffect(() => {
     const el = scroller.current;
-    if (!el || !losesScrollInGesture()) return;
-    let settle: ReturnType<typeof setTimeout> | undefined;
-    const wheel = () => {
-      wheelAt.current = performance.now();
-      clearTimeout(settle);
-      // The timer is the end of the gesture (a later wheel event would have reset it), even if
-      // it fires a fraction of a millisecond before `performance.now()` says so.
-      settle = setTimeout(() => {
-        wheelAt.current = -Infinity;
-        // A render with nothing held would pull a feed scrolled a little up, still counted at
-        // its bottom, back down.
-        if (!heldBack.current && !more.current) return;
-        heldBack.current = false;
-        grow((n) => n + 1);
-      }, WHEEL_SETTLE_MS);
+    if (!el) return;
+    const wheel = (e: WheelEvent) => userScrolled(e.deltaY ? e.deltaY < 0 : undefined);
+    // A finger: its touch events, not its pointer events, as a browser cancels the pointer once
+    // the touch turns into a scroll. The end is taken on the window, where it comes wherever the
+    // finger was lifted; one that went to a node removed meanwhile is made up by the next touch.
+    let fingerY: number | undefined;
+    const touchStart = (e: TouchEvent) => {
+      touching.current = true;
+      fingerY = e.touches[0]?.clientY;
+      userScrolled();
     };
-    // Passive: a wheel listener that may cancel would take the scroll off the browser's
-    // scrolling thread.
+    // The finger moving down scrolls the feed up.
+    const touchMove = (e: TouchEvent) => {
+      const y = e.touches[0]?.clientY;
+      if (y !== undefined && fingerY !== undefined && y !== fingerY) userScrolled(y > fingerY);
+      fingerY = y;
+    };
+    const touchEnd = (e: TouchEvent) => {
+      if (!touching.current || e.touches.length) return;
+      touching.current = false;
+      userScrolled();
+    };
+    // The main button pressed on the feed's own element: its scrollbar (and its padding and the
+    // margins beside the column, which scroll nothing). Its direction is not known: taken as up.
+    const pointerDown = (e: PointerEvent) => {
+      if (e.target !== el || e.pointerType === 'touch' || e.button !== 0 || e.ctrlKey) return;
+      barHeld.current = e.pointerId;
+      userScrolled(true);
+    };
+    const pointerUp = (e: PointerEvent) => {
+      if (e.pointerId !== barHeld.current) return;
+      barHeld.current = undefined;
+      userScrolled();
+    };
+    const key = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (!SCROLL_KEYS.has(e.key) || t?.closest('input, textarea, select, [contenteditable]')) return;
+      userScrolled(UP_KEYS.has(e.key) || (e.key === ' ' && e.shiftKey));
+    };
+    // Passive: a wheel or touch listener that may cancel would take the scroll off the
+    // browser's scrolling thread.
     el.addEventListener('wheel', wheel, { passive: true });
+    el.addEventListener('touchstart', touchStart, { passive: true });
+    el.addEventListener('touchmove', touchMove, { passive: true });
+    window.addEventListener('touchend', touchEnd, true);
+    window.addEventListener('touchcancel', touchEnd, true);
+    el.addEventListener('pointerdown', pointerDown);
+    window.addEventListener('pointerup', pointerUp);
+    window.addEventListener('pointercancel', pointerUp);
+    window.addEventListener('keydown', key);
     return () => {
-      clearTimeout(settle);
+      clearTimeout(settle.current);
       el.removeEventListener('wheel', wheel);
+      el.removeEventListener('touchstart', touchStart);
+      el.removeEventListener('touchmove', touchMove);
+      window.removeEventListener('touchend', touchEnd, true);
+      window.removeEventListener('touchcancel', touchEnd, true);
+      el.removeEventListener('pointerdown', pointerDown);
+      window.removeEventListener('pointerup', pointerUp);
+      window.removeEventListener('pointercancel', pointerUp);
+      window.removeEventListener('keydown', key);
     };
   }, []);
   // Images and code blocks grow after the render, and the window over the feed shrinks when
@@ -396,7 +478,7 @@ export function Chat({
     if (!el || !feed.current || typeof ResizeObserver === 'undefined') return;
     const o = new ResizeObserver(() => {
       if (!stick.current) return;
-      if (wheeling()) heldBack.current = true;
+      if (userScrolling()) heldBack.current = true;
       else el.scrollTop = el.scrollHeight;
     });
     o.observe(feed.current);
@@ -734,13 +816,16 @@ export function Chat({
         ref={scroller}
         onScroll={(e) => {
           const el = e.currentTarget as HTMLDivElement;
+          // A scroll event while the user's scroll goes on is its momentum or its bounce.
+          const user = userScrolling();
+          if (user) userScrolled();
           const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
           const range = el.scrollHeight - el.clientHeight;
-          if (near || (el.scrollTop < lastTop.current && range === lastRange.current)) stick.current = near;
+          if (near || (el.scrollTop < lastTop.current && ((user && upward.current) || range === lastRange.current))) stick.current = near;
           lastTop.current = el.scrollTop;
           lastRange.current = range;
           if (el.scrollTop < 400 && start > 0) {
-            if (wheeling()) more.current = true;
+            if (holding()) more.current = true;
             else showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
           }
           if (quote && phone) setQuote(feedSelection(feed.current));

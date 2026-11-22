@@ -1174,15 +1174,14 @@ async fn idle_timeout_waits_for_a_turn_the_runtime_starts_by_itself() {
     adapters.set_own_turn(true);
     adapters.emit(sid, AdapterEvent::BackgroundTasks(0)).await;
     tokio::time::sleep(Duration::from_millis(800)).await;
-    assert!(
-        !adapters.calls().contains(&FakeCall::Kill(sid)),
+    assert_eq!(
+        ends(&adapters.calls(), sid),
+        0,
         "never idle during the runtime's own turn"
     );
     adapters.set_own_turn(false);
     adapters.end_turn(sid).await;
-    adapters
-        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
-        .await;
+    adapters.wait_for("idle kill", |c| ends(c, sid) > 0).await;
     w.stop().await;
 }
 

@@ -1329,6 +1329,9 @@ export interface Me {
   project_sort: ProjectSort;
   /** The project a new session is quick-started in, the same on every device; null: not picked. */
   new_session_project_id: Uuid | null;
+  /** The share of a usage window, in percent, from which the chat shows the limit bar above the
+   *  input: the hub's `HQC_LIMIT_NOTICE_PERCENT`, 0 no bar; absent from hubs before it (70). */
+  limit_notice_percent?: number;
 }
 
 /** The fields of the hub's session object (SPEC §6) the client uses. */
@@ -1467,6 +1470,7 @@ export function parseMe(v: unknown): Me {
     look: oneOf(o, 'look', LOOK_NAMES) ?? 'spacious',
     project_sort: oneOf(o, 'project_sort', PROJECT_SORT_NAMES) ?? 'custom',
     new_session_project_id: optStr(o, 'new_session_project_id') ?? null,
+    limit_notice_percent: optNum(o, 'limit_notice_percent'),
   };
 }
 

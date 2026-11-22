@@ -8142,7 +8142,8 @@ button.ps-look {
   outline: 2px dashed var(--browser);
   outline-offset: 2px;
 }
-/* Above the input: a window of the account's usage at 70 % or more, and a limit hit (SPEC §6). */
+/* Above the input: a window of the account's usage at the hub's share (`limit_notice_percent`,
+   70 % by default) or more, and a limit hit (SPEC §6). */
 .limit-notice {
   flex: none;
   padding: 6px 28px;

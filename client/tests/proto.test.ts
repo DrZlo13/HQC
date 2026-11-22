@@ -320,6 +320,9 @@ describe('examples/wire', () => {
     expect(parseMe(load('api.me.json')).look).toBe('compact');
     expect(parseMe({ ...(load('api.me.json') as object), look: undefined }).look).toBe('spacious');
     expect(parseMe({ ...(load('api.me.json') as object), look: 'dense' }).look).toBe('spacious');
+    // The limit bar's threshold: the hub's; none from a hub before it (the chat takes 70).
+    expect(parseMe(load('api.me.json')).limit_notice_percent).toBe(90);
+    expect(parseMe({ ...(load('api.me.json') as object), limit_notice_percent: undefined }).limit_notice_percent).toBeUndefined();
     // The project bar's order: Custom from a hub before it and for a value this build does not
     // know.
     expect(parseMe(load('api.me.json')).project_sort).toBe('recent');

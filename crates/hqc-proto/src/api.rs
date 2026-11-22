@@ -1119,6 +1119,14 @@ pub struct Me {
     /// project is deleted.
     #[serde(default)]
     pub new_session_project_id: Option<Uuid>,
+    /// The share of a usage window, in percent, from which the chat shows the limit bar above
+    /// the input: the hub's `HQC_LIMIT_NOTICE_PERCENT`, `0` no bar; 70 from hubs before it.
+    #[serde(default = "default_limit_notice_percent")]
+    pub limit_notice_percent: u8,
+}
+
+fn default_limit_notice_percent() -> u8 {
+    70
 }
 
 /// `PATCH /api/me`.
@@ -1637,6 +1645,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.new_session_project_id, None, "absent from older hubs");
+        assert_eq!(me.limit_notice_percent, 90);
+        let mut old: Value =
+            serde_json::from_str(include_str!("../examples/wire/api.me.json")).unwrap();
+        old.as_object_mut().unwrap().remove("limit_notice_percent");
+        let old: Me = serde_json::from_value(old).unwrap();
+        assert_eq!(old.limit_notice_percent, 70, "a hub before it");
         assert!(serde_json::from_str::<PatchMe>(r#"{"project_sort":"Name"}"#).is_err());
         for o in [ProjectSort::Custom, ProjectSort::Name, ProjectSort::Recent] {
             assert_eq!(ProjectSort::parse(o.as_str()), Some(o));

@@ -515,6 +515,51 @@ async fn in_a_conversation_a_post_wakes_the_next_agent_until_twenty_follow_the_o
     hub.finish().await;
 }
 
+/// SPEC §7.1.1, §20: the posts limit of a conversation is the hub's hops limit
+/// (`HQC_PEER_HOPS_PER_CHAIN`): at three, the fourth post after the owner's message wakes nobody
+/// and the room says the agents posted three times.
+#[tokio::test]
+async fn a_conversation_stops_at_the_hops_limit_of_the_hub() {
+    let hub = TestHub::start_limited(hqc_hub::config::Limits {
+        peer_hops_per_chain: 3,
+        ..Default::default()
+    })
+    .await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (room, members) = room(
+        &hub,
+        json!({"title": "Short", "mode": "conversation",
+               "agents": [{"model": "opus"}, {"model": "sonnet"}]}),
+    )
+    .await;
+    let (a, b) = (titled(&members, "opus"), titled(&members, "sonnet"));
+    say(&hub, &room, "Tabs or spaces?").await;
+    let (_, inputs) = starts_and_inputs(&mut w, 1).await;
+    let ia = of(&inputs, a).clone();
+    ack_input(&mut w, &ia).await;
+    let (mut speaker, mut next, mut input) = (a, b, ia);
+    for n in 1..=3 {
+        let woken = answer_inputs(&mut w, speaker, &input, &format!("Tabs, {n}."), 1).await;
+        assert_eq!(woken[0]["payload"]["session_id"], next["id"], "post {n}");
+        (speaker, next, input) = (next, speaker, woken[0].clone());
+    }
+    assert!(answer(&mut w, speaker, &input, "Tabs, 4.").await.is_empty());
+    w.expect_silence(Duration::from_millis(200)).await;
+    let events = hub.events(id(&room)).await;
+    assert_eq!(posts(&events).len(), 4);
+    let stopped = lines(&events, "room_stopped");
+    assert_eq!(stopped.len(), 1, "{events:?}");
+    assert!(
+        stopped[0]["payload"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("posted 3 times"),
+        "{stopped:?}"
+    );
+    hub.finish().await;
+}
+
 /// SPEC §7.1.1: in a conversation the owner's first message wakes the first agent only; each
 /// post wakes only the next agent after its author, the last one waking the first; each input
 /// carries the owner's messages and the other agents' posts since the agent's previous input.

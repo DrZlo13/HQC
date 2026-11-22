@@ -81,7 +81,7 @@ pub(crate) async fn session_for(
 
 // ---------------------------------------------------------------- me, projects
 
-pub async fn me(user: CurrentUser) -> Json<api::Me> {
+pub async fn me(State(app): State<AppState>, user: CurrentUser) -> Json<api::Me> {
     Json(api::Me {
         id: user.id,
         email: user.email,
@@ -92,6 +92,7 @@ pub async fn me(user: CurrentUser) -> Json<api::Me> {
         look: user.look,
         project_sort: user.project_sort,
         new_session_project_id: user.new_session_project_id,
+        limit_notice_percent: app.config.limits.limit_notice_percent,
     })
 }
 
@@ -152,7 +153,7 @@ pub async fn patch_me(
         .await?;
         user.new_session_project_id = Some(id);
     }
-    Ok(me(user).await)
+    Ok(me(State(app), user).await)
 }
 
 /// The user's project; another user's looks like a missing one.

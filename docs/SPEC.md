@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.189, 2026-11-20. Status: the architecture agreed after six reviews and a survey of
+Version 0.190, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1547,11 +1547,13 @@ HTTP API (iteration 1 and projects with workspaces from iteration 2; the list is
 the rest is marked "later"):
 
 - `GET /api/me` → `{id, email, display_name, timezone, personal_project_id, theme, look,
-  project_sort, new_session_project_id}` (`api.me.json`); `PATCH /api/me` {timezone?, theme?,
-  look?, project_sort?, new_session_project_id?} (since 0.38, `api.me.patch.request.json`; an
-  unknown zone: `400`; `theme` since 0.51, `look` and `project_sort` since 0.114, §3 User,
-  another value: `422`; `new_session_project_id` since 0.188: a project that is not the user's
-  or does not exist: `404`, nothing stored) → the same object;
+  project_sort, new_session_project_id, limit_notice_percent}` (`api.me.json`;
+  `limit_notice_percent` since 0.190: the hub's `HQC_LIMIT_NOTICE_PERCENT`, the limit bar's
+  threshold below, 70 from a hub before it); `PATCH /api/me` {timezone?, theme?, look?,
+  project_sort?, new_session_project_id?} (since 0.38, `api.me.patch.request.json`; an unknown
+  zone: `400`; `theme` since 0.51, `look` and `project_sort` since 0.114, §3 User, another value:
+  `422`; `new_session_project_id` since 0.188: a project that is not the user's or does not
+  exist: `404`, nothing stored) → the same object;
   later keys; `PUT /api/me/project_order` {project_ids} (since 0.64,
   `api.project_order.request.json`) → `{projects[]}` in that order: the user's own order of the
   project bar, kept per user (`users.project_order`); ids that are not the user's projects and
@@ -1996,10 +1998,12 @@ the rest is marked "later"):
   bar, the share used and when it resets. Since 0.179 the chat also reads them when it opens and
   whenever the session's state changes, and shows a bar above the input, worded as the VS Code
   tab words it; unlike the tab, which shows the share only once the status is `allowed_warning`,
-  at 70 % of either window: "You've hit your 5-hour limit · resets 18:00" while `status` is
-  `rejected` (the limit named by `rate_limit_type`, "usage limit" for one it does not know), else
-  "You've used 82% of your weekly limit · resets Wed 18:00" for the fuller window at 70 % or
-  more; nothing below, and nothing for a limit or a window whose reset time has passed (the hub
+  at 70 % of either window (since 0.190 `limit_notice_percent` of `/api/me`, the hub's
+  `HQC_LIMIT_NOTICE_PERCENT`; at `0` the chat shows no bar at all, a hit limit included): "You've
+  hit your 5-hour limit · resets 18:00" while `status` is `rejected` (the limit named by
+  `rate_limit_type`, "usage limit" for one it does not know), else "You've used 82% of your
+  weekly limit · resets Wed 18:00" for the fuller window at that share or more; nothing below, and
+  nothing for a limit or a window whose reset time has passed (the hub
   keeps the last report, and a new one comes with the next turn), nor in a session on a provider
   (its model does not run on the subscription the limits are of).
   `GET /api/workers/enroll/{code}` → `{name, os, created_at, country?, replaceable?}`
@@ -3316,8 +3320,9 @@ The reply to an ask:
 Chains:
 - `chain_id` is created on the first `ask`/`send` from a turn started by a human; `depth`
   grows on every `ask` (limit 3), `hops` on every `peer.message` in the chain
-  (limit 20). The hub keeps the `chain` on the input that started each turn and sets it on
-  outgoing messages itself (since 0.35, T32; the MCP server is not involved): the chain of a
+  (limit 20; since 0.190 the hub's `HQC_PEER_HOPS_PER_CHAIN`, §20). The hub keeps the `chain`
+  on the input that started each turn and sets it on outgoing messages itself (since 0.35, T32;
+  the MCP server is not involved): the chain of a
   call is that of the calling session's last `delivered` input (inputs reach the agent one
   turn at a time, in `seq` order, so that input started the current turn). A `user.message`
   has no chain: a new one starts with `depth` = 1 for an ask, 0 for a send, and `hops` = 1;
@@ -3341,8 +3346,8 @@ Chains:
   limit) and stores it with the schedule; its runs carry it (a `user.message` with a `chain`), so
   a turn started by an agent's schedule continues the agent's chain instead of starting a
   human's. A schedule made by a person (the API) carries none. A chain carries at most 50 peer
-  messages in all (§20): `hops` grows only along a path, and one turn could otherwise fan out
-  without end.
+  messages in all (§20; since 0.190 the hub's `HQC_PEER_MESSAGES_PER_CHAIN`): `hops` grows only
+  along a path, and one turn could otherwise fan out without end.
 - Since 0.43 (T39), a message cannot raise permissions (user decision, 2026-10-25): a turn woken
   by a peer message (`hqc_ask`, `hqc_send` with `wake_on_send`, the prompt of `hqc_spawn`) or by
   a run of an agent's schedule runs at most in the lowest mode of the target and every session
@@ -3526,9 +3531,10 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   the speaker (its first input from the room since another agent was woken, the room stopped or
   the owner wrote last) decides: its latest post that is no aside goes to the next agent after
   it as the owner's message does, from the posting
-  agent (`room.seq` the post's) with the post's files, while at most 20 posts (the `hops` limit
-  of a chain, above and §20) follow the owner's last message before it (or a non-member's, §7), else the room gets
-  `system room_stopped` instead; without a post, its pass goes on with the room's last post that
+  agent (`room.seq` the post's) with the post's files, while at most as many posts as the `hops`
+  limit of a chain (20, `HQC_PEER_HOPS_PER_CHAIN`; above and §20) follow the owner's last
+  message before it (or a non-member's, §7), else the room gets `system room_stopped` instead;
+  without a post, its pass goes on with the room's last post that
   is no aside, or owner's message, to the next agent after the passer that is not that message's author, from
   its author (the room for the owner's message), and once every agent but that author passed
   nobody is woken and no other line is written; with neither, `system room_stopped` "<agent's
@@ -3611,8 +3617,9 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   is none of its agents (`hqc_room`'s first message, an `hqc_send` into the room) how it ended
   (user decision, 2026-11-17: before it, the session that made the room polled it until it was
   quiet). A round ends in a `conversation` when every agent but the last message's author passed
-  ("every agent but <name> passed"), at the posts limit ("the agents posted 20 times"), on any
-  other `room_stopped` (its text) and on the room's Stop ("stopped by the owner", after the agents
+  ("every agent but <name> passed"), at the posts limit ("the agents posted 20 times", the
+  number the limit's), on any other `room_stopped` (its text) and on the room's Stop ("stopped by
+  the owner", after the agents
   are stopped); in a `council` when no agent has a turn open or an input from the room pending
   ("every agent answered"). The reason is cleaned as a name is (§7.1.1 above), its agents' titles
   in it too, and names them unquoted (an empty one by its address). The notice is a `peer.message`
@@ -6620,7 +6627,7 @@ send from a session in a lower mode (§7.1).
   | `mcp.call.args` (§5.2, since 0.33) | 64 KB serialized; the worker refuses a bigger call before sending it, the hub checks again | `mcp.result` `error invalid_args` |
   | `mcp.call.session_token` (§5.2) | `hqcs_` + 43 base64url characters, checked before the database | `mcp.result` `error unauthorized` |
   | send buffer of a session (§7.1, since 0.35) | the newest 50 messages and 64 KB of their texts | the oldest dropped, `system peer_evicted` in the target |
-  | chain of peer messages (§7.1) | `depth` ≤ 3 nested asks, `hops` ≤ 20 messages | `mcp.result` `error limit_exceeded` |
+  | chain of peer messages (§7.1) | `depth` ≤ 3 nested asks, `hops` ≤ 20 messages (since 0.190 `HQC_PEER_HOPS_PER_CHAIN`, 1–254); the posts of a room's conversation after the owner's message the same number (§7.1.1) | `mcp.result` `error limit_exceeded`; a room's post: `system room_stopped` in the room |
   | `hqc_ask.timeout_s` (§7) | 1 … `ask_timeout_s` (600 s), larger cut to it | `0`: `error invalid_args` |
   | `hqc_list_sessions` (§7) | 200 sessions per call | `truncated: true` |
   | search query (§15, since 0.36): `GET /api/search`, `hqc_search_history` | `q` 1–200 characters, no U+0000 (since 0.119), fuzzy at least 3; 50 hits per page (the tool 20); 5 s `statement_timeout` | `400 bad_request` / `mcp.result` `error invalid_args` |
@@ -6639,7 +6646,7 @@ send from a session in a lower mode (§7.1).
   | `mcp.call` of an archived session | refused | `error unavailable` |
   | open `hqc_ask`s per session (§7.1) | 5 | `error limit_exceeded`, nothing is stored |
   | peer messages a session sends (`hqc_send`, `hqc_ask`, the prompt of `hqc_spawn`) | 20 a minute | same |
-  | peer messages in one chain (§7.1) | 50 in all | same |
+  | peer messages in one chain (§7.1) | 50 in all (since 0.190 `HQC_PEER_MESSAGES_PER_CHAIN`) | same |
   | `hqc_schedule` from an agent (§7.1, §16) | moves the chain on like a send; refused at the chain's limits | `error limit_exceeded` |
   | runs of scheduled messages (§16) | 60 per owner and hour | the run is skipped, warn in the hub's log |
   | searches (§15) | 30 per owner and minute, 10 of them fuzzy; 4 at once on the hub | `429 search_limit` / `503 busy`; `error limit_exceeded` / `unavailable` |
@@ -6716,6 +6723,16 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
+### 0.189 → 0.190 (the chain limits and the limit bar from the hub's environment)
+§7.1, §7.1.1, §20: the two limits of a chain of peer messages were constants of the hub, so a
+room that should talk longer than 20 posts without the owner, or a chain that should carry more
+than 50 messages, needed a rebuilt hub. `HQC_PEER_HOPS_PER_CHAIN` (default 20, 1–254: `hops`
+stops growing at 255) sets the messages one after another in a chain and the posts of a room's
+conversation after the owner's message; `HQC_PEER_MESSAGES_PER_CHAIN` (default 50, from 1) sets
+the messages of a chain in all. §6: the share of a usage window from which the chat shows the
+limit bar was 70 % in the client; it is now `HQC_LIMIT_NOTICE_PERCENT` (default 70, 0–100), which
+the hub serves as `limit_notice_percent` of `/api/me`, and at `0` the chat shows no bar. A value
+out of range stops the hub at start.
 ### 0.188 → 0.189 (the activity line above the input, as "Main agent:")
 §6, §17.1: "Agent is working", the grey box at the end of the feed, read as a message of the
 dialogue. The main agent's row is now the first row of the live block above the input, as

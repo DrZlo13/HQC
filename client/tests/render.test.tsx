@@ -3526,7 +3526,7 @@ describe("the feed like the Claude Code tab", () => {
 });
 
 // An answer the hub took closes the card at once, before the response event comes over the
-// socket (SPEC 0.188).
+// socket (SPEC 0.187).
 describe("an answered request closes before its event", () => {
   const session = (api: Partial<Api>) => {
     const socket = { subscribe: () => () => {} } as unknown as HubSocket;

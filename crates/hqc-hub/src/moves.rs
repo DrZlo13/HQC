@@ -153,7 +153,13 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
     let me = crate::peers::address(app, caller).await.map_err(internal)?;
     // The chain moves on as for a schedule; one at its limit moves nothing (SPEC §7.1). The
     // input's chain is built after the move ([`woken`]), from the same turn.
-    crate::peers::next_chain(turn.clone(), false, crate::peers::sender_mode(caller), &me)?;
+    crate::peers::next_chain(
+        turn.clone(),
+        false,
+        crate::peers::sender_mode(caller),
+        &me,
+        app.config.limits.peer_hops_per_chain,
+    )?;
     // Off the connection's loop: the worker answers `fs.stat` on the connection the call came by.
     let (app, caller, request_id) = (app.clone(), caller.clone(), c.request_id.clone());
     Ok(Answer::Wait(Box::pin(async move {
@@ -209,7 +215,8 @@ async fn woken(
         .await
         .map_err(internal)?;
     let mode = crate::peers::sender_mode(&m.session);
-    let chain = crate::peers::next_chain(turn, false, mode, &address)?;
+    let max_hops = app.config.limits.peer_hops_per_chain;
+    let chain = crate::peers::next_chain(turn, false, mode, &address, max_hops)?;
     let chain = serde_json::to_value(chain).map_err(internal)?;
     let text = format!(
         "You moved to {}, project {}; continue the task.",

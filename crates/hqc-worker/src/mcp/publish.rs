@@ -363,7 +363,7 @@ mod tests {
                 let mut f = a.by_index(i).unwrap();
                 let mut v = Vec::new();
                 f.read_to_end(&mut v).unwrap();
-                (f.name().to_string(), v)
+                (f.name().unwrap().to_string(), v)
             })
             .collect()
     }

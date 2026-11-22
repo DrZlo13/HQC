@@ -283,7 +283,10 @@ pub fn inspect(path: &Path) -> Result<Site, String> {
     let (mut files, mut unpacked) = (Vec::new(), 0u64);
     for i in 0..z.len() {
         let e = z.by_index_raw(i).map_err(|e| format!("entry {i}: {e}"))?;
-        let name = e.name().to_string();
+        let name = e
+            .name()
+            .map_err(|e| format!("entry {i}: {e}"))?
+            .into_owned();
         if e.name_raw().len() > MAX_SITE_NAME || name.len() > MAX_SITE_NAME {
             return Err(format!("a name is over {MAX_SITE_NAME} bytes"));
         }
@@ -660,7 +663,12 @@ pub async fn public_url(app: &AppState, a: &ArtifactRow) -> Option<String> {
     let entry = tokio::task::spawn_blocking(move || {
         let f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
         let z = zip::ZipArchive::new(f).map_err(|e| e.to_string())?;
-        site_entry(z.file_names())
+        let names = z
+            .file_names()
+            .map(|n| n.map(std::borrow::Cow::into_owned))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        site_entry(names.iter().map(String::as_str))
     })
     .await
     .map_err(|e| e.to_string())

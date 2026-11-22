@@ -127,6 +127,9 @@ free text, Yes/No), `event.clarify.request.elicitation_url.json` — its link (`
 questions); `event.clarify.response.decline.json` and `hub.clarify.response.decline.json` — the
 person declined it (`action: decline`).
 
+SPEC 0.203: `worker.session.subagent_leftovers.json` — a subagent reported 30 minutes ago and a
+background command it started still runs; the hub tells the session's agent.
+
 Archived projects (§3 Project): `api.projects.archived.json` — `GET /api/projects?archived=1`, the
 projects with `archived_at`, which `api.projects.json` (the project bar) leaves out.
 

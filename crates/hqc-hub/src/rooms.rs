@@ -537,7 +537,7 @@ fn named(title: Option<&str>, address: &str) -> String {
 /// text the hub puts there cannot make one. Any case, fullwidth or other compatibility forms,
 /// any run of Unicode whitespace between the words and invisible characters inside count
 /// ([`hqc_proto::lookalike::escape`]).
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     hqc_proto::lookalike::escape(text, MARK, ESCAPED)
 }
 

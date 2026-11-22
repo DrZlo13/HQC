@@ -93,6 +93,16 @@ pub enum AdapterEvent {
     /// of its `task_notification`, SPEC §8.1), right after its `system task_notification`: the
     /// worker uploads it as an `attachment` of the session.
     TaskOutput(std::path::PathBuf),
+    /// A subagent reported 30 minutes ago, and background commands it started still run
+    /// (Claude Code: tasks of the `background_tasks_changed` list whose `parent_task_id` it is,
+    /// SPEC §8.1): `subagent` is its task, `ended_s` the seconds since its report, `commands`
+    /// those commands. Sent once per report as `session.subagent_leftovers`; the hub tells the
+    /// agent.
+    SubagentLeftovers {
+        subagent: String,
+        ended_s: u64,
+        commands: Vec<hqc_proto::frame::LeftoverCommand>,
+    },
     /// The runtime reported its own session id (ACP), or the session goes on under another
     /// one (Claude Code: after `/clear`, the new transcript, SPEC §8.1); sent in
     /// `session.state`, and later starts continue it.

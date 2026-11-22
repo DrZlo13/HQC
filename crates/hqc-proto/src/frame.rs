@@ -212,10 +212,39 @@ pub enum WorkerFrame {
     /// reported them (since SPEC 0.81, §5.4); answered with `ack {}`.
     #[serde(rename = "worker.limits")]
     WorkerLimits(Limits),
+    /// Background commands a subagent left running are still running a while after it
+    /// reported (since SPEC 0.203, §5.4, §8.1); answered with `ack {}`.
+    #[serde(rename = "session.subagent_leftovers")]
+    SubagentLeftovers(SubagentLeftovers),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
     Error(WireError),
+}
+
+/// `session.subagent_leftovers {session_id, subagent, ended_s, commands}` (since SPEC 0.203,
+/// §5.4): a subagent of the session's agent that reported a while ago, and the background
+/// commands it started that the runtime still lists (Claude Code, §8.1). The hub tells the agent
+/// with a note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubagentLeftovers {
+    pub session_id: Uuid,
+    /// The subagent's task (Claude Code: the `description` of its `task_started`).
+    pub subagent: String,
+    /// Seconds since the subagent reported.
+    pub ended_s: u64,
+    pub commands: Vec<LeftoverCommand>,
+}
+
+/// One command of [`SubagentLeftovers`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LeftoverCommand {
+    /// The runtime's id of the task, which its own tool for stopping a task takes.
+    pub task_id: String,
+    /// The command's `description` in the runtime's list.
+    pub description: String,
+    /// Seconds since the command started.
+    pub running_s: u64,
 }
 
 /// `mcp.call {request_id, session_token, tool, args}` (SPEC §5.2, §7). `request_id` is a
@@ -1711,6 +1740,7 @@ mod tests {
         "mcp.cancel",
         "workspace.created",
         "worker.limits",
+        "session.subagent_leftovers",
         "ack",
         "error",
     ];
@@ -2020,6 +2050,10 @@ mod tests {
             "worker.limits",
             include_str!("../examples/wire/worker.worker.limits.json"),
         ),
+        (
+            "session.subagent_leftovers",
+            include_str!("../examples/wire/worker.session.subagent_leftovers.json"),
+        ),
         ("ack", include_str!("../examples/wire/worker.ack.json")),
         (
             "ack",
@@ -2080,6 +2114,7 @@ mod tests {
             WorkerFrame::McpCancel(_) => "mcp.cancel",
             WorkerFrame::WorkspaceCreated(_) => "workspace.created",
             WorkerFrame::WorkerLimits(_) => "worker.limits",
+            WorkerFrame::SubagentLeftovers(_) => "session.subagent_leftovers",
             WorkerFrame::Ack(_) => "ack",
             WorkerFrame::Error(_) => "error",
         }

@@ -447,6 +447,20 @@ pub fn user_author(id: Uuid) -> Value {
     json!({"kind": "user", "id": id})
 }
 
+/// `45 s`, `12 min`, `1 h 20 min`, `3 d 2 h`: the two largest units, rounded down, a zero
+/// second one left out; for the notes the hub gives an agent (SPEC §8.1, §17.3).
+pub fn elapsed(secs: i64) -> String {
+    let (d, h, m) = (secs / 86_400, secs / 3_600 % 24, secs / 60 % 60);
+    match (d, h, m) {
+        (0, 0, 0) => format!("{secs} s"),
+        (0, 0, m) => format!("{m} min"),
+        (0, h, 0) => format!("{h} h"),
+        (0, h, m) => format!("{h} h {m} min"),
+        (d, 0, _) => format!("{d} d"),
+        (d, h, _) => format!("{d} d {h} h"),
+    }
+}
+
 async fn after_store(
     app: &AppState,
     s: &SessionRow,
@@ -664,4 +678,21 @@ pub async fn turn_lost(app: &AppState, session_id: Uuid) -> anyhow::Result<()> {
     // The speaker of a conversation room: the room stops (SPEC §7.1.1).
     crate::rooms::turn_lost(app, &s, "its agent process stopped").await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn elapsed_names_the_two_largest_units() {
+        assert_eq!(elapsed(0), "0 s");
+        assert_eq!(elapsed(45), "45 s");
+        assert_eq!(elapsed(60), "1 min");
+        assert_eq!(elapsed(12 * 60 + 40), "12 min");
+        assert_eq!(elapsed(3_600), "1 h");
+        assert_eq!(elapsed(3_600 + 20 * 60 + 59), "1 h 20 min");
+        assert_eq!(elapsed(86_400 + 59 * 60), "1 d");
+        assert_eq!(elapsed(3 * 86_400 + 2 * 3_600 + 30 * 60), "3 d 2 h");
+    }
 }

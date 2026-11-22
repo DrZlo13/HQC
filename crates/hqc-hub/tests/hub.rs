@@ -2283,6 +2283,123 @@ async fn a_pause_while_the_worker_is_away_stops_the_agent_on_its_reconnect() {
     hub.finish().await;
 }
 
+/// SPEC 0.203, §8.1: `session.subagent_leftovers` gives the session's agent a note, the owner's
+/// pending `user.message` that names the subagent and each command with its task id and run
+/// time, delivered as any input; the frame is acked. A paused session gets none.
+#[tokio::test]
+async fn subagent_leftovers_give_the_agent_a_note() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("leftovers").await;
+    ack_start(&mut w, &sid).await;
+    let leftovers = json!({
+        "session_id": sid,
+        "subagent": "Heightmap: 25 frames",
+        "ended_s": 1805,
+        "commands": [
+            {"task_id": "b3k9wq2lz", "description": "Wait for the suite", "running_s": 9300},
+            {"task_id": "bx1", "description": "tail -f build.log", "running_s": 1850},
+        ],
+    });
+    w.send("session.subagent_leftovers", leftovers.clone())
+        .await;
+    let mut got = vec![w.recv().await, w.recv().await];
+    got.sort_by_key(|f| f["type"].as_str().unwrap().to_string());
+    assert_eq!(
+        (got[0]["type"].as_str(), got[1]["type"].as_str()),
+        (Some("ack"), Some("session.input")),
+        "{got:?}"
+    );
+    let si = &got[1];
+    assert_eq!(
+        si["payload"]["text"],
+        "[hqc] Subagent \"Heightmap: 25 frames\" reported 30 min ago, but background commands it \
+         started still run (their descriptions as the subagent wrote them): \"Wait for the \
+         suite\" (task b3k9wq2lz, 2 h 35 min); \"tail -f build.log\" (task bx1, 30 min). Stop \
+         the ones no longer needed with TaskStop, or leave them."
+    );
+    let (_, me) = hub.get("/api/me").await;
+    let events = hub.events(&sid).await;
+    let note = events
+        .iter()
+        .find(|e| e["event_id"] == si["payload"]["event_id"])
+        .expect("the note is stored");
+    assert_eq!(
+        (
+            note["type"].as_str(),
+            note["author"]["kind"].as_str(),
+            &note["author"]["id"]
+        ),
+        (Some("user.message"), Some("user"), &me["id"]),
+        "{note}"
+    );
+    w.reply(
+        &si["id"],
+        "ack",
+        json!({"event_id": si["payload"]["event_id"]}),
+    )
+    .await;
+    w.event(agent_event(&sid, "status", json!({"state": "idle"})))
+        .await;
+
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/pause"), json!({}))
+        .await;
+    assert_eq!((s, r["state"].as_str()), (200, Some("paused")), "{r}");
+    let kill = w.expect("session.kill").await;
+    w.reply(&kill["id"], "ack", json!({})).await;
+    w.send("session.subagent_leftovers", leftovers).await;
+    w.expect("ack").await;
+    w.expect_silence(Duration::from_millis(300)).await;
+    let notes = hub
+        .events(&sid)
+        .await
+        .into_iter()
+        .filter(|e| e["type"] == "user.message")
+        .count();
+    assert_eq!(notes, 1);
+    hub.finish().await;
+}
+
+/// SPEC 0.203, §8.1: `session.subagent_leftovers` naming a session of another worker is acked
+/// and writes nothing: the session's worker gets no input and the session no `user.message`.
+#[tokio::test]
+async fn subagent_leftovers_for_another_workers_session_write_nothing() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("leftovers-other").await;
+    ack_start(&mut w, &sid).await;
+    let (_, token2) = hub.enroll("other-mac").await;
+    let mut w2 = FakeWorker::connect(&hub, &token2).await.unwrap();
+    w2.hello(WS_PATH, Uuid::new_v4()).await;
+    let id = w2
+        .send(
+            "session.subagent_leftovers",
+            json!({
+                "session_id": sid,
+                "subagent": "Heightmap: 25 frames",
+                "ended_s": 1805,
+                "commands": [
+                    {"task_id": "b3k9wq2lz", "description": "Wait for the suite", "running_s": 9300},
+                ],
+            }),
+        )
+        .await;
+    let ack = w2.expect("ack").await;
+    assert_eq!(ack["id"], id.as_str(), "{ack}");
+    w.expect_silence(Duration::from_millis(300)).await;
+    let notes = hub
+        .events(&sid)
+        .await
+        .into_iter()
+        .filter(|e| e["type"] == "user.message")
+        .count();
+    assert_eq!(notes, 0);
+    hub.finish().await;
+}
+
 /// A session paused while the turn of its input "go" runs, its worker sent the pause's
 /// `session.stop` (SPEC §17.3): `(hub, worker, worker token, session id)`.
 async fn paused_during_a_turn(

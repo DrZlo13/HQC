@@ -912,6 +912,18 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     optStr(p, 'rate_limit_type');
     optNum(p, 'resets_at');
   },
+  // SPEC 0.203: commands a subagent left running 30 minutes after it reported.
+  'session.subagent_leftovers': (p) => {
+    str(p, 'session_id');
+    str(p, 'subagent');
+    num(p, 'ended_s');
+    for (const c of arr(p, 'commands')) {
+      const o = obj(c, 'command');
+      str(o, 'task_id');
+      str(o, 'description');
+      num(o, 'running_s');
+    }
+  },
   'workspace.inspect': (p) => {
     str(p, 'request_id');
     str(p, 'path');

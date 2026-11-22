@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.215, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.216, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -547,7 +547,9 @@ closed row means records ask nothing more about that move.
 A `secret` (since 0.147) is a row of the session whose agent's `hqc_secret` waits for the owner
 (§7, §10.1): `request_id` — the `mcp.call`'s, `worker_id` — the session's worker, `payload` —
 the hub's `approval.request` in the session's feed (`tool: hqc_secret`, `description` — the
-agent's purpose, `secret: {name, kind}`, the one option `deny`), no `expires_at` (the call ends
+agent's purpose, `secret: {name, kind, vault?}` — `vault` (since 0.216) the Vaultwarden entry the
+agent named, kept only when the session's worker reads Vaultwarden (§14) — the one option
+`deny`), no `expires_at` (the call ends
 at the runtime's tool timeout, as a move's), `result` — the `mcp.result` frame once the owner
 gave it (`POST /api/sessions/{id}/secrets` with `request_id`, §6: the worker's note, the path or
 the key's fingerprint) or declined it. The runtime's `mcp.cancel` and a worker restart close the
@@ -595,7 +597,7 @@ the client renders only them. The "source" column is the component that produces
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (short error text; since 0.194 an opened call row in the client shows it only when it is not the start of `result_preview`, which the Claude Code adapter cuts from the same text), `duration_ms?`, `artifact_id?` (a diff or a large result, §12; since 0.180 the Claude Code adapter's whole text of a result longer than `result_preview`, its first 2 MiB, kind `text`, §8.1), `artifact_ids[]?` (since 0.180: the result's images, kind `image`, in order; absent when none, §8.1) | adapter |
-| `approval.request` | `request_id`, `tool`, `description`, `args_preview?`, `options[{id, label, canonical, grant?}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind}`, `subagent?{task_id, description}` (since 0.181: the subagent that asks, §10.1; absent for the agent itself and a subagent the adapter does not know) | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons (since 0.213 also the option ids `server_session` and `server_always`, canonical `session` and `always`, on an MCP tool's card, §10.1); `args_preview` (since 0.207) — the call's arguments as `tool.call.args_preview` carries them (the same limit and form), so a card that does not stand right after its call (a subagent's, another session's, one in the Requests list) shows the whole command and every argument; absent from an older worker; `grant` of an option (since 0.207) — what choosing it grants besides this call: `{place, rules?[], exact?}`, `place` ∈ `session` (the worker's session rules, until the process ends) / `local_settings` (Claude Code writes the rules to `.claude/settings.local.json` at the root of the git repository containing the session's cwd, §8.1), `rules` — as Claude Code writes a rule, `toolName` or `toolName(ruleContent)`, at most 10, each at most 256 bytes (a rule cut there ends with `…`; past 10 the tenth item is `… N more`, the count of the rules not listed, which the option grants as well), `exact` — the exact call is allowed too; no field — the option grants nothing more (`once`, `deny`) or the worker does not say; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; since 0.180 `reason?` — why the runtime asks (Claude Code: `decision_reason`, at most 1024 bytes), `display_name?` — the runtime's name of the tool (at most 256 bytes), both absent when blank, and `human_only?` — `true` when only a person may answer it (§8.1): its `options` are `once` and `deny`, it has no `rule_suggestions`, and the hub's `auto_approve` leaves it to the owner (§10.1); absent when false. The client shows `reason` under the card's title and names the tool by `display_name` when there is one, an MCP server's tool as `<tool> (<server>)` (the runtime's `display_name` of one drops the server); `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for; the hub drops it from a worker's event |
+| `approval.request` | `request_id`, `tool`, `description`, `args_preview?`, `options[{id, label, canonical, grant?}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind, vault?}`, `subagent?{task_id, description}` (since 0.181: the subagent that asks, §10.1; absent for the agent itself and a subagent the adapter does not know) | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons (since 0.213 also the option ids `server_session` and `server_always`, canonical `session` and `always`, on an MCP tool's card, §10.1); `args_preview` (since 0.207) — the call's arguments as `tool.call.args_preview` carries them (the same limit and form), so a card that does not stand right after its call (a subagent's, another session's, one in the Requests list) shows the whole command and every argument; absent from an older worker; `grant` of an option (since 0.207) — what choosing it grants besides this call: `{place, rules?[], exact?}`, `place` ∈ `session` (the worker's session rules, until the process ends) / `local_settings` (Claude Code writes the rules to `.claude/settings.local.json` at the root of the git repository containing the session's cwd, §8.1), `rules` — as Claude Code writes a rule, `toolName` or `toolName(ruleContent)`, at most 10, each at most 256 bytes (a rule cut there ends with `…`; past 10 the tenth item is `… N more`, the count of the rules not listed, which the option grants as well), `exact` — the exact call is allowed too; no field — the option grants nothing more (`once`, `deny`) or the worker does not say; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; since 0.180 `reason?` — why the runtime asks (Claude Code: `decision_reason`, at most 1024 bytes), `display_name?` — the runtime's name of the tool (at most 256 bytes), both absent when blank, and `human_only?` — `true` when only a person may answer it (§8.1): its `options` are `once` and `deny`, it has no `rule_suggestions`, and the hub's `auto_approve` leaves it to the owner (§10.1); absent when false. The client shows `reason` under the card's title and names the tool by `display_name` when there is one, an MCP server's tool as `<tool> (<server>)` (the runtime's `display_name` of one drops the server); `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for and, since 0.216, the Vaultwarden entry the agent named (§7); the hub drops it from a worker's event |
 | `approval.response` | `request_id`, `option_id`, `by` (user id or `auto`), `message?` (the user's text instead of the call, only with a `deny`/`deny_always` option, §10.1) | client, or the hub with `auto_approve` |
 | `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived, since 0.180 withdrawn — the runtime withdrew its request, §8.1; the client says "withdrawn") | adapter, worker or hub. An answer from another device is not a cancellation: the first answer closes the request, the second gets `409 request_closed` (§10.1) |
 | `clarify.request` | `request_id`, `questions[{id, text, header?, options?: [string], option_descriptions?: [string], option_previews?: [string], multi?: bool, required?: bool, input?: "integer" \| "number"}]`, `subagent?{task_id, description}` (since 0.181, as on `approval.request`) | Claude Code adapter: the `AskUserQuestion` tool arrives as `can_use_tool`, the answer goes into `updatedInput.answers` (verified on 2.1.307 with `--permission-prompt-tool stdio`, §8.1). Since 0.69 `header` is the question's short label and `option_descriptions` what each option means, in the order and number of `options`, `""` for an option without one; each is absent when empty. Since 0.199 `option_previews` is each option's mockup (an ASCII sketch, code, a config) by the same rule, cut by the worker to 8 KiB with `\n… (truncated)` after it. The client shows `header` above the question, each description under its option, and an "Other" field: its text is the answer (with `multi`, an item of the array beside the checked labels); "Other" chosen with nothing typed is sent as `"Other"`, as the VS Code tab does. As in the tab, "Answer" stays disabled until every question has an answer: an option picked, a text typed (not only spaces) or "Other" chosen. A question with a preview shows it as plain text in `<pre>`, never rendered as markdown or HTML, not wrapped and scrolling sideways: on a desktop in a column beside the options, the preview of the option last under the pointer while the pointer is over the question (the "Other" row lets it go) or of the option with the keyboard focus (kept while the focus is in the preview), else of the first chosen one, else the first one that has a preview, the column as tall as the tallest preview of the question; on a phone under each chosen option that has one. ACP agents have no source for it. Since 0.180 also an MCP server's request for input (Claude Code: `elicitation`, §8.1), with `server?` — the server that asks, `message?` — its text, `url?` — the page it sends the person to, then with no `questions`; a question of its form carries `required: true` for a field the server requires and `input` (`integer`, `number`) for a free-text field whose answer must read as one, both absent otherwise and in the agent's questions; the client heads the card "<server> asks", shows the text above the questions, "required" beside a required question's header, the link (only an http, https or mailto one as a link, labelled with the address it opens, a host in its punycode form), no "Other", the submit button ("Done" for a link, the card then saying "Done"; unlike the agent's questions it waits only for what the form's schema says, which a server on the MCP SDK checks the answer against, refusing one that does not match (§8.1): every `required` question answered, an `integer` answer an optional minus and digits, at most 2^53 − 1 in size, a `number` one written in decimal (an optional minus, digits with an optional point, an optional exponent) that JavaScript's `Number()` reads as a finite number; a field neither required nor answered may stay empty) and "Decline" |
@@ -1305,7 +1307,7 @@ MCP calls (worker → hub → worker):
   with git's message; `force` (only when the user confirmed the files the inspection listed, §6)
   removes them. A worktree folder that is gone already is pruned and `removed: false`. `force`
   changes nothing for a clone.
-- `secret.put` {request_id, session_id, kind, name, value?, passphrase?, remember?, comment?} →
+- `secret.put` {request_id, session_id, kind, name, value?, vault?, passphrase?, remember?, comment?} →
   `result {request_id, secret {note, path?, fingerprint?, public_key?, remembered?}}` or `error
   {invalid_frame}` with the reason (since 0.147, §14) — a secret or an ssh key for the session's
   running agent. `kind`: `secret` (`value` is the secret: the file `$HQC_SECRETS/<name>` of the
@@ -1314,9 +1316,15 @@ MCP calls (worker → hub → worker):
   and with `remember` kept for the session's workspace) or `ssh_keygen` (the worker makes an
   ed25519 key with `comment`, `hqc <name>` when absent, keeps it for the workspace and loads
   it; `public_key` is its public half). `name` is a key name of §14 (letters, digits, `_`, `-`
-  and `.`, 1 to 64, not starting with `.` or `-`); `value` is at most 64 KiB. `note` is what the
-  agent is told, never the value. The worker takes it only with `session_secrets`, for a session
-  of its owner that is not restricted and whose agent runs now; a kept name the workspace has
+  and `.`, 1 to 64, not starting with `.` or `-`); `value` is at most 64 KiB. `vault` (since
+  0.216) stands for `value` of a `secret` or an `ssh_key`, one of the two exactly: the exact name
+  or the id of a Vaultwarden (Bitwarden) entry, one line of 1 to 200 characters, which the worker
+  reads itself with `rbw` on its machine (§14) — the value never passes through the hub; a worker
+  without `vault` refuses it, and a locked `rbw`, no entry of that name or id, several of that
+  name, an empty value and one over 64 KiB are refused with the reason, never with what `rbw`
+  printed on its standard output. `note` is what the agent is told, never the value. The worker
+  takes it only with `session_secrets`, for a session of its owner that is not restricted and
+  whose agent runs now; a kept name the workspace has
   already, a bad key, a wrong passphrase are refused, and the reason never carries the value, the
   key or the passphrase; a frame that does not parse is answered "secret.put is malformed",
   without the parser's words. The hub sends it only on the owner's request and waits 30 s; the
@@ -1406,7 +1414,9 @@ MCP calls (worker → hub → worker):
   Code live sessions registry and reports holders (§9.3); `moves: true` (since 0.75) — the worker
   moves a moved session's transcript (§8.1), reported only when Claude Code's config folder
   (`$CLAUDE_CONFIG_DIR`, else `~/.claude`) exists at the worker's start, where the transcripts
-  are; the hub moves only sessions of such a worker (§6).
+  are; the hub moves only sessions of such a worker (§6). `vault: true` (since 0.216) — its
+  `worker.toml` has both `session_secrets` and `vault` (§14): `secret.put` may name a Vaultwarden
+  entry instead of the value (§5.3); the hub keeps it with the rest of `capabilities`.
   `environments` (since 0.56, T43) — the environments of the local config (§14) as `{name,
   allow_local_mcp?, permissions {unblock?, allow?, deny?}}`, without `default` and never with the
   values (or the names) of `env`; a plain string, as workers before 0.56 send, reads as an
@@ -1773,8 +1783,10 @@ the rest is marked "later"):
   name the owner has, `409 provider_in_use` on deleting one sessions run on): {name, label,
   base_url, model, context_tokens?} (`context_tokens` 1000 to 10 000 000); a provider object has
   `workers[]`, the owner's workers whose last `hello` allowed it.
-  `POST /api/sessions/{id}/secrets` (since 0.147, §14) {kind, name, value, passphrase?,
-  remember?, request_id?} (unknown fields: `422`): a secret (`kind: secret`) or an ssh private
+  `POST /api/sessions/{id}/secrets` (since 0.147, §14) {kind, name, value?, vault?, passphrase?,
+  remember?, request_id?} (unknown fields: `422`; one of `value` and `vault` exactly, else `400`;
+  `vault` since 0.216 — a Vaultwarden entry the worker reads itself, §5.3, only on a worker whose
+  `capabilities` have `vault`, else `409 unavailable`): a secret (`kind: secret`) or an ssh private
   key (`kind: ssh_key`, with `passphrase` and `remember` for it only) for the session's running
   agent, from its owner, on a worker of theirs with `session_secrets` (else `409 unavailable`),
   not the service session, not archived. The hub passes it in `secret.put` (§5.3) and keeps it
@@ -1784,7 +1796,9 @@ the rest is marked "later"):
   secret_refused` with the worker's reason (no running agent, a bad key, a wrong passphrase, a
   kept name the workspace has), `504 worker_timeout`. The feed gets `system secret_given` with the
   name and, for a key, its fingerprint ("Secret WIFI_PASS given", "ssh key pi-lab (SHA256:…)
-  given, remembered for this workspace"). `request_id` answers the session's open `hqc_secret`
+  given, remembered for this workspace"), and the entry when the worker read it from
+  Vaultwarden ("Secret WIFI_PASS given from Vaultwarden entry home-wifi"; a locked `rbw` is `422
+  secret_refused` too). `request_id` answers the session's open `hqc_secret`
   (§7): its `name` and `kind` must be the request's (`400`), a closed one is `409
   request_closed`; the request closes with the call's result and the feed gets `approval.response
   {option_id: give}`; a refused give leaves it open. "Decline" is the request's answer with
@@ -2441,15 +2455,18 @@ key button beside the attach one: a form above the composer with the kind (Passw
 name and the value — a password field (`autocomplete="current-password"`, so a phone's password
 manager fills it), a key a text area without spelling help, with an optional passphrase and
 "Remember for this workspace". "Give" sends `POST /api/sessions/{id}/secrets`; on success the
-answer's `note` goes on a line of its own into the message being written and the form closes;
-on an error the form keeps what was typed and shows the reason. The value lives only in the
-form while it is open: never in the draft, the feed, `localStorage` or `sessionStorage`. The
-hub's `hqc_secret` card (`approval.request` with `tool: hqc_secret` and `secret`) shows "The
-agent asks for a secret / an ssh key: <name>", the agent's purpose and the same fields, with
-"Give" and "Decline"; it is answered once the hub's `approval.response` with `give` or `deny`
-comes, and on the requests screen it has the same form. The rules screen of a workspace whose
-worker has `session_secrets` lists the ssh keys kept for it (name, fingerprint) with Delete
-after a confirmation; an offline worker gives a line saying so.
+answer's `note` goes on a line of its own into the message being written and the form closes; on
+an error the form keeps what was typed and shows the reason. The value lives only in the form
+while it is open: never in the draft, the feed, `localStorage` or `sessionStorage`. The hub's
+`hqc_secret` card (`approval.request` with `tool: hqc_secret` and `secret`) shows "The agent
+asks for a secret / an ssh key: <name>", the agent's purpose and the same fields, with "Give"
+and "Decline"; it is answered once the hub's `approval.response` with `give` or `deny` comes,
+and on the requests screen it has the same form. When the card names a Vaultwarden entry
+(`secret.vault`, since 0.216) it opens on "Vaultwarden | Type it" set to Vaultwarden: the entry
+in a field the owner may change, and "Give" sends `vault` instead of a value — the worker reads
+it, and the value reaches neither the client nor the hub; "Type it" gives the fields above. The
+rules screen of a workspace whose worker has `session_secrets` lists the ssh keys kept for it
+(name, fingerprint) with Delete after a confirmation; an offline worker gives a line saying so.
 
 The browser (since 0.148, §14). The menu of the chat header's mode pill of a session whose worker
 has `browser` has, under the switch, "Browser: off · Give the browser" or "Browser: on · Turn
@@ -3325,10 +3342,14 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   address does not change. The result is `{address, title}` — the session's address and the
   title as stored. A repeat of the call (§5.2) sets the same title again.
 
-- `hqc_secret(name, purpose, kind?)` (since 0.147) — asks the owner for a secret without it
+- `hqc_secret(name, purpose, kind?, vault?)` (since 0.147) — asks the owner for a secret without it
   entering the conversation: `kind` `secret` (the default) or `ssh_key`, `name` a key name of §14,
   `purpose` one line of 1 to 300 characters the owner is shown (a control character, a line or
   paragraph separator or a bidirectional control is `invalid_args`, as for `hqc_move`'s path).
+  `vault` (since 0.216) — the Vaultwarden (Bitwarden) entry that holds it, its exact name or its
+  id, one such line of 1 to 200 characters: the card shows it for the owner to
+  confirm or change and the worker reads the value (§5.3); on a worker that does not read
+  Vaultwarden the hub leaves it off the card and the owner types the value.
   Only on a worker of the owner with `session_secrets`, else `unavailable`. It opens a
   PendingRequest `secret` (§3) with the hub's card in the feed and waits as `hqc_ask` does
   (`ack` now, the `mcp.result` later, kept until the worker acknowledges it); a repeat finds the
@@ -6538,6 +6559,24 @@ session asks and why, and a prompt-injected agent that has a secret can leak it.
 the card it writes (`approval.request` with `secret`, §4) its own: it drops `secret` from an
 `approval.request` a worker sends.
 
+A secret from Vaultwarden (since 0.216). `vault = true` at the top of `worker.toml` (off by
+default, and only with `session_secrets`) lets an `hqc_secret` card name a Vaultwarden
+(Bitwarden) entry instead of a typed value, as T3 Code's card takes a 1Password reference: the
+worker reads it with `rbw` 1.15 or newer (from `PATH`; an older one lacks `list --fields type`
+and `get --field private_key`, and is refused as such) on its own machine and the value goes
+into the agent's process as a typed one does, so it passes neither the client nor the hub. The
+entry is the one whose name or id equals what the card says, exactly: `rbw get` alone would also
+take an entry whose name merely contains it, or one with a matching site address, so the worker
+first finds the entry's id in `rbw list --fields id,name,type` (none, or several of that name,
+is refused) and reads by the id — the password (a note's text for a note), the private key of an
+entry of Bitwarden's type "SSH key" (`--field private_key`). `rbw unlocked`, the list and the
+read take at most 15 s together. What the worker can read is what the account `rbw` is signed in
+with there can, and while `rbw` is unlocked there the commands of every agent on that machine,
+which run as the same user, can read it too without a card: the card decides what the worker
+gives, not what an agent there can reach. A locked `rbw` is refused (unlock it on that machine,
+or type the value), and the card stays open. `hello.capabilities.vault` tells the hub (§5.4);
+`hqc-worker env` shows `vault`.
+
 The browser (since 0.148). `browser = true` at the top of `worker.toml` (off by default; the hub
 cannot turn it on) lets the owner give a session's agent their Chrome on this machine (`PATCH
 /api/sessions/{id} {browser}`, §6): Claude Code runs with `--chrome` and reaches the browser
@@ -7229,6 +7268,19 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
+### 0.215 → 0.216 (a secret from Vaultwarden)
+§14: `vault = true` in `worker.toml` (with `session_secrets`) lets an `hqc_secret` card take the
+secret from a Vaultwarden (Bitwarden) entry instead of a typed value, as T3 Code's card takes a
+1Password reference: the worker reads it with `rbw` on its own machine, as T3 Code reads
+1Password with `op` on the agent's machine, so the value passes neither the client nor the hub.
+The entry is the one named exactly (found by its id first, since `rbw get` alone also takes a
+partial name), an entry of Bitwarden's type "SSH key" gives its private key, and every `rbw`
+call of a read fits in 15 s.
+§7: `hqc_secret` takes `vault`, the entry the agent names; §3, §4: the card carries it as
+`secret.vault`, only for a worker that reads Vaultwarden. §6: the card opens on the entry, which
+the owner confirms or changes, or switches to typing the value; `POST
+/api/sessions/{id}/secrets` takes `vault` in place of `value`, and the feed line names the entry.
+§5.3: `secret.put.vault`; §5.4: `hello.capabilities.vault`, so no hub migration.
 ### 0.214 → 0.215 (.git and .hqc are never published; the card names secrets first)
 §7, §20: the card of a publication could understate what goes public: it named the first 50
 files that are not hidden, so an `id_rsa` or a `credentials.json` past them was only in "and N

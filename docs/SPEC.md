@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.213, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.214, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -7222,6 +7222,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.213 → 0.214 (a move or a publication after a restart only on the owner's mark)
+§3 `move`, `publish`: a hub that stopped while it carried out an allowed move or publication
+took, on start, any `approval.response` of the session with the call's `request_id` and `once`
+as the owner's leave, the hub's own `by: auto` included; a worker that reused the call's request
+id for an approval of its own and then cancelled the call had it carried out at the next start.
+The owner's `once` now closes the row and puts `allowed_by` (the owner's id) into its `payload`
+in one update, and only rows with the mark are carried out after a restart; the feed is not
+consulted. A row an older hub closed allowed has no mark and is not carried out after the
+upgrade.
 
 ### 0.212 → 0.213 (all tools of an MCP server in one answer)
 §10.1, §8.1, §4: the card of an MCP tool call offers "Allow all <server> tools for this session"

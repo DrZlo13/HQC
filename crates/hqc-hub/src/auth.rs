@@ -311,6 +311,7 @@ pub struct CurrentUser {
     pub theme: Theme,
     pub look: Look,
     pub project_sort: ProjectSort,
+    pub new_session_project_id: Option<Uuid>,
 }
 
 impl FromRequestParts<AppState> for CurrentUser {
@@ -357,6 +358,7 @@ impl FromRequestParts<AppState> for CurrentUser {
             theme: Theme::parse(&u.theme).unwrap_or_default(),
             look: Look::parse(&u.look).unwrap_or_default(),
             project_sort: ProjectSort::parse(&u.project_sort).unwrap_or_default(),
+            new_session_project_id: u.new_session_project_id,
             personal_project_id: u.personal_project_id.ok_or_else(|| {
                 ApiError::Internal(anyhow::anyhow!("user without personal project"))
             })?,

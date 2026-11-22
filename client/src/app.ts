@@ -1287,6 +1287,33 @@ export class AppState {
     this.changed();
   }
 
+  /** The project the quick-start button and the page's `newSessionInProject` open a new session
+   *  in (SPEC §3 User): the one picked in Settings while it is on the bar, else the personal
+   *  project; undefined until `/api/me` has answered and the project is known (from the lists,
+   *  or from the list kept from the last load). */
+  newSessionProject(): Project | undefined {
+    const me = this.me;
+    if (!me) return undefined;
+    return (me.new_session_project_id && this.projects.get(me.new_session_project_id)) || this.project(me.personal_project_id);
+  }
+
+  async setNewSessionProject(id: string): Promise<void> {
+    this.me = await this.api.setNewSessionProject(id);
+    this.changed();
+  }
+
+  /** Opens the new-session window of `newSessionProject()`; when the hub has not answered yet
+   *  (a shortcut pressed while the page loads), as soon as it has. */
+  openNewSessionInProject(): void {
+    const go = (): boolean => {
+      const p = this.newSessionProject();
+      if (p) location.hash = `#/p/${p.id}/new`;
+      return !!p;
+    };
+    if (go()) return;
+    const stop = this.onChange(() => go() && stop());
+  }
+
   /** A project's color and emoji or letters (T49); the personal project's too. */
   async setAppearance(id: string, patch: { color?: ProjectColor; icon?: { kind: 'emoji' | 'letters'; value: string } }): Promise<void> {
     const p = await this.api.patchProject(id, patch);

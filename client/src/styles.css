@@ -2329,17 +2329,43 @@ select.input {
   font-size: 12px;
 }
 
-/* The workers line at the bottom of the first screen, over the home indicator. */
+/* The workers line at the bottom of the first screen, over the home indicator; the floating
+   new-session button stands above it. */
+.sessions-phone {
+  --wline-h: 46px;
+}
+:root.list-compact .sessions-phone {
+  --wline-h: 32px;
+}
 .sessions-phone .wline {
-  height: calc(46px + env(safe-area-inset-bottom));
+  height: calc(var(--wline-h) + env(safe-area-inset-bottom));
   padding-bottom: env(safe-area-inset-bottom);
 }
 :root.list-compact .sessions-phone .wline {
-  height: calc(32px + env(safe-area-inset-bottom));
+  height: calc(var(--wline-h) + env(safe-area-inset-bottom));
   font-size: 12px;
 }
+/* The project's color as its tile has it (`--tile`, ~24 %), over the page, so the rows under
+   the button do not show through. */
+.phone-new-session {
+  position: absolute;
+  right: 16px;
+  bottom: calc(var(--wline-h) + env(safe-area-inset-bottom) + 16px);
+  z-index: 5;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+  background: linear-gradient(var(--tile), var(--tile)), var(--bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--shade) 35%, transparent);
+  text-decoration: none;
+}
 .sessions-phone.phone-home .session-scroll {
-  padding-bottom: 12px;
+  padding-bottom: 88px;
 }
 
 .chip {

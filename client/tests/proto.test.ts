@@ -325,6 +325,11 @@ describe('examples/wire', () => {
     expect(parseMe(load('api.me.json')).project_sort).toBe('recent');
     expect(parseMe({ ...(load('api.me.json') as object), project_sort: undefined }).project_sort).toBe('custom');
     expect(parseMe({ ...(load('api.me.json') as object), project_sort: 'Name' }).project_sort).toBe('custom');
+    // The project a new session is quick-started in: null before one is picked and from a hub
+    // before it.
+    expect(parseMe(load('api.me.json')).new_session_project_id).toBe('0199f3a2-7c10-7000-8000-0000000000d1');
+    expect(parseMe({ ...(load('api.me.json') as object), new_session_project_id: undefined }).new_session_project_id).toBeNull();
+    expect(parseMe({ ...(load('api.me.json') as object), new_session_project_id: null }).new_session_project_id).toBeNull();
     const w = parseWorkspace(load('api.workspace.json'));
     expect(p.default_workspace_id).toBe(w.id);
     expect(w).toMatchObject({ project_id: p.id, kind: 'dir', label: 'home-mac' });

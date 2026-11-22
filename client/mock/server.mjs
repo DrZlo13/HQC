@@ -103,6 +103,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     theme: 'warm',
     look: 'spacious',
     project_sort: 'custom',
+    new_session_project_id: null,
   };
   const workerId = ex['hub.hello.ack'].payload.worker_id;
   const now = () => new Date().toISOString();
@@ -681,6 +682,10 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (body?.project_sort !== undefined) {
       if (!['custom', 'name', 'recent'].includes(body.project_sort)) throw fail(422, 'unprocessable', 'unknown project order');
       me.project_sort = body.project_sort;
+    }
+    if (body?.new_session_project_id !== undefined) {
+      if (!projects.has(body.new_session_project_id)) throw fail(404, 'not_found', 'unknown project');
+      me.new_session_project_id = body.new_session_project_id;
     }
     if (body?.timezone !== undefined) me.timezone = body.timezone;
     return me;

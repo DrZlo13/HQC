@@ -92,7 +92,7 @@ A 12-megapixel photo takes about a second. libheif is LGPL-3.0; its license is i
     Running, idle by age), one menu per row on a right click, archive and favorites buttons past
     the column's edge on hover, a desktop row dragged onto a project on the bar to move it there,
     the workers line at the bottom; `PhoneHome.tsx` — a
-    phone's first screen, the projects; `NewSession.tsx` — a new session as a chat window with
+    phone's first screen, the projects and the floating new-session button; `NewSession.tsx` — a new session as a chat window with
     its chips; `ContextMenu.tsx` — the client's menus;
   - `ProjectSettings.tsx` — the project settings page (`#/p/<id>/settings`): Appearance, the
     project's quick messages (a list, an add and edit form; every save sends the whole list on top of

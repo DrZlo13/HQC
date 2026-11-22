@@ -1115,6 +1115,10 @@ pub struct Me {
     /// The project bar's order; `custom` from hubs before it.
     #[serde(default)]
     pub project_sort: ProjectSort,
+    /// The project a new session is quick-started in; null until picked, and when the picked
+    /// project is deleted.
+    #[serde(default)]
+    pub new_session_project_id: Option<Uuid>,
 }
 
 /// `PATCH /api/me`.
@@ -1133,6 +1137,9 @@ pub struct PatchMe {
     /// `custom` | `name` | `recent`; anything else `422`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_sort: Option<ProjectSort>,
+    /// One of the user's own projects; another user's or a missing one `404`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_session_project_id: Option<Uuid>,
 }
 
 /// `POST /api/workers/enroll/confirm`; case and the dash of `code` do not matter.
@@ -1616,6 +1623,20 @@ mod tests {
         }
         assert_eq!(m.project_sort, Some(ProjectSort::Name));
         assert_eq!(me.project_sort, ProjectSort::Recent);
+        assert_eq!(
+            m.new_session_project_id,
+            Some("0199f3a2-7c10-7000-8000-0000000000d1".parse().unwrap())
+        );
+        assert_eq!(
+            me.new_session_project_id,
+            Some("0199f3a2-7c10-7000-8000-0000000000d1".parse().unwrap())
+        );
+        assert!(serde_json::from_str::<PatchMe>(r#"{"new_session_project_id":"x"}"#).is_err());
+        let old: Me = serde_json::from_str(
+            r#"{"id":"0199f3a2-7c10-7000-8000-0000000000aa","email":"a","display_name":"a","timezone":"UTC","personal_project_id":"0199f3a2-7c10-7000-8000-0000000000d1"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.new_session_project_id, None, "absent from older hubs");
         assert!(serde_json::from_str::<PatchMe>(r#"{"project_sort":"Name"}"#).is_err());
         for o in [ProjectSort::Custom, ProjectSort::Name, ProjectSort::Recent] {
             assert_eq!(ProjectSort::parse(o.as_str()), Some(o));

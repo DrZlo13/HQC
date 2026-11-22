@@ -272,13 +272,6 @@ export const IconMove = ({ size = 16 }: { size?: number }) => (
   </Svg>
 );
 
-/** A pinned block (the favorites over the session list). */
-export const IconPin = ({ size = 12 }: { size?: number }) => (
-  <Svg size={size}>
-    <path d="M7 3h6M8 3v6l-3 3h10l-3-3V3M10 12v5" />
-  </Svg>
-);
-
 /** ▾ of a dropdown, ▴ of a line that opens upwards. */
 export const IconChevronDown = ({ size = 12 }: { size?: number }) => (
   <Svg size={size}>
@@ -370,12 +363,12 @@ export const IconAgent = ({ size = 14 }: { size?: number }) => (
   </Svg>
 );
 
-/** A room of several agents, beside "+" of the session column: two robots' heads. */
+/** A room of several agents talking: two speech bubbles, the back one's tail on the left, the
+ *  front one's on the right, the back one drawn only where the front one leaves it. */
 export const IconRoom = ({ size = 16 }: { size?: number }) => (
   <Svg size={size}>
-    <rect x="2" y="8" width="7.5" height="7" rx="2" />
-    <rect x="10.5" y="8" width="7.5" height="7" rx="2" />
-    <path d="M5.75 5.5V8M14.25 5.5V8" />
+    <path d="M12 8V5a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2v2.5L7 10h1" />
+    <path d="M10 8h6a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2v2.5L13 15h-3a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2z" />
   </Svg>
 );
 

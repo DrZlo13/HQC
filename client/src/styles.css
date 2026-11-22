@@ -1014,8 +1014,8 @@ select.input {
   position: relative;
 }
 
-/* The column's header in one row: the project's name (or the search field in its place), the
-   search, the order "State ▾", the project's "⋯" and a new session. */
+/* The column's header in one row: the project's name, the search, the project's "⋯" (the order
+   and a new room in it) and a new session. */
 .side-head {
   flex: none;
   min-height: 66px;
@@ -1042,29 +1042,6 @@ select.input {
   margin-left: 4px;
   border-radius: 7px;
 }
-.btn-mode {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  height: 34px;
-  padding: 0 6px 0 8px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text2);
-  font: 500 13px var(--sans);
-  cursor: pointer;
-}
-.btn-mode:hover,
-.btn-mode[aria-expanded='true'] {
-  background: var(--row-hover);
-  color: var(--text);
-}
-.btn-mode:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
 /* The compact look: a 50 px header of 26 px buttons, as the rail's rows. */
 :root.list-compact .side-head {
   min-height: 50px;
@@ -1081,10 +1058,6 @@ select.input {
 :root.list-compact .side-head .icon {
   width: 14px;
   height: 14px;
-}
-:root.list-compact .btn-mode {
-  height: 26px;
-  font-size: 12.5px;
 }
 
 .side-title {
@@ -1248,11 +1221,6 @@ select.input {
   min-height: 0;
   overflow-y: auto;
 }
-.group-pin {
-  margin-left: auto;
-  display: flex;
-}
-
 /* The width repeats the flex basis: Safari sizes an inline-flex box (a project's running mark)
    by its items' widths, so a dot without one let the count beside it overflow. */
 .dot {
@@ -1303,6 +1271,10 @@ select.input {
 }
 .dot-vs .icon {
   stroke-width: 2.2;
+}
+/* Paused: the pause sign in the dot's box, in the idle ring's colour. */
+.dot-paused {
+  color: var(--muted);
 }
 /* A room's icon stands there too (`dot-vs mark-room`), in the colors of the dot of its group. */
 .mark-wait {
@@ -1562,6 +1534,70 @@ select.input {
 .layout-phone .ctx-menu .menu-item {
   height: 44px;
   font-size: 16px;
+}
+/* An item with a submenu (a model family): the version picked there after its label, a chevron
+   at its end; on a computer the submenu is a flyout beside the item, fixed where the layout
+   effect puts it, over the menu. */
+.ctx-menu .menu-has-sub .menu-label,
+.menu-split-row .menu-label {
+  flex: 1;
+}
+.menu-sub-arrow {
+  display: flex;
+  color: var(--muted);
+}
+.menu.ctx-menu.ctx-flyout {
+  z-index: 41;
+  min-width: 150px;
+}
+/* On a phone the chevron is a button of its own beside the item, and the submenu unfolds under
+   it, its items indented past the check marks. */
+.menu-split-row {
+  display: flex;
+  align-items: center;
+}
+.ctx-menu .menu-split-row .menu-item {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+.menu-sub-toggle {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.menu-split.is-open .menu-sub-toggle .icon {
+  transform: rotate(180deg);
+}
+.menu-inline {
+  padding-left: 26px;
+}
+/* The pick shown on a family stays on its line, at its end. */
+.layout-phone .menu-split-row .menu-detail {
+  flex-basis: auto;
+  padding-left: 0;
+}
+/* Over a menu's items (the mode pill's switch) and under them (the model pill's limits; empty
+   while the worker has reported none). */
+.menu-top:not(:last-child) {
+  margin-bottom: 4px;
+}
+.menu-bottom {
+  min-width: 240px;
+  padding: 8px 10px 4px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.menu-bottom:empty {
+  display: none;
 }
 /* A phone's menu: a clear layer over the screen under it takes the tap that closes it. */
 .menu-scrim {
@@ -2089,7 +2125,7 @@ select.input {
 
 /* A phone's list screens: one header row — on
    the first screen the view's title with its menu, Requests, the search, the settings and the
-   avatar; on a project's screen "‹", its name, the search, the order, "⋯" and "+" — then the
+   avatar; on a project's screen "‹", its name, the search, "⋯" and "+" — then the
    groups with rows from edge to edge. Spacious: a 52 px header, two-line rows, 42 px project
    tiles with "N waiting · N running"; Compact (`list-compact`): a 36 px header, 22 px group
    lines and 30 px one-line rows. */
@@ -2113,10 +2149,6 @@ select.input {
   height: 36px;
   margin: 0 2px 0 4px;
   border-radius: 18px;
-}
-.sessions-phone .btn-mode {
-  height: 40px;
-  font-size: 14px;
 }
 .sessions-phone .side-head .avatar {
   margin: 0 6px 0 4px;
@@ -2170,10 +2202,6 @@ select.input {
   width: 28px;
   height: 28px;
   border-radius: 8px;
-}
-:root.list-compact .sessions-phone .btn-mode {
-  height: 30px;
-  font-size: 13px;
 }
 :root.list-compact .sessions-phone .side-head .avatar {
   width: 24px;
@@ -2603,6 +2631,38 @@ select.input {
   line-height: 1.3;
   overflow-wrap: anywhere;
 }
+/* Rename in place: on a computer a pencil after the title while the mouse is on it, aligned to
+   the line's top so the line keeps its height; on a phone the title itself takes the tap. */
+.btn-rename-title {
+  width: 22px;
+  height: 20px;
+  margin-left: 4px;
+  border-radius: 5px;
+  vertical-align: top;
+  opacity: 0;
+}
+.chat-title:hover .btn-rename-title,
+.btn-rename-title:focus-visible {
+  opacity: 1;
+}
+.chat-title.is-renamable {
+  cursor: text;
+}
+/* The field in the title's place, in its type and height. */
+.chat-title-input {
+  display: block;
+  width: 100%;
+  height: 1.3em;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  outline: none;
+  box-shadow: 0 1px 0 var(--accent);
+}
 
 /* One line, so the header keeps its height while parts of the row come and go. When the row is
    too long the address of "started by" and the folder give way, each to an ellipsis (the whole
@@ -2650,6 +2710,7 @@ select.input {
 /* On a computer a turn's capped mode gives way with the address and the folder, but keeps the
    mode's name. */
 .chat:not(.chat-phone) .chat-meta .perm-capped {
+  flex: 0 1 auto;
   min-width: 5em;
 }
 
@@ -2678,8 +2739,8 @@ select.input {
   color: var(--text2);
 }
 
-/* A room: its mode where a session names its model, and its agents' sessions on a line of their
-   own, each with its state. */
+/* A room: no pills, its mode in the meta row after the folder (on a phone after the state), and
+   its agents' sessions on a line of their own, each with its state. */
 .chat-room {
   color: var(--text2);
   white-space: nowrap;
@@ -2700,35 +2761,114 @@ select.input {
   color: var(--danger);
 }
 
-/* T38: the permission mode next to the state pill; Auto and Allow all stand out. */
-.perm-auto,
-.perm-allow-all {
+/* T38: the permission mode and the model, round pills next to the state (on a phone on a line
+   of their own under it), each opening its menu
+   (a chevron); an archived session's are the marks alone. Auto and Allow all stand out. Not
+   `.pill`, which a phone's chat strips of its box. */
+.btn-mode-pill,
+.btn-model-pill {
+  flex: none;
   display: inline-flex;
   align-items: center;
+  gap: 3px;
+  max-width: 100%;
   height: 22px;
   padding: 0 8px;
+  border: 1px solid var(--border);
   border-radius: 11px;
-  border: 1px solid var(--permission-border);
+  background: transparent;
+  color: var(--text2);
+  font: 500 12px var(--sans);
+  white-space: nowrap;
+}
+button.btn-mode-pill,
+button.btn-model-pill {
+  padding-right: 6px;
+  cursor: pointer;
+}
+button.btn-mode-pill:hover,
+button.btn-model-pill:hover,
+.btn-mode-pill[aria-expanded='true'],
+.btn-model-pill[aria-expanded='true'] {
+  background: var(--row-hover);
+  color: var(--text);
+}
+/* The row clips: a focus ring drawn outside the pill would be cut off. */
+.btn-mode-pill:focus-visible,
+.btn-model-pill:focus-visible {
+  outline-offset: -2px;
+}
+.btn-mode-pill .icon,
+.btn-model-pill .icon {
+  color: var(--muted);
+}
+.pill-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.btn-mode-pill.perm-auto,
+.btn-mode-pill.perm-allow-all {
+  border-color: var(--permission-border);
   background: var(--permission-bg);
   color: var(--waiting);
   font-weight: 600;
-  white-space: nowrap;
 }
-
-.perm-ask {
-  color: var(--muted);
-  white-space: nowrap;
+.btn-mode-pill.perm-auto .icon,
+.btn-mode-pill.perm-allow-all .icon {
+  color: inherit;
+}
+button.btn-mode-pill.perm-auto:hover,
+button.btn-mode-pill.perm-allow-all:hover,
+.btn-mode-pill.perm-auto[aria-expanded='true'],
+.btn-mode-pill.perm-allow-all[aria-expanded='true'] {
+  border-color: var(--waiting);
 }
 
 /* T39: a turn capped by a message; the session's own mode, dimmer, after it. */
-.perm-capped {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-
 .perm-next {
   opacity: 0.7;
+}
+
+/* The mode pill's switch over its menu: Ask | Auto | Allow all, the session's own pressed. */
+.mode-switch {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--row-hover);
+}
+.mode-switch button {
+  flex: 1;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text2);
+  font: 500 13px var(--sans);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.mode-switch button:hover {
+  color: var(--text);
+}
+.mode-switch button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.mode-switch button[aria-pressed='true'] {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--shade) 30%, transparent);
+}
+.mode-switch .btn-mode-auto[aria-pressed='true'],
+.mode-switch .btn-mode-allow_all[aria-pressed='true'] {
+  color: var(--waiting);
+}
+.layout-phone .mode-switch button {
+  height: 38px;
+  font-size: 15px;
 }
 
 .pill {
@@ -2846,6 +2986,13 @@ select.input {
 .menu-item:hover {
   background: var(--row-hover);
 }
+/* "Folder rules" in "More" is a link. */
+.menu a.menu-item {
+  text-decoration: none;
+}
+.menu a.menu-item:hover {
+  color: var(--text);
+}
 .menu-danger {
   color: var(--danger);
 }
@@ -2864,17 +3011,6 @@ select.input {
   min-height: 28px;
   overflow-wrap: anywhere;
 }
-/* The model of the session, below the menu's items. */
-.menu-settings {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 240px;
-  padding: 8px 10px 4px;
-  margin-top: 4px;
-  border-top: 1px solid var(--border);
-}
-
 .limits {
   display: flex;
   flex-direction: column;
@@ -5143,6 +5279,10 @@ a.relay-peer {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* The rename field's underline is a shadow under it, outside the title's box. */
+.chat-phone .chat-title.is-editing {
+  overflow: visible;
+}
 
 .chat-phone .chat-meta {
   flex-wrap: nowrap;
@@ -5156,25 +5296,73 @@ a.relay-peer {
   background: transparent;
 }
 
+/* A phone chat's header is lines: "‹", the title up to the first button and the buttons; the
+   state's line; the pills' line. The lines under the first are as wide as the header past "‹".
+   They stand at even gaps, with even padding above and below, and the round buttons and "‹",
+   centred on the title, overflow the first line into that padding: half of 44px - 20.8px,
+   rounded up. (A new session's window keeps "‹" beside its title and state.) */
+.chat-phone .chat-head:has(> .chat-head-top) {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 12px 4px;
+  padding-top: calc(12px + env(safe-area-inset-top));
+}
+/* As tall as the title's line, 16px × 1.3. Positioned, so the buttons' lower half, over the
+   state's line, takes the taps there. */
+.chat-head-top {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 20.8px;
+}
+.chat-head-top > .chat-title {
+  flex: 1;
+  min-width: 0;
+}
+.chat-phone .chat-head > .chat-meta,
+.chat-phone .chat-head > .chat-pills,
+.chat-phone .chat-head > .chat-room-agents {
+  padding-left: 46px; /* "‹", 44px, and the gap after it */
+}
+
+/* The pills' line: the mode and the model pills, each at its full text, then "started by"
+   (alone without pills). The address gives way first, to an ellipsis; only past it a pill's
+   words do (a long provider's label, a turn's capped mode). */
+.chat-pills {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  overflow: clip;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.chat-pills > .btn-mode-pill,
+.chat-pills > .btn-model-pill {
+  flex: 0 1 auto;
+  min-width: 3em;
+}
+/* "started by" keeps its words, which do not shrink; the address, an item of the line, takes
+   only the room left, up to its own width, and never less than its ellipsis. A shrink factor
+   would hand the pills a fraction of a pixel too, enough for an ellipsis. */
+.chat-pills > .chat-spawned {
+  display: contents;
+}
+.chat-pills > .chat-spawned a {
+  flex: 1 1 0;
+  min-width: 1.2em;
+  max-width: max-content;
+  overflow: clip;
+  text-overflow: ellipsis;
+}
+
 .chat-where {
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* On a phone "started by" is the header's last line, as wide as the header (under its buttons
-   too) and lined up with the title past the back button, in the meta row's type; an address
-   too long for it ends in an ellipsis. */
-.chat-phone .chat-head:has(> .chat-spawned) {
-  flex-wrap: wrap;
-}
-.chat-phone .chat-spawned {
-  flex-basis: 100%;
-  padding-left: 46px; /* the back button, 44px, and the header's gap */
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: clip;
   text-overflow: ellipsis;
 }
 
@@ -5207,7 +5395,7 @@ a.relay-peer {
   color: var(--muted);
 }
 
-/* The Compact look on a phone (the new screen): a 42 px header, the feed 14/1.4. */
+/* The Compact look on a phone (the new screen): 36 px buttons, smaller type, the feed 14/1.4. */
 :root.list-compact .chat-phone {
   --feed-line: 19.6px;
   font-size: 14px;
@@ -5225,13 +5413,34 @@ a.relay-peer {
   font-size: 15px;
   line-height: 19px;
 }
+:root.list-compact .chat-phone .chat-title-input {
+  height: 19px;
+}
 :root.list-compact .chat-phone .chat-meta,
-:root.list-compact .chat-phone .chat-spawned {
+:root.list-compact .chat-phone .chat-pills {
   font-size: 11.5px;
   line-height: 16px;
 }
-:root.list-compact .chat-phone .chat-spawned {
-  padding-left: 38px; /* the back button is 36px in this look */
+/* The chat's lines as above, for 36 px buttons on a 19 px title: half of 36px - 19px, rounded up. */
+:root.list-compact .chat-phone .chat-head:has(> .chat-head-top) {
+  gap: 3px;
+  padding: 9px 4px;
+  padding-top: calc(9px + env(safe-area-inset-top));
+}
+:root.list-compact .chat-head-top {
+  height: 19px;
+}
+:root.list-compact .chat-phone .chat-head > .chat-meta,
+:root.list-compact .chat-phone .chat-head > .chat-pills,
+:root.list-compact .chat-phone .chat-head > .chat-room-agents {
+  padding-left: 38px; /* "‹" is 36px in this look */
+}
+/* On their own line the pills are a little lower than on a computer, 20px, still a finger's
+   target. */
+:root.list-compact .chat-phone .btn-mode-pill,
+:root.list-compact .chat-phone .btn-model-pill {
+  height: 20px;
+  border-radius: 10px;
 }
 
 /* ---- pages: project settings, settings, enroll ---- */

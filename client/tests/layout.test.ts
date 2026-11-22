@@ -115,6 +115,42 @@ describe('layout widths', () => {
     ).toBe('none');
   });
 
+  it("a phone's chat header: the buttons on the title's line, then the state's line and the pills' line with \"started by\", each as wide as the header", () => {
+    // Checked in Chromium at 390 px in both looks: the state and the pills at their full text,
+    // the title cut only at the first button, the address only at the header's edge.
+    const head = rule('.chat-phone .chat-head:has(> .chat-head-top)');
+    expect([head['flex-direction'], head['align-items'], head['gap'], head['padding']]).toEqual(['column', 'stretch', '4px', '12px 4px']);
+    // Line 1 is the title's height; the buttons, centred on it, overflow into the padding.
+    const top = rule('.chat-head-top');
+    expect([top['display'], top['align-items'], top['height'], top['position']]).toEqual(['flex', 'center', '20.8px', 'relative']);
+    expect([rule('.chat-head-top > .chat-title')['flex'], rule('.chat-head-top > .chat-title')['min-width']]).toEqual(['1', '0']);
+    expect(rule('.chat-phone .chat-head > .chat-meta, .chat-phone .chat-head > .chat-pills, .chat-phone .chat-head > .chat-room-agents')['padding-left']).toBe('46px');
+    const compact = rule(':root.list-compact .chat-phone .chat-head:has(> .chat-head-top)');
+    expect([compact['gap'], compact['padding']]).toEqual(['3px', '9px 4px']);
+    expect(rule(':root.list-compact .chat-head-top')['height']).toBe('19px');
+    // The pills' line: a pill gives way only past the address, to an ellipsis of its words.
+    const line = rule('.chat-pills');
+    expect([line['display'], line['flex-wrap'], line['overflow'], line['min-width'], line['white-space']]).toEqual(['flex', 'nowrap', 'clip', '0', 'nowrap']);
+    const pill = rule('.chat-pills > .btn-mode-pill, .chat-pills > .btn-model-pill');
+    expect([pill['flex'], pill['min-width']]).toEqual(['0 1 auto', '3em']);
+    expect([rule('.pill-text')['min-width'], rule('.pill-text')['text-overflow']]).toEqual(['0', 'ellipsis']);
+    // "started by" keeps its words; the address takes the room left, up to its width, and ends
+    // in an ellipsis when that is short, which stays even when the pills take the whole line.
+    expect(rule('.chat-pills > .chat-spawned')['display']).toBe('contents');
+    const address = rule('.chat-pills > .chat-spawned a');
+    expect([address['flex'], address['min-width'], address['max-width'], address['overflow'], address['text-overflow']]).toEqual([
+      '1 1 0',
+      '1.2em',
+      'max-content',
+      'clip',
+      'ellipsis',
+    ]);
+    // In Spacious the computer's 22 px, in Compact 20 px, still round.
+    expect(rule('.btn-mode-pill, .btn-model-pill')['height']).toBe('22px');
+    const pills = rule(':root.list-compact .chat-phone .btn-mode-pill, :root.list-compact .chat-phone .btn-model-pill');
+    expect([pills['height'], pills['border-radius']]).toEqual(['20px', '10px']);
+  });
+
   it("an option's box keeps its 18px beside a long description, the Other field takes the rest", () => {
     expect(rule('.choice input')['flex']).toBe('none');
     expect(rule('.choice-other .input')['flex']).toBe('1');
@@ -176,15 +212,6 @@ describe('layout widths', () => {
       'hidden',
       'ellipsis',
     ]);
-  });
-
-  it('on a phone the "started by" line takes the header\'s whole width, one line: a long address ends in an ellipsis instead of breaking', () => {
-    expect(rule('.chat-phone .chat-head:has(> .chat-spawned)')['flex-wrap']).toBe('wrap');
-    // The title's column has a basis of 0: it stays on the first line beside the buttons.
-    expect(rule('.chat-head-main')['flex']).toBe('1');
-    const spawned = rule('.chat-phone .chat-spawned');
-    expect(spawned['flex-basis']).toBe('100%');
-    expect([spawned['white-space'], spawned['overflow'], spawned['text-overflow']]).toEqual(['nowrap', 'clip', 'ellipsis']);
   });
 
   it("a message's images stand in one row while they fit, any other file keeps a row of its own", () => {

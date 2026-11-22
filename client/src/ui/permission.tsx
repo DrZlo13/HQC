@@ -257,9 +257,9 @@ function FolderForm({
   );
 }
 
-/** An open menu (the session column's, the project bar's, the chat's "More"), the workers'
- *  list above the column's bottom line, or the session column slid out over the chat (a
- *  narrow window: its Esc puts the column away). */
+/** An open menu (the session column's, the project bar's, the chat header's pills and
+ *  "More"), the workers' list above the column's bottom line, or the session column slid out
+ *  over the chat (a narrow window: its Esc puts the column away). */
 const OPEN_POPUP = '[role="menu"], .wline-pop, .sidebar-slide';
 
 function isTyping(el: Element | null): boolean {

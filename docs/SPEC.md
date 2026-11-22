@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.205, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
+Version 0.206, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -559,7 +559,7 @@ the client renders only them. The "source" column is the component that produces
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?, due_in_ms?, retry?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands and (since 0.169) Monitor watchers, in the order they became rows, then (since 0.169) the wakeup the agent armed and its cron jobs, empty when none (§8.1); since 0.181 a task the CLI marks `ambient` is no row, and the commands and subagents it starts are rows as the agent's own (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.161; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row, a command's and (since 0.169) a Monitor's say, `retry` (since 0.179) `{attempt, max_retries, retry_delay_ms, error_status?}` while its request to the model API failed and waits to be retried (`error_status` absent: the attempt got no response; §8.1), `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row, `command` for a command's and, since 0.169, `monitor` for a Monitor's, `wakeup` for the agent's wakeup and `cron` for one of its cron jobs; a command's or a Monitor's row carries only `task_id`, `description` (its Bash call's description, or the command; the Monitor's description), `duration_ms`, `call_id?`, `kind` and `stoppable`; a wakeup's and a job's row also `due_in_ms` (since 0.169), the milliseconds until it fires when the list was sent, by the worker's clock, 0 once due, absent on a job whose next fire is not known |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops, and (since 0.179) again, unchanged, at each heartbeat of a long call of the main agent (§8.1, §17.3) |
 | `schedules.live` | `schedules[{schedule_id, message, due_in_ms, cron?, at?, timezone}]` | hub (since 0.169); transport only, not written to the database: the session's enabled schedules (§16) that have a next run, the whole list each time, the next one first, empty when none. `due_in_ms` is the milliseconds until the next run when the list was sent, by the hub's clock, 0 when due; `cron` is the pattern of a recurring schedule and `at` the time of a one-off, `timezone` the zone of the schedule. A worker sending one is refused (`error invalid_frame`, §5.2) |
-| `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false), `interrupted?` (since 0.161: `true` for a reply an interrupt cut off before the runtime finished it — Stop, "No" to a permission request, §8.1; absent when false; the client shows it muted with " · interrupted" after its time), `refusal?` (since 0.168: `true` for the runtime's reply to a model refusal, Claude Code's with `stop_reason: "refusal"`; absent when false) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Under a `refusal` one, while no message of the user stands after it in the feed, the session is not archived and VS Code does not hold it (`locked_vscode`, whose chat has no input), a small "Switch model" opens a model menu: the aliases, the versions, "Another model…" and the providers the session's worker allows (§6), the session's model checked, without Claude Code's default, which a running agent is not switched to (it takes it at its next start, §5.3 `session.model`). The checked one only closes the menu; another switches the session as the "More" menu does, and once the hub took it the line says "Switched to <model>. Send the message again." in the button's place, until a `system model_not_switched` after the choice (§8.1) brings the button back. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
+| `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false), `interrupted?` (since 0.161: `true` for a reply an interrupt cut off before the runtime finished it — Stop, "No" to a permission request, §8.1; absent when false; the client shows it muted with " · interrupted" after its time), `refusal?` (since 0.168: `true` for the runtime's reply to a model refusal, Claude Code's with `stop_reason: "refusal"`; absent when false) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Under a `refusal` one, while no message of the user stands after it in the feed, the session is not archived and VS Code does not hold it (`locked_vscode`, whose chat has no input), a small "Switch model" opens a model menu: the families, each with its versions in a submenu, "Another model…" and the providers the session's worker allows (§6), the session's model checked, without Claude Code's default, which a running agent is not switched to (it takes it at its next start, §5.3 `session.model`). The checked entry itself (an alias, or the version in its family's submenu) only closes the menu; a family checked for one of its versions switches to its alias, and any other choice switches the session as the header's model pill does, and once the hub took it the line says "Switched to <model>. Send the message again." in the button's place, until a `system model_not_switched` after the choice (§8.1) brings the button back. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (short error text; since 0.194 an opened call row in the client shows it only when it is not the start of `result_preview`, which the Claude Code adapter cuts from the same text), `duration_ms?`, `artifact_id?` (a diff or a large result, §12; since 0.180 the Claude Code adapter's whole text of a result longer than `result_preview`, its first 2 MiB, kind `text`, §8.1), `artifact_ids[]?` (since 0.180: the result's images, kind `image`, in order; absent when none, §8.1) | adapter |
@@ -1697,7 +1697,7 @@ the rest is marked "later"):
   check over 16 KiB `400`.
   The client: the rules screen `#/p/<project>/rules/<workspace>` (`?session=<id>` when opened
   from a session), from "Rules · N hqc" on the workspace's row in the project settings and
-  "Folder rules" in the session header; it shows the worker, the path, the workspace's
+  "Folder rules" in the chat's "More" menu; it shows the worker, the path, the workspace's
   environment (since 0.56), the worker's default mode and the session's; "Check a command" (a
   command, or a tool name such as `Edit`; a multi-line field since 0.62, so a pasted script keeps
   the line breaks that separate its commands; the worker's verdict with the rule and its source, "Will
@@ -2005,8 +2005,8 @@ the rest is marked "later"):
   | offline | revoked, revoked_at?, last_seen?, system_session_id, limits, ...}` (§3 Worker);
   `limits` (since 0.81) — `{five_hour?, seven_day?, status?, rate_limit_type?, resets_at?,
   reported_at}` of the latest `worker.limits` (§5.4; the three since 0.179), `null` while there
-  is none. The chat's "More" menu shows them for the session's worker under the model field: a
-  bar, the share used and when it resets. Since 0.179 the chat also reads them when it opens and
+  is none. The menu of the chat header's model pill shows them for the session's worker under its
+  items: a bar, the share used and when it resets. Since 0.179 the chat also reads them when it opens and
   whenever the session's state changes, and shows a bar above the input, worded as the VS Code
   tab words it; unlike the tab, which shows the share only once the status is `allowed_warning`,
   at 70 % of either window (since 0.190 `limit_notice_percent` of `/api/me`, the hub's
@@ -2134,8 +2134,9 @@ Bing or Yandex, kept on this device (`localStorage`), not on the hub; "Models" (
 lists the user's providers (§3 Provider), each with its model, `base_url` and the workers that
 allow it, or the `[providers.<name>] base_url = "…"` line a `worker.toml` needs when none does,
 with Edit and Delete, and "Add a provider"; the model menus of a session
-(the new session's model chip and the chat's "More") list, below the Claude models (Claude
-Code's default, the aliases, since 0.168 the versions, "Another model…"), the
+(the new session's model chip and the chat header's model pill) list, below the Claude models
+(Claude Code's default; since 0.206 a family each — Opus, Sonnet, Haiku, Fable — whose item picks
+its alias and whose submenu holds its versions, the versions since 0.168; "Another model…"), the
 providers its worker allows; picking one in a chat asks once ("The agent restarts on …"), and a
 Claude model picked there leaves the provider in the same `PATCH`; a provider session's chat
 header names the provider instead of the model and shows no cost, which the CLI computes at a
@@ -2176,10 +2177,10 @@ archived, not a service session) first, the projects without one after them, the
 first; the starred projects first in each. Its "Reorder…" (since 0.64) arranges the user's own
 order whichever is shown: the tiles are dragged (or moved with ↑/↓ when focused) instead of
 opened, ✓ stores the order with `PUT /api/me/project_order` and switches the bar to Custom, ✕
-drops it. A right click on a project (or the menu key) opens the project's menu, the same as "⋯"
-in the session column's head: Open in new tab, Add to (Remove from) favorites, Project
-settings…, Archive project (Restore for an archived one) and Delete project…, neither of the
-last two for the personal project. Archive project takes it off the bar at once, without a
+drops it. A right click on a project (or the menu key) opens the project's menu: Open in new tab,
+Add to (Remove from) favorites, then the end it shares with "⋯" in the session column's head
+(below): Project settings…, Archive project (Restore for an archived one) and Delete project…,
+neither of the last two for the personal project. Archive project takes it off the bar at once, without a
 question, the open one giving its place to the personal project (on a phone, back to the
 projects screen), and shows "Archived «name» · find it with the search on the bar · Undo" for 5
 s at the bottom of the bar (on a phone "Archived «name» · Undo" at the bottom of the projects
@@ -2197,11 +2198,17 @@ tile for it.
 The session column (since 0.114): 280–310 px by default, narrowing with the window; its right
 edge is dragged (or moved with ←/→ in 16 px steps when focused) between 240 and 560 px, the
 width kept on this device (`hqc.look`), never so wide that the chat gets less than 300 px. Its
-head is one row: the project's name, the magnifier (the search page, §15), the order menu
-("State ▾": State, Recent, Custom and "Reorder…"), "⋯" (the project's menu above) and "+" (a new
-session, below). Under it the project's favorites (§3 Favorite) pinned over the scrolling list,
-then the groups (below). A row is a dot — amber waiting, red error, the project color pulsing
-while it works, an empty ring idle, `</>` while it is open in VS Code and not working there —
+head is one row: the project's name, the magnifier (the search page, §15), "⋯" and "+" (a new
+session, below). "⋯" (since 0.206) holds the list's order — State, Recent and Custom, the one
+shown checked, none while Reorder runs — and "Reorder…"; then "New room…" (§7.1.1); then, on a
+phone, whose project screen has no bar to right-click, Add to (Remove from) favorites, and the
+end of the bar's menu above: Project settings…, Archive project (Restore) and Delete project….
+Under the head the project's favorites (§3 Favorite) pinned over the scrolling list, under the
+name "Favorites" and their count as any group's, then the groups (below). A row is a dot — amber
+waiting, red error, the project color pulsing while it works, an empty ring idle, `</>` while it
+is open in VS Code and not working there, (since 0.206) the pause sign, muted and titled
+"Paused", for a paused session that neither works nor waits (one still ending its turn keeps its
+pulsing dot) —
 then the title, "Draft", the unread count, and in Spacious the state line under the title (the
 state, "N queued", "N agents"); Compact puts the row on one line, "N agents" after the title and
 the state in the dot alone (faded while the worker is offline). A desktop row has no time (its
@@ -2211,13 +2218,13 @@ star (they stay 300 ms after the mouse leaves the row or them, for the way betwe
 card or tooltip: Archive archives the row as its menu's Archive does; the star, filled on a
 favorite, adds the session to the favorites or takes it out as its menu's item does. A right
 click on a row (the menu key; on a phone a long press or a right click) opens its menu: Open in
-new tab, Add to (Remove from) favorites, Rename, Move to project…, Folder rules (with a
-workspace), Restart session and (since 0.160) Pause session (§17.3; not for an archived, a
-service, a VS Code-driven session or one whose worker is offline), or for a paused session Resume
-session in their place, Archive, and Delete…, which asks in a second step of the menu with the focus on
-Cancel. Since 0.172 the chat header's "⋯" starts with the same Rename for a session that is not
-archived, a room and a room's agent included. A desktop row (not in Reorder) can also be dragged onto another project on the bar, whose
-tile or row is ringed while the row is over it: dropped there, the session moves
+new tab, Add to (Remove from) favorites, Rename, Move to project… (not for a room), Restart
+session (not for an archived, a service, a VS Code-driven or a paused session, a room or one whose
+worker is offline), (since 0.160) Pause session while the agent works, as beside Stop in the chat
+(below), or Resume session for a paused one, Archive, and Delete…, which asks in a second step of
+the menu with the focus on Cancel. A folder's rules are in the chat's "More" (below). A desktop
+row (not in Reorder) can also be dragged onto another project on the bar, whose tile or row is
+ringed while the row is over it: dropped there, the session moves
 (`POST /api/sessions/{id}/move`) into that project's one `ready` folder on the session's worker,
 or, with none or several, "Move to project…" opens over the list with that project chosen; a
 refusal is the list's notice. At the bottom of a desktop column: "Requests" while one is open (§10.1), then the
@@ -2225,12 +2232,56 @@ workers line — "N workers online", the open session's worker with "N running" 
 every project, by the rule of the list's Running group), "offline" while the socket is down —
 whose click opens the "Workers" list above it (§10.2). A phone's project screen (`#/p/<id>`) has
 the same column with one head row after "‹" back to the projects and no buttons past the column;
-"Requests" and the workers line are on the phone's first screen (below). The client's menus (a
-row's, a project's, the head's, a new session's chips, the feed's) close on Esc or a press
-outside, move with ↑/↓ and give the focus back to what had it; while one, the workers list or
-the slid-out column is open, a permission card does not take Enter and Esc (§10.1).
+"Requests" and the workers line are on the phone's first screen (below).
 
-The session list (since 0.53, T50): the order menu's State / Recent / Custom (State groups Needs
+The chat header (since 0.206): the title, then the meta row — the state, the permission mode and
+the model as round pills beside it (below and §6 `permission_mode`; none for a room or the
+service session, and an archived session's are the names alone, without a menu), then, on a
+computer, "started by <address>", "on <worker>", the folder with its copy button, "Browser" and
+the cost. On a phone the header is lines at even gaps, with even padding above and below: "‹",
+the title and the header's buttons, centred on the title's line, the title cut only at the first
+button; the state at its full text and "N agents" (a room's: the state and its mode); the two
+pills, each at its full text with its chevron, 22 px tall as on a computer (20 px in a phone's
+Compact look), then "started by <address>", whose address gives way to an ellipsis first and a pill's text (a
+provider's long label) only past it. The lines under the first are as wide as the header past
+"‹". Without pills "started by" is that line alone, and without either there is no such line;
+a room has no pills, and its agents' line stays right under its state's, above "started by" of
+a room an agent made. "More" says where the session runs, "<worker> · <folder>" with the
+folder's copy button (no worker while VS Code holds the session: the state pill names it), and
+the cost. The model pill names the provider (§3 Provider), else
+the model (the one chosen, or the last usage's when none is or it is the chosen one's full
+name), else "Default"; its menu is the model menu above, the session's model checked (a family
+for its alias and for each of its versions, the version after the family's name, "Opus 4.8"):
+the checked entry itself (the alias, or the version in the submenu) only closes the menu, a
+family checked for one of its versions switches to its alias. "Another model…" asks for the name
+in the menu (Enter sends it, an empty one nothing); the worker's usage limits stand under the
+items (§6 `GET /api/workers`). The title is renamed in place:
+on a computer a pencil after it, shown on hover, and on a phone a tap on the title turns it into
+a field; Enter or leaving the field sends `PATCH /api/sessions/{id} {title}` with the name
+trimmed (an empty or unchanged one sends nothing), Esc keeps the old one, a refusal is the
+chat's notice "Not renamed: …"; not for an archived or a service session, a room and a room's
+agent included. While the agent works (`running`, `waiting`, `queued`; not an archived or a
+service session, a room or one paused already) "Pause" (§17.3) stands right before Stop (on a
+phone an icon, "Pause after this turn"); a paused session that is not archived has "Resume" in
+its place, before Stop while its turn still runs; their refusals are the chat's notice ("Not
+paused: …", "Not resumed: …").
+"More" (⋯) holds, as far as each applies: on a phone where the session runs and the cost (above),
+and "Retry" for a failed one; Schedules (not for a room, §16), Move to project… (not for
+an archived session or a room), "Folder rules" (a link to the rules screen of the session's
+folder, §6), Restart session (as in the row's menu; a refusal "Not restarted: …"); with none of
+them, and in the service session, there is no "More".
+
+The client's menus (a row's, a project's, the head's, the header's pills, a new session's chips,
+the feed's) close on Esc or a press outside, move with ↑/↓ and give the focus back to what had
+it; while one, the workers list or the slid-out column is open, a permission card does not take
+Enter and Esc (§10.1). Since 0.206 an item with a submenu (a model family's versions) shows a
+chevron: on a computer the submenu is a flyout beside the item, to its right where it fits, else
+to its left, opened by the mouse on the item or by →, which focuses its first entry; ↑/↓ move
+within it, ← and Esc close it alone with the focus back on the item, and it goes 250 ms after the
+mouse left both the item and it; on a phone the chevron is a button of its own beside the item
+and unfolds the submenu under it, indented. A click on the item itself picks it.
+
+The session list (since 0.53, T50): State / Recent / Custom of the column head's "⋯" (State groups Needs
 you / Running and then the idle sessions by how long ago they were active, "Idle · Today", "Idle
 · Yesterday", "Idle · Last 7 days", "Idle · This month", "Idle · Earlier"; Recent Today /
 Yesterday / Last 7 days / This month / Earlier; Custom is one list in the saved order; empty
@@ -2346,13 +2397,14 @@ comes, and on the requests screen it has the same form. The rules screen of a wo
 worker has `session_secrets` lists the ssh keys kept for it (name, fingerprint) with Delete
 after a confirmation; an offline worker gives a line saying so.
 
-The browser (since 0.148, §14). The chat's "More" menu of a session whose worker has `browser`
-has "Browser: off · Give the browser" or "Browser: on · Turn off"; giving it asks once ("Give the
+The browser (since 0.148, §14). The menu of the chat header's mode pill of a session whose worker
+has `browser` has, under the switch, "Browser: off · Give the browser" or "Browser: on · Turn
+off"; giving it asks once ("Give the
 agent your browser? The agent restarts with your Chrome on <worker>: it opens its own tabs in
 your profile, signed in as you, and sees the tabs you drag into its tab group. It can click and
 type there; it cannot upload files. Watch what it does."), taking it away says the agent
 restarts without it; both send `PATCH /api/sessions/{id} {browser}`. While it is on, the chat
-header shows "Browser" after the model or provider, titled "The agent has your Chrome on
+header's meta row on a computer shows "Browser" after the folder, titled "The agent has your Chrome on
 <worker>". Since 0.149 the lists mark it in the browser's own color (fuchsia, `--browser`, apart
 from the amber of waiting, the blue of unread and the violet of messages between sessions): the
 session's row has a ring of it and a globe after its title ("The agent has your browser"), and a
@@ -2653,19 +2705,20 @@ of the state.
 from `session.state` (§5.4), kept in the hub's memory; absent — none. The chat's main agent
 row (§17.1) shows it in place of "Working"; a client ignores a `kind` it does not know.
 `permission_mode` and `effective_permission_mode` (since 0.42, T38): §3 Session; absent —
-null. The client shows the mode in the chat header: `effective_permission_mode`, else
-`permission_mode`; "Auto" and (since 0.129) "Allow all" as a marked badge, "Ask" as plain
-text, "<runs> (<asked> asked)" ("Ask (Auto asked)", "Auto (Allow all asked)") while the session
-asked for a higher mode than its worker runs (not restarted yet, a process that cannot switch,
-`allow_auto = false`, or Allow all on a worker without `allow_all = true`), nothing while both
-are absent; since 0.43 (T39), while
+null. The client shows the mode in the chat header as a round pill beside the state:
+`effective_permission_mode`, else `permission_mode`; "Auto" and (since 0.129) "Allow all" in
+amber, "Ask" plain, "<runs> (<asked> asked)" ("Ask (Auto asked)", "Auto (Allow all asked)")
+while the session asked for a higher mode than its worker runs (not restarted yet, a process
+that cannot switch, `allow_auto = false`, or Allow all on a worker without `allow_all = true`),
+"Default" (the worker's default, not reported yet) while both are absent; since 0.43 (T39), while
 `permission_capped_by` is set, "<runs> (asked by <address>) · <own> after this turn" ("Ask
 (asked by <address>) · Auto after this turn", "Auto (asked by <address>) · Allow all after
 this turn"; since 0.129 "the session's own mode" for <own> when `permission_mode` is absent,
 since the worker's default is not known to the client): the turn runs in the cap's mode, the
 session's own mode comes back when it ends.
-The session's "More" menu has "Switch to <mode>" for each of the two other modes; a new
-session's "Permissions" chip has the worker's default, Ask, Auto and Allow all. Going to Ask
+Since 0.206 the pill opens a menu with a switch Ask | Auto | Allow all over its items, the
+session's own mode pressed (pressing it only closes the menu), and the browser's item under it
+(above); a new session's "Permissions" chip has the worker's default, Ask, Auto and Allow all. Going to Ask
 asks nothing; going to Auto asks one line: "Switch to Auto? Claude Code then runs tool calls
 without asking; the worker's deny list is the only limit."; going to Allow all asks its own:
 "Switch to Allow all? Claude Code then runs every tool call without asking, with no classifier
@@ -3646,7 +3699,8 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   questions push as in any session.
 - The client lists only the room: an agent's session (`room_id`) is in no list or count; the
   room's state there is its agents' (one needs the owner — needs you, else one runs —
-  running), its row has the room's icon in place of the state dot, in the dot's colors, and the
+  running), its row has the room's icon (two speech bubbles) in place of the state dot, in the
+  dot's colors, and the
   room's header names its agents with their state, each a link to its session, has Stop (`POST
   /stop` of the room) and the room's cost, the sum of its agents' (each as its own header counts
   it, one with a provider left out), "$X this room". A room has no
@@ -3655,8 +3709,8 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   title in place of "Message from", a pass as a quiet line, and (since 0.189 in the live block above the input, before 0.189 at
   the bottom of the feed) a row per agent at work, as a session shows its own agent's work (§6,
   §17.1); on the project bar the rate and the
-  count of agents at work of a room are those of its running agents (§6). "New room" opens a
-  window like a new session's (`#/p/<id>/new-room`): chips over the input — one per agent, which
+  count of agents at work of a room are those of its running agents (§6). "New room…" in the
+  session column head's "⋯" opens a window like a new session's (`#/p/<id>/new-room`): chips over the input — one per agent, which
   opens its name (`name`, §6), model and prompt, "+ Agent", then the mode, the workspace, the
   folder and the permissions — and the first message creates the room (`POST
   /api/projects/{id}/rooms` without a title: "Room N") and goes in as its first message. Search (§15) leaves out an agent's inputs from the room, which the room has: the
@@ -6923,6 +6977,24 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.205 → 0.206 (the chat header reworked)
+§6 client layout and `permission_mode`, §7.1.1, §17.3: the chat header's "More" menu held
+everything, Pause among it, also for an idle session. The permission mode and the model are now
+round pills beside the state, each opening its menu: the mode a switch Ask | Auto | Allow all
+with the browser's item under it; the model the Claude families, each with its versions in a
+submenu, "Another model…", the providers and the worker's usage limits, the same menu in a new
+session's model chip and in "Switch model" under a refusal. The title is renamed in place (a
+pencil on hover, on a phone a tap). Pause stands before Stop only while the agent works, also in
+the row's menu; a paused session has Resume in its place, and its row shows the pause sign.
+"More" keeps Schedules, Move to project…, Folder rules and Restart session; Folder rules left
+the row's menu. The meta row says "on <worker>". On a phone the header's buttons stand on the
+title's line, the state has a line of its own, the pills another with "started by" after them
+instead of a last line of its own, and where the session runs is in "More". The session column
+head's "⋯" took the list's order, "Reorder…" and "New room…" and dropped Open in new tab and the
+favorites item, both in the project's right-click menu (a phone, without the bar, keeps the
+favorites item); Favorites has no pin, and the room's icon is two speech bubbles. Client only.
+0.186–0.196 are taken by open branches.
 
 ### 0.204 → 0.205 (a subagent's cards and rows on a phone: the task before the counts)
 §6, §4: on a phone a subagent's start card cut its task to a few letters, as "Agent started:",

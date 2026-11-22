@@ -1,7 +1,7 @@
-// The usage limits of a session's worker account, in the chat's "More" menu under the model
-// (SPEC §6): the 5-hour and the 7-day window, as the worker last reported them; and above the
-// input a bar while a window is at the hub's share (`Me.limit_notice_percent`, 70 % by default)
-// or the account has hit a limit.
+// The usage limits of a session's worker account, in the menu of the chat header's model pill
+// under its items (SPEC §6): the 5-hour and the 7-day window, as the worker last reported them;
+// and above the input a bar while a window is at the hub's share (`Me.limit_notice_percent`,
+// 70 % by default) or the account has hit a limit.
 
 import { useEffect, useState } from 'preact/hooks';
 

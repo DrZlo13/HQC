@@ -292,15 +292,17 @@ const menuOf = (title: string, x = 40, y = 120) =>
     rowOf(title).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
   });
 const menuItems = () => [...root.querySelectorAll('.menu .menu-item')].map((b) => b.textContent);
-const SESSION_MENU = ['Open in new tab', 'Add to favorites', 'Rename', 'Move to project…', 'Folder rules', 'Restart session', 'Pause session', 'Archive', 'Delete…'];
+const SESSION_MENU = ['Open in new tab', 'Add to favorites', 'Rename', 'Move to project…', 'Restart session', 'Pause session', 'Archive', 'Delete…'];
+/** The column header's "⋯" of a project the user may archive, on a computer. */
+const PROJECT_MENU = ['State', 'Recent', 'Custom', 'Reorder…', 'New room…', 'Project settings…', 'Archive project', 'Delete project…'];
 /** Archives a row from its menu's item. */
 async function archiveRow(title: string) {
   await menuOf(title);
   await click(root.querySelector('.menu .btn-archive'));
 }
-/** Reorder, from the header's order menu. */
+/** Reorder, from the header's project menu. */
 async function startReorder() {
-  await click(root.querySelector('.side-head .btn-mode'));
+  await click(root.querySelector('.side-head .btn-project-menu'));
   await click(root.querySelector('.menu .btn-reorder'));
 }
 /** A key pressed where the focus is (in a menu: its item). */
@@ -310,18 +312,18 @@ const pressKey = (key: string) =>
   });
 
 describe('SessionList (desktop column)', () => {
-  it('a header in one row: the name, search, the order, the project menu, a new room, a new session; then the groups', async () => {
+  it('a header in one row: the name, search, the project menu, a new session; then the groups', async () => {
     await mount(<SessionList app={makeApp()} current="net" />);
     const head = root.querySelector('.side-head')!;
     expect(head.querySelector('.project-title')!.textContent).toBe('physics-mp');
+    // The order and a new room are in the project menu; its name says what it holds.
     expect([...head.children].map((c) => c.getAttribute('aria-label') ?? c.textContent)).toEqual([
       'physics-mp',
       'Search sessions and messages',
-      'Session order: State',
-      'Project: settings, favorites, archive',
-      'New room',
+      'Project: order, new room, settings, archive, delete',
       'New session',
     ]);
+    expect(head.querySelector('.btn-mode, .btn-new-room')).toBeNull();
     // No tile, no "1 needs you · 2 running", no gear, no row of State / Recent / Custom.
     expect(root.querySelector('.side-tile, .side-counts, .btn-project-settings, .seg-group')).toBeNull();
     expect(groups()).toEqual([
@@ -368,6 +370,31 @@ describe('SessionList (desktop column)', () => {
       expect(groups()[1]).toEqual(['Running', '3', ['Stone textures', 'Step determinism', 'Busy in VS Code']]);
       render(null, root);
     }
+  });
+
+  it("a paused session's mark is the pause sign, muted, \"Paused\" its tooltip; one still finishing its turn keeps its running dot; on a phone too", async () => {
+    const list = [
+      ...LIST,
+      sess('held', 'Held build', 'paused', at(1), { paused_at: at(1) }),
+      sess('ending', 'Ending turn', 'running', at(2), { paused_at: at(0.5) }),
+    ];
+    for (const phone of [false, true]) {
+      await mount(<SessionList app={makeApp(list)} phone={phone} />);
+      const held = rowOf('Held build').querySelector<HTMLElement>('.dot-paused')!;
+      expect(held.getAttribute('title')).toBe('Paused');
+      expect(held.querySelector('svg')).not.toBeNull();
+      expect(rowOf('Held build').querySelector('.dot')).toBeNull();
+      expect(rowOf('Ending turn').querySelector('.dot-run')).not.toBeNull();
+      expect(rowOf('Ending turn').querySelector('.dot-paused')).toBeNull();
+      render(null, root);
+    }
+  });
+
+  it("a room's mark is two speech bubbles", async () => {
+    await mount(<SessionList app={makeApp([...LIST, sess('room', 'Glaze review', 'idle', at(0.05), { room_mode: 'council', worker_id: undefined })])} />);
+    const svg = rowOf('Glaze review').querySelector('.mark-room svg')!;
+    expect(svg.querySelectorAll('path')).toHaveLength(2);
+    expect(svg.querySelector('rect, circle')).toBeNull();
   });
 
   it("the row under the mouse: round archive and favorites buttons past the column's edge, level with the row", async () => {
@@ -530,34 +557,36 @@ describe('SessionList (desktop column)', () => {
     localStorage.clear();
   });
 
-  it('switches to "Recent" from the order menu, no time in a row, and keeps the choice on the hub (T50)', async () => {
+  it('switches to "Recent" from the project menu, no time in a row, and keeps the choice on the hub (T50)', async () => {
     const api = hubApi();
     await mount(<SessionList app={makeApp(LIST, api)} />);
     expect(api.sessionOrder).toHaveBeenCalledWith('p1');
-    await click(root.querySelector('.side-head .btn-mode'));
-    expect(menuItems()).toEqual(['State', 'Recent', 'Custom', 'Reorder…']);
-    expect(root.querySelector('.menu .btn-mode-state')!.getAttribute('aria-checked')).toBe('true');
+    const checked = () => [...root.querySelectorAll('.menu [aria-checked="true"]')].map((b) => b.textContent);
+    await click(root.querySelector('.side-head .btn-project-menu'));
+    expect(menuItems()).toEqual(PROJECT_MENU);
+    expect(checked()).toEqual(['State']);
     expect(root.querySelector('.menu .btn-mode-recent')!.getAttribute('aria-checked')).toBe('false');
     await click(root.querySelector('.menu .btn-mode-recent'));
     expect(root.querySelector('.ctx-menu')).toBeNull();
     expect(groups().map((g) => g[0])).toEqual(['Today', 'Yesterday', 'Last 7 days']);
     expect(root.querySelector('.session-when')).toBeNull();
     expect(api.putSessionOrder).toHaveBeenCalledWith('p1', { mode: 'recent' });
-    expect(root.querySelector('.side-head .btn-mode')!.textContent).toBe('Recent');
     // The button toggles its menu; Esc closes it.
-    await click(root.querySelector('.side-head .btn-mode'));
-    await click(root.querySelector('.side-head .btn-mode'));
+    await click(root.querySelector('.side-head .btn-project-menu'));
+    expect(checked()).toEqual(['Recent']);
+    await click(root.querySelector('.side-head .btn-project-menu'));
     expect(root.querySelector('.ctx-menu')).toBeNull();
-    await click(root.querySelector('.side-head .btn-mode'));
+    await click(root.querySelector('.side-head .btn-project-menu'));
     expect(document.activeElement).toBe(root.querySelector('.menu .btn-mode-state'));
     await pressKey('Escape');
     expect(root.querySelector('.ctx-menu')).toBeNull();
     // The focus goes back to the button, not to the page.
-    expect(document.activeElement).toBe(root.querySelector('.side-head .btn-mode'));
+    expect(document.activeElement).toBe(root.querySelector('.side-head .btn-project-menu'));
     render(null, root);
     // Another device: the hub's record.
     await mount(<SessionList app={makeApp(LIST, hubApi({ mode: 'recent', session_ids: [] }))} />);
-    expect(root.querySelector('.side-head .btn-mode')!.textContent).toBe('Recent');
+    await click(root.querySelector('.side-head .btn-project-menu'));
+    expect(checked()).toEqual(['Recent']);
     expect(groups()[0][0]).toBe('Today');
   });
 
@@ -813,12 +842,17 @@ describe('archive from the row (T50)', () => {
     expect(sent.filter((r) => r.url.endsWith('/pause'))).toEqual([{ method: 'POST', url: '/api/sessions/net/pause' }]);
 
     await menuOf('Held build');
-    expect(menuItems()).toEqual(['Open in new tab', 'Add to favorites', 'Rename', 'Move to project…', 'Folder rules', 'Resume session', 'Archive', 'Delete…']);
+    expect(menuItems()).toEqual(['Open in new tab', 'Add to favorites', 'Rename', 'Move to project…', 'Resume session', 'Archive', 'Delete…']);
     await click(root.querySelector('.menu .btn-resume'));
     expect(sent.filter((r) => r.url.endsWith('/resume'))).toEqual([{ method: 'POST', url: '/api/sessions/held/resume' }]);
+
+    // Pause only while the agent works, as beside Stop in the chat: an idle one has none.
+    await menuOf('Collision profiling');
+    expect(menuItems()).not.toContain('Pause session');
+    expect(menuItems()).toContain('Restart session');
   });
 
-  it('the menu: links to a new tab and to the folder rules, the move form in the column; Esc or a press away closes it', async () => {
+  it('the menu: a link to a new tab, no folder rules (in the chat\'s "More"), the move form in the column; Esc or a press away closes it', async () => {
     const api = {
       ...hubApi(),
       workerDirs: vi.fn(async () => []),
@@ -829,7 +863,7 @@ describe('archive from the row (T50)', () => {
     await menuOf('Network sync');
     const tab = root.querySelector('.menu a.btn-open-tab')!;
     expect([tab.getAttribute('href'), tab.getAttribute('target')]).toEqual(['#/s/net', '_blank']);
-    expect(root.querySelector('.menu a.btn-rules')!.getAttribute('href')).toBe('#/p/p1/rules/w1?session=net');
+    expect(root.querySelector('.menu .btn-rules')).toBeNull();
     await pressKey('Escape');
     expect(root.querySelector('.ctx-menu')).toBeNull();
     expect(rowOf('Network sync').querySelector('.is-menu')).toBeNull();
@@ -1019,7 +1053,9 @@ describe('Reorder (T50)', () => {
     expect(root.querySelector('.reorder-bar')!.textContent).toBe('ReorderCancelDone');
     expect(root.querySelector('.ctx-menu')).toBeNull();
     // The order can't change mid-way, and a row has no menu or link.
-    expect(root.querySelector<HTMLButtonElement>('.side-head .btn-mode')!.disabled).toBe(true);
+    await click(root.querySelector('.side-head .btn-project-menu'));
+    expect([...root.querySelectorAll<HTMLButtonElement>('.menu .btn-mode-state, .menu .btn-mode-recent, .menu .btn-mode-custom, .menu .btn-reorder')].map((b) => b.disabled)).toEqual([true, true, true, true]);
+    await pressKey('Escape');
     expect(root.querySelector('a.session-row')).toBeNull();
     await menuOf('Network sync');
     expect(root.querySelector('.ctx-menu')).toBeNull();
@@ -1039,7 +1075,9 @@ describe('Reorder (T50)', () => {
 
     await click(root.querySelector('.btn-reorder-done'));
     expect(api.putSessionOrder).toHaveBeenCalledWith('p1', { mode: 'custom', session_ids: ['det', 'stones', 'cave', 'net', 'prof'] });
-    expect(root.querySelector('.side-head .btn-mode')!.textContent).toBe('Custom');
+    await click(root.querySelector('.side-head .btn-project-menu'));
+    expect(root.querySelector('.menu .btn-mode-custom')!.getAttribute('aria-checked')).toBe('true');
+    await pressKey('Escape');
     expect(groups()).toEqual([['Custom order', undefined, ['Step determinism', 'Stone textures', 'Cave scene port', 'Network sync', 'Collision profiling']]]);
   });
 
@@ -2179,16 +2217,14 @@ describe('loading a chat ahead', () => {
 });
 
 describe('SessionList (phone)', () => {
-  it('a project\'s screen: one header row — "‹", the name, search, State, "⋯", a new room, "+" — then the groups; no chips, gear or floating "New"', async () => {
+  it('a project\'s screen: one header row — "‹", the name, search, "⋯", "+" — then the groups; no chips, gear or floating "New"', async () => {
     await mount(<SessionList app={makeApp()} phone />);
     const head = root.querySelector('.sessions-phone > .side-head')!;
     expect([...head.children].map((c) => c.getAttribute('aria-label') ?? c.textContent)).toEqual([
       'Back to projects',
       'physics-mp',
       'Search sessions and messages',
-      'Session order: State',
-      'Project: settings, favorites, archive',
-      'New room',
+      'Project: order, new room, favorites, settings, archive, delete',
       'New session',
     ]);
     expect(head.querySelector('.btn-back')!.getAttribute('href')).toBe('#/');
@@ -2205,7 +2241,7 @@ describe('SessionList (phone)', () => {
     expect(root.querySelector('.list-hint')!.textContent).toBe('Press and hold a session to archive, rename or delete it.');
   });
 
-  it('"⋯" is the project\'s menu — settings, favorites, archive — and a tap beside it only closes it; "+" opens a new session', async () => {
+  it('"⋯" is the project\'s menu — the order, a new room, favorites (no bar to right-click here), settings, archive — and a tap beside it only closes it; "+" opens a new session', async () => {
     const api = {
       ...hubApi(),
       archiveProject: vi.fn(async (id: string) => app.archivedProjects.get(id)!),
@@ -2213,7 +2249,17 @@ describe('SessionList (phone)', () => {
     const app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
     await mount(<SessionList app={app} phone />);
     await click(root.querySelector('.side-head .btn-project-menu'));
-    expect(menuItems()).toEqual(['Open in new tab', 'Add to favorites', 'Project settings…', 'Archive project', 'Delete project…']);
+    expect(menuItems()).toEqual([
+      'State',
+      'Recent',
+      'Custom',
+      'Reorder…',
+      'New room…',
+      'Add to favorites',
+      'Project settings…',
+      'Archive project',
+      'Delete project…',
+    ]);
     expect(root.querySelector('.menu .btn-project-settings')!.getAttribute('href')).toBe('#/p/p1/settings');
     expect(root.querySelector('.menu-scrim')).not.toBeNull();
     await click(root.querySelector('.menu .btn-favorite'));
@@ -2223,10 +2269,6 @@ describe('SessionList (phone)', () => {
     expect(api.archiveProject).toHaveBeenCalledWith('p1');
     // A phone goes to the projects screen, where its Undo is.
     expect(location.hash).toBe('#/');
-    // The order menu too has the layer.
-    await click(root.querySelector('.side-head .btn-mode'));
-    expect(root.querySelector('.menu-scrim')).not.toBeNull();
-    await pressKey('Escape');
     await click(root.querySelector('.side-head .btn-new-session'));
     expect(location.hash).toBe('#/p/p0/new');
     location.hash = '';
@@ -2272,7 +2314,6 @@ describe('SessionList (phone)', () => {
     expect([menu.style.left, menu.style.top]).toEqual(['30px', '200px']);
     expect(rowOf('Network sync').querySelector('.session-row.is-menu')).not.toBeNull();
     expect(menuItems()).toEqual(SESSION_MENU);
-    expect(menu.querySelector('.btn-rules')!.getAttribute('href')).toBe('#/p/p1/rules/w1?session=net');
     await click(menu.querySelector('.btn-archive'));
     expect(root.querySelector('.ctx-menu')).toBeNull();
     expect(root.querySelector('.toast-text')!.textContent).toBe('Archived «Network sync»');
@@ -2328,7 +2369,7 @@ describe('SessionList (phone)', () => {
     expect(root.querySelector('.menu-scrim')).toBeNull();
   });
 
-  it('Reorder, from the order menu, puts the handle on the right of the row', async () => {
+  it('Reorder, from the project menu, puts the handle on the right of the row', async () => {
     await mount(<SessionList app={makeApp()} phone />);
     await startReorder();
     const item = rowOf('Network sync');
@@ -2365,7 +2406,8 @@ describe('favorites', () => {
     // Pinned over the list on a desktop: not in its scroll.
     expect(root.querySelector('.fav-pinned.group-favorites')).not.toBeNull();
     expect(root.querySelector('.session-scroll .group-favorites')).toBeNull();
-    expect(root.querySelector('.fav-pinned .group-pin svg')).not.toBeNull();
+    // Its head is the name alone, as every group's.
+    expect(root.querySelector('.fav-pinned .group-head svg, .group-pin')).toBeNull();
     // In its own project the other one is listed.
     await act(() => app.selectProject('p0'));
     expect(favoriteTitles()).toEqual(['Migration plan']);
@@ -2381,7 +2423,7 @@ describe('favorites', () => {
     await mount(<SessionList app={makeApp(LIST.map((s) => (s.id === 'cave' ? { ...s, favorite_at: at(30) } : s)))} phone />);
     expect(root.querySelector('.sessions-phone > .fav-pinned.group-favorites')).not.toBeNull();
     expect(root.querySelector('.session-scroll .group-favorites')).toBeNull();
-    expect(root.querySelector('.fav-pinned .group-pin svg')).not.toBeNull();
+    expect(root.querySelector('.fav-pinned .group-head svg, .group-pin')).toBeNull();
   });
 
   it("the row's menu adds a session to the favorites and takes it out; the summary of another device too", async () => {
@@ -2591,7 +2633,9 @@ describe('the list on a reload', () => {
     expect([...root.querySelectorAll('.rail-project')].map((r) => r.getAttribute('aria-label'))).toEqual(['Personal', 'physics-mp']);
     expect(root.querySelector('.rail-project.is-current')!.getAttribute('aria-label')).toBe('Personal');
     expect(root.querySelector('.project-title')!.textContent).toBe('Personal');
-    expect(root.querySelector('.side-head .btn-mode')!.textContent).toBe('Recent');
+    await click(root.querySelector('.side-head .btn-project-menu'));
+    expect(root.querySelector('.menu .btn-mode-recent')!.getAttribute('aria-checked')).toBe('true');
+    await pressKey('Escape');
     expect(groups()).toEqual([
       ['Today', '3', ['Stone textures', 'Step determinism', 'Network sync']],
       ['Yesterday', '1', ['Collision profiling']],
@@ -2743,22 +2787,21 @@ describe('the read mark', () => {
 });
 
 describe("the column's project menu and width (desktop)", () => {
-  it('"⋯": Open in new tab, favorites, Project settings…, Archive project, Delete project… (the last two not for the personal project)', async () => {
+  it('"⋯": the order, Reorder…, New room…, Project settings…, Archive project, Delete project… (the last two not for the personal project); no new tab or favorites, which the bar has', async () => {
     const api = { ...hubApi(), deleteProject: vi.fn(async () => {}) };
     const app = makeApp(LIST, api);
     await mount(<SessionList app={app} />);
     await click(root.querySelector('.side-head .btn-project-menu'));
     const menu = root.querySelector('.ctx-menu')!;
     expect(menu.getAttribute('aria-label')).toBe('Project «physics-mp»');
-    expect(menuItems()).toEqual(['Open in new tab', 'Add to favorites', 'Project settings…', 'Archive project', 'Delete project…']);
+    expect(menuItems()).toEqual(PROJECT_MENU);
+    // Three parts: the list, a new room, the project.
+    expect(menu.querySelectorAll('.menu-sep')).toHaveLength(3);
     // The column has the name: no line over the items.
     expect(menu.querySelector('.menu-head')).toBeNull();
-    expect(menu.querySelector('.btn-open-tab')!.getAttribute('href')).toBe('#/p/p1');
-    expect(menu.querySelector('.btn-open-tab')!.getAttribute('target')).toBe('_blank');
+    expect(menu.querySelector('.btn-open-tab, .btn-favorite')).toBeNull();
     expect(menu.querySelector('.btn-project-settings')!.getAttribute('href')).toBe('#/p/p1/settings');
-    await click(menu.querySelector('.btn-favorite'));
-    expect(api.setProjectFavorite).toHaveBeenCalledWith('p1', true);
-    expect(root.querySelector('.ctx-menu')).toBeNull();
+    await pressKey('Escape');
 
     // Delete asks first; "no" keeps the project.
     const ask = vi.fn((_text: string) => false);
@@ -2779,7 +2822,8 @@ describe("the column's project menu and width (desktop)", () => {
     }
     // The personal project is not deleted (SPEC §3).
     await click(root.querySelector('.side-head .btn-project-menu'));
-    expect(menuItems()).toEqual(['Open in new tab', 'Add to favorites', 'Project settings…']);
+    expect(menuItems()).toEqual(['State', 'Recent', 'Custom', 'Reorder…', 'New room…', 'Project settings…']);
+    expect(root.querySelector('.side-head .btn-project-menu')!.getAttribute('aria-label')).toBe('Project: order, new room, settings');
   });
 
   it('the right edge sets the width: dragged, or ←/→; kept on this device, within bounds', async () => {
@@ -2894,8 +2938,8 @@ describe('menus over a pending permission card', () => {
     expect(actions.approve).not.toHaveBeenCalled();
     await pressKey('Escape');
 
-    // The order menu with the focus left on the page (a click that moved no focus).
-    await click(root.querySelector('.side-head .btn-mode'));
+    // The project menu with the focus left on the page (a click that moved no focus).
+    await click(root.querySelector('.side-head .btn-project-menu'));
     (document.activeElement as HTMLElement).blur();
     await pressKey('Escape');
     expect(root.querySelector('.ctx-menu')).toBeNull();
@@ -3146,7 +3190,7 @@ describe('a new session', () => {
     expect(menuItems()).toEqual(["The worker's default", 'Ask', 'Auto', 'Allow all']);
     await click(root.querySelector('.ctx-menu .btn-permissions-ask'));
     await click(root.querySelector('.btn-chip-model'));
-    expect(menuItems()).toEqual(["Claude Code's default", 'Opus', 'Sonnet', 'Haiku', 'Fable', 'Opus 5.5', 'Opus 5', 'Opus 4.8', 'Opus 4.7', 'Opus 4.6', 'Sonnet 5.5', 'Sonnet 5', 'Sonnet 4.6', 'Haiku 5.5', 'Haiku 4.5', 'Fable 5.2', 'Fable 5.1', 'Fable 5', 'Another model…']);
+    expect(menuItems()).toEqual(["Claude Code's default", 'Opus', 'Sonnet', 'Haiku', 'Fable', 'Another model…']);
     await click(root.querySelector('.ctx-menu .btn-model-haiku'));
     expect(chips()).toEqual(['phys-mp · home-mac', 'Folder net', 'Permissions: Ask', 'Model: Haiku']);
     expect(win()!.querySelector('.chat-meta')!.textContent).toBe('Drafthome-mac/~/work/games/phys-mp/net');
@@ -3186,23 +3230,36 @@ describe('a new session', () => {
     expect(api.createSession).toHaveBeenCalledTimes(1);
   });
 
-  // SPEC 0.168: the model chip lists the versions after the aliases, apart; one picked is checked
-  // there and the session starts with it.
-  it('the model chip offers the versions, and starts the session with the one picked', async () => {
+  // SPEC 0.168: a family's versions in its submenu, beside it on a computer; one picked checks its
+  // family, which names it, and the session starts with it.
+  it('the model chip has a family\'s versions in its submenu, and starts the session with the one picked', async () => {
     const { app, api } = draftApp();
     location.hash = '#/p/p1/new';
     await mount(<App app={app} />);
     await settle();
     await click(root.querySelector('.btn-chip-model'));
     const entries = () =>
-      [...root.querySelectorAll('.ctx-menu > *')].map((el) => (el.classList.contains('menu-sep') ? '—' : el.textContent));
-    expect(entries()).toEqual(["Claude Code's default", 'Opus', 'Sonnet', 'Haiku', 'Fable', '—', 'Opus 5.5', 'Opus 5', 'Opus 4.8', 'Opus 4.7', 'Opus 4.6', 'Sonnet 5.5', 'Sonnet 5', 'Sonnet 4.6', 'Haiku 5.5', 'Haiku 4.5', 'Fable 5.2', 'Fable 5.1', 'Fable 5', '—', 'Another model…']);
-    await click(root.querySelector('.ctx-menu .btn-model-claude-opus-4-8'));
+      [...root.querySelectorAll('.ctx-menu:not(.ctx-flyout) > *')]
+        .filter((el) => !el.classList.contains('ctx-flyout'))
+        .map((el) => (el.classList.contains('menu-sep') ? '—' : el.textContent));
+    expect(entries()).toEqual(["Claude Code's default", 'Opus', 'Sonnet', 'Haiku', 'Fable', '—', 'Another model…']);
+    const hover = (sel: string) =>
+      act(async () => {
+        root.querySelector(sel)!.dispatchEvent(new MouseEvent('mouseenter'));
+      });
+    const versions = () => [...root.querySelectorAll('.ctx-flyout .menu-item')].map((b) => b.textContent);
+    await hover('.ctx-menu .btn-model-opus');
+    expect(versions()).toEqual(['Opus 5.5', 'Opus 5', 'Opus 4.8', 'Opus 4.7', 'Opus 4.6']);
+    await click(root.querySelector('.ctx-flyout .btn-model-claude-opus-4-8'));
+    expect(root.querySelector('.ctx-menu')).toBeNull();
     expect(chips()[3]).toBe('Model: Opus 4.8');
     await click(root.querySelector('.btn-chip-model'));
-    expect(root.querySelector('.ctx-menu .btn-model-claude-opus-4-8')!.getAttribute('aria-checked')).toBe('true');
+    expect(root.querySelector('.ctx-menu .btn-model-opus')!.getAttribute('aria-checked')).toBe('true');
+    expect(root.querySelector('.ctx-menu .btn-model-opus .menu-detail')!.textContent).toBe('4.8');
     expect(root.querySelector('.ctx-menu .btn-model-custom')!.getAttribute('aria-checked')).toBe('false');
-    await click(root.querySelector('.ctx-menu .btn-model-claude-opus-4-8'));
+    await hover('.ctx-menu .btn-model-opus');
+    expect(root.querySelector('.ctx-flyout .btn-model-claude-opus-4-8')!.getAttribute('aria-checked')).toBe('true');
+    await click(root.querySelector('.ctx-flyout .btn-model-claude-opus-4-8'));
     await typeMessage('Go');
     await sendMessage();
     expect(api.createSession).toHaveBeenCalledWith('p1', undefined, expect.objectContaining({ model: 'claude-opus-4-8' }));
@@ -3589,8 +3646,8 @@ describe('a new session', () => {
 });
 
 // A room: a session with no worker whose agents are member sessions (`room_id`). The lists, the
-// counts and the marks show the room and not its agents, with the state of them all; "New room"
-// beside "+" opens its form.
+// counts and the marks show the room and not its agents, with the state of them all; "New room…"
+// in the project menu opens its form.
 describe('a room', () => {
   const room = (more: Partial<SessionInfo> = {}) =>
     sess('room', 'Glaze review', 'idle', at(0.05), { room_mode: 'conversation', worker_id: undefined, ...more });
@@ -3798,11 +3855,12 @@ describe('a room', () => {
       windowWidth(1024);
     });
 
-    it('"New room" beside "+" opens a chat window with its chips; the first message creates the room with what they chose, then goes into it as its first message', async () => {
+    it('"New room…" in the project menu opens a chat window with its chips; the first message creates the room with what they chose, then goes into it as its first message', async () => {
       const { app, api } = roomApp();
       location.hash = '#/p/p1';
       await mount(<App app={app} />);
-      await click(root.querySelector('.side-head .btn-new-room'));
+      await click(root.querySelector('.side-head .btn-project-menu'));
+      await click(root.querySelector('.ctx-menu .btn-new-room'));
       await settle();
       expect(location.hash).toBe('#/p/p1/new-room');
       expect(win()!.querySelector('.chat-title')!.textContent).toBe('New room');

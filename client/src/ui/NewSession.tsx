@@ -11,7 +11,7 @@ import { onBack, replaceHash } from '../nav';
 import { ROOM_MODES, type PermissionMode, type RoomMode, type SessionInfo } from '../proto';
 import type { OutgoingFile } from '../session';
 import { Timeline, type Item } from '../timeline';
-import { isTypedModel, modelMenuItems } from './agentSettings';
+import { ModelName, isTypedModel, modelMenuItems } from './agentSettings';
 import { ChatItems, type ChatActions } from './cards';
 import { Composer, SessionsButton, toOutgoing, type SessionsToggle } from './Chat';
 import { ContextMenu, type MenuEntry } from './ContextMenu';
@@ -387,7 +387,8 @@ export function ChipButton({
 /** The chips over a new session's or room's input: the workspace (each of the project's with
  *  its worker and whole path, the default marked, "Add a workspace…" under them), the folder
  *  inside it (typed), the permissions (the worker's default, Ask, Auto, Allow all) and, with
- *  `withModel`, the model (Claude Code's default, an alias, a version, another name typed);
+ *  `withModel`, the model (Claude Code's default, a family with its versions in a submenu,
+ *  another name typed);
  *  with `mode`, a room's mode first. Each opens its menu upwards; a pick gives the caret back
  *  to the input. `values` are what is chosen, `onChange` takes what a pick changes. */
 export function NewSessionChips({
@@ -565,30 +566,5 @@ export function NewSessionChips({
         )}
       {menu}
     </div>
-  );
-}
-
-/** The name of another model, typed into the model's menu: each change goes at once, an
- *  empty name is the runtime's default. */
-function ModelName({ value, onChange, onKeyDown }: { value: string; onChange: (model: string | undefined) => void; onKeyDown: (e: KeyboardEvent) => void }) {
-  // Its own text: a name that becomes an alias as it is typed ("opus") stays in the field.
-  const [name, setName] = useState(value);
-  return (
-    <label class="menu-field">
-      <span class="field-label">Model name</span>
-      <input
-        class="input mono"
-        name="model_name"
-        placeholder="claude-sonnet-4-5"
-        data-focus
-        value={name}
-        onInput={(e) => {
-          const v = (e.currentTarget as HTMLInputElement).value;
-          setName(v);
-          onChange(v.trim() || undefined);
-        }}
-        onKeyDown={onKeyDown}
-      />
-    </label>
   );
 }

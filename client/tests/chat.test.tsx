@@ -1045,13 +1045,16 @@ describe('header', () => {
     await mount(app);
     expect($('.pill')!.textContent).toBe('Running');
     expect($('.pill.state-running .pulse')).not.toBeNull();
+    // No turn for Stop to stop, and Stop spares the subagent; Pause ends it with the process.
     expect(button('Stop')).toBeUndefined();
+    expect($('.btn-pause')).not.toBeNull();
     render(null, root);
 
     ({ app } = setup('idle', { subagents: 0 }));
     await mount(app);
     expect($('.pill')!.textContent).toBe('Idle');
     expect($('.pill .pulse')).toBeNull();
+    expect($('.btn-pause')).toBeNull();
   });
 
   it('says "Pausing" while a paused session\'s turn runs, Paused once it is paused', async () => {
@@ -1070,6 +1073,7 @@ describe('header', () => {
     await mount(app);
     expect($('.pill')!.textContent).toBe('Running');
     expect($('.chat-agents')).toBeNull();
+    expect($('.btn-pause')).not.toBeNull();
     const s = app.sessions.get('s1')!;
     await act(async () =>
       app.mergeSummary([
@@ -1077,6 +1081,7 @@ describe('header', () => {
       ]),
     );
     expect($('.pill')!.textContent).toBe('Idle');
+    expect($('.btn-pause')).toBeNull();
   });
 
   it('offers "Run in background" for a running call the worker reports in the foreground', async () => {

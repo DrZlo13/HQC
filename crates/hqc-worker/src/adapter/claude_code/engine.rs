@@ -83,14 +83,20 @@
 //! - `rate_limit_event` → [`AdapterEvent::Limits`] with the 5-hour and 7-day windows of its
 //!   `rate_limit_info.unifiedWindows` (2.1.310: one before each turn's answer), its `status`,
 //!   `rateLimitType` and `resetsAt`;
-//! - `system` `informational` of a level other than `info` and `system` `notification` →
+//! - `system` `informational` with `model_restriction` (2.1.325: the CLI refused the model asked
+//!   for and runs on another) → `system model_not_switched` "Model not switched: <asked> is not
+//!   available. The agent runs on <model>" with that model, and [`AdapterEvent::ModelKept`],
+//!   but nothing for one `at: switch` of a model other than the latest `set_model`'s;
+//!   another of a level other than `info` and `system` `notification` →
 //!   `system runtime_notice` with the text; `model_fallback` and `model_consent_fallback` →
 //!   `system model_fallback` "<model> → <fallback>: <content>", the fallback the model of this
 //!   turn's `usage`; `model_refusal_no_fallback` → `system model_refusal`; an `assistant` with
-//!   `supersedes` and `model_refusal_fallback` (its `retracted_message_uuids`) → `retraction`
-//!   of the events of those records of this turn not retracted yet ([`Core::retract`]), the
-//!   latter then `system model_refusal_fallback`, its fallback the model of this turn's `usage`
-//!   unless its `scope` is `local`;
+//!   `supersedes`, and `model_refusal_fallback` and a `user` (2.1.325: the message that asks the
+//!   model again after a response whose tool call could not be parsed) by their
+//!   `retracted_message_uuids` → `retraction` of the events of those records of this turn not
+//!   retracted yet ([`Core::retract`]), `model_refusal_fallback` then `system
+//!   model_refusal_fallback`, its fallback the model of this turn's `usage` unless its `scope` is
+//!   `local`;
 //! - `user` `tool_result` → `tool.result`, its text the report of a subagent that completed
 //!   when the record's `tool_use_result` has one ([`agent_report`]); a text longer than the
 //!   preview and the result's images go with it to be uploaded ([`AdapterEvent::ToolResult`]);
@@ -511,6 +517,9 @@ pub struct Core {
     /// `request_id` of the latest `set_model` sent ([`Core::set_model`]), and its model.
     model_request: Option<String>,
     model_requested: Option<String>,
+    /// The `request_id` of a `set_model` whose refusal a `model_restriction` line has shown
+    /// ([`Core::model_restricted`]; 2.1.325 sends it before the `restricted_by_org` error).
+    model_noticed: Option<String>,
     /// The session's cumulative cost and `modelUsage` token sums as of the last `usage` with a
     /// `cost_usd` (or the transcript's last `cost-state` when resumed, none after `/clear`):
     /// the baseline of the next turn's cost and of a compaction's tokens, one value so that
@@ -649,6 +658,7 @@ impl Core {
             model: None,
             model_request: None,
             model_requested: None,
+            model_noticed: None,
             cost_base: None,
             compacted: false,
             commands: None,
@@ -1354,8 +1364,18 @@ impl Core {
                     }
                     None => vec![],
                 },
-                Some("informational") => match v["content"].as_str() {
-                    Some(t) if v["level"] != "info" && !t.trim().is_empty() => {
+                Some("informational") => match (
+                    v["model_restriction"]["effective_model"].as_str(),
+                    v["content"].as_str(),
+                ) {
+                    // The CLI refused the model asked for and runs on another (2.1.325): the
+                    // model kept, as for a refused `set_model`, in hqc's words.
+                    (Some(m), _) if !m.trim().is_empty() => self.model_restricted(
+                        v["model_restriction"]["requested_model"].as_str(),
+                        v["model_restriction"]["at"].as_str(),
+                        m,
+                    ),
+                    (_, Some(t)) if v["level"] != "info" && !t.trim().is_empty() => {
                         vec![self.emit_system(RUNTIME_NOTICE, text(t))]
                     }
                     _ => vec![],
@@ -1467,6 +1487,10 @@ impl Core {
                 .as_deref()
                 .is_some_and(|latest| latest != id)
             {
+                return vec![];
+            }
+            // The `model_restriction` line before it said so already (2.1.325).
+            if r["error_code"] == "restricted_by_org" && self.model_noticed.as_deref() == Some(id) {
                 return vec![];
             }
             // The error names the model the CLI kept (2.1.312): the session's again. The fixed
@@ -2333,14 +2357,18 @@ impl Core {
     }
 
     fn on_user(&mut self, v: &Value) -> Vec<Action> {
+        // The message that asks the model again after a response whose tool call the CLI could
+        // not parse names that response's records, which the CLI dropped from the conversation
+        // (2.1.325): they go at once, not only with the next answer's `supersedes`, which a turn
+        // stopped first never brings.
+        let mut out = self.retract(&v["retracted_message_uuids"]);
         let Some(uuid) = record_uuid(v) else {
-            return vec![];
+            return out;
         };
         let blocks = blocks(v);
         // The record's `tool_use_result` is its `tool_result`'s only when it has one, as the VS
         // Code tab reads it (extension 2.1.319).
         let single = blocks.iter().filter(|b| b["type"] == "tool_result").count() == 1;
-        let mut out = Vec::new();
         for (i, block) in blocks.iter().enumerate() {
             if block["type"] != "tool_result" {
                 continue;
@@ -3056,6 +3084,52 @@ impl Core {
             e.event_id = id;
         }
         Action::Emit(AdapterEvent::Event(e))
+    }
+
+    /// The CLI refused the model asked for (`asked`, when it says) and runs on `kept`
+    /// (`system/informational` with `model_restriction`, 2.1.325): `system model_not_switched`
+    /// with `kept` and [`AdapterEvent::ModelKept`], as for a refused `set_model`, so the
+    /// session's model is the one that answers; the model of this turn's `usage` from now on.
+    /// A line `at: switch` about a model other than the latest `set_model`'s is about an
+    /// earlier pick, and its `kept` may be outdated ("a later switch can outdate it"): only
+    /// logged. One of the latest `set_model`'s comes before that request's `restricted_by_org`
+    /// error, which then gives no second line.
+    fn model_restricted(
+        &mut self,
+        asked: Option<&str>,
+        at: Option<&str>,
+        kept: &str,
+    ) -> Vec<Action> {
+        if at == Some("switch") && self.model_requested.is_some() {
+            if asked.is_some() && asked != self.model_requested.as_deref() {
+                tracing::info!(session_id = %self.session_id, asked = ?asked, kept, "model restriction of an earlier pick");
+                return vec![];
+            }
+            self.model_noticed.clone_from(&self.model_request);
+        }
+        let kept = text(kept);
+        let t = match asked.map(text).filter(|a| !a.trim().is_empty()) {
+            Some(a) => {
+                format!("Model not switched: {a} is not available. The agent runs on {kept}")
+            }
+            None => format!("Model not switched. The agent runs on {kept}"),
+        };
+        self.model = Some(kept.clone());
+        vec![
+            self.emit_new(EventKind::System {
+                text: t,
+                code: MODEL_NOT_SWITCHED.into(),
+                call_id: None,
+                status: None,
+                task_id: None,
+                from_session_id: None,
+                usage: None,
+                fork: None,
+                compaction: None,
+                model: Some(kept.clone()),
+            }),
+            Action::Emit(AdapterEvent::ModelKept(kept)),
+        ]
     }
 
     fn emit_event(&self, kind: EventKind) -> Event {

@@ -594,7 +594,7 @@ async fn publish_packs_and_uploads_before_the_call() {
     assert_eq!(up.headers["x-hqc-artifact-name"], "site");
     assert_eq!(up.headers["x-hqc-artifact-kind"], "site");
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(up.body.clone())).unwrap();
-    let names: Vec<&str> = zip.file_names().collect();
+    let names: Vec<String> = zip.file_names().map(|n| n.unwrap().into_owned()).collect();
     assert_eq!(names, ["css/a.css", "index.html"]);
     let mut page = String::new();
     std::io::Read::read_to_string(&mut zip.by_name("index.html").unwrap(), &mut page).unwrap();

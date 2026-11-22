@@ -265,3 +265,15 @@ describe('layout widths', () => {
     expect(rule('.phone-new-session')['bottom']).toBe('calc(var(--wline-h) + env(safe-area-inset-bottom) + 16px)');
   });
 });
+
+describe('notes and spinners', () => {
+  it('stands the empty feed\'s note in its middle, and a centred "Loading…" spinner over the word', () => {
+    expect(rule('.feed:has(> .feed-note)')['min-height']).toBe('100%');
+    const note = rule('.feed-note');
+    expect([note['flex'], note['align-items'], note['justify-content']]).toEqual(['1', 'center', 'center']);
+    expect(rule('.loading-center')['flex-direction']).toBe('column');
+    expect(rule('.spinner')['animation']).toBe('spin 0.8s linear infinite');
+    // In a line the spinner is as tall as the text; centred, 20 px.
+    expect([rule('.spinner')['width'], rule('.loading-center .spinner')['width']]).toEqual(['1em', '20px']);
+  });
+});

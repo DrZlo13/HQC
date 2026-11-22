@@ -422,6 +422,26 @@ describe('rendering attachments', () => {
     expect(el.querySelector('.md-code-diff .md-code-lang')!.textContent).toBe('small.patch');
   });
 
+  it('a diff whose size is not known yet is a card with its name and "Loading…"', async () => {
+    const src = fakeSource([]);
+    src.artifact.mockImplementation(() => new Promise<Artifact>(() => {}));
+    const store = new ArtifactStore(src as never, vi.fn() as never);
+    const { el } = chatWith(
+      [
+        ev('event.attachment', (e) => {
+          e.seq = 1;
+          e.payload = { artifact_id: 'slow', kind: 'diff', name: 'fix.patch' };
+        }),
+      ],
+      store,
+    );
+    await flush();
+    const card = el.querySelector('.attachment-kind-diff > .card-attachment')!;
+    expect(card.querySelector('.card-title')!.textContent).toBe('fix.patch');
+    expect(card.querySelector('.loading')!.textContent).toBe('Loading…');
+    expect(card.querySelector('.loading .spinner')).not.toBeNull();
+  });
+
   it('a body announced over the limit is not read', async () => {
     const src = fakeSource([meta('d', 'diff', 'd.patch')]);
     const fetchImpl = vi.fn(async () => new Response('x', { headers: { 'content-length': String(600 * 1024) } }));
@@ -781,7 +801,8 @@ describe('the viewer over the chat (SPEC §12)', () => {
       const el = viewer('markdown', store, onClose, onDownload);
       const dialog = el.querySelector('[role=dialog]')!;
       expect(dialog.getAttribute('aria-modal')).toBe('true');
-      expect(dialog.querySelector('.viewer-body')!.textContent).toBe('loading…');
+      // Until the text is in: a spinner over "Loading…" in the middle of the window.
+      expect(dialog.querySelector('.viewer-body > .loading.loading-center')!.textContent).toBe('Loading…');
       await flush();
       expect(fetchImpl).toHaveBeenCalledWith('/artifacts/a?exp=1&sig=s1');
       expect(dialog.querySelector('.md h1')!.textContent).toBe('Report');

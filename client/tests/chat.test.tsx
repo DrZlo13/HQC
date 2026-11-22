@@ -2056,6 +2056,19 @@ describe('live subagents', () => {
     }
   });
 
+  it('shows a spinner and "Loading…" in an open history until its first page is in', async () => {
+    const { api, app } = setup('running', { subagents: 1 });
+    await mount(app);
+    api.subagentHistory.mockImplementation(() => new Promise(() => {}) as never);
+    const subagent = { task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000 };
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [subagent]))));
+    await act(async () => root.querySelector<HTMLButtonElement>('button.live-agents-opens')!.click());
+    const loading = $('.live-agents-history > .live-agents-note > .loading')!;
+    expect(loading.getAttribute('role')).toBe('status');
+    expect(loading.textContent).toBe('Loading…');
+    expect(loading.querySelector('.spinner')).not.toBeNull();
+  });
+
   it('keeps the newest 200 steps of an open history and says earlier ones are not shown', async () => {
     const { api, app } = setup('running', { subagents: 1 });
     await mount(app);
@@ -2916,6 +2929,7 @@ describe('history', () => {
     await act(async () => button('Requests only')!.click());
     await settle();
     expect(root.querySelector('.perm')).not.toBeNull();
+    expect(root.querySelector('.feed-note')).toBeNull();
     await act(async () => button('Requests only')!.click());
     await settle();
     expect(blocks().length).toBe(120);
@@ -3389,6 +3403,36 @@ describe('switching chats', () => {
     await mount(app);
     await act(async () => void (await new Promise((r) => setTimeout(r, 20))));
   }
+
+  it('a chat whose first page is not in yet shows a spinner and "Loading…" in the empty feed', async () => {
+    const { api, app } = setup('idle');
+    api.eventsBefore.mockReturnValue(new Promise(() => {}) as never);
+    await mountChat(app);
+    const loading = root.querySelector('.feed > .feed-note > .loading.loading-center')!;
+    expect(loading.getAttribute('role')).toBe('status');
+    expect(loading.textContent).toBe('Loading…');
+    expect(loading.querySelector('.spinner')!.getAttribute('aria-hidden')).toBe('true');
+    expect(root.querySelectorAll('.feed > .feed-note')).toHaveLength(1);
+  });
+
+  it('"Requests only" of a log without requests says "No requests" in the middle of the feed, and not while its first page loads', async () => {
+    const { api, app } = setup('idle', { history: [HISTORY[0], HISTORY[1]] });
+    app.sessions.get('s1')!.system = true;
+    const page = api.eventsBefore.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    api.eventsBefore.mockImplementation(async (...a: Parameters<typeof page>) => {
+      await held;
+      return page(...a);
+    });
+    await mountChat(app);
+    await act(async () => button('Requests only')!.click());
+    const notes = () => [...root.querySelectorAll('.feed > .feed-note')].map((n) => n.textContent);
+    expect(notes()).toEqual(['Loading…']);
+    await act(async () => release());
+    await act(async () => void (await new Promise((r) => setTimeout(r, 20))));
+    expect(notes()).toEqual(['No requests']);
+  });
 
   it('a chat opened before shows its feed in the first frame, resubscribes after its last seq, then fetches its newest page again', async () => {
     const { api, app } = setup('idle');

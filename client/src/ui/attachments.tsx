@@ -11,6 +11,7 @@ import { HEIC_NAME } from '../heic';
 import type { Artifact, ArtifactKind } from '../proto';
 import type { PendingAttachment } from '../timeline';
 import { IconCross } from './icons';
+import { Loading } from './Loading';
 import { CodeBlock, Markdown } from './Markdown';
 
 /** What the viewer over the chat shows: an image, or a text rendered as Markdown. */
@@ -80,7 +81,7 @@ export function AttachmentView({
   let body;
   if (store && k === 'image') body = <ImageView id={id} name={n} store={store} actions={actions} />;
   // The body of a diff is loaded only once its size is known (T22).
-  else if (store && k === 'diff' && !meta && !metaFailed) body = <div class="card card-attachment muted">{n} · loading…</div>;
+  else if (store && k === 'diff' && !meta && !metaFailed) body = <DiffLoading name={n} />;
   else if (store && k === 'diff' && meta && meta.size <= MAX_INLINE_TEXT)
     body = <DiffView id={id} name={n} store={store} actions={actions} />;
   else if (store && k === 'html') body = <HtmlView id={id} name={n} meta={meta} store={store} actions={actions} />;
@@ -320,7 +321,7 @@ export function ArtifactViewer({
 function ViewerImage({ id, name, store }: { id: string; name: string; store: ArtifactStore }) {
   const { src, failed, onError } = useImageSrc(store, id, name);
   if (failed) return <div class="error-text">The image failed to load</div>;
-  if (!src) return <div class="muted">loading…</div>;
+  if (!src) return <Loading center />;
   return <img src={src} alt={name} onError={onError} />;
 }
 
@@ -338,7 +339,7 @@ function ViewerMarkdown({ id, store }: { id: string; store: ArtifactStore }) {
     };
   }, [store, id]);
   if (error) return <div class="error-text">The document failed to load: {error}</div>;
-  if (text === null) return <div class="muted">loading…</div>;
+  if (text === null) return <Loading center />;
   return <Markdown text={text} />;
 }
 
@@ -368,8 +369,19 @@ function DiffView({ id, name, store, actions }: { id: string; name: string; stor
       </div>
     );
   }
-  if (text === null) return <div class="card card-attachment muted">{name} · loading…</div>;
+  if (text === null) return <DiffLoading name={name} />;
   return <CodeBlock code={text} lang="diff" title={name} extra={download} />;
+}
+
+/** A diff's card while its size or its text is on its way: its name, then "Loading…", as the
+ *  card of a diff that failed to load has its name and the error. */
+function DiffLoading({ name }: { name: string }) {
+  return (
+    <div class="card card-attachment">
+      <div class="card-title">{name}</div>
+      <Loading />
+    </div>
+  );
 }
 
 function HtmlView({

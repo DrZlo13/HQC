@@ -47,6 +47,7 @@ import {
   IconBolt,
   IconCheck,
   IconChevron,
+  IconClock,
   IconCross,
   IconFork,
   IconJoined,
@@ -1016,15 +1017,21 @@ function TextAnswer({ event, actions }: { event: EventOf<'approval.response'>; a
 }
 
 function PendingBubble({ pending, actions }: { pending: PendingMessage; actions: ChatActions }) {
+  const sending = pending.status === 'sending';
   return (
-    <div class={`msg-user msg-pending ${pending.status === 'failed' ? 'msg-failed' : ''}`}>
+    <div class={`msg-user msg-pending ${sending ? '' : 'msg-failed'}`}>
       <div class="msg-bubble">
+        {/* Being sent: a clock where the time will stand once the hub has the message, as a
+            messenger shows it; the words are its tooltip and its name. */}
+        {sending && (
+          <span class="msg-time msg-sending" role="img" aria-label="Sending" title="Sending">
+            <IconClock size={13} />
+          </span>
+        )}
         {pending.text && <UserText text={pending.text} />}
         {pending.attachments && <PendingAttachments files={pending.attachments} />}
       </div>
-      {pending.status === 'sending' ? (
-        <div class="meta">sending…</div>
-      ) : (
+      {!sending && (
         // An alert of its own under the message: what happened on the left, the two ways out
         // on the right.
         <div class="send-alert" role="alert">

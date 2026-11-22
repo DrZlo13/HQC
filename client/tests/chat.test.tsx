@@ -1431,6 +1431,20 @@ describe('live subagents', () => {
     expect(await at(300_000)).toEqual(['due', '', '5m 1s', 'due']);
   });
 
+  it('a subagent whose "what it does now" is its task says the task once', async () => {
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    // After a call of a tool without its own words (an MCP tool) the CLI sends the task itself.
+    const agents = [
+      { task_id: 'a', description: 'Review links, part A', activity: 'Review links, part A', duration_ms: 1000, kind: 'agent' as const },
+      { task_id: 'b', description: 'Review links, part B', activity: 'Reading notes.md', duration_ms: 1000, kind: 'agent' as const },
+    ];
+    await act(async () =>
+      render(<LiveSubagents agents={agents} receivedAt={1000} schedules={[]} schedulesAt={1000} onSchedules={() => {}} now={() => 1000} />, root),
+    );
+    expect(rows().map((r) => r[0])).toEqual(['Agent: Review links, part A', 'Agent: Review links, part B: Reading notes.md']);
+  });
+
   it('says on its row that a subagent retries a request to the model API (SPEC 0.179)', async () => {
     const { app } = setup('running', { subagents: 1 });
     await mount(app);

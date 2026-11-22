@@ -2102,6 +2102,17 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
     expect(card.querySelector(".subagent-stats")!.textContent).toBe("5s");
   });
 
+  it("running with its task as what it does: Running, not the task again", () => {
+    const t = new Timeline();
+    t.apply(call(1, "ag", "Agent", AGENT));
+    // After a call of a tool without its own words (an MCP tool) the CLI sends the task itself.
+    t.apply(live([{ task_id: "a1", description: AGENT.description, activity: AGENT.description, duration_ms: 1000, call_id: "ag" }]));
+    show(t);
+    const card = root.querySelector(".subagent")!;
+    expect(card.querySelector(".subagent-state")!.textContent).toBe("Running");
+    expect(card.querySelector(".subagent-activity")).toBeNull();
+  });
+
   it("failed with its error, stopped, in the background", () => {
     const t = new Timeline();
     t.apply(call(1, "e", "Agent", AGENT));

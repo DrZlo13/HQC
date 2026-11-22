@@ -201,6 +201,11 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
           continue;
         }
         break;
+      // The thinking being written (the timeline's only `agent.delta` item) is a block of its
+      // own, never a row of a folded group of calls: it is there to be read while it is
+      // written. Stored, it joins the group before it as above.
+      case 'agent.delta':
+        break;
       case 'approval.request': {
         let g = group as Extract<Block, { kind: 'tools' }> | null;
         // The calls of one batch run together: a subagent's card or the card of a subagent's end

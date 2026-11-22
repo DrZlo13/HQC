@@ -1495,6 +1495,134 @@ async fn subscribe_mid_answer_gets_the_text_so_far() {
     hub.finish().await;
 }
 
+/// A client that subscribes mid-thinking gets the thinking written so far as one `agent.delta`
+/// with `thinking`; the thinking stored ends it, and the answer's text after it is a text of
+/// its own (SPEC §6).
+#[tokio::test]
+async fn subscribe_mid_thinking_gets_the_thinking_so_far() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("think").await;
+    ack_start(&mut w, &sid).await;
+    for t in ["Checking ", "the tests"] {
+        w.event(agent_event(
+            &sid,
+            "agent.delta",
+            json!({"text": t, "thinking": true}),
+        ))
+        .await;
+    }
+
+    let mut c = FakeClient::connect(&hub).await;
+    let backlog = c.subscribe(&sid, 0).await;
+    let copies: Vec<_> = backlog
+        .iter()
+        .filter(|e| e["type"] == "agent.delta")
+        .collect();
+    assert_eq!(copies.len(), 1, "{backlog:?}");
+    assert!(copies[0].get("seq").is_none());
+    assert_eq!(
+        copies[0]["payload"],
+        json!({"text": "Checking the tests", "thinking": true})
+    );
+
+    w.event(agent_event(
+        &sid,
+        "agent.thinking",
+        json!({"text": "Checking the tests"}),
+    ))
+    .await;
+    assert_eq!(c.until("event").await["event"]["type"], "agent.thinking");
+    w.event(agent_event(&sid, "agent.delta", json!({"text": "Done"})))
+        .await;
+    let mut late = FakeClient::connect(&hub).await;
+    let backlog = late.subscribe(&sid, 0).await;
+    let copies: Vec<_> = backlog
+        .iter()
+        .filter(|e| e["type"] == "agent.delta")
+        .collect();
+    assert_eq!(copies.len(), 1, "{backlog:?}");
+    assert_eq!(copies[0]["payload"], json!({"text": "Done"}));
+    hub.finish().await;
+}
+
+/// The thinking being written ends with its turn and with its worker's connection, as the
+/// answer's text does (SPEC §6): a client that subscribes after gets no copy of it.
+#[tokio::test]
+async fn the_thinking_ends_with_the_turn_and_the_worker() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("think").await;
+    ack_start(&mut w, &sid).await;
+    let thinking = json!({"text": "Checking", "thinking": true});
+    w.event(agent_event(&sid, "agent.delta", thinking.clone()))
+        .await;
+    w.event(agent_event(&sid, "status", json!({"state": "idle"})))
+        .await;
+    let mut late = FakeClient::connect(&hub).await;
+    let backlog = late.subscribe(&sid, 0).await;
+    assert!(
+        backlog.iter().all(|e| e["type"] != "agent.delta"),
+        "{backlog:?}"
+    );
+
+    w.event(agent_event(&sid, "agent.delta", thinking)).await;
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    // The hub ends the texts of the worker's sessions after it marks the worker offline.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let mut late = FakeClient::connect(&hub).await;
+        let backlog = late.subscribe(&sid, 0).await;
+        if backlog.iter().all(|e| e["type"] != "agent.delta") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the thinking outlived its worker: {backlog:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    hub.finish().await;
+}
+
+/// With both the thinking and the answer's text open, a client that subscribes gets a copy of
+/// each, the thinking first (SPEC §6).
+#[tokio::test]
+async fn subscribe_gets_the_thinking_before_the_text() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("think").await;
+    ack_start(&mut w, &sid).await;
+    w.event(agent_event(&sid, "agent.delta", json!({"text": "Writ"})))
+        .await;
+    w.event(agent_event(
+        &sid,
+        "agent.delta",
+        json!({"text": "Checking", "thinking": true}),
+    ))
+    .await;
+    let mut c = FakeClient::connect(&hub).await;
+    let backlog = c.subscribe(&sid, 0).await;
+    let copies: Vec<_> = backlog
+        .iter()
+        .filter(|e| e["type"] == "agent.delta")
+        .map(|e| e["payload"].clone())
+        .collect();
+    assert_eq!(
+        copies,
+        [
+            json!({"text": "Checking", "thinking": true}),
+            json!({"text": "Writ"})
+        ]
+    );
+    hub.finish().await;
+}
+
 /// SPEC §6: an input stored while the agent's text is being written has
 /// `payload.during_text`, so clients show it under that text; once the text is stored, the next
 /// input has none.
@@ -1542,6 +1670,56 @@ async fn an_input_during_the_answer_text_is_marked() {
     hub.finish().await;
 }
 
+/// SPEC §6: so does an input stored while the agent's thinking is being written; once the
+/// thinking is stored, the next input has none.
+#[tokio::test]
+async fn an_input_during_the_thinking_is_marked() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("during").await;
+    ack_start(&mut w, &sid).await;
+    w.event(agent_event(
+        &sid,
+        "agent.delta",
+        json!({"text": "Checking", "thinking": true}),
+    ))
+    .await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "meanwhile"}),
+        )
+        .await;
+    assert_eq!(s, 201);
+    let during = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    w.reply(&si["id"], "ack", json!({"event_id": during})).await;
+    w.event(agent_event(
+        &sid,
+        "agent.thinking",
+        json!({"text": "Checking"}),
+    ))
+    .await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "after"}),
+        )
+        .await;
+    assert_eq!(s, 201);
+    let after = r["event"]["event_id"].clone();
+    let events = hub.events(&sid).await;
+    let stored = |id: &Value| events.iter().find(|e| &e["event_id"] == id).unwrap();
+    assert_eq!(stored(&during)["payload"]["during_text"], true);
+    assert!(
+        stored(&after)["payload"].get("during_text").is_none(),
+        "{}",
+        stored(&after)
+    );
+    hub.finish().await;
+}
+
 /// SPEC §4, §6 (0.161): an `agent.delta` with `reset: true` (the runtime abandoned the attempt
 /// that wrote the text) drops the text so far: the subscriber gets it, a client that subscribes
 /// after it gets no copy, and an input stored after it is not marked `during_text`.
@@ -1557,6 +1735,55 @@ async fn a_reset_delta_drops_the_text_so_far() {
     w.event(agent_event(&sid, "agent.delta", json!({"text": "Let me"})))
         .await;
     assert_eq!(c.until("event").await["event"]["payload"]["text"], "Let me");
+    let reset = agent_event(&sid, "agent.delta", json!({"text": "", "reset": true}));
+    w.event(reset.clone()).await;
+    assert_eq!(c.until("event").await["event"], reset);
+
+    let mut late = FakeClient::connect(&hub).await;
+    let backlog = late.subscribe(&sid, 0).await;
+    assert!(
+        backlog.iter().all(|e| e["type"] != "agent.delta"),
+        "{backlog:?}"
+    );
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "meanwhile"}),
+        )
+        .await;
+    assert_eq!(s, 201);
+    let input = r["event"]["event_id"].clone();
+    let events = hub.events(&sid).await;
+    let stored = events.iter().find(|e| e["event_id"] == input).unwrap();
+    assert!(stored["payload"].get("during_text").is_none(), "{stored}");
+    hub.finish().await;
+}
+
+/// SPEC §4, §6 (0.208): the reset drops the thinking being written with the answer's text: a
+/// client that subscribes after it gets a copy of neither, and an input stored after it is not
+/// marked `during_text`.
+#[tokio::test]
+async fn a_reset_delta_drops_the_thinking_so_far() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("reset").await;
+    ack_start(&mut w, &sid).await;
+    w.event(agent_event(&sid, "agent.delta", json!({"text": "Let me"})))
+        .await;
+    w.event(agent_event(
+        &sid,
+        "agent.delta",
+        json!({"text": "Checking", "thinking": true}),
+    ))
+    .await;
+    let mut c = FakeClient::connect(&hub).await;
+    let backlog = c.subscribe(&sid, 0).await;
+    let copies = backlog
+        .iter()
+        .filter(|e| e["type"] == "agent.delta")
+        .count();
+    assert_eq!(copies, 2, "{backlog:?}");
     let reset = agent_event(&sid, "agent.delta", json!({"text": "", "reset": true}));
     w.event(reset.clone()).await;
     assert_eq!(c.until("event").await["event"], reset);

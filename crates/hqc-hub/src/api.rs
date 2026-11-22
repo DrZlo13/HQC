@@ -407,6 +407,8 @@ pub async fn delete_project(
         app.token_rate_changed(*session_id, 0);
         app.drop_foreground_calls(*session_id);
         app.drop_activity(*session_id);
+        // As for one session deleted: its text or thinking being written goes with it.
+        app.end_live_text(*session_id);
         app.session_changed(*session_id);
     }
     for (worker_id, f) in cleanups {
@@ -1626,6 +1628,8 @@ async fn remove_session(app: &AppState, s: &SessionRow) -> ApiResult<()> {
     app.token_rate_changed(id, 0);
     app.drop_foreground_calls(id);
     app.drop_activity(id);
+    // A text or thinking it was writing would otherwise stay in memory.
+    app.end_live_text(id);
     app.session_changed(id);
     Ok(())
 }

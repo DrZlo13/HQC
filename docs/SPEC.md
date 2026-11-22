@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.207, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
+Version 0.208, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -554,8 +554,8 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.203: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
-| `agent.delta` | `text`, `reset?` (since 0.161: `true` when the runtime abandoned the attempt that wrote the text so far, which the hub and the client drop, §6, §8.1; `text` is then empty; absent when false) | adapter; transport only, not written to the database |
+| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.203: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
+| `agent.delta` | `text`, `reset?` (since 0.161: `true` when the runtime abandoned the attempt that wrote the text so far, which the hub and the client drop, and (since 0.208) the thinking being written with it, §6, §8.1; `text` is then empty; absent when false), `thinking?` (since 0.208: `true` for a piece of the agent's thinking being written, not of its answer; absent when false; §6, §8.1) | adapter; transport only, not written to the database |
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?, due_in_ms?, retry?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands and (since 0.169) Monitor watchers, in the order they became rows, then (since 0.169) the wakeup the agent armed and its cron jobs, empty when none (§8.1); since 0.181 a task the CLI marks `ambient` is no row, and the commands and subagents it starts are rows as the agent's own (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.161; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row, a command's and (since 0.169) a Monitor's say, `retry` (since 0.179) `{attempt, max_retries, retry_delay_ms, error_status?}` while its request to the model API failed and waits to be retried (`error_status` absent: the attempt got no response; §8.1), `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row, `command` for a command's and, since 0.169, `monitor` for a Monitor's, `wakeup` for the agent's wakeup and `cron` for one of its cron jobs; a command's or a Monitor's row carries only `task_id`, `description` (its Bash call's description, or the command; the Monitor's description), `duration_ms`, `call_id?`, `kind` and `stoppable`; a wakeup's and a job's row also `due_in_ms` (since 0.169), the milliseconds until it fires when the list was sent, by the worker's clock, 0 once due, absent on a job whose next fire is not known |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops, and (since 0.179) again, unchanged, at each heartbeat of a long call of the main agent (§8.1, §17.3) |
 | `schedules.live` | `schedules[{schedule_id, message, due_in_ms, cron?, at?, timezone}]` | hub (since 0.169); transport only, not written to the database: the session's enabled schedules (§16) that have a next run, the whole list each time, the next one first, empty when none. `due_in_ms` is the milliseconds until the next run when the list was sent, by the hub's clock, 0 when due; `cron` is the pattern of a recurring schedule and `at` the time of a one-off, `timezone` the zone of the schedule. A worker sending one is refused (`error invalid_frame`, §5.2) |
@@ -570,7 +570,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`), `action?` (since 0.180, only for a request with `server`: `accept` — the answers, also none, are the input; `decline` — the person declined, `answers` empty; the client shows "Declined") | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; since 0.181 also the worker after a background task's end, the task's output file (§8.1), with the same `author`, `kind: text`; the user's files go into `user.message.artifact_ids` (rule below) |
-| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
+| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.161 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`), `call_id?`, `status?`, `task_id?` (since 0.135, only on `task_notification`), `usage?{total_tokens, tool_uses, duration_ms}` (since 0.181, only on `task_notification`), `from_session_id?` (since 0.172, only on `room_passed`: the agent that passed), `trigger?`, `pre_tokens?`, `post_tokens?` (since 0.179, only on `context_compacted`), `model?` (since 0.179, only on `model_not_switched`) | hub or worker; codes below |
@@ -644,7 +644,10 @@ Rules:
 - `agent.delta` goes to clients over WebSocket and is not saved; `agent.message` is saved. The
   hub keeps the text of a session's deltas in memory until its `agent.message`, a `status`
   other than `running` or (since 0.161) a delta with `reset` (up to 512 KiB, and not past the
-  worker's disconnect), so a client that subscribes mid-answer gets all of it (§6, since 0.72).
+  worker's disconnect or, since 0.208, the session's deletion), so a client that subscribes
+  mid-answer gets all of it (§6, since 0.72). Since 0.208 it keeps the text of the deltas with
+  `thinking` apart, the same way (its own 512 KiB) and also until the session's
+  `agent.thinking`, so a client that subscribes mid-thinking gets the thinking so far.
 - `subagents.live` (since 0.113) goes to clients the same way and is not saved either. The hub
   keeps a session's latest list in memory while it is not empty, so a client that subscribes
   or falls behind the stream gets it (§6), its `duration_ms` grown and the `due_in_ms` of its timers
@@ -833,18 +836,23 @@ Worker → hub:
   connection; the worker counts such answers per event (a counter in the outbox) and after
   **10** writes an `error` to the log and deletes the event so that it is not resent forever.
 - `seq` is assigned by the hub; clients see only events with a `seq`.
-- `agent.delta` is not written to the outbox and is lost on a disconnect; that is acceptable. It
-  goes in the same `event` frame; the hub answers `ack {event_id}` without `seq` and does not
-  store it. So do `subagents.live` (since 0.113) and `tokens.rate` (since 0.122); a
-  `mirror.event` of any of them, and of `schedules.live` (since 0.169) and `retraction` (since
-  0.179: only the adapter takes back, §4), is dropped.
+- `agent.delta`, the thinking's too (since 0.208), is not written to the outbox and is lost on a
+  disconnect; that is acceptable. It goes in the same `event` frame; the hub answers
+  `ack {event_id}` without `seq` and does not store it. So do `subagents.live` (since 0.113)
+  and `tokens.rate` (since 0.122); a `mirror.event` of any of them, and of `schedules.live`
+  (since 0.169) and `retraction` (since 0.179: only the adapter takes back, §4), is dropped.
 - The `ack` to `session.input` and `agent.delta` bypass the outbox, while the turn's events go
   through it, so the hub may receive the input's `ack` and the deltas later than the
   `tool.call`/`approval.request` of the same turn. The hub does not rely on the order between
   them (verified on the T4 adapter): an input `ack` that arrives after an `agent.message` with
   `final: true` and that input's `in_reply_to` does not reopen the turn. A turn that ended
   without final text (only `status idle|error`) stays "in progress" until the next turn when
-  its `ack` is late like this **[verify]**.
+  its `ack` is late like this **[verify]**. A delta, though, goes before the outbox entries
+  written after it: the connection sends the outbox on a wake only after the direct frames
+  queued by then, and before a frame that keeps its place (below) only the entries written
+  before that frame; a frame queued while the worker connects again goes after the whole outbox
+  (below). Since 0.208 the hub relies on it: a thinking delta that reached it after its
+  `agent.thinking` would open a new thinking, on the hub and in the clients (§6).
 - A session's `session.state` bypasses the outbox too, but since 0.75 the worker sends it only
   after the outbox entries written before it (since 0.173 only up to the last one of its session
   or its transcript), also in what it sends at once when it stops. The hub ends an open turn as lost on `stopped` (§17.3),
@@ -1902,7 +1910,8 @@ the rest is marked "later"):
   first answer after `/clear` starts a new conversation, like one before the first message,
   without the source's events. Since 0.108 a fork before a message with `during_text` keeps the
   `agent.message` the client shows above it (below, the WebSocket paragraph) as the newest cut
-  and the last copied event. Since 0.161 a fork before a message the client shows after the
+  and the last copied event; an `agent.thinking` the client shows above it (since 0.208) is not
+  kept. Since 0.161 a fork before a message the client shows after the
   turns it waited through (the same paragraph; one with `during_text` too) cuts after them: the
   newest cut is the last `agent.message` before the place the client shows the message at, and
   the feed also gets the events after the message and before that place but its inputs. The
@@ -2762,6 +2771,15 @@ or an empty one when none is kept, with the history it catches up. Since 0.169 t
 carries each change of the session's schedules; a client that fell behind gets it, empty or not.
 The text ends with the `agent.message` stored for it, a `status` other than `running` and (since
 0.179) a `retraction`, after which the runtime sends no message for the text it took back. Since
+0.208 the thinking being written comes the same way, as one `agent.delta` with `thinking` before
+the answer's, and ends with the session's `agent.thinking` and with whatever ends the answer's
+text, a delta with `reset` too. The client draws it as the `agent.thinking` it becomes, the
+collapsed "Thinking · …" line that opens to the text so far, with the same mark in the one-column
+look, as a block of its own after the stored events, above the inputs that stand under it
+(below) and before the messages not stored yet. It is never a row of the run of tool calls
+before it, folded with the run: it is there to be read while it is written; the stored
+`agent.thinking` joins that run as any stored thinking does. Otherwise the stored
+`agent.thinking` that ends it keeps its block, so a thinking the user opened stays open. Since
 0.108 a `user.message`
 or `peer.message` that came while that text was being written stands under it in the feed, live
 (after the text, with the messages not stored yet) and once the text
@@ -2770,7 +2788,17 @@ order, never above the input it answers (`in_reply_to`) and, since 0.161, never 
 waited for a turn of its own and stands after the turns it waited through (below); a final one
 takes along its `usage` and, since 0.161, the `system turn_interrupted` or `turn_ended_early`
 line after it. The client takes this from the hub's `payload.during_text`, never guesses it
-from times. Since 0.161 an
+from times. Since 0.208 the same holds for the thinking: the hub marks an input stored while the
+session's thinking is being written with `during_text` too; the thinking being written stands
+above the inputs with `during_text` at the end of the feed, but one that waited for a turn of
+its own and was delivered (below), and above the inputs that still wait for one (`pending`); the
+stored `agent.thinking` goes above the inputs with `during_text` right before it as an
+`agent.message` does, taking nothing along, and an `agent.message` after it in the same turn
+stays under them. While the answer's text is being
+written, the thinking being written right above the inputs under that text goes under it with
+them: the worker holds a text until the next block of the response (§8.1), so the text came
+before the thinking. An input stored before the session's last `agent.thinking` does not go under
+the answer's text being written. Since 0.161 an
 input with a `delivery` (`user.message`, `peer.message`) that came while a turn ran (with
 `during_text` too, not failed, and not delivered at its own `ts` as a mirrored one is, §9.2)
 stands at the bottom of the feed until the agent takes it, under everything live (after the
@@ -4183,8 +4211,15 @@ cancel it; its withdrawal does. Before 0.180 the adapter answered every `control
 cancelled by a worker restart or Stop is not answered later by a message (§10.1): a message goes
 to the agent, not to the server.
 
-Mapping of stream-json to §4: `stream_event` text delta → `agent.delta`; `assistant`
-with text → `agent.message`, where the adapter holds the last text until the
+Mapping of stream-json to §4: `stream_event` text delta → `agent.delta`; since 0.208 the main
+agent's thinking delta (`content_block_delta` with `delta.type: thinking_delta`) with text in
+`delta.thinking` → `agent.delta` with `thinking: true`, an empty one → nothing: the chunks carry
+text only with `--thinking-display summarized` (above; the 2.1.307 and 2.1.308 fixtures, recorded
+without it, have empty ones), and the finished block still comes as the `assistant` `thinking`
+(`agent.thinking`, above), as long as the chunks joined. The chunks come in bursts, a sentence or a
+paragraph of the summarized thinking at a time, the last right before the block (2.1.312, sonnet
+5.5 on a test install: 45 chunks in three bursts over 3.5 s, 543 characters, and a block of 543);
+`assistant` with text → `agent.message`, where the adapter holds the last text until the
 next stream item: `tool_use` → `final: false`, `result` → `final: true`;
 `tool_use` → `tool.call` (since 0.135 the `args_preview` of an `Agent` or `Task` call has its
 `prompt` last: the input's keys come sorted, and a prompt cut at 4 KB took `subagent_type` and
@@ -4247,9 +4282,13 @@ same reset comes, while such text stands, before a main agent's `assistant` that
 `<synthetic>` and whose `message.id` is not that of the latest `message_start`: 2.1.312 retries a
 stream that broke after its first event mostly without a stream ("Error streaming, falling back to
 non-streaming mode"), and that response brings no `message_start`; the tab drops the rows at such an
-`assistant` too. None when no text delta came since the last `assistant` text, none before an
-`assistant` without `message.id`, and none for a subagent's (by the code of the tab and of 2.1.312;
-a broken stream was not reproduced). Since 0.69 a `result` with `num_turns: 0`, no tokens and no
+`assistant` too. Since 0.208 thinking deltas count as text deltas do: the same reset comes after
+thinking deltas that no `assistant` thinking or text took up, and the hub and the client drop the
+thinking being written with the text; an attempt may break while the model thinks. None when no
+text delta came since the last `assistant` text and no thinking delta since the last `assistant`
+thinking or text, none before an `assistant` without `message.id`, and none for a subagent's (by
+the code of the tab and of 2.1.312; a broken stream was not reproduced). Since 0.69 a `result`
+with `num_turns: 0`, no tokens and no
 cost (a local slash command, the empty second `result` the CLI sends after a turn it started by
 itself) gives no `usage`, which the feed would show as an empty `0 → 0 tokens` line; `/compact` has
 zeros in `usage` too but costs, and keeps its `usage`; since 0.170 its tokens are the growth of the
@@ -7006,6 +7045,34 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.207 → 0.208 (the thinking shows while it is written)
+§4, §6, §8.1: while the model thought, the feed showed only the activity line, and the "Thinking"
+line came when the thinking was done, together with the next step. With `--thinking-display
+summarized`, which the worker passes, Claude Code streams the thinking as `thinking_delta` chunks
+with text before the finished block; the adapter dropped them. It now sends each as an
+`agent.delta` with `thinking: true`. The hub keeps the thinking being written apart from the
+answer's text, sends it on `subscribe` as one such delta before the answer's, and ends it on the
+session's `agent.thinking` and on whatever ends the answer's text; an input stored meanwhile gets
+`during_text`. The client draws it as the collapsed "Thinking" line its `agent.thinking` will be,
+a block of its own, not a row of the folded run of tool calls before it; the stored
+`agent.thinking` takes its block, so a line the user opened stays open, unless it joins that run.
+An input written during the thinking stands under it, live and once it is stored, as under the
+answer's text since 0.108; while the answer's text is still being written, the thinking after it
+stands under that text. §8.1: a `message_start`, or a response of another `message.id`, after
+thinking deltas that no `assistant` thinking or text took up drops the thinking with the text
+(`reset`), as after text deltas since 0.161. §4: the hub drops the texts being written of a session
+it deletes. §5.2: the hub relies on a delta going before the outbox entries written after it, as
+the worker sends them: a thinking delta after its `agent.thinking` would open a second thinking.
+The hub has to be updated before the workers: an older hub ignores `thinking`, so it adds a newer
+worker's thinking chunks to the answer's text it keeps for subscriptions, which its
+`agent.thinking` does not end, marks inputs stored meanwhile with `during_text`, and passes the
+deltas on as they came; its client, older too, shows them as answer text until the next
+`agent.message` or the end of the turn. Checked on a test install (Claude Code 2.1.312, sonnet
+5.5), at 1280 and 390 px: the "Thinking" line stood in the feed about 3 s before its
+`agent.thinking`, growing to 543 characters as three bursts of chunks came (45 in all); after a
+Bash call it stood under the folded run of that call, growing from 250 to 480 characters, and
+joined the run once stored. 0.186–0.205 are taken by other pull requests.
 
 ### 0.206 → 0.207 (the permission card says what it asks and what it grants)
 §4, §8.1, §10.1: the card showed a multi-line command as its first line when it stood right after

@@ -1,7 +1,6 @@
-// One context menu for the session column, the project bar and the feed: a session row's right
-// click and a phone's long press, the column header's order and project menus, a project's right
-// click on the bar, a right click on text selected in the feed. It stands at the point it was
-// opened from, kept inside the window.
+// One context menu for the session column and the project bar: a session row's right click and
+// a phone's long press, the column header's order and project menus, a project's right click on
+// the bar. It stands at the point it was opened from, kept inside the window.
 
 import type { ComponentChildren } from 'preact';
 import { useEffect, useLayoutEffect, useRef } from 'preact/hooks';

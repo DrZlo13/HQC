@@ -1335,6 +1335,14 @@ export class AppState {
     this.edited();
   }
 
+  /** `text` at the end of a project's quick messages, added to the list the hub has now, so what
+   *  another device changed stays; a text already in it sends nothing. */
+  async addQuickMessage(id: string, text: string): Promise<void> {
+    await this.refreshProject(id);
+    const fresh = this.project(id)?.quick_messages ?? [];
+    if (!fresh.includes(text)) await this.setQuickMessages(id, [...fresh, text]);
+  }
+
   /** An image as the project's icon; the hub checks it (`422 invalid_icon`). */
   async uploadProjectIcon(id: string, file: File): Promise<void> {
     const p = await this.api.uploadProjectIcon(id, file, file.name);

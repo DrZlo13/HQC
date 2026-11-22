@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.203, 2026-11-20. Status: the architecture agreed after six reviews and a survey of
+Version 0.204, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2312,6 +2312,13 @@ once, and what another device changed shows when the answer comes.
 Each message in the list is a button. The opener has `aria-expanded` and, while the list is open,
 `aria-controls`; Esc on a message of the list puts the focus back on the opener. The new session's
 window has no such button.
+A message the user typed, with text, has a lightning-bolt button "Add to quick messages" among
+its buttons, right before fork (since 0.204); like fork, not while it waits for delivery or
+when it was not delivered. A press reads the project from the hub, adds the
+message's text exactly as typed at the end of that list and sends it whole in `PATCH
+/api/projects/{id}`; a text the hub's list has already sends nothing. A text the project's list
+has is a check, "In quick messages", that cannot be pressed; the hub's refusal is said in the
+chat's notice. The service session has no such button.
 The project settings have a section "Quick messages" between Appearance and Workspaces: a line
 saying what they are, the list in stored order (each message as written, kept to 3 lines, with
 "Edit" and "Delete"), and "Add a quick message"; the form for a new or an edited message is a
@@ -2383,8 +2390,11 @@ stands at the right end of its first line, inside the bubble or plate for the us
 note on that line (since 0.178 an icon, its words the tooltip: "Joined the turn", §17.2; "Instead
 of the request", §10.1) and before "· scheduled", "· awaiting delivery", "· queued" (since 0.161,
 an input that came while a turn ran, see the WebSocket below), "· not delivered" or "· forking…";
-its buttons show on hover: the user's copy and "Fork from here" inside the bubble left of the
-time, an agent message's copy in the margin left of the feed, on a phone under the message. Since
+its buttons are always shown, in the line's flow so that they cover no text: Search, Copy, Quote
+and, for the user's message, "Add to quick messages" (see quick messages above) and "Fork from
+here", left of the time in its line (inside the bubble or plate for the user's and the text
+answer's), on a phone too, except that a phone's agent message with a usage line has them at that
+line's right end (since 0.204, see Quote below). Since
 0.156, until the hub answers a fork (it copies the source's history first, seconds for a long
 session) the message says "· forking…" and its "Fork from here" is disabled; the client asks for
 no second fork before the same message meanwhile.
@@ -2457,10 +2467,30 @@ the result's (an error's `error_text`; a done one's without the CLI's trailer, f
 `agentId: <id> (use SendMessage …)` line that the `<usage>` block follows), on one line without its
 Markdown marks; a click on the head opens the whole text as Markdown. In the Compact look the
 start's mark is a pulsing dot while it runs, a check when done, a cross when it failed or stopped
-and a grey dot in the background; the end's a check when done, else a cross. Quote (since 0.74): on
-a computer a right click on text selected in the feed opens the client's menu with "Quote" (into the
-input as `> ` lines), "Copy" and (since 0.142) "Search in <the search picked in Settings>", which
-opens its results for the text in a new tab; on a phone a "Quote" button under the selection's end. The input is
+and a grey dot in the background; the end's a check when done, else a cross.
+Search, Copy and Quote (since 0.204; the client's menu of a right click and a phone's "Quote" button
+are gone, a right click gives the browser's own menu): the buttons of an agent message, the user's
+message, a text answer, a message from another session and the reply to it, what the session sent to
+another ("Sent to") and the reply it got ("Reply from"), a room post and the agent's reasoning (at
+the right end of its summary line, folded or open; a click on them neither folds nor unfolds it),
+also in the history of a subagent; tool output has none. They are always shown (see the message's
+time above), Search being a slot at the strip's left end that keeps its place, hidden and not
+clickable, while the message holds no selection, so that the line does not re-wrap when one is made.
+A message holds the selection that starts in it, else the one that ends in it, and its selection is
+the browser's own text when the range lies inside it; one that leaves it is clipped to the message,
+by lines (paragraphs, list items and table rows on separate lines, cells apart by a tab), without
+the message's time and head, its meta line, the summary line of a reasoning (a folded one: only that
+line, without its "Thinking · "), the caption bar of a code block and the buttons (a triple click
+that ends at the start of the next block, or a range across two messages, gives the first message
+its own part). Copy puts the selection into the clipboard, else the message's text; "Quote" puts the
+selection into the input as `> ` lines (and clears the selection), else the message's first two
+sentences (`Intl.Segmenter`, a blank line between paragraphs is not one), with "…" after them when
+text follows (after a space when they end in `.`, `!`, `?` or `…`); it is shown where there is an
+input; "Search in <the search picked in Settings>" (since 0.142), live while the message holds a
+selection, with or without an input, opens its results for the text in a new tab. A press on the
+buttons reads the selection and keeps it as it was when it began: a mouse press does not clear it,
+and a phone's tap, which clears it before the click, still acts on the text it held; the click, a
+press elsewhere or a press the browser takes over lets go of it. The input is
 one row: the paperclip, the field growing with its lines up to 200 px, send; on a computer its
 placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input takes the
 caret when the chat opens, once its newest page is in, unless a request waits for an answer (an open
@@ -2475,10 +2505,30 @@ than the text, and an open thinking block is prose in the feed's font. A call wi
 turn after it in `seq` order (the final `agent.message`, `status` `idle` or `error`, `system
 turn_lost`) is not finished, marked with the cross of a failed call, as the VS Code tab marks a
 call without a result once the session is not busy; a run is running while one of its calls
-is, else it takes the mark of its last call. Quote (since 0.74): on a
-computer a right click on text selected in the feed opens the client's menu with "Quote" (into
-the input as `> ` lines), "Copy" and (since 0.142) "Search in <the search picked in Settings>",
-which opens its results for the text in a new tab; on a phone a "Quote" button under the selection's end. The
+is, else it takes the mark of its last call.
+Search, Copy and Quote (since 0.204; the client's menu of a right click and a phone's "Quote" button
+are gone, a right click gives the browser's own menu): the buttons of an agent message, the user's
+message, a text answer, a message from another session and the reply to it, what the session sent to
+another ("Sent to") and the reply it got ("Reply from"), a room post and the agent's reasoning (at
+the right end of its summary line, folded or open; a click on them neither folds nor unfolds it),
+also in the history of a subagent; tool output has none. They are always shown (see the message's
+time above), Search being a slot at the strip's left end that keeps its place, hidden and not
+clickable, while the message holds no selection, so that the line does not re-wrap when one is made.
+A message holds the selection that starts in it, else the one that ends in it, and its selection is
+the browser's own text when the range lies inside it; one that leaves it is clipped to the message,
+by lines (paragraphs, list items and table rows on separate lines, cells apart by a tab), without
+the message's time and head, its meta line, the summary line of a reasoning (a folded one: only that
+line, without its "Thinking · "), the caption bar of a code block and the buttons (a triple click
+that ends at the start of the next block, or a range across two messages, gives the first message
+its own part). Copy puts the selection into the clipboard, else the message's text; "Quote" puts the
+selection into the input as `> ` lines (and clears the selection), else the message's first two
+sentences (`Intl.Segmenter`, a blank line between paragraphs is not one), with "…" after them when
+text follows (after a space when they end in `.`, `!`, `?` or `…`); it is shown where there is an
+input; "Search in <the search picked in Settings>" (since 0.142), live while the message holds a
+selection, with or without an input, opens its results for the text in a new tab. A press on the
+buttons reads the selection and keeps it as it was when it began: a mouse press does not clear it,
+and a phone's tap, which clears it before the click, still acts on the text it held; the click, a
+press elsewhere or a press the browser takes over lets go of it. The
 input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
 computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the
 input takes the caret when the chat opens, once its newest page is in, unless a request waits
@@ -6871,6 +6921,22 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
+### 0.203 → 0.204 (a message's Search, Copy and Quote are buttons of its own, and Add to quick messages)
+§6: Search, Copy and Quote of selected text were the client's menu of a right click on a computer
+and a "Quote" button under the selection on a phone, which a phone's own selection menu covered.
+They are now buttons of the message that holds the selection, always shown (no hover), in the line's
+flow so that they cover no text: left of the message's time, in the head of a message from another
+session and of a room post, at the right end of a phone's agent message's usage line, at the right
+end of a reasoning's summary. A phone has no row under the message any more. Search is a slot at the
+strip's left end, hidden until the message holds a selection, so the line keeps its width. Quote with
+nothing selected takes the message's first two sentences with "…"; Copy with nothing selected copies
+the whole message, as before. The buttons are on agent, user and text-answer messages, a message
+from another session, a reply to one, what the session sent to another and the reply it got, a room
+post, the agent's reasoning and the messages of a subagent's history; Search no longer needs the
+input. A right click opens the browser's menu.
+§6 client layout, quick messages: a message the user typed has a button right before fork that adds
+its text at the end of the project's quick messages (read from the hub first, sent whole in `PATCH
+/api/projects/{id}`, nothing sent for a text already there); a text in the list is a check.
 ### 0.202 → 0.203 (a subagent that ends with its commands still running)
 §8.1: a subagent of Claude Code 2.1.329 that stops while commands it started run on (a wait loop
 that never ends) sends its `task_notification` with its report as `summary` and no `handback`.

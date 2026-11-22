@@ -2941,7 +2941,7 @@ select.input {
   gap: 24px;
 }
 
-/* The anchor of a message's hover buttons (`.msg-actions`): the feed's left edge. */
+/* The anchor of a block's gutter mark (the one-column feed). */
 .feed-block {
   position: relative;
 }
@@ -3101,27 +3101,15 @@ select.input {
   font-variant-numeric: tabular-nums;
 }
 
-.meta .btn-copy {
-  order: 10;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-.relay:hover .meta .btn-copy,
-.meta .btn-copy:focus-visible,
-.meta .btn-copy:not(.btn-copy-idle) {
-  opacity: 1;
-}
-@media (hover: none) {
-  .meta .btn-copy {
-    opacity: 1;
-  }
-}
-
 /* A message's time at the right end of its first line, as Telegram has it; in a bubble or a
    plate, inside it. */
 .msg-time {
   float: right;
   margin-left: 16px;
+  /* The float stays within the first text line, whatever its buttons are: WebKit rounds a text
+     line down to whole pixels (22.5 px is 22), and a float as tall as --feed-line reaches into
+     the second line, shortens it by its own width, and a long word there splits. */
+  height: calc(var(--feed-line) - 1px);
   font-size: 12px;
   line-height: var(--feed-line);
   font-weight: 400;
@@ -3130,7 +3118,6 @@ select.input {
   white-space: nowrap;
 }
 .msg-bubble > .msg-time {
-  position: relative;
   margin-left: 12px;
 }
 /* A bubble's note ("Joined the turn", "Instead of the request"): an icon right before the time,
@@ -3142,76 +3129,6 @@ select.input {
   color: var(--accent-text);
   cursor: help;
 }
-/* A message's copy and fork buttons, on hover, at the edge opposite its time: a column in the
-   margin left of the feed, from the message's top, its right edge on the block's left edge so
-   the block's hover holds on the way to it. Narrow enough for the timeline's padding, it
-   covers neither the time nor the next block. */
-.msg-actions {
-  position: absolute;
-  z-index: 5;
-  top: 0;
-  left: -26px;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: 1px;
-  border-radius: 7px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  box-shadow: 0 4px 12px color-mix(in srgb, var(--shade) 30%, transparent);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s;
-}
-/* A transparent bridge over the seam (its border, a rounded pixel): a slow approach from the
-   message keeps the hover. */
-.chat:not(.chat-phone) .msg-actions::after {
-  content: '';
-  position: absolute;
-  top: -1px;
-  bottom: -1px;
-  left: 100%;
-  width: 4px;
-}
-/* The phone keeps the buttons' own 24 px (a row under the message, styles below). */
-.chat:not(.chat-phone) .msg-actions .btn-copy-idle {
-  width: 22px;
-  height: 22px;
-}
-/* The copy result in the button itself, not a caption that widens the column; its colour
-   holds under the pointer too. */
-.msg-actions .btn-copy.btn-copy-done {
-  color: var(--online);
-}
-.msg-actions .btn-copy.btn-copy-failed {
-  color: var(--danger);
-}
-.feed-block:hover .msg-actions,
-.msg-actions:focus-within {
-  opacity: 1;
-  pointer-events: auto;
-}
-@media (hover: none) {
-  .msg-actions {
-    opacity: 1;
-    pointer-events: auto;
-  }
-}
-/* One column: the 24 px margin left of the gutter, as small as the tab's. */
-:root.feed-column .msg-actions {
-  left: -22px;
-  border-radius: 6px;
-}
-:root.feed-column .chat:not(.chat-phone) .msg-actions .btn-copy-idle {
-  width: 18px;
-  height: 18px;
-  border-radius: 5px;
-}
-:root.feed-column .chat:not(.chat-phone) .msg-actions .icon {
-  width: 13px;
-  height: 13px;
-}
-
 .msg-user {
   display: flex;
   flex-direction: column;
@@ -3227,57 +3144,37 @@ select.input {
   color: var(--text);
   overflow-wrap: anywhere;
 }
-/* The user's copy and fork on a computer: in the bubble (or plate), left of the time on its
-   first line, shown on hover over the text's end (on the bubble's colour), taking no room while
-   hidden; small enough for the line. */
-.msg-time-actions {
-  position: absolute;
-  top: 50%;
-  right: 100%;
-  transform: translateY(-50%);
+/* A message's buttons (Search, Copy, Quote and the user's Add to quick messages and Fork): always
+   shown, in the line's flow so that they cover no text: left of the time, in a head, and at the
+   right end of a phone's usage line or of a reasoning's summary. */
+.msg-buttons {
   display: inline-flex;
   gap: 2px;
-  padding: 0 6px 0 4px;
-  background: var(--bubble);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s;
+  margin-right: 6px;
+  vertical-align: middle;
 }
-.feed-block:hover .msg-time-actions,
-.msg-time-actions:focus-within {
-  opacity: 1;
-  pointer-events: auto;
+.msg-agent > .meta .msg-buttons,
+.thinking summary .msg-buttons {
+  margin-left: auto;
+  margin-right: 0;
 }
-/* A bubble with them is wide enough to hold them, a one-word message too. */
-.msg-bubble-acts {
-  min-width: 7.5em;
+/* Search keeps its place while the message holds no selection, so that the line does not
+   re-wrap when one is made. */
+.btn-msg-search-idle {
+  visibility: hidden;
 }
-/* A touch screen as wide as a computer's has no hover: the buttons stay, in the line's flow so
-   they cover no text. */
-@media (hover: none) {
-  .msg-time-actions {
-    position: static;
-    transform: none;
-    padding: 0;
-    margin-right: 6px;
-    vertical-align: middle;
-    background: none;
-    opacity: 1;
-    pointer-events: auto;
-  }
-}
-.chat:not(.chat-phone) .msg-time-actions .btn-copy-idle {
+.chat:not(.chat-phone) .msg-buttons .btn-copy-idle {
   width: 18px;
   height: 18px;
 }
-.chat:not(.chat-phone) .msg-time-actions .icon {
+.chat:not(.chat-phone) .msg-buttons .icon {
   width: 13px;
   height: 13px;
 }
-.msg-time-actions .btn-copy.btn-copy-done {
+.msg-buttons .btn-copy.btn-copy-done {
   color: var(--online);
 }
-.msg-time-actions .btn-copy.btn-copy-failed {
+.msg-buttons .btn-copy.btn-copy-failed {
   color: var(--danger);
 }
 
@@ -3796,7 +3693,7 @@ select.input {
 :root.feed-column .thinking-text {
   padding-left: 0;
 }
-.thinking[open] summary .icon {
+.thinking[open] summary > .icon {
   transform: rotate(90deg);
 }
 
@@ -4685,14 +4582,6 @@ a.relay-peer {
 
 /* ---- composer and the VS Code strip ---- */
 
-/* "Quote" under the end of text selected in the feed. */
-.btn-quote {
-  position: fixed;
-  z-index: 20;
-  transform: translateX(-50%);
-  box-shadow: 0 6px 18px color-mix(in srgb, var(--shade) 35%, transparent);
-}
-
 /* The subagents running now, pinned above the input (LiveSubagents, SPEC §6). */
 .live-agents {
   flex: none;
@@ -5226,17 +5115,6 @@ a.relay-peer {
   line-height: 1.5;
 }
 
-/* No margin and no hover on a phone: a message's buttons are a row under it. */
-.chat-phone .msg-actions {
-  position: static;
-  flex-direction: row;
-  padding: 0;
-  border: 0;
-  background: none;
-  box-shadow: none;
-  opacity: 1;
-  pointer-events: auto;
-}
 
 .chat-phone .chat-head {
   padding: 6px 4px;
@@ -7081,6 +6959,14 @@ button.ps-look {
   background: transparent;
   color: var(--muted);
   cursor: progress;
+}
+
+/* A text already among the project's quick messages (or being added): its button waits,
+   without the hover. */
+.btn-copy.btn-to-quick:disabled {
+  background: transparent;
+  color: var(--muted);
+  cursor: default;
 }
 
 /* ---- diffs and paths in markdown (T16) ---- */

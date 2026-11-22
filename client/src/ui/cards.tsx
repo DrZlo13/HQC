@@ -1,16 +1,18 @@
 // The feed of a chat (T26): agent messages as text without a bubble, the user's in a bubble
 // on the right (or, in the Compact look, a plate from the left edge and a mark in a
 // gutter before every other item), runs of tool calls folded into groups, request cards,
-// service lines. A message's time sits at the right end of its first line, its copy and fork
-// buttons at the other edge on hover. One component per event type of SPEC §4; unknown and
-// invalid events render as a collapsed row and never throw.
+// service lines. A message's time sits at the right end of its first line, its Search, Copy,
+// Quote and fork buttons left of it, always shown (a phone's usage line and a reasoning's
+// summary hold them at their right end). One component per event type of SPEC §4; unknown
+// and invalid events render as a collapsed row and never throw.
 
 import type { SecretFields } from '../api';
-import { Fragment, type ComponentChildren } from 'preact';
-import { useMemo, useState } from 'preact/hooks';
+import { Fragment, type ComponentChildren, type RefObject } from 'preact';
+import { useContext, useMemo, useRef, useState } from 'preact/hooks';
 import type { Activity, ClarifyAction, ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, ModelProvider, SessionState } from '../proto';
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import type { ArtifactStore } from '../artifacts';
+import type { WebSearch } from '../websearch';
 import { modelMenuItems, type ModelChoice } from './agentSettings';
 import { AttachmentView, PendingAttachments, type ViewedArtifact } from './attachments';
 import { ContextMenu } from './ContextMenu';
@@ -43,13 +45,16 @@ import {
   IconArrowOut,
   IconAttach,
   IconBackground,
+  IconBolt,
   IconCheck,
   IconChevron,
   IconCross,
   IconFork,
   IconJoined,
   IconQuestion,
+  IconQuote,
   IconReply,
+  IconSearch,
   IconShield,
   IconStop,
   IconWarn,
@@ -76,6 +81,7 @@ import { activityOf, elapsed, stats } from './LiveSubagents';
 import { CodeBlock, CopyButton, Markdown, markdownLine, safeHref } from './Markdown';
 import { asker, PermissionBlock } from './permission';
 import { PeerMessageBlock, ReplyFromBlock, ReplyToBlock, SentBlock } from './relay';
+import { firstSentences, SelectionContext } from './selection';
 
 /** The session's model, for the offer under the runtime's reply to a model refusal (SPEC
  *  0.168): the one it has now, the providers its worker allows, and `to`, which switches it as
@@ -151,6 +157,10 @@ export interface ChatActions {
   /** A fork before this message of the user is under way: its time says so, and its fork
    *  button waits. */
   forking?(eventId: string): boolean;
+  /** The project's quick messages (SPEC §6): `has` — the text is in the list, `add` puts it at
+   *  the end and says a refusal itself; absent where the session has no project and where the
+   *  card is shown away from its session. */
+  quickMessages?: { has(text: string): boolean; add(text: string): Promise<void> };
   /** Gives the secret an agent's `hqc_secret` asks for (SPEC 0.147); absent where it cannot
    *  be given (the session's worker does not take secrets). */
   giveSecret?(requestId: string, f: SecretFields): Promise<void>;
@@ -158,6 +168,12 @@ export interface ChatActions {
    *  chat's "More" has no model field, and while VS Code holds the session — its message
    *  cannot be sent again from here. */
   modelSwitch?: ModelSwitch;
+  /** Puts a text of the feed into the message being written as a quote; absent where there
+   *  is no input (the message's Quote button is not shown). */
+  quote?(text: string): void;
+  /** The web search of the Search button of a message that holds a selection; without it the
+   *  button is not shown. */
+  webSearch?: WebSearch;
 }
 
 export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActions }) {
@@ -294,7 +310,7 @@ export function blockSeq(b: Block): number | undefined {
 function BlockView({ block, actions }: { block: Block; actions: ChatActions }) {
   switch (block.kind) {
     case 'agent':
-      return <AgentMessage event={block.event} usage={block.usage} />;
+      return <AgentMessage event={block.event} usage={block.usage} actions={actions} />;
     case 'tools':
       return <ToolGroup block={block} actions={actions} />;
     case 'subagent':
@@ -458,9 +474,9 @@ export function EventView({ event, actions, queued }: { event: HqcEvent; actions
       // service line, not the agent's text.
       if (event.payload.runtime && event.payload.refusal) return <RefusalLine event={event} actions={actions} />;
       if (event.payload.runtime) return <Line kind="system line-runtime">{event.payload.text}</Line>;
-      return <AgentMessage event={event} />;
+      return <AgentMessage event={event} actions={actions} />;
     case 'agent.thinking':
-      return <Thinking event={event} />;
+      return <Thinking event={event} actions={actions} />;
     case 'tool.call':
     case 'tool.result':
       // Drawn in tool groups (feed.ts).
@@ -470,7 +486,7 @@ export function EventView({ event, actions, queued }: { event: HqcEvent; actions
     case 'approval.response': {
       const p = event.payload;
       // A text answer is the user's message (SPEC §10.1).
-      if (p.message) return <TextAnswer event={event} />;
+      if (p.message) return <TextAnswer event={event} actions={actions} />;
       // Otherwise the request's row says it; alone (its request not loaded) it is a line.
       if (actions.timeline.request(p.request_id)) return null;
       return <Line kind="approval">Answer to the request: {p.option_id}</Line>;
@@ -809,16 +825,16 @@ function Bubble({
   ts: string;
   note?: BubbleNote;
   time?: ComponentChildren;
-  /** Shown on hover left of the time (a computer's; a phone has them under the message). */
+  /** The message's buttons, left of the time. */
   buttons?: ComponentChildren;
   children: ComponentChildren;
 }) {
   return (
-    <div class={['msg-bubble', buttons && 'msg-bubble-acts'].filter(Boolean).join(' ')}>
+    <div class="msg-bubble">
       <MessageTime
         ts={ts}
         before={[
-          buttons && <span class="msg-time-actions">{buttons}</span>,
+          buttons && <MessageButtons>{buttons}</MessageButtons>,
           note && (
             <span class="msg-note" role="img" aria-label={note.label} title={note.label}>
               {note.icon}
@@ -833,11 +849,77 @@ function Bubble({
   );
 }
 
-/** A message's buttons, shown on hover at the edge opposite its time (styles.css): left of the
- *  feed, clear of the time and of the next block. The user's message has them in its bubble,
- *  left of the time, on a computer (`Bubble`). */
-function MessageActions({ children }: { children: ComponentChildren }) {
-  return <div class="msg-actions">{children}</div>;
+/** What a press on a message's buttons does to the feed's selection: it is kept until the
+ *  click (a mouse press keeps it where it is; a phone's tap clears it before the click). A click
+ *  does nothing else: in a `<summary>` it neither folds nor unfolds the details. */
+function usePress() {
+  const selection = useContext(SelectionContext);
+  return {
+    onPointerDown: (e: Event) => {
+      e.preventDefault();
+      selection.press();
+    },
+    onClick: (e: Event) => {
+      e.preventDefault();
+      selection.release();
+    },
+  };
+}
+
+/** A message's buttons, always shown, in the line's flow so that they cover no text (styles.css):
+ *  by the message's time, in a head, at the end of a usage line or of a `<summary>`. */
+export function MessageButtons({ children }: { children: ComponentChildren }) {
+  return (
+    <span class="msg-buttons" {...usePress()}>
+      {children}
+    </span>
+  );
+}
+
+/** Search, Copy and Quote of the message whose root element is `root`, with `text` its source:
+ *  they take the text selected in the message, else Copy the whole text and Quote its first
+ *  sentences. Search is the slot at the strip's left end: hidden, not clickable, but in its place
+ *  until the message holds a selection, so the line's width does not change while selecting. */
+export function SelectionButtons({ root, text, actions }: { root: RefObject<Element | null>; text: string; actions: ChatActions }) {
+  const selection = useContext(SelectionContext);
+  const { quote, webSearch } = actions;
+  const selected = () => selection.text(root.current);
+  const holding = !!selection.holder && selection.holder === root.current;
+  return (
+    <>
+      {webSearch && (
+        <button
+          type="button"
+          class={`btn-copy btn-copy-idle btn-msg-search${holding ? '' : ' btn-msg-search-idle'}`}
+          aria-label={`Search in ${webSearch.label}`}
+          aria-hidden={holding ? undefined : true}
+          tabIndex={holding ? undefined : -1}
+          title={`Search in ${webSearch.label}`}
+          onClick={() => {
+            const q = selected();
+            if (q) window.open(webSearch.url(q), '_blank', 'noopener');
+          }}
+        >
+          <IconSearch size={13} />
+        </button>
+      )}
+      <CopyButton text={() => selected() ?? text} icon />
+      {quote && (
+        <button
+          type="button"
+          class="btn-copy btn-copy-idle btn-msg-quote"
+          aria-label="Quote"
+          title="Quote"
+          onClick={() => {
+            quote(selected() ?? firstSentences(text));
+            document.getSelection()?.removeAllRanges();
+          }}
+        >
+          <IconQuote size={13} />
+        </button>
+      )}
+    </>
+  );
 }
 
 function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'>; actions: ChatActions; queued?: boolean }) {
@@ -846,28 +928,32 @@ function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'
   const fork = actions.fork && event.author.kind === 'user' && d !== 'pending' && d !== 'failed';
   // The hub copies the history before it answers, seconds for a long session (SPEC §6).
   const forking = fork && !!actions.forking?.(event.event_id);
-  const phone = useIsPhone();
-  const buttons = (event.payload.text || fork) && [
-    event.payload.text && <CopyButton key="copy" text={event.payload.text} icon />,
-    fork && (
-      <button
-        key="fork"
-        type="button"
-        class="btn-copy btn-copy-idle btn-fork"
-        disabled={forking}
-        aria-label={forking ? 'Forking…' : 'Fork from here'}
-        title={forking ? 'Forking…' : 'Fork from here: a new session with the conversation before this message'}
-        onClick={() => actions.fork!(event)}
-      >
-        <IconFork />
-      </button>
-    ),
-  ];
+  const root = useRef<HTMLDivElement>(null);
+  // Where fork is: not on a message waiting for delivery or not delivered.
+  const quick = event.author.kind === 'user' && event.payload.text && d !== 'pending' && d !== 'failed' ? actions.quickMessages : undefined;
+  const buttons = (event.payload.text || fork) && (
+    <>
+      {event.payload.text && <SelectionButtons root={root} text={event.payload.text} actions={actions} />}
+      {quick && <QuickAddButton text={event.payload.text} quick={quick} />}
+      {fork && (
+        <button
+          type="button"
+          class="btn-copy btn-copy-idle btn-fork"
+          disabled={forking}
+          aria-label={forking ? 'Forking…' : 'Fork from here'}
+          title={forking ? 'Forking…' : 'Fork from here: a new session with the conversation before this message'}
+          onClick={() => actions.fork!(event)}
+        >
+          <IconFork />
+        </button>
+      )}
+    </>
+  );
   return (
-    <div class="msg-user">
+    <div class="msg-user" ref={root}>
       <Bubble
         ts={event.ts}
-        buttons={!phone && buttons}
+        buttons={buttons}
         note={event.payload.joined ? JOINED : undefined}
         time={[
           event.payload.schedule_id && <span class="scheduled"> · scheduled</span>,
@@ -889,8 +975,26 @@ function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'
           </div>
         )}
       </Bubble>
-      {phone && buttons && <MessageActions>{buttons}</MessageActions>}
     </div>
+  );
+}
+
+/** Adds the message's text to the project's quick messages; a text already there is a check. */
+function QuickAddButton({ text, quick }: { text: string; quick: NonNullable<ChatActions['quickMessages']> }) {
+  const { busy, run } = useAction();
+  const has = quick.has(text);
+  const said = has ? 'In quick messages' : 'Add to quick messages';
+  return (
+    <button
+      type="button"
+      class="btn-copy btn-copy-idle btn-to-quick"
+      disabled={busy || has}
+      aria-label={said}
+      title={said}
+      onClick={() => run(() => quick.add(text))}
+    >
+      {has ? <IconCheck /> : <IconBolt size={13} />}
+    </button>
   );
 }
 
@@ -901,16 +1005,15 @@ function UserText({ text }: { text: string }) {
 }
 
 /** "Reply with text instead": the user's text went to the agent with the denial. */
-function TextAnswer({ event }: { event: EventOf<'approval.response'> }) {
+function TextAnswer({ event, actions }: { event: EventOf<'approval.response'>; actions: ChatActions }) {
   const text = event.payload.message!;
+  const root = useRef<HTMLDivElement>(null);
+  const buttons = <SelectionButtons root={root} text={text} actions={actions} />;
   return (
-    <div class="msg-user msg-answer">
-      <Bubble ts={event.ts} note={INSTEAD}>
+    <div class="msg-user msg-answer" ref={root}>
+      <Bubble ts={event.ts} note={INSTEAD} buttons={buttons}>
         <UserText text={text} />
       </Bubble>
-      <MessageActions>
-        <CopyButton text={text} icon />
-      </MessageActions>
     </div>
   );
 }
@@ -967,23 +1070,31 @@ export function UsageParts({ usage }: { usage: EventOf<'usage'> }) {
   );
 }
 
-function AgentMessage({ event, usage }: { event: EventOf<'agent.message'>; usage?: EventOf<'usage'> }) {
+function AgentMessage({ event, usage, actions }: { event: EventOf<'agent.message'>; usage?: EventOf<'usage'>; actions: ChatActions }) {
   // An interrupt cut it off: muted, marked after its time.
   const interrupted = event.payload.interrupted;
+  const phone = useIsPhone();
+  const root = useRef<HTMLElement>(null);
+  const buttons = <SelectionButtons root={root} text={event.payload.text} actions={actions} />;
+  // A phone's line is full: the buttons go to the end of the usage line when there is one.
+  const inUsage = phone && !!usage;
   return (
-    <article class={`msg-agent ${event.payload.final ? 'msg-final' : 'msg-interim'}${interrupted ? ' msg-interrupted' : ''}`}>
-      <MessageTime ts={event.ts}>{interrupted && <span class="interrupted"> · interrupted</span>}</MessageTime>
+    <article
+      class={`msg-agent ${event.payload.final ? 'msg-final' : 'msg-interim'}${interrupted ? ' msg-interrupted' : ''}`}
+      ref={root}
+    >
+      <MessageTime ts={event.ts} before={!inUsage && <MessageButtons>{buttons}</MessageButtons>}>
+        {interrupted && <span class="interrupted"> · interrupted</span>}
+      </MessageTime>
       <Markdown class="text" text={event.payload.text} />
       {usage && (
         <div class="meta">
           <span class="usage">
             <UsageParts usage={usage} />
           </span>
+          {inUsage && <MessageButtons>{buttons}</MessageButtons>}
         </div>
       )}
-      <MessageActions>
-        <CopyButton text={event.payload.text} icon />
-      </MessageActions>
     </article>
   );
 }
@@ -997,13 +1108,17 @@ export function StreamingMessage({ text }: { text: string }) {
   );
 }
 
-function Thinking({ event }: { event: EventOf<'agent.thinking'> }) {
+function Thinking({ event, actions }: { event: EventOf<'agent.thinking'>; actions: ChatActions }) {
+  const root = useRef<HTMLDetailsElement>(null);
   return (
-    <details class="thinking">
+    <details class="thinking" ref={root}>
       <summary>
         <IconChevron size={12} />
         {/* Cut where the line ends: 2000 characters are wider than any window. */}
         <span class="thinking-peek">Thinking · {oneLine(event.payload.text.slice(0, 2000), 2000)}</span>
+        <MessageButtons>
+          <SelectionButtons root={root} text={event.payload.text} actions={actions} />
+        </MessageButtons>
       </summary>
       {/* The feed's own font, no box: prose, as in the VS Code tab. */}
       <div class="thinking-text">{event.payload.text}</div>
@@ -1097,7 +1212,7 @@ function StateMark({ state }: { state: 'running' | 'unfinished' | 'error' | 'ok'
  *  session's folder relative to it, then its result; open, the change of an Edit, a MultiEdit or
  *  a Write (its result only if it failed), else the arguments and the result. */
 function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
-  if (row.kind === 'thinking') return <Thinking event={row.event} />;
+  if (row.kind === 'thinking') return <Thinking event={row.event} actions={actions} />;
   const { call } = row;
   const result = call ? actions.timeline.resultFor(call.payload.call_id) ?? row.result : row.result;
   const r = result?.payload;

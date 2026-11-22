@@ -306,20 +306,20 @@ describe('messages', () => {
       ev('event.agent.message', (e) => (e.payload.text = SRC)),
       ev('event.peer.message', (e) => (e.payload.text = 'peer **md**')),
     ]);
-    // A message's in its hover buttons; a peer message's in its head, by the time.
+    // A message's in its buttons by the time; a peer message's in its head.
     const copy = (sel: string) => root.querySelector<HTMLButtonElement>(`${sel} .btn-copy`)!;
     for (const [sel, text] of [
-      ['.msg-user .msg-time-actions', 'user *md*'],
-      ['.msg-agent > .msg-actions', SRC],
+      ['.msg-user .msg-buttons', 'user *md*'],
+      ['.msg-agent .msg-buttons', SRC],
       ['.relay-head > .meta', 'peer **md**'],
     ]) {
       await act(async () => copy(sel).click());
       expect(writeText).toHaveBeenLastCalledWith(text);
     }
-    // In the hover column the result is the button's icon and label; by the time, a caption.
+    // The result is the button's icon and label, in a head too.
     await act(() => new Promise((r) => setTimeout(r, 0)));
-    expect(copy('.msg-agent > .msg-actions').getAttribute('aria-label')).toBe('Copied');
-    expect(copy('.relay-head > .meta').textContent).toBe('Copied');
+    expect(copy('.msg-agent .msg-buttons').getAttribute('aria-label')).toBe('Copied');
+    expect(copy('.relay-head > .meta').getAttribute('aria-label')).toBe('Copied');
     // The code block's button copies only the block.
     await act(async () => root.querySelector<HTMLButtonElement>('.msg-agent .md-code .btn-copy')!.click());
     expect(writeText).toHaveBeenLastCalledWith('ls -la');

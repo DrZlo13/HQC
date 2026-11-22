@@ -174,8 +174,8 @@ export interface ApiRetry {
   /** The HTTP status of the failed attempt; absent: it got no response. */
   error_status?: number;
 }
-/** What the agent waits on now, shown in the activity line instead of "Agent is working"
- *  (`activity` of the session and its summary, SPEC 0.179). */
+/** What the agent waits on now, shown in the main agent's row instead of "Working"
+ *  (`activity` of the session and its summary, SPEC 0.179, §17.1). */
 export type Activity =
   | ({ kind: 'retrying' } & ApiRetry)
   | { kind: 'compacting' }

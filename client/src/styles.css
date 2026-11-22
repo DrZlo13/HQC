@@ -2977,7 +2977,6 @@ select.input {
   padding-left: 0;
 }
 :root.feed-column .feed > .msg-streaming,
-:root.feed-column .feed > .activity,
 :root.feed-column .feed > .waited-requests {
   position: relative;
   margin-left: 22px;
@@ -3799,51 +3798,6 @@ select.input {
 }
 .thinking[open] summary .icon {
   transform: rotate(90deg);
-}
-
-/* The running command at the end of the feed. */
-.activity {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--code);
-  border: 1px solid var(--border);
-  min-width: 0;
-  font-size: 13px;
-}
-
-.activity-label {
-  color: var(--accent-text);
-}
-/* A room's agent leading its line. */
-.activity-name {
-  flex: none;
-  color: var(--text2);
-}
-
-.activity-queued .activity-label {
-  color: var(--muted);
-}
-.activity-waiting .activity-label {
-  color: var(--waiting);
-}
-
-.activity-what {
-  flex: 1;
-  min-width: 0;
-  font-size: 12.5px;
-  color: var(--text2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.activity-timer {
-  font-size: 12px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
 }
 
 /* ---- cards ---- */
@@ -4797,6 +4751,21 @@ a.relay-peer {
 }
 .live-agents-kind {
   color: var(--muted);
+}
+/* The main agent's row (ActivityLine): what it does in the accent colour; input waiting for a
+   turn is muted, an approval it waits for is the waiting colour. */
+.live-agents-lead {
+  color: var(--accent-text);
+}
+.live-agents-lead-queued .live-agents-lead {
+  color: var(--muted);
+}
+.live-agents-lead-waiting .live-agents-lead {
+  color: var(--waiting);
+}
+/* "Run in background": the stop button's size, in the accent colour. */
+.live-agents-background {
+  color: var(--accent-text);
 }
 /* One column: the dot in the 22 px gutter of the feed's marks, the text on the feed's text. */
 :root.feed-column .chat:not(.chat-phone) .live-agents {

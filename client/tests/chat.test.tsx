@@ -956,7 +956,7 @@ describe('header', () => {
     // SPEC 0.125: the running `ls /` is `toolu_01`; a summary without it takes the button away.
     const { api, app } = setup('running', { history: HISTORY.slice(0, 5), foreground_calls: ['toolu_01'] });
     await mount(app);
-    await act(async () => button('Run in background')!.click());
+    await act(async () => $('button[aria-label="Run in background"]')!.click());
     expect(api.background).toHaveBeenCalledWith('s1', 'toolu_01');
     const s = app.sessions.get('s1')!;
     await act(async () =>
@@ -964,14 +964,14 @@ describe('header', () => {
         { session_id: 's1', project_id: 'p1', title: s.title, state: 'running', queue_len: 0, unread: 0, last_seq: 7, last_read_seq: 7 },
       ]),
     );
-    expect(button('Run in background')).toBeUndefined();
+    expect($('button[aria-label="Run in background"]')).toBeNull();
   });
 
   it("shows what the agent waits on from the session's summary, until a summary without it", async () => {
     // SPEC 0.179: `activity` comes and goes with the summaries the hub pushes.
     const { app } = setup('running', { history: [] });
     await mount(app);
-    expect($('.activity')!.textContent).toBe('Agent is working');
+    expect($('.live-agents-row')!.textContent).toBe('Main agent: Working');
     const s = app.sessions.get('s1')!;
     const summary = { session_id: 's1', project_id: 'p1', title: s.title, state: 'running' as const, queue_len: 0, unread: 0, last_seq: 7, last_read_seq: 7 };
     await act(async () =>
@@ -979,9 +979,9 @@ describe('header', () => {
         { ...summary, activity: { kind: 'retrying', attempt: 2, max_retries: 10, retry_delay_ms: 4000, error_status: 529 } },
       ]),
     );
-    expect($('.activity')!.textContent).toBe('Retrying 2/10 (529), next in 4 s');
+    expect($('.live-agents-row')!.textContent).toBe('Main agent: Retrying 2/10 (529), next in 4 s');
     await act(async () => app.mergeSummary([summary]));
-    expect($('.activity')!.textContent).toBe('Agent is working');
+    expect($('.live-agents-row')!.textContent).toBe('Main agent: Working');
   });
 
   it('shows the state, worker, path, model and cost of the session, "Stop" and "More"', async () => {
@@ -1133,7 +1133,7 @@ describe('header', () => {
     expect($('.btn-stop')).toBeNull();
   });
 
-  it("a room's feed has a line for each agent at work, in the agents' order, with the command it runs", async () => {
+  it("a room's live block has a row for each agent at work, in the agents' order, with the command it runs", async () => {
     const { app, api } = setup('idle', { room_mode: 'conversation', commands: [], history: [HISTORY[0]] });
     const room = app.sessions.get('s1')!;
     const member = (id: string, title: string, state: SessionState) =>
@@ -1157,11 +1157,12 @@ describe('header', () => {
     api.events.mockImplementation(async (id: string, after: number) => page(id, after));
     api.eventsBefore.mockImplementation(async (id: string, before?: number, limit?: number) => page(id, 0, before, limit));
     await mount(app);
-    for (let i = 0; i < 20 && root.querySelectorAll('.activity').length < 3; i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
-    const lines = [...root.querySelectorAll('.activity')];
-    expect(lines.map((l) => l.textContent!.replace(/\d+:\d\d$/, 'M:SS'))).toEqual(['Opus · Runningmake testM:SS', 'Sonnet is working', 'Haiku · Input queued']);
-    // The room's own line is gone: it is never at work itself.
-    expect(root.querySelectorAll('.feed > .activity')).toHaveLength(3);
+    const lead = () => [...root.querySelectorAll('.live-agents-row[role="status"]')];
+    for (let i = 0; i < 20 && lead().length < 3; i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    const lines = lead();
+    expect(lines.map((l) => l.textContent!.replace(/\d+m \d+s$/, 'M:SS'))).toEqual(['Opus · Command: make testM:SS', 'Sonnet · Working', 'Haiku · Input queued']);
+    // The room's own row is gone: it is never at work itself. The rows stand in the block, not the feed.
+    expect(root.querySelectorAll('.feed .live-agents-row')).toHaveLength(0);
     // The agents' chats load the newest page only, not their older history.
     expect(api.eventsBefore.mock.calls.filter(([id]) => id === 'm1')).toHaveLength(1);
     // The agents' chats stay open while the room's does, and close with it.
@@ -1262,8 +1263,9 @@ describe('live subagents', () => {
       delete e.seq;
       patch(e);
     });
+  // The rows of the tasks: the main agent's row, `role="status"`, is looked at on its own.
   const rows = () =>
-    [...root.querySelectorAll('.live-agents-row')].map((r) => [
+    [...root.querySelectorAll('.live-agents-row:not([role="status"])')].map((r) => [
       r.querySelector('.live-agents-what')!.textContent,
       r.querySelector('.live-agents-stats')!.textContent,
     ]);
@@ -1271,18 +1273,28 @@ describe('live subagents', () => {
   it('shows a row per subagent above the input, outside the feed, none with an empty list', async () => {
     const { app } = setup('running', { subagents: 2 });
     await mount(app);
-    expect($('.live-agents')).toBeNull();
+    expect(rows()).toEqual([]);
     await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = e.payload.agents.slice(0, 2)))));
     expect(rows()).toEqual([
       [
-        'Agent: Fix schematic power nets in import: Running Verify the final sample runs are byte-identical',
+        'Subagent: Fix schematic power nets in import: Running Verify the final sample runs are byte-identical',
         '155.3k tokens · 188 tools · 4m 13s',
       ],
-      ['Agent: Reply with number', '1s'],
+      ['Subagent: Reply with number', '1s'],
     ]);
     // Pinned: outside the feed's scroller, right above the input.
     expect($('.timeline .live-agents')).toBeNull();
     expect($('.live-agents + .composer-wrap')).not.toBeNull();
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = []))));
+    expect(rows()).toEqual([]);
+  });
+
+  it('shows no empty block while the session idles and the list of its counted tasks has not come', async () => {
+    const { app } = setup('idle', { subagents: 2 });
+    await mount(app);
+    expect($('.live-agents')).toBeNull();
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = e.payload.agents.slice(0, 1)))));
+    expect(rows().length).toBe(1);
     await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = []))));
     expect($('.live-agents')).toBeNull();
   });
@@ -1452,6 +1464,23 @@ describe('live subagents', () => {
     expect(rows()).toEqual([['Reply with number: Retrying 2/10 (no response), next in 4 s', '9s']]);
   });
 
+  it('the main agent has the first row of the block, which shows with no subagent, and the feed has no activity line', async () => {
+    const { app } = setup('running', { history: [] });
+    await mount(app);
+    expect($('.timeline .live-agents-row')).toBeNull();
+    expect($('.live-agents + .composer-wrap')).not.toBeNull();
+    expect(root.querySelectorAll('.live-agents-row')).toHaveLength(1);
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = e.payload.agents.slice(0, 1)))));
+    const all = [...root.querySelectorAll('.live-agents-row')];
+    expect(all).toHaveLength(2);
+    expect(all[0].textContent).toBe('Main agent: Working');
+    expect(all[1].textContent).toContain('Subagent: ');
+    render(null, root);
+    const idle = setup('idle', { history: [] });
+    await mount(idle.app);
+    expect($('.live-agents')).toBeNull();
+  });
+
   it('says a subagent waits for permission while a request names it', async () => {
     const { app } = setup('waiting', {
       subagents: 2,
@@ -1460,15 +1489,15 @@ describe('live subagents', () => {
     await mount(app);
     await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = e.payload.agents.slice(0, 2)))));
     expect(rows().map((r) => r[0])).toEqual([
-      'Agent: Fix schematic power nets in import: waiting for permission',
-      'Agent: Reply with number',
+      'Subagent: Fix schematic power nets in import: waiting for permission',
+      'Subagent: Reply with number',
     ]);
     await act(async () =>
       subscriber!.onEvent(ev('event.approval.response', 5, (e) => (e.payload.request_id = 'req-3'))),
     );
     expect(rows().map((r) => r[0])).toEqual([
-      'Agent: Fix schematic power nets in import: Running Verify the final sample runs are byte-identical',
-      'Agent: Reply with number',
+      'Subagent: Fix schematic power nets in import: Running Verify the final sample runs are byte-identical',
+      'Subagent: Reply with number',
     ]);
   });
 

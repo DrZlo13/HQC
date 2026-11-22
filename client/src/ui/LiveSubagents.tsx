@@ -1,14 +1,16 @@
 // The subagents, the background commands and the timers of the session (`subagents.live` and
 // `schedules.live`, SPEC §6), pinned above the input while the feed scrolls: one line each,
-// led by "Agent:", "Command:" (when the worker says which), "Monitor:", "Wakeup:", "Cron:" or
+// led by "Subagent:", "Command:" (when the worker says which), "Monitor:", "Wakeup:", "Cron:" or
 // "Scheduled:". A subagent has its task and what it does now (that it retries a request to the
 // model API, while it does, or that it waits for permission), then its tokens, tool calls and
 // run time, which ticks here between the lists the hub sends; a command or a watcher has only
 // its description and run time. A timer, a wakeup or a cron job of the agent and a message
 // scheduled by the hub, has "in 12m 34s" instead, counting down to "due"; a scheduled message
-// opens the schedules of the chat. A `stoppable` line ends with a stop button. A subagent's
+// opens the schedules of the chat. The main agent's row ("Main agent:", `lead`) stands first,
+// while a turn is on or input waits. A `stoppable` line ends with a stop button. A subagent's
 // line opens what it has done under it, drawn as the feed draws the agent's own steps.
 
+import type { ComponentChildren } from 'preact';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { LiveKind, LiveSchedule, LiveSubagent, SubagentHistory } from '../proto';
 import { Timeline, type Item } from '../timeline';
@@ -33,7 +35,7 @@ export interface SubagentHistoryOpener {
 }
 
 const PREFIX: Record<LiveKind, string> = {
-  agent: 'Agent: ',
+  agent: 'Subagent: ',
   command: 'Command: ',
   monitor: 'Monitor: ',
   wakeup: 'Wakeup: ',
@@ -62,10 +64,13 @@ interface Row {
  *  `asking`: the `task_id`s an open permission request names (since 0.181), whose row says it
  *  waits for it instead of what it does; `history`: the lines that open what their subagent has
  *  done (one at a time; it goes with its line); `now`: the clock (tests). Nothing when both
- *  lists are empty. A `stoppable` row (a subagent's, a command's or a Monitor's) gets a stop
- *  button, which calls `onStop` with its `task_id` and stays disabled until that settles; the
- *  row goes when the task ends. */
+ *  lists are empty and `lead` has no row. A `stoppable` row (a subagent's, a command's or a
+ *  Monitor's) gets a stop button, which calls `onStop` with its `task_id` and stays disabled
+ *  until that settles; the row goes when the task ends. `lead`: the rows that stand before them
+ *  (the main agent's, cards.tsx `ActivityLine`), each one drawn; the block shows with only
+ *  those. */
 export function LiveSubagents({
+  lead,
   agents,
   receivedAt,
   schedules,
@@ -76,6 +81,7 @@ export function LiveSubagents({
   now,
   onStop,
 }: {
+  lead?: ComponentChildren[];
   agents: LiveSubagent[];
   receivedAt: number;
   schedules: LiveSchedule[];
@@ -103,7 +109,7 @@ export function LiveSubagents({
   useEffect(() => {
     if (open !== null && shown === null) setOpen(null);
   }, [open, shown]);
-  if (!rows.length) return null;
+  if (!rows.length && !lead?.length) return null;
   const stop = (id: string) => {
     setStopping((s) => new Set(s).add(id));
     void onStop!(id).finally(() =>
@@ -115,8 +121,9 @@ export function LiveSubagents({
     );
   };
   return (
-    <section class="live-agents" aria-label="Running subagents and commands, and timers">
+    <section class="live-agents" aria-label="What the agent, its subagents and commands do now, and timers">
       <ul class={shown ? 'live-agents-list live-agents-list-open' : 'live-agents-list'}>
+        {lead}
         {rows.map((r) => {
           const line = (
             <>

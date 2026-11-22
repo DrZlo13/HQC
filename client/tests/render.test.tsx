@@ -16,6 +16,7 @@ import { PermissionBlock } from "../src/ui/permission";
 import {
   ActivityLine,
   ChatItems,
+  activityShown,
   onlyRequests,
   type ChatActions,
 } from "../src/ui/cards";
@@ -2611,13 +2612,16 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
         root,
       ),
     );
-    return root.querySelector(".activity");
+    return root.querySelector(".live-agents-row");
   }
 
-  it('running: "Agent is working" with a pulse', () => {
+  it('running: "Main agent: Working" with a pulse, a row of the live block (SPEC 0.189)', () => {
     const line = draw("running")!;
-    expect(line.textContent).toBe("Agent is working");
+    expect(line.textContent).toBe("Main agent: Working");
+    expect(line.querySelector(".live-agents-kind")!.textContent).toBe("Main agent: ");
     expect(line.querySelector(".pulse-dot")).not.toBeNull();
+    expect(line.getAttribute("role")).toBe("status");
+    expect(line.parentElement!.tagName).toBe("LI");
   });
 
   it("running with an activity (SPEC 0.179): what the agent waits on instead", () => {
@@ -2630,26 +2634,26 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
           root,
         ),
       );
-      const text = root.querySelector(".activity")?.textContent;
+      const text = root.querySelector(".live-agents-row")?.textContent;
       render(null, root);
       return text;
     };
     const retry = { kind: "retrying", attempt: 3, max_retries: 10, retry_delay_ms: 7400 } as const;
-    expect(line({ ...retry, error_status: 529 })).toBe("Retrying 3/10 (529), next in 8 s");
-    expect(line(retry)).toBe("Retrying 3/10 (no response), next in 8 s");
+    expect(line({ ...retry, error_status: 529 })).toBe("Main agent: Retrying 3/10 (529), next in 8 s");
+    expect(line(retry)).toBe("Main agent: Retrying 3/10 (no response), next in 8 s");
     // The next attempt goes at once: no delay to count.
-    expect(line({ ...retry, retry_delay_ms: 0 })).toBe("Retrying 3/10 (no response)");
-    expect(line({ kind: "compacting" })).toBe("Compacting the conversation…");
-    expect(line({ kind: "thinking", estimated_tokens: 12345 })).toBe("Thinking · ~12k tokens");
-    expect(line({ kind: "thinking", estimated_tokens: 840 })).toBe("Thinking · ~840 tokens");
+    expect(line({ ...retry, retry_delay_ms: 0 })).toBe("Main agent: Retrying 3/10 (no response)");
+    expect(line({ kind: "compacting" })).toBe("Main agent: Compacting the conversation…");
+    expect(line({ kind: "thinking", estimated_tokens: 12345 })).toBe("Main agent: Thinking · ~12k tokens");
+    expect(line({ kind: "thinking", estimated_tokens: 840 })).toBe("Main agent: Thinking · ~840 tokens");
     // A running command keeps its own line; other states keep theirs.
     const t = new Timeline();
     t.apply(call(1, "b", "Bash", { command: "sleep 30" }));
     expect(line({ kind: "compacting" }, "running", t)).toContain("sleep 30");
-    expect(line({ kind: "compacting" }, "queued")).toBe("Input queued");
+    expect(line({ kind: "compacting" }, "queued")).toBe("Main agent: Input queued");
   });
 
-  it('running with the last tool.call unanswered: "Running <command> <time>"', () => {
+  it('running with the last shell call unanswered: "Command: <command>" and its run time', () => {
     const t = new Timeline();
     t.apply(call(1, "a", "Read", { file_path: "a.rs" }));
     t.apply(result(2, "a"));
@@ -2665,17 +2669,17 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
       }),
     );
     const line = draw("running", t)!;
-    expect(line.querySelector(".activity-label")!.textContent).toBe("Running");
-    expect(line.querySelector(".activity-what")!.textContent).toBe(
-      "cd build && ctest",
+    expect(line.querySelector(".live-agents-kind")!.textContent).toBe("Command: ");
+    expect(line.querySelector(".live-agents-what")!.textContent).toBe(
+      "Command: cd build && ctest",
     );
-    expect(line.querySelector(".activity-timer")!.textContent).toBe("1:24");
+    expect(line.querySelector(".live-agents-stats")!.textContent).toBe("1m 24s");
     t.apply(result(4, "b"));
     render(null, root);
-    expect(draw("running", t)!.textContent).toBe("Agent is working");
+    expect(draw("running", t)!.textContent).toBe("Main agent: Working");
   });
 
-  it('a call younger than 2 s leaves the line at "Agent is working"', () => {
+  it('a call younger than 2 s leaves the row at "Main agent: Working"', () => {
     const t = new Timeline();
     t.apply(
       ev("event.tool.call", (e) => {
@@ -2703,14 +2707,13 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
           root,
         ),
       );
-      return root.querySelector(".activity")!;
+      return root.querySelector(".live-agents-row")!;
     };
-    expect(line(NOW).textContent).toBe("Agent is working");
+    expect(line(NOW).textContent).toBe("Main agent: Working");
     render(null, root);
     const later = line(NOW + 1500);
-    expect(later.querySelector(".activity-label")!.textContent).toBe("Running");
-    expect(later.querySelector(".activity-what")!.textContent).toBe("git status");
-    expect(later.querySelector(".activity-timer")!.textContent).toBe("0:02");
+    expect(later.querySelector(".live-agents-what")!.textContent).toBe("Command: git status");
+    expect(later.querySelector(".live-agents-stats")!.textContent).toBe("2s");
   });
 
   it("a call that waited for a permission or an answer counts its 2 s from the answer", () => {
@@ -2734,7 +2737,7 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
           e.ts = new Date(NOW - 500).toISOString();
         }),
       );
-      expect(draw("running", t)!.textContent).toBe("Agent is working");
+      expect(draw("running", t)!.textContent).toBe("Main agent: Working");
       render(null, root);
     }
   });
@@ -2758,12 +2761,12 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
       root = document.createElement("div");
       document.body.appendChild(root);
       act(() => render(<ActivityLine state="running" timeline={t} />, root));
-      expect(root.querySelector(".activity")!.textContent).toBe(
-        "Agent is working",
+      expect(root.querySelector(".live-agents-row")!.textContent).toBe(
+        "Main agent: Working",
       );
       act(() => void vi.advanceTimersByTime(2000));
-      expect(root.querySelector(".activity-what")!.textContent).toBe(
-        "cargo build",
+      expect(root.querySelector(".live-agents-what")!.textContent).toBe(
+        "Command: cargo build",
       );
     } finally {
       render(null, root);
@@ -2779,12 +2782,12 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
       root = document.createElement("div");
       document.body.appendChild(root);
       act(() => render(<ActivityLine state="running" timeline={t} now={() => NOW} root="/w/hqc" />, root));
-      return root.querySelector(".activity-what")!.textContent;
+      return root.querySelector(".live-agents-what")!.textContent;
     };
-    expect(line("mcp__probe-bench__move", { x: 90.7, y: 80.9 })).toBe("move (probe-bench) x: 90.7, y: 80.9");
-    expect(line("mcp__probe-bench__look", {})).toBe("look (probe-bench)");
-    expect(line("Read", { file_path: "/w/hqc/src/a.rs" })).toBe("Read src/a.rs");
-    expect(line("Bash", { command: "cat /w/hqc/Cargo.toml" })).toBe("cat Cargo.toml");
+    expect(line("mcp__probe-bench__move", { x: 90.7, y: 80.9 })).toBe("Main agent: Running move (probe-bench) x: 90.7, y: 80.9");
+    expect(line("mcp__probe-bench__look", {})).toBe("Main agent: Running look (probe-bench)");
+    expect(line("Read", { file_path: "/w/hqc/src/a.rs" })).toBe("Main agent: Running Read src/a.rs");
+    expect(line("Bash", { command: "cat /w/hqc/Cargo.toml" })).toBe("Command: cat Cargo.toml");
   });
 
   it("a call before the last end of a turn is not the running one", () => {
@@ -2794,13 +2797,13 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
       agentText(2, "Stopped.", true),
       ev("event.user.message", withSeq(3)),
     ]);
-    expect(draw("running", t)!.textContent).toBe("Agent is working");
+    expect(draw("running", t)!.textContent).toBe("Main agent: Working");
     render(null, root);
     t.apply(call(4, "b", "Bash", { command: "make" }));
-    expect(draw("running", t)!.querySelector(".activity-what")!.textContent).toBe("make");
+    expect(draw("running", t)!.querySelector(".live-agents-what")!.textContent).toBe("Command: make");
   });
 
-  it('a waiting hqc_ask (T32): "Waiting for a reply from <session> <time>"', () => {
+  it('a waiting hqc_ask (T32): "Main agent: Waiting for a reply from <session>" and its run time', () => {
     const t = new Timeline();
     t.apply(
       ev("event.tool.call", (e) => {
@@ -2815,20 +2818,16 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
       }),
     );
     const line = draw("running", t)!;
-    expect(line.classList.contains("activity-ask")).toBe(true);
-    expect(line.querySelector(".activity-label")!.textContent).toBe(
-      "Waiting for a reply",
+    expect(line.querySelector(".live-agents-what")!.textContent).toBe(
+      "Main agent: Waiting for a reply from hqc/build-bot",
     );
-    expect(line.querySelector(".activity-what")!.textContent).toBe(
-      "from hqc/build-bot",
-    );
-    expect(line.querySelector(".activity-timer")!.textContent).toBe("1:24");
+    expect(line.querySelector(".live-agents-stats")!.textContent).toBe("1m 24s");
     t.apply(result(2, "q"));
     render(null, root);
-    expect(draw("running", t)!.textContent).toBe("Agent is working");
+    expect(draw("running", t)!.textContent).toBe("Main agent: Working");
   });
 
-  it('a call the runtime runs in the foreground: "Run in background", which moves it', () => {
+  it('a call the runtime runs in the foreground: an icon button "Run in background", which moves it', () => {
     const t = new Timeline();
     t.apply(call(1, "toolu_a", "Bash", { command: "sleep 30" }));
     const moved = vi.fn();
@@ -2847,7 +2846,7 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
           root,
         ),
       );
-      return root.querySelector<HTMLButtonElement>(".activity-background");
+      return root.querySelector<HTMLButtonElement>("button[aria-label='Run in background']");
     };
     // A running call the worker did not report as a foreground one: no button.
     expect(line(undefined)).toBeNull();
@@ -2855,19 +2854,53 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
     expect(line(["toolu_b"])).toBeNull();
     render(null, root);
     const button = line(["toolu_b", "toolu_a"])!;
-    expect(button.textContent).toBe("Run in background");
+    expect(button.title).toBe("Run in background");
+    expect(button.textContent).toBe("");
+    expect(button.querySelector("svg")).not.toBeNull();
     act(() => button.click());
     expect(moved).toHaveBeenCalledWith("toolu_a");
   });
 
   it("queued and waiting: their line; waiting with its request on screen: none", () => {
-    expect(draw("queued")!.textContent).toBe("Input queued");
+    expect(draw("queued")!.textContent).toBe("Main agent: Input queued");
     render(null, root);
-    expect(draw("waiting")!.textContent).toBe("Waiting for approval");
+    expect(draw("waiting")!.textContent).toBe("Main agent: Waiting for approval");
     render(null, root);
     const t = new Timeline();
     t.apply(ev("event.approval.request", withSeq(1)));
     expect(draw("waiting", t)).toBeNull();
+  });
+
+  it("a room's agent: its name leads the row in place of \"Main agent: \"", () => {
+    root = document.createElement("div");
+    document.body.appendChild(root);
+    const t = new Timeline();
+    t.apply(call(1, "a", "Bash", { command: "sleep 15" }));
+    act(() =>
+      render(
+        <>
+          <ActivityLine state="running" timeline={new Timeline()} name="Optimist" activity={{ kind: "thinking", estimated_tokens: 647 }} />
+          <ActivityLine state="running" timeline={t} name="Pessimist" now={() => NOW} />
+          <ActivityLine state="queued" timeline={new Timeline()} name="Realist" />
+        </>,
+        root,
+      ),
+    );
+    expect([...root.querySelectorAll(".live-agents-what")].map((e) => e.textContent)).toEqual([
+      "Optimist · Thinking · ~647 tokens",
+      "Pessimist · Command: sleep 15",
+      "Realist · Input queued",
+    ]);
+  });
+
+  it("activityShown: running, queued, or waiting with no open request", () => {
+    const open = new Timeline();
+    open.apply(ev("event.approval.request", withSeq(1)));
+    expect(activityShown("running", new Timeline())).toBe(true);
+    expect(activityShown("queued", new Timeline())).toBe(true);
+    expect(activityShown("waiting", new Timeline())).toBe(true);
+    expect(activityShown("waiting", open)).toBe(false);
+    expect(activityShown("idle", new Timeline())).toBe(false);
   });
 
   it("nothing in other states", () => {

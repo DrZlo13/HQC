@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.191, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
+Version 0.192, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -6413,7 +6413,11 @@ send from a session in a lower mode (§7.1).
   for itself (Claude Code: `ScheduleWakeup`, §8.1) is not idle before the wakeup is due: the
   timeout counts from the later of its last activity and that time, so a wakeup that never
   starts keeps the agent at most `idle_timeout` past it; the wakeup lives in the process and
-  dies with it, which before 0.162 an idle unload did before it fired.
+  dies with it, which before 0.162 an idle unload did before it fired. Since 0.192 a turn the
+  runtime starts by itself (Claude Code: e.g. after a background task's end or on a wakeup,
+  §8.1) is not idle until its `result`, as a turn of hqc's is not: before, the timeout counted
+  from its last output, so such a turn that waited longer than `idle_timeout` for an approval or
+  an answer, or ran a command that long, was killed and lost.
 - Restart (since 0.130, `POST /api/sessions/{id}/restart`, §6): the hub sends `session.kill` and
   right after it `session.start` with `mode: resume`: the process ends and starts again at once,
   resuming its transcript, so its MCP servers and settings are read anew. A turn that runs is
@@ -6735,6 +6739,13 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
+### 0.191 → 0.192 (a turn the runtime starts by itself is not idle)
+§17.3: `idle_timeout` counted a turn Claude Code starts by itself (e.g. after a background
+task's end or on a wakeup) as idleness, since no input of hqc's opened it. Such a turn that
+asked for an approval waited silently, and after `idle_timeout` the worker killed the process:
+the request was withdrawn, the turn lost. Such a turn now keeps the agent as a turn of hqc's
+does, until its `result`. Only the worker changes. (0.186–0.197 are taken by other
+branches.)
 ### 0.190 → 0.191 (a pause stops the running turn at once)
 §6, §7.1, §17.3 (user decision, 2026-11-20: "pause should come at once; a turn may run for half
 an hour"): a pause during a turn let the turn run to its end, and only then the hub ended the

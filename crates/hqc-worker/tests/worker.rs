@@ -1158,6 +1158,38 @@ async fn idle_timeout_waits_for_background_tasks() {
     w.stop().await;
 }
 
+// idle_timeout (SPEC §17.3): a turn the runtime starts by itself (Claude Code: on the end of a
+// background task) is not idleness, however long it is silent (an approval it waits for); the
+// agent is stopped once that turn ends.
+#[tokio::test]
+async fn idle_timeout_waits_for_a_turn_the_runtime_starts_by_itself() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut cfg = env.config(&hub.url());
+    cfg.idle_timeout = Some(Duration::from_millis(300));
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    adapters.emit(sid, AdapterEvent::BackgroundTasks(1)).await;
+    // The task ends, the runtime runs its own turn on it and then says nothing.
+    adapters.set_own_turn(true);
+    adapters.emit(sid, AdapterEvent::BackgroundTasks(0)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        !adapters.calls().contains(&FakeCall::Kill(sid)),
+        "never idle during the runtime's own turn"
+    );
+    adapters.set_own_turn(false);
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
+        .await;
+    w.stop().await;
+}
+
 // idle_timeout (SPEC §17.3): an agent that armed a wakeup for itself is not idle before it is
 // due; once it fired or was stopped, the usual timeout counts.
 #[tokio::test]

@@ -1145,7 +1145,9 @@ function ToolCallBody({
       {r && (r.error || !change) && (
         <>
           <div class="label">{r.error ? 'Error' : 'Result'}</div>
-          {r.error_text && <div class="error-text">{r.error_text}</div>}
+          {/* The short error text, when it is just the start of the result below (Claude Code's
+              worker cuts both from one text), would show it twice. */}
+          {r.error_text && !r.result_preview.startsWith(r.error_text) && <div class="error-text">{r.error_text}</div>}
           {r.result_preview && <pre class="pre">{withLinks(r.result_preview)}</pre>}
           {r.artifact_ids.length > 0 && (
             <div class="attachments tool-images">

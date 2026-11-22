@@ -129,6 +129,12 @@ struct ToolRow: View {
     @State private var expanded = false
 
     private var tool: String { call.payload["tool"]?.string ?? "Tool" }
+    /// An MCP tool `mcp__<server>__<tool>` reads as its tool, the server beside it.
+    private var toolName: (name: String, server: String?) {
+        let parts = tool.components(separatedBy: "__")
+        guard tool.hasPrefix("mcp__"), parts.count >= 3 else { return (tool, nil) }
+        return (parts.dropFirst(2).joined(separator: "__"), parts[1])
+    }
     private var args: String { call.payload["args_preview"]?.string ?? "" }
     private var failed: Bool { result?.payload["error"]?.bool == true }
     private var output: String {
@@ -159,7 +165,13 @@ struct ToolRow: View {
                     Image(systemName: icon)
                         .frame(width: 20)
                         .foregroundStyle(failed ? .red : .secondary)
-                    Text(tool).font(.subheadline.weight(.semibold))
+                    Text(toolName.name)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                    if let server = toolName.server {
+                        Text(server).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
                     Text(args.replacingOccurrences(of: "\n", with: " "))
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)

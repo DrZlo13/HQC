@@ -594,7 +594,7 @@ function titleOf(s: SessionInfo): string {
 
 /** A session's menu, the same on a desktop row and a phone row: Open in new tab, favorites,
  *  then Rename and Move to project… (not for a room), then Restart session (`restartableSession`),
- *  Pause session while the agent works (`canPause`, as by Stop in the chat) or Resume session for
+ *  Pause session while the agent works (`canPause`, as in the chat's header) or Resume session for
  *  a paused one, Archive and Delete… (a step of its own). A folder's rules are in the chat's
  *  "More". */
 function sessionMenu(app: AppState, s: SessionInfo, on: { onMove: () => void; onAskDelete: () => void }): MenuEntry[] {

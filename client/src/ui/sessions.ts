@@ -97,17 +97,18 @@ export function pausingAfterTurn(s: Pick<SessionInfo, 'state' | 'paused_at'>): b
   return !!s.paused_at && (s.state === 'running' || s.state === 'waiting');
 }
 
-/** "Pause" (SPEC §17.3), beside Stop in the chat header and in the list's menu: offered while
- *  the agent works — a turn runs, input is queued or it waits on a request — not for an idle
- *  session, whose agent is already free to unload; not for one paused already, an archived or a
- *  service session, nor a room, which has no pause of its own. */
+/** "Pause" (SPEC §17.3), in the chat header and in the list's menu: offered while the agent
+ *  works — a turn runs, input is queued, it waits on a request, or its turn has ended while a
+ *  background subagent or task still works (`atWorkAfterTurn`, shown as Running) — not for one
+ *  shown Idle, with nothing at work, whose agent is already free to unload; not for one paused
+ *  already, an archived or a service session, nor a room, which has no pause of its own. */
 export function canPause(s: SessionInfo): boolean {
   return (
     !s.archived &&
     !s.system &&
     !s.room_mode &&
     !s.paused_at &&
-    (s.state === 'running' || s.state === 'waiting' || s.state === 'queued')
+    (s.state === 'running' || s.state === 'waiting' || s.state === 'queued' || atWorkAfterTurn(s))
   );
 }
 

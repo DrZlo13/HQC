@@ -834,7 +834,11 @@ describe('archive from the row (T50)', () => {
       sent.push({ method: init?.method, url: String(input) });
       return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
     };
-    const list = [...LIST, sess('held', 'Held build', 'paused', at(1), { paused_at: at(1) })];
+    const list = [
+      ...LIST,
+      sess('held', 'Held build', 'paused', at(1), { paused_at: at(1) }),
+      sess('bg', 'Background audit', 'idle', at(2), { subagents: 1 }),
+    ];
     await mount(<SessionList app={makeApp(list, Object.assign(new Api('', fetchHub), hubApi()))} />);
     await menuOf('Network sync');
     await click(root.querySelector('.menu .btn-pause'));
@@ -846,10 +850,13 @@ describe('archive from the row (T50)', () => {
     await click(root.querySelector('.menu .btn-resume'));
     expect(sent.filter((r) => r.url.endsWith('/resume'))).toEqual([{ method: 'POST', url: '/api/sessions/held/resume' }]);
 
-    // Pause only while the agent works, as beside Stop in the chat: an idle one has none.
+    // Pause only while the agent works, as in the chat's header: an idle one has none, one whose
+    // background subagent works after its turn has it.
     await menuOf('Collision profiling');
     expect(menuItems()).not.toContain('Pause session');
     expect(menuItems()).toContain('Restart session');
+    await menuOf('Background audit');
+    expect(menuItems()).toContain('Pause session');
   });
 
   it('the menu: a link to a new tab, no folder rules (in the chat\'s "More"), the move form in the column; Esc or a press away closes it', async () => {

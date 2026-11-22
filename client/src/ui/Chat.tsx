@@ -782,7 +782,9 @@ export function Chat({
         </button>
       )}
       {/* Pause only while the agent works (SPEC §17.3), right before Stop; a paused session has
-          Resume in its place, and Stop still while the turn it cut short ends. */}
+          Resume in its place, and Stop still while the turn it cut short ends. After the turn,
+          with only a background subagent or task at work, Pause stands alone: Stop stops a turn
+          and spares those (§8.1), while a pause ends them with the agent's process. */}
       {info && canPause(info) &&
         (phone ? (
           <button type="button" class="icon-btn icon-btn-round btn-pause" aria-label="Pause session" onClick={pause}>

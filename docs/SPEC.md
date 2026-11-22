@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.211, 2026-11-22. Status: the architecture agreed after six reviews and a survey of
+Version 0.212, 2026-11-22. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2270,7 +2270,7 @@ favorite, adds the session to the favorites or takes it out as its menu's item d
 click on a row (the menu key; on a phone a long press or a right click) opens its menu: Open in
 new tab, Add to (Remove from) favorites, Rename, Move to project… (not for a room), Restart
 session (not for an archived, a service, a VS Code-driven or a paused session, a room or one whose
-worker is offline), (since 0.160) Pause session while the agent works, as beside Stop in the chat
+worker is offline), (since 0.160) Pause session while the agent works, as in the chat's header
 (below), or Resume session for a paused one, Archive, and Delete…, which asks in a second step of
 the menu with the focus on Cancel. A folder's rules are in the chat's "More" (below). A desktop
 row (not in Reorder) can also be dragged onto another project on the bar, whose tile or row is
@@ -2310,11 +2310,14 @@ on a computer a pencil after it, shown on hover, and on a phone a tap on the tit
 a field; Enter or leaving the field sends `PATCH /api/sessions/{id} {title}` with the name
 trimmed (an empty or unchanged one sends nothing), Esc keeps the old one, a refusal is the
 chat's notice "Not renamed: …"; not for an archived or a service session, a room and a room's
-agent included. While the agent works (`running`, `waiting`, `queued`; not an archived or a
-service session, a room or one paused already) "Pause" (§17.3) stands right before Stop (on a
-phone an icon, "Pause session"); a paused session that is not archived has "Resume" in
-its place, before Stop while its turn still runs; their refusals are the chat's notice ("Not
-paused: …", "Not resumed: …").
+agent included. While the agent works (`running`, `waiting`, `queued`, and since 0.212 an `idle`
+session whose subagents or background tasks still work after its turn, which the header shows
+as Running; not an archived or a service session, a room or one paused already) "Pause" (§17.3;
+on a phone an icon, "Pause session") stands right before Stop, or alone after the turn, where
+Stop has no turn to stop and spares the background work (§8.1) that a pause ends with the
+agent's process; a paused session that is not archived has "Resume" in its place, before Stop
+while its turn still runs; their refusals are the chat's notice ("Not paused: …", "Not
+resumed: …").
 "More" (⋯) holds, as far as each applies: on a phone where the session runs and the cost (above),
 and "Retry" for a failed one; Schedules (not for a room, §16), Move to project… (not for
 an archived session or a room), "Folder rules" (a link to the rules screen of the session's
@@ -7192,6 +7195,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.211 → 0.212 (Pause while a subagent works after the turn)
+§6 client layout: Pause was offered for `running`, `waiting` and `queued` only, so a session
+whose turn had ended while its background subagent or task still worked, which the header and
+its row show as Running, had neither Pause nor Stop. Pause is now offered there too, in the
+header and in the row's menu; it ends the agent's process and that work with it, as a pause of
+an idle agent always did (§17.3). Stop stays hidden there: it stops a turn, and a background
+subagent or task goes on after it (§8.1); a subagent and a background command have their own
+stop on their line above the input. Client only.
 
 ### 0.210 → 0.211 (the favorites scroll with the session list)
 §6 client layout: a project's favorites were a block pinned over its session list, on a phone

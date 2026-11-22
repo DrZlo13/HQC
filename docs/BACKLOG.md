@@ -86,10 +86,8 @@ Second:
 - The machine kept awake while its agents work (T3 Code, Orca; desktop apps).
 - MCP Apps: an interactive page an MCP server returns with a tool result, shown under the call in
   the feed (T3 Code; Claude Code since 2.1.301).
-- Signing in to Claude Code from hqc, a phone included, when the CLI on a node is signed out
-  (T3 Code; Claude Code: `--enable-auth-status`).
-- The last 8 KiB of a background build's or server's output on a click (Claude Code:
-  `get_task_output`).
+- The last 8 KiB of a background build's or server's output on a click while it runs (Claude
+  Code: `get_task_output`); its output after the end has been an attachment since SPEC 0.181.
 - A turn cut by a worker restart goes on after `--resume` instead of ending in "Agent process
   exited during a turn" (Claude Code: `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1`; the VS Code
   extension sets it with a limit of 1 hour); the hub then must not close a turn the worker will
@@ -108,8 +106,8 @@ Second:
   `CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1`).
 - A clean exit of the process on unload and kill instead of SIGTERM with code 143 (Claude Code:
   `end_session`).
-- The subscription's spending and limits, as `/usage` shows them (Claude Code: `get_usage`,
-  `get_session_cost`).
+- The subscription's spending, as `/usage` shows it (Claude Code: `get_usage`,
+  `get_session_cost`); the limits are in the model menu since SPEC 0.206.
 - Plugins and skills reloaded without restarting the session (Claude Code: `reload_plugins`,
   `reload_skills`).
 - One TodoWrite instead of four task tools, as the VS Code extension does (Claude Code:
@@ -124,7 +122,7 @@ Second:
 
 What the Claude app for macOS has in its Code tab and hqc does not, picked from
 `docs/notes/hqc-vs-claude-desktop.md`; the second list comes after the first. The bugs that note
-lists are not here: they are being fixed.
+lists are not here: #156–#160 fixed them.
 
 First:
 - "Waiting for you" on a session that ended its turn with a question in its text, from the

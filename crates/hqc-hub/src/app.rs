@@ -34,6 +34,10 @@ pub struct Inner {
     pub workers: WorkerRegistry,
     pub bus: broadcast::Sender<Arc<Notice>>,
     pub push: Arc<dyn PushSender>,
+    /// Apple push to the native iOS client (SPEC §16), when `HQC_APNS_*` is set.
+    pub apns: Option<Arc<dyn crate::apns::ApnsSender>>,
+    /// One-time codes of the native client's sign-in, until exchanged ([`crate::native`]).
+    pub native_codes: Mutex<HashMap<String, crate::native::NativeCode>>,
     /// `(user_id, session_id)` -> number of client WebSockets subscribed (SPEC §16: no push
     /// while the user is watching the session).
     pub watchers: Mutex<HashMap<(Uuid, Uuid), usize>>,
@@ -156,6 +160,23 @@ pub enum Notice {
 
 impl AppState {
     pub fn new(db: PgPool, config: Config, push: Arc<dyn PushSender>) -> Self {
+        let apns = match crate::apns::from_config(config.apns.as_ref()) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!(error = %e, "HQC_APNS_*: Apple push disabled");
+                None
+            }
+        };
+        Self::with_apns(db, config, push, apns)
+    }
+
+    /// As [`AppState::new`] with the Apple push sender given (tests pass a fake).
+    pub fn with_apns(
+        db: PgPool,
+        config: Config,
+        push: Arc<dyn PushSender>,
+        apns: Option<Arc<dyn crate::apns::ApnsSender>>,
+    ) -> Self {
         let auth = Auth::from_config(&config.auth);
         let (bus, _) = broadcast::channel(1024);
         AppState(Arc::new(Inner {
@@ -164,6 +185,8 @@ impl AppState {
             workers: WorkerRegistry::default(),
             bus,
             push,
+            apns,
+            native_codes: Mutex::new(HashMap::new()),
             watchers: Mutex::new(HashMap::new()),
             limiter: RateLimiter::default(),
             ws_auth: Arc::new(Semaphore::new(config.limits.ws_auth_concurrency)),

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.213, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.214, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -563,6 +563,12 @@ hub carries out at once every such row closed without a `result` whose session's
 owner's `once` (a publication needs no worker); the result goes to the worker when it is
 connected, or after its `hello`. A publication done before the stop answers from its
 `attachment` with the link the artifact has then.
+
+### ApnsDevice
+Since 0.214 (§16): a user's iOS device that takes notices over APNs: `id`, `user_id`,
+`token` (the APNs device token in hex, unique), `sandbox` (a development build), `created_at`,
+`updated_at`. Written by `POST /api/push/apns`, deleted by `DELETE` or when APNs says the
+token is gone (hub migration `0055`).
 
 ### ScheduledMessage
 `owner_id`, `session_id` or (`project_id`, `workspace_id`, template), `cron` or `at`,
@@ -2118,6 +2124,28 @@ the rest is marked "later"):
   body itself: §16. `endpoint`: only `https://` on push service hosts (§20), otherwise `400`;
   at most 10 subscriptions per user (`409 push_limit`); someone else's `endpoint`: `409
   conflict`, not a takeover; a repeated request for one's own subscription updates it.
+- `/api/push/apns` (since 0.214, §16): Apple push to the native iOS client. `GET` →
+  `{enabled}` (the hub has `HQC_APNS_*`); `POST {token, sandbox?}` stores the device token the
+  app got from iOS (hex, 64 to 200 characters, kept in lower case; `sandbox: true` for a
+  development build, sent through APNs' sandbox host) → `201 {id}`; `400` for another token;
+  the limit and the rules of a push subscription apply (`409 push_limit`, someone else's token
+  `409 conflict`); `DELETE {token}` → `204`, the device takes no more notices.
+- Native client sign-in (since 0.214, `crates/hqc-hub/src/native.rs`): the iOS app cannot read
+  the Access cookie of the system browser, and identity providers such as Google refuse a
+  login page embedded in an app. The app opens `GET /api/native/login?challenge=<base64url
+  SHA-256 of a verifier>&state=<s>` in the system browser (`ASWebAuthenticationSession`);
+  like every `/api/*` route it is behind Access, so the person signs in there first. The hub
+  keeps the person's Access token (the `Cf-Access-Jwt-Assertion` it verified) under a random
+  one-time code for 120 s and answers `302 hqc-app://signed-in?code=<code>&state=<s>` (a
+  fixed scheme: the route redirects nowhere else; `challenge` must be 43 base64url
+  characters, `state` 8 to 128 of `[A-Za-z0-9._-]`, else `400`; at most 256 codes wait, the
+  oldest goes first). The app then posts `{code, verifier}` to `POST /worker/native/token`,
+  outside Access as every `/worker/*` (§20), and gets `{token}`, which it sends as the
+  `CF_Authorization` cookie from then on. The code is taken out on the first exchange, also one
+  whose verifier does not match (`400 bad_code`, as for an unknown or expired code), so the
+  token never travels in a URL and another app that catches the redirect cannot use it. In dev
+  mode the token is empty (every request is let in); behind an OIDC proxy the route is `400
+  not_access`: the proxy's own session signs requests in, which an app cannot carry.
 - `/api/schedules` (since 0.38, T35; §3 ScheduledMessage, §16): `GET
   /api/schedules?session_id=` → `{schedules[]}` (`api.schedules.json`; without `session_id`:
   all of the user's), the next due first, finished ones last; `POST /api/schedules`
@@ -6650,6 +6678,20 @@ pushes nothing; the agent's post in the room, a `peer.message` there, pushes wit
 `session_id`, so the click opens the room, the room's title and the body "<agent's title>:
 <text>".
 
+Since 0.214 the same notices also go over APNs to the user's iOS devices (`/api/push/apns`,
+§6), when the hub has a token-based APNs key (`HQC_APNS_KEY` or `HQC_APNS_KEY_FILE`,
+`HQC_APNS_KEY_ID`, `HQC_APNS_TEAM_ID`, `HQC_APNS_TOPIC` = the app's bundle id; all or none;
+RUNBOOK §1.10): to the same users, skipped by the same rule of a live subscription. The APNs
+payload carries `aps.alert` `{title, body}` from the push body (the body cut until the payload
+fits 4 KB), `aps.thread-id` the session, `aps.category` `APPROVAL`, `QUESTION` or `MESSAGE`,
+and `session_id`, `open_session_id?`, `type`, `request_id?` and, for an approval, its
+`options[{id, canonical, label}]` (at most 6), so the app answers an approval from the
+notification's "Allow once" (the `once` option, else `session`) and "Deny" (`deny`) buttons
+without opening, and a tap opens `open_session_id` or `session_id`; `apns-collapse-id` is
+the push body's `tag` (its SHA-256 in hex when longer than 64 bytes). APNs answering `410`,
+`BadDeviceToken`, `Unregistered` or `DeviceTokenNotForTopic` deletes the device, as a gone Web
+Push subscription is deleted.
+
 Push body (JSON, `hqc_proto::api::PushMessage`, example `examples/wire/api.push.json`):
 `{session_id, type, title?, body?, tag?, payload?}`, where `type` is the event type and
 `payload` is the §4 event itself as stored. The hub sets `title` (the session title), `body`
@@ -7034,6 +7076,8 @@ send from a session in a lower mode (§7.1).
   it); `/api/*` is behind Cloudflare Access with JWT verification (in OIDC mode, behind the
   proxy's sign-in, the hub verifying the provider's ID token, §6); `/worker/*` is outside
   Access, worker tokens only, rate limit on enroll;
+  `/worker/native/token` (since 0.214, §6) is there too: it gives an Access token only for a
+  one-time code with its verifier, and shares the rate limit of enroll;
   `artifacts.<hub-domain>` is public, signed links with a TTL only; the publication domain
   (`HQC_PUBLISH_BASE`, since 0.209) is public too, published files only (§12).
 - The hub's dev mode (`HQC_DEV=1`, no Access) is allowed only on a loopback
@@ -7197,6 +7241,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.213 → 0.214 (the iOS client signs in through the browser and gets Apple push)
+§6: `GET /api/native/login` and `POST /worker/native/token`, the native client's sign-in
+through the system browser with a one-time code and a verifier, so identity providers that
+refuse an embedded login page (Google) work; `/api/push/apns` for the client's device token.
+§16: the notices of Web Push also go over APNs (`HQC_APNS_*`), with the approval's options so
+the app answers it from the notification. §20: `/worker/native/token` outside Access. §3: the
+table `apns_devices` (hub migration `0055`). The iOS client also gains attachments (upload and
+preview), rooms, schedules, search, workers with enrollment and Claude Code's sign-in,
+workspaces with a folder browser, and the session controls of the web client (rename, model,
+pause, restart, favorite, archive, delete), all over the existing API.
 
 ### 0.212 → 0.213 (a native iOS client)
 §2, §18: a native iOS client in `ios/` (Swift, SwiftUI, iOS 26) besides the web client. It uses

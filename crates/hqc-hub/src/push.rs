@@ -282,9 +282,15 @@ pub fn message(s: &SessionRow, row: &EventRow, request_id: Option<&str>, body: S
 }
 
 async fn send_to_user(app: &AppState, user: Uuid, payload: &Value) {
-    if app.push.public_key().is_none() {
-        return;
+    if app.push.public_key().is_some() {
+        send_web(app, user, payload).await;
     }
+    if let Some(apns) = &app.apns {
+        send_apns(app, apns.as_ref(), user, payload).await;
+    }
+}
+
+async fn send_web(app: &AppState, user: Uuid, payload: &Value) {
     let subs = match db::push_subs_of(&app.db, user).await {
         Ok(s) => s,
         Err(e) => {
@@ -301,6 +307,37 @@ async fn send_to_user(app: &AppState, user: Uuid, payload: &Value) {
                 let _ = db::delete_push_sub(&app.db, None, &sub.endpoint).await;
             }
             Err(PushError::Other(e)) => tracing::warn!(%user, error = %e, "push failed"),
+        }
+    }
+}
+
+/// The same notice over APNs to the user's iOS devices (SPEC §16).
+async fn send_apns(
+    app: &AppState,
+    apns: &dyn crate::apns::ApnsSender,
+    user: Uuid,
+    payload: &Value,
+) {
+    let devices = match db::apns_devices_of(&app.db, user).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!(error = %e, "APNs devices query");
+            return;
+        }
+    };
+    if devices.is_empty() {
+        return;
+    }
+    let bytes = crate::apns::payload(payload);
+    let collapse = crate::apns::collapse_id(payload["tag"].as_str().unwrap_or_default());
+    for d in devices {
+        match apns.send(&d.token, d.sandbox, &collapse, &bytes).await {
+            Ok(()) => tracing::debug!(%user, "APNs push sent"),
+            Err(PushError::Gone) => {
+                tracing::info!(%user, "APNs device gone, deleting");
+                let _ = db::delete_apns_device(&app.db, None, &d.token).await;
+            }
+            Err(PushError::Other(e)) => tracing::warn!(%user, error = %e, "APNs push failed"),
         }
     }
 }

@@ -2695,6 +2695,59 @@ pub async fn push_subscribe(
     }
 }
 
+/// `GET /api/push/apns`: whether the hub sends Apple push to the native client (SPEC §16).
+pub async fn apns_status(State(app): State<AppState>, _user: CurrentUser) -> Json<Value> {
+    Json(json!({ "enabled": app.apns.is_some() }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApnsDevice {
+    pub token: String,
+    #[serde(default)]
+    pub sandbox: bool,
+}
+
+/// `POST /api/push/apns`: the native client's device token (SPEC §16).
+pub async fn apns_register(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Json(b): Json<ApnsDevice>,
+) -> ApiResult<impl IntoResponse> {
+    let token = b.token.trim().to_ascii_lowercase();
+    if !crate::apns::valid_device_token(&token) {
+        return Err(ApiError::BadRequest(
+            "token must be the APNs device token in hex".into(),
+        ));
+    }
+    let max = app.config.limits.push_subs_per_user;
+    match db::upsert_apns_device(&app.db, user.id, &token, b.sandbox, max).await? {
+        db::PushUpsert::Stored(id) => Ok((StatusCode::CREATED, Json(json!({ "id": id })))),
+        db::PushUpsert::Foreign => Err(ApiError::Conflict(
+            "conflict",
+            "this device token belongs to another user".into(),
+        )),
+        db::PushUpsert::Limit => Err(ApiError::Conflict(
+            "push_limit",
+            format!("at most {max} devices per user; remove one first"),
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApnsDeviceToken {
+    pub token: String,
+}
+
+/// `DELETE /api/push/apns`: the device signs out of notices.
+pub async fn apns_unregister(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Json(b): Json<ApnsDeviceToken>,
+) -> ApiResult<StatusCode> {
+    db::delete_apns_device(&app.db, Some(user.id), &b.token.trim().to_ascii_lowercase()).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Push services of the browsers (SPEC §20): the hub POSTs to the endpoint, so anything else
 /// would let a user point it into the hub's network.
 const PUSH_HOSTS: &[&str] = &["fcm.googleapis.com", "updates.push.services.mozilla.com"];

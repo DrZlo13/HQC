@@ -3765,6 +3765,73 @@ pub async fn push_subs_of(db: &PgPool, user: Uuid) -> sqlx::Result<Vec<PushSubRo
     .await
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct ApnsDeviceRow {
+    pub token: String,
+    pub sandbox: bool,
+}
+
+/// Store a device, or refresh the user's own one; another user's token is never taken over,
+/// and a user has at most `max` devices (SPEC §20), as with push subscriptions.
+pub async fn upsert_apns_device(
+    db: &PgPool,
+    user: Uuid,
+    token: &str,
+    sandbox: bool,
+    max: i64,
+) -> sqlx::Result<PushUpsert> {
+    let mut tx = db.begin().await?;
+    sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR UPDATE")
+        .bind(user)
+        .execute(&mut *tx)
+        .await?;
+    let others: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM apns_devices WHERE user_id = $1 AND token <> $2")
+            .bind(user)
+            .bind(token)
+            .fetch_one(&mut *tx)
+            .await?;
+    if others >= max {
+        return Ok(PushUpsert::Limit);
+    }
+    let id: Option<Uuid> = sqlx::query_scalar(
+        "INSERT INTO apns_devices (id, user_id, token, sandbox) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (token) DO UPDATE SET sandbox = EXCLUDED.sandbox, updated_at = now()
+           WHERE apns_devices.user_id = EXCLUDED.user_id
+         RETURNING id",
+    )
+    .bind(new_id())
+    .bind(user)
+    .bind(token)
+    .bind(sandbox)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(id.map_or(PushUpsert::Foreign, PushUpsert::Stored))
+}
+
+pub async fn delete_apns_device(
+    db: &PgPool,
+    user: Option<Uuid>,
+    token: &str,
+) -> sqlx::Result<bool> {
+    let r = sqlx::query(
+        "DELETE FROM apns_devices WHERE token = $1 AND ($2::uuid IS NULL OR user_id = $2)",
+    )
+    .bind(token)
+    .bind(user)
+    .execute(db)
+    .await?;
+    Ok(r.rows_affected() > 0)
+}
+
+pub async fn apns_devices_of(db: &PgPool, user: Uuid) -> sqlx::Result<Vec<ApnsDeviceRow>> {
+    sqlx::query_as("SELECT token, sandbox FROM apns_devices WHERE user_id = $1")
+        .bind(user)
+        .fetch_all(db)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

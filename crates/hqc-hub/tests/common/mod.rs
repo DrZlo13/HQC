@@ -60,6 +60,31 @@ impl PushSender for RecordingPush {
     }
 }
 
+/// Records Apple pushes instead of sending them: (device token, sandbox, collapse id, payload).
+#[derive(Default)]
+pub struct RecordingApns {
+    pub sent: Mutex<Vec<(String, bool, String, Value)>>,
+}
+
+impl hqc_hub::apns::ApnsSender for RecordingApns {
+    fn send<'a>(
+        &'a self,
+        device_token: &'a str,
+        sandbox: bool,
+        collapse_id: &'a str,
+        payload: &'a [u8],
+    ) -> BoxFuture<'a, Result<(), PushError>> {
+        let v: Value = serde_json::from_slice(payload).unwrap();
+        self.sent.lock().unwrap().push((
+            device_token.to_string(),
+            sandbox,
+            collapse_id.to_string(),
+            v,
+        ));
+        Box::pin(async { Ok(()) })
+    }
+}
+
 /// Serves `app` on a free local port; its address.
 async fn serve(app: &AppState) -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -75,6 +100,7 @@ pub struct TestHub {
     pub ws_base: String,
     pub http: reqwest::Client,
     pub push: Arc<RecordingPush>,
+    pub apns: Arc<RecordingApns>,
     pub email: String,
     /// `boot_id` of [`FakeWorker::online`].
     pub boot_id: Uuid,
@@ -266,6 +292,7 @@ impl TestHub {
             listen: "127.0.0.1:0".into(),
             auth,
             vapid: None,
+            apns: None,
             client_dir: None,
             timing,
             limits,
@@ -276,7 +303,8 @@ impl TestHub {
         configure(&mut config);
         std::fs::create_dir_all(&config.artifacts.dir).unwrap();
         let push = Arc::new(RecordingPush::default());
-        let app = hqc_hub::start(pool, config, push.clone()).await;
+        let apns = Arc::new(RecordingApns::default());
+        let app = hqc_hub::start_with_apns(pool, config, push.clone(), Some(apns.clone())).await;
         let addr = serve(&app).await;
         TestHub {
             app,
@@ -284,6 +312,7 @@ impl TestHub {
             ws_base: format!("ws://{addr}"),
             http: reqwest::Client::new(),
             push,
+            apns,
             email,
             boot_id: Uuid::new_v4(),
             schema,
@@ -296,7 +325,14 @@ impl TestHub {
     /// beside it; close its workers first, and finish only the new one.
     pub async fn restart(&self) -> TestHub {
         let push = Arc::new(RecordingPush::default());
-        let app = hqc_hub::start(self.app.db.clone(), self.app.config.clone(), push.clone()).await;
+        let apns = Arc::new(RecordingApns::default());
+        let app = hqc_hub::start_with_apns(
+            self.app.db.clone(),
+            self.app.config.clone(),
+            push.clone(),
+            Some(apns.clone()),
+        )
+        .await;
         let addr = serve(&app).await;
         TestHub {
             app,
@@ -304,6 +340,7 @@ impl TestHub {
             ws_base: format!("ws://{addr}"),
             http: reqwest::Client::new(),
             push,
+            apns,
             email: self.email.clone(),
             boot_id: self.boot_id,
             schema: self.schema.clone(),

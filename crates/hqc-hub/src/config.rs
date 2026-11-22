@@ -10,6 +10,8 @@ pub struct Config {
     pub listen: String,
     pub auth: AuthConfig,
     pub vapid: Option<VapidConfig>,
+    /// Apple push to the native iOS client (SPEC §16): `HQC_APNS_*`, all or none.
+    pub apns: Option<ApnsConfig>,
     /// The built web client (`client/dist`) served on `/`; `None`: the hub serves only the APIs.
     pub client_dir: Option<PathBuf>,
     pub timing: Timing,
@@ -300,6 +302,26 @@ impl std::fmt::Debug for VapidConfig {
     }
 }
 
+/// An APNs token-based key (SPEC §16): the `.p8` key from the Apple Developer account, its
+/// key id, the team id, and the topic (the iOS app's bundle id).
+#[derive(Clone)]
+pub struct ApnsConfig {
+    pub key_pem: String,
+    pub key_id: String,
+    pub team_id: String,
+    pub topic: String,
+}
+
+impl std::fmt::Debug for ApnsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApnsConfig")
+            .field("key_id", &self.key_id)
+            .field("team_id", &self.team_id)
+            .field("topic", &self.topic)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Timing {
     /// WebSocket ping interval to workers and clients (SPEC §5: heartbeat 20 s).
@@ -443,6 +465,33 @@ impl Config {
             _ => bail!("set both HQC_VAPID_PRIVATE and HQC_VAPID_PUBLIC, or neither"),
         };
 
+        let apns_key = match (var("HQC_APNS_KEY"), var("HQC_APNS_KEY_FILE")) {
+            (Some(_), Some(_)) => bail!("set HQC_APNS_KEY or HQC_APNS_KEY_FILE, not both"),
+            (Some(k), None) => Some(k.replace("\\n", "\n")),
+            (None, Some(f)) => Some(
+                std::fs::read_to_string(&f)
+                    .map_err(|e| anyhow::anyhow!("HQC_APNS_KEY_FILE {f}: {e}"))?,
+            ),
+            (None, None) => None,
+        };
+        let apns = match (
+            apns_key,
+            var("HQC_APNS_KEY_ID"),
+            var("HQC_APNS_TEAM_ID"),
+            var("HQC_APNS_TOPIC"),
+        ) {
+            (Some(key_pem), Some(key_id), Some(team_id), Some(topic)) => Some(ApnsConfig {
+                key_pem,
+                key_id,
+                team_id,
+                topic,
+            }),
+            (None, None, None, None) => None,
+            _ => bail!(
+                "set all of HQC_APNS_KEY (or HQC_APNS_KEY_FILE), HQC_APNS_KEY_ID, HQC_APNS_TEAM_ID and HQC_APNS_TOPIC, or none"
+            ),
+        };
+
         let client_dir = var("HQC_CLIENT_DIR").map(PathBuf::from);
         if let Some(dir) = &client_dir {
             if !dir.join("index.html").is_file() {
@@ -485,6 +534,7 @@ impl Config {
             listen,
             auth,
             vapid,
+            apns,
             client_dir,
             timing: Timing {
                 turn_watchdog: turn_watchdog_from(var("HQC_TURN_WATCHDOG_S").as_deref())?,

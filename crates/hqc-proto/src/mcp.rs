@@ -570,7 +570,8 @@ pub const TOOLS: &[Tool] = &[
             to hqc, until the user unpublishes it or deletes this session. Call it only when \
             the user asks you to \
             publish something: the link is public. `path` is a folder with an `index.html` \
-            (the whole folder is published: the page loads its own styles, scripts, images, \
+            (the whole folder is published, except any `.git` and `.hqc` in it: the page \
+            loads its own styles, scripts, images, \
             fonts, ES modules, fetch/XHR and wasm from it by relative links, and nothing from \
             other sites; Web Workers, target=_blank and popups, form submission, cookies and \
             localStorage do not work, links open in the same tab) or a single file; absolute \

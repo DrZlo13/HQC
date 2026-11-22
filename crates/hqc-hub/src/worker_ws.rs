@@ -698,6 +698,10 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
         for sid in db::paused_sessions_to_stop(&app.db, conn.worker_id).await? {
             crate::pause::stop_if_paused(app, sid).await?;
         }
+        // So is the stop of a turn a pause cut: the turn's end then brings the kill.
+        for session_id in db::paused_turns_to_stop(&app.db, conn.worker_id).await? {
+            conn.send(HubFrame::SessionStop { session_id });
+        }
         for sid in db::sessions_to_restart(&app.db, conn.worker_id).await? {
             delivery::kick(app, sid, true).await;
         }

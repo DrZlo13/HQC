@@ -991,14 +991,14 @@ function approvalCall(items: ReturnType<Timeline['items']>, t: Timeline, request
 
 /** The state in the header: a pill, pulsing while the session works (a turn, or a background
  *  subagent after it). `where`: a session VS Code has ("In VS Code on <machine>"), marked `</>`.
- *  `pausing`: paused while its turn runs, "Pausing after this turn". */
+ *  `pausing`: paused while the turn the pause stopped still runs, "Pausing". */
 function StatePill({ state, timeline, where, pausing }: { state: SessionState; timeline: Timeline; where?: string; pausing?: boolean }) {
   let label = where ?? STATE_LABELS[state];
   if (state === 'waiting') {
     const r = timeline.openRequests()[0];
     label = r?.type === 'approval.request' ? 'Waiting for permission' : 'Waiting for reply';
   }
-  if (pausing) label = 'Pausing after this turn';
+  if (pausing) label = 'Pausing';
   return (
     <span class={`state pill state-${state}`}>
       {where ? <IconCode size={12} /> : <span class={`pill-dot ${state === 'running' ? 'pulse' : ''}`} aria-hidden="true" />}

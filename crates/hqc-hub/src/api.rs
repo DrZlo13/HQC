@@ -1930,7 +1930,7 @@ pub async fn stop(
 /// `session.stop` to its worker, and the runtime's approvals and questions cancelled too only
 /// when the worker is not connected (a connected worker keeps those of background subagents
 /// open, SPEC §10.1); `true` when the frame went out.
-async fn stop_session(app: &AppState, s: &SessionRow) -> ApiResult<bool> {
+pub(crate) async fn stop_session(app: &AppState, s: &SessionRow) -> ApiResult<bool> {
     let open = db::open_requests_of_session(&app.db, s.id).await?;
     let runtimes = |kind: &str| matches!(kind, "approval" | "clarify");
     for p in open.iter().filter(|p| !runtimes(&p.kind)) {

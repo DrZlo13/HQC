@@ -895,6 +895,48 @@ async fn an_ask_fails_when_the_targets_turn_ends_without_a_reply() {
     );
 }
 
+/// A text a Stop or a pause cut off (`interrupted`) is no reply (SPEC §7.1): the ask fails at the
+/// turn's `status idle` as a turn that ended without an answer, not with the cut text.
+#[tokio::test]
+async fn an_interrupted_answer_fails_the_ask() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (_, ta) = started(&hub, &mut w, "Asker", None).await;
+    let (b, _) = started(&hub, &mut w, "Helper", None).await;
+
+    let (rid, input) = ask_same_worker(
+        &mut w,
+        &ta,
+        json!({"text": "deploy?", "session": "personal/helper"}),
+    )
+    .await;
+    ack_input(&mut w, &input).await;
+    w.event(agent_event(
+        &b,
+        "agent.message",
+        json!({"text": "Half of the", "final": true, "interrupted": true,
+               "in_reply_to": input["payload"]["event_id"]}),
+    ))
+    .await;
+    w.expect_silence(Duration::from_millis(300)).await;
+    w.send(
+        "event",
+        json!({"event": agent_event(&b, "status",
+                                    json!({"state": "idle",
+                                           "in_reply_to": input["payload"]["event_id"]}))}),
+    )
+    .await;
+    let f = frames(&mut w, 2).await;
+    let r = pick(&f, "mcp.result");
+    assert_eq!(r["payload"]["request_id"], rid.as_str());
+    assert_eq!(r["payload"]["error"]["code"], "unavailable", "{r}");
+    assert_eq!(
+        r["payload"]["error"]["message"],
+        "the turn of personal/helper on the question ended without an answer"
+    );
+}
+
 /// The worker acks an input outside its outbox and sends turn events through it (SPEC §5.2),
 /// so the ack of an ask queued behind input X can reach the hub before the `status idle` of
 /// turn X. That status names X (`in_reply_to`) and leaves the ask open; B's turn on the ask

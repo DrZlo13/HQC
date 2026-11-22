@@ -474,7 +474,7 @@ pub fn allowed(app: &AppState, p: PendingRow) {
 /// out — are kept by their session's worker until that worker says `hello` ([`after_hello`]).
 /// Only these: no move this process carries out is among them.
 pub async fn left_on_start(app: &AppState) {
-    let rows = match db::allowed_moves_without_result(&app.db).await {
+    let rows = match db::allowed_without_result(&app.db, KIND).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!(error = %e, "allowed moves without a result");

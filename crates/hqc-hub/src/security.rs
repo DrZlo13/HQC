@@ -62,6 +62,13 @@ pub fn client_csp(artifact_origin: Option<&str>) -> String {
 }
 
 pub async fn guard(State(app): State<AppState>, req: Request, next: Next) -> Response {
+    if req.uri().path() != "/health"
+        && crate::publish::is_publish_host(&app.config.artifacts, req.headers())
+    {
+        // The publication domain is outside Access and the login: it serves the published
+        // archives and nothing else (SPEC §12).
+        return crate::publish::serve(&app, req).await;
+    }
     let path = req.uri().path();
     let artifact_route = path.starts_with("/artifacts/");
     if !artifact_route

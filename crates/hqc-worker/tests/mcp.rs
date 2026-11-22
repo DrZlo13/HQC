@@ -180,6 +180,7 @@ async fn a_call_goes_to_the_hub_and_back() {
             "hqc_room",
             "hqc_schedule",
             "hqc_move",
+            "hqc_publish",
             "hqc_rename"
         ],
         "only tools that landed"
@@ -556,6 +557,82 @@ async fn attach_uploads_the_file_before_the_call() {
         assert!(!text.contains("secret\n"), "{text}");
     }
     assert_eq!(hub.artifacts.uploads().len(), 2);
+    assert!(c
+        .maybe("mcp.call", Duration::from_millis(300))
+        .await
+        .is_none());
+    drop(rt);
+    w.stop().await;
+}
+
+/// SPEC 0.209 (§7, §12): `hqc_publish` packs the folder into a zip on the worker and uploads it
+/// as a `site` before the call, which carries the artifact and the canonical path packed; a
+/// folder without `index.html` is refused before anything is uploaded, and `hqc_attach` does
+/// not take the kind `site`.
+#[tokio::test]
+async fn publish_packs_and_uploads_before_the_call() {
+    let (env, hub, w, mut c, _sid) = setup().await;
+    let ws = env.workspace();
+    std::fs::create_dir_all(ws.join("site/css")).unwrap();
+    std::fs::write(ws.join("site/index.html"), b"<link href=css/a.css>").unwrap();
+    std::fs::write(ws.join("site/css/a.css"), b"body{}").unwrap();
+    std::fs::create_dir_all(ws.join("bare")).unwrap();
+    std::fs::write(ws.join("bare/a.html"), b"a").unwrap();
+    let mut rt = Runtime::spawn(&env, Some(TOKEN_A));
+    rt.initialize().await;
+
+    rt.call_tool(
+        2,
+        "hqc_publish",
+        json!({"path": "site", "caption": "The report"}),
+    )
+    .await;
+    let f = c.expect("mcp.call").await;
+    let ups = hub.artifacts.uploads();
+    assert_eq!(ups.len(), 1, "uploaded before the call");
+    let up = &ups[0];
+    assert_eq!(up.headers["x-hqc-artifact-name"], "site");
+    assert_eq!(up.headers["x-hqc-artifact-kind"], "site");
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(up.body.clone())).unwrap();
+    let names: Vec<&str> = zip.file_names().collect();
+    assert_eq!(names, ["css/a.css", "index.html"]);
+    let mut page = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("index.html").unwrap(), &mut page).unwrap();
+    assert_eq!(page, "<link href=css/a.css>");
+    let p = &f["payload"];
+    assert_eq!(p["tool"], "hqc_publish");
+    let real = ws
+        .join("site")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+    assert_eq!(
+        p["args"],
+        json!({"artifact_id": up.id, "path": real, "caption": "The report"})
+    );
+
+    // Refused on the worker: nothing is uploaded and no call goes to the hub.
+    for (n, (tool, args)) in [
+        ("hqc_publish", json!({"path": "bare"})),
+        ("hqc_publish", json!({"path": "../../outside"})),
+        (
+            "hqc_attach",
+            json!({"path": "site/index.html", "kind": "site"}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        rt.call_tool(10 + n as u64, tool, args.clone()).await;
+        let r = rt.recv().await;
+        let (is_err, text) = result_text(&r);
+        assert!(
+            is_err && text.starts_with("invalid_args: "),
+            "{args}: {text}"
+        );
+    }
+    assert_eq!(hub.artifacts.uploads().len(), 1);
     assert!(c
         .maybe("mcp.call", Duration::from_millis(300))
         .await

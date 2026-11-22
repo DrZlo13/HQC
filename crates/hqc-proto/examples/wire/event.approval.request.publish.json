@@ -1,0 +1,14 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000112",
+  "seq": 44,
+  "ts": "2026-11-08T10:00:00Z",
+  "author": { "kind": "system" },
+  "type": "approval.request",
+  "payload": { "request_id": "0199f3a2-7c10-7000-8000-0000000003a1", "tool": "hqc_publish",
+    "description": "The agent asks to publish /w/hqc/report at a public link: anyone who has the link can open it, without signing in to hqc, until you unpublish it or delete this session.\n3 files, 31 KB:\ncss/style.css\nimg/chart.png\nindex.html",
+    "options": [
+    { "id": "once", "label": "Publish", "canonical": "once" },
+    { "id": "deny", "label": "Deny", "canonical": "deny" }
+  ] }
+}

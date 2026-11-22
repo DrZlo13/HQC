@@ -5,7 +5,7 @@ import { ApiError } from '../api';
 import type { Project, SessionInfo } from '../proto';
 import { projectName } from './Appearance';
 import { IconArchive, IconBack, IconRestore, IconSearch, IconTrash } from './icons';
-import { count, shortPath } from './labels';
+import { UNPUBLISH_SESSION, count, shortPath } from './labels';
 import { archivedLabel, matchesQuery } from './sessions';
 
 /** Archive mode of the session list (T50, `Archive` / `MArchive2`): it must look different at
@@ -114,7 +114,9 @@ export function ArchiveList({ app, project, current, phone }: { app: AppState; p
                 </div>
                 {confirming ? (
                   <div class="row-confirm" role="group" aria-label="Confirm deletion">
-                    <span class="row-confirm-text">{phone ? 'Delete forever? This can’t be undone.' : 'Delete forever?'}</span>
+                    <span class="row-confirm-text">
+                      {phone ? 'Delete forever? This can’t be undone.' : 'Delete forever?'} {UNPUBLISH_SESSION}
+                    </span>
                     <button type="button" class="btn btn-small btn-danger-fill btn-confirm-delete" onClick={() => remove(s)}>
                       Delete
                     </button>

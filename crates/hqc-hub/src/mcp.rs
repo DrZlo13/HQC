@@ -136,6 +136,10 @@ pub const REGISTRY: &[HubTool] = &[
         run: |app, caller, c| Box::pin(crate::secrets::keygen(app, caller, c)),
     },
     HubTool {
+        name: hqc_proto::mcp::PUBLISH,
+        run: |app, caller, c| Box::pin(crate::publish::tool(app, caller, c)),
+    },
+    HubTool {
         name: hqc_proto::mcp::RENAME,
         run: |app, caller, c| Box::pin(now(rename(app, caller, c.args.clone()))),
     },
@@ -792,6 +796,13 @@ async fn attach(app: &AppState, caller: &SessionRow, request_id: &str, v: Value)
             format!("no artifact {} uploaded for this session", a.artifact_id),
         )
     })?;
+    if art.kind == "site" {
+        // Its attachment is the publication's, written once the owner allows it (SPEC 0.209).
+        return Err(err(
+            error_code::INVALID_ARGS,
+            "a site is published with hqc_publish, not attached",
+        ));
+    }
     let mut payload = json!({"artifact_id": art.id, "kind": art.kind, "name": art.name});
     if let Some(c) = a.caption.filter(|c| !c.trim().is_empty()) {
         payload["caption"] = json!(c);

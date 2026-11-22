@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.208, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
+Version 0.209, 2026-11-20. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -143,6 +143,19 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   events and keeps a mirrored record's `delivery` only as `delivered` on a typed prompt), so
   it can neither reset the chain limits of its sessions' turns nor queue input. A worker of the
   same owner can still use the owner's hqc tools through its sessions' tokens, within the caps.
+- A publication (since 0.209, `hqc_publish`, §7, §12) is public: anyone who has its link opens
+  it, without Access or the sign-in, until its owner unpublishes it or deletes the session (or
+  the project) that published it. Only the session owner's `once` on the card of the session's
+  request (in its chat, the Requests list or the feed of a session or room waiting on it)
+  publishes, whatever the session's mode and `auto_approve`; a compromised hub can
+  answer that card itself, as any request. The worker packs only files whose canonical paths
+  lie inside the folder and `allowed_roots` (a link pointing out is refused by its name). The
+  hub trusts the archive no more than that: it opens it with limits (§20) and serves it only on
+  the publication domain (`HQC_PUBLISH_BASE`), a host apart from the hub's and the artifact
+  domain that answers nothing but published files and `/health`, under a sandbox CSP: the page
+  has no origin of its own, sees no cookies, reaches no API of the hub and loads only its own
+  files. The link is a random id, not derived from the content: it cannot be found from the
+  files or from another publication.
 - A colleague with access to a shared project is limited by grants (§11) and by the worker
   owner's confirmations (§10).
 
@@ -466,11 +479,18 @@ and the project object carry `favorite_at?` (the row's `created_at`) for the req
 
 ### Artifact
 `owner_id`, `session_id` (the first session whose input carried the artifact; null until then),
-`kind` (file/image/diff/html/text), `mime`, `size`, `sha256`, `name` (the last path component
+`kind` (file/image/diff/html/text; since 0.209 site — the zip of a page or a file that
+`hqc_publish` uploads, §7), `mime`, `size`, `sha256`, `name` (the last path component
 without control characters, up to 255 bytes), `storage_key` (= `sha256`: the content on
 disk is shared by all records with the same hash). A record is unique by `(owner_id, sha256,
 name)`: the same file from the same user under the same name is the same record; since 0.128
-an upload of it that names a `kind` gives the record that kind. The hub
+an upload of it that names a `kind` gives the record that kind. A `site` is not (since 0.209):
+every `hqc_publish` uploads a record of its own, so two publications of the same files are
+unpublished apart. A `site` is published while `published_at` is set, with `public_id` — 128
+random bits as 32 lowercase hex characters, unique — the first segment of its link (§12);
+unpublishing clears both (migration `0052`). A published `site`'s `session_id` is the
+publishing session, set when it is published; deleting that session, or its project, sets it to
+null and takes the publication down (§12). The hub
 separately remembers which sessions received the artifact in their input: their workers may
 download it (§5.3, §12). Events refer only to `artifact_id`; download links are issued at render
 time (§12). Unused artifacts are removed by the hub's cleanup (since 0.23, §12); `updated_at` is
@@ -482,8 +502,8 @@ the last upload of the same file or the last input with it.
 
 ### PendingRequest
 Open requests that survive a hub restart: `kind`
-(approval/clarify/ask/worker_approval/move/secret/follow/mcp_call), `session_id`, `request_id`,
-`payload`, `expires_at`, `from_session_id`, `from_event_id`, `worker_id`
+(approval/clarify/ask/worker_approval/move/secret/follow/publish/mcp_call), `session_id`,
+`request_id`, `payload`, `expires_at`, `from_session_id`, `from_event_id`, `worker_id`
 (for ask and mcp_call: whom to give the result to), `result` (filled in when the answer has
 been received but not yet delivered to the worker).
 
@@ -532,6 +552,17 @@ gave it (`POST /api/sessions/{id}/secrets` with `request_id`, §6: the worker's 
 the key's fingerprint) or declined it. The runtime's `mcp.cancel` and a worker restart close the
 row without a frame. Nothing of the secret is in it.
 
+A `publish` (since 0.209) is a row of the session whose agent's `hqc_publish` waits for the
+owner's answer (§7, §10.1), as a `move` is: `request_id` — the `mcp.call`'s, `worker_id` — the
+session's worker, `payload` — the hub's `approval.request` plus `publish: {artifact_id, caption,
+entry}` (`entry` — the name of the one file of an archive of a file, else null), no
+`expires_at`, `result` — the `mcp.result` frame. An allowed publication closes the row first,
+without a `result`, and fills it in once published. On start, before it serves anything, the
+hub carries out at once every such row closed without a `result` whose session's feed has the
+owner's `once` (a publication needs no worker); the result goes to the worker when it is
+connected, or after its `hello`. A publication done before the stop answers from its
+`attachment` with the link the artifact has then.
+
 ### ScheduledMessage
 `owner_id`, `session_id` or (`project_id`, `workspace_id`, template), `cron` or `at`,
 `timezone`, `message`, `enabled`, `last_run`, `catch_up`.
@@ -569,7 +600,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.request` | `request_id`, `questions[{id, text, header?, options?: [string], option_descriptions?: [string], option_previews?: [string], multi?: bool, required?: bool, input?: "integer" \| "number"}]`, `subagent?{task_id, description}` (since 0.181, as on `approval.request`) | Claude Code adapter: the `AskUserQuestion` tool arrives as `can_use_tool`, the answer goes into `updatedInput.answers` (verified on 2.1.307 with `--permission-prompt-tool stdio`, §8.1). Since 0.69 `header` is the question's short label and `option_descriptions` what each option means, in the order and number of `options`, `""` for an option without one; each is absent when empty. Since 0.199 `option_previews` is each option's mockup (an ASCII sketch, code, a config) by the same rule, cut by the worker to 8 KiB with `\n… (truncated)` after it. The client shows `header` above the question, each description under its option, and an "Other" field: its text is the answer (with `multi`, an item of the array beside the checked labels); "Other" chosen with nothing typed is sent as `"Other"`, as the VS Code tab does. As in the tab, "Answer" stays disabled until every question has an answer: an option picked, a text typed (not only spaces) or "Other" chosen. A question with a preview shows it as plain text in `<pre>`, never rendered as markdown or HTML, not wrapped and scrolling sideways: on a desktop in a column beside the options, the preview of the option last under the pointer while the pointer is over the question (the "Other" row lets it go) or of the option with the keyboard focus (kept while the focus is in the preview), else of the first chosen one, else the first one that has a preview, the column as tall as the tallest preview of the question; on a phone under each chosen option that has one. ACP agents have no source for it. Since 0.180 also an MCP server's request for input (Claude Code: `elicitation`, §8.1), with `server?` — the server that asks, `message?` — its text, `url?` — the page it sends the person to, then with no `questions`; a question of its form carries `required: true` for a field the server requires and `input` (`integer`, `number`) for a free-text field whose answer must read as one, both absent otherwise and in the agent's questions; the client heads the card "<server> asks", shows the text above the questions, "required" beside a required question's header, the link (only an http, https or mailto one as a link, labelled with the address it opens, a host in its punycode form), no "Other", the submit button ("Done" for a link, the card then saying "Done"; unlike the agent's questions it waits only for what the form's schema says, which a server on the MCP SDK checks the answer against, refusing one that does not match (§8.1): every `required` question answered, an `integer` answer an optional minus and digits, at most 2^53 − 1 in size, a `number` one written in decimal (an optional minus, digits with an optional point, an optional exponent) that JavaScript's `Number()` reads as a finite number; a field neither required nor answered may stay empty) and "Decline" |
 | `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`), `action?` (since 0.180, only for a request with `server`: `accept` — the answers, also none, are the input; `decline` — the person declined, `answers` empty; the client shows "Declined") | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
-| `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; since 0.181 also the worker after a background task's end, the task's output file (§8.1), with the same `author`, `kind: text`; the user's files go into `user.message.artifact_ids` (rule below) |
+| `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; since 0.181 also the worker after a background task's end, the task's output file (§8.1), with the same `author`, `kind: text`; since 0.209 also a publication the owner allowed (`hqc_publish`, §7), with `kind: site` (`event.attachment.site.json`); the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.161 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
@@ -1509,7 +1540,9 @@ MCP calls (worker → hub → worker):
   and `Content-Type` as in `POST /api/artifacts`. The answer is the artifact (§6), `201`, or
   `200` for the same content under the same name. A bad token `401`, over the limit `413
   too_large`, an unknown `kind` `400`. Since 0.180 also a tool result's whole text and its
-  images (§8.1), with their `Content-Type`.
+  images (§8.1), with their `Content-Type`. Since 0.209, for `hqc_publish` (§7):
+  `x-hqc-artifact-kind: site` with the zip the worker packed, stored as `application/zip`; a
+  `site` is always a new record (`201`).
 
 ## 6. Client ↔ Hub protocol
 
@@ -1975,19 +2008,24 @@ the rest is marked "later"):
   another clarify, an unknown one, or `decline` with answers: `400`; only the worker owner
   answers one with `server`, anyone else gets `403` (§10.1, §11)
 - `POST /api/artifacts` (multipart: field `file`, optional `kind`) → `201` and the artifact
-  object `{id, kind, name, mime, size, sha256, created_at}` (`api.artifact.json`); the same
-  file under the same name again → `200` and the earlier object, with the `kind` given (since
-  0.128); over 100 MB: `413
-  too_large`; unknown `kind` or no `file`: `400`; a body the multipart parser refuses: `400`
-  with the parser's reason, `multipart: …` (since 0.109). Without the field, `kind` is derived
-  from the type and extension (§12). `GET /api/artifacts/{id}` → the artifact object; `GET
-  /api/artifacts/{id}/url` → `{url, expires_at}` (`api.artifact.url.json`), a signed link
-  valid for 10 minutes (§12). Someone else's or a nonexistent artifact: `404`. An input (`POST
-  .../input`) with `artifact_ids` of someone else's or nonexistent artifacts: `400
-  unknown_artifact`; more than 32: `400`. Download by link: `GET /artifacts/{id}?exp=&sig=`
+  object `{id, kind, name, mime, size, sha256, created_at, public_url?}` (`api.artifact.json`);
+  the same file under the same name again → `200` and the earlier object, with the `kind` given
+  (since 0.128); over 100 MB: `413 too_large`; unknown `kind`, `kind: site` (since 0.209: only
+  the worker's `hqc_publish` uploads one) or no `file`: `400`; a body the multipart parser
+  refuses: `400` with the parser's reason, `multipart: …` (since 0.109). Without the field,
+  `kind` is derived from the type and extension (§12). `GET /api/artifacts/{id}` → the artifact
+  object, a published `site` with `public_url`, its link (since 0.209, `api.artifact.site.json`;
+  absent while it is not published, and on a hub without `HQC_PUBLISH_BASE`); `DELETE
+  /api/artifacts/{id}/publication` (since 0.209) → `204`: the owner unpublishes it,
+  `published_at` and `public_id` are cleared and the link is `404` from then on; an artifact not
+  published: `204`, nothing changes; `GET /api/artifacts/{id}/url` → `{url, expires_at}`
+  (`api.artifact.url.json`), a signed link valid for 10 minutes (§12). Someone else's or a
+  nonexistent artifact: `404`. An input (`POST .../input`) with `artifact_ids` of someone
+  else's or nonexistent artifacts: `400 unknown_artifact`; more than 32: `400`. Download by link: `GET /artifacts/{id}?exp=&sig=`
   (outside `/api`, §12); for the worker: `GET /worker/artifacts/{id}` (§5.3)
 - `GET /api/requests` → `{requests[]}` (`api.requests.json`, since 0.41, T37): every open
-  request (`approval`, `clarify`, `worker_approval`, since 0.76 `move`, since 0.95 `follow`) in the user's sessions that are not
+  request (`approval`, `clarify`, `worker_approval`, since 0.76 `move`, since 0.95 `follow`,
+  since 0.209 `publish`) in the user's sessions that are not
   archived, oldest first, the workers' service sessions included. An item is `{session_id,
   request_id, kind, address, title, worker_id?, worker_name?, system?, event, waiting[]}`:
   `address` (`<project-slug>/<session-slug>`), `title` and the worker of the request's session,
@@ -3301,6 +3339,50 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   workspace, a name the workspace has and a worker without `session_secrets` are refused. The
   feed gets `system secret_given` ("ssh key pi-kitchen (SHA256:…) made for this workspace").
   Listed only as `hqc_secret` is.
+- `hqc_publish(path, caption?)` (since 0.209) — publish a page or a file at a public link.
+  `path` (absolute, or relative to the session's working directory) is a folder with
+  `index.html` at its top, or one file. The worker daemon packs it itself (§2.1): its canonical
+  path must lie inside the session's workspace and `allowed_roots`, as for `hqc_attach`; a folder
+  is walked with its names sorted, every entry's canonical path must stay inside the folder and
+  `allowed_roots` (a link pointing out is `invalid_args` naming it; a link to a folder up the
+  tree is skipped), only regular files and folders, at most 10 000 files of at most 500 MiB
+  together, each path at most 512 bytes (the hub's limits, §20); a folder without `index.html`
+  is `invalid_args`. One file becomes the archive of that file under its name. The zip is
+  deterministic — entries by path, deflated, one fixed time, mode 0644 — written to an unlinked
+  temporary file of mode 0600 and cut at the artifact limit (100 MB) while it is written
+  (`invalid_args`). The daemon uploads it (`PUT /worker/artifacts`, `kind: site`, §5.4) and only
+  then sends the `mcp.call` with `{artifact_id, path, caption?}`
+  (`hqc_proto::mcp::PublishCall`), `path` — the canonical path it packed. Without
+  `HQC_PUBLISH_BASE` (§12) the hub answers `unavailable` before anything else. It accepts only an
+  unpublished `site` of the session's owner uploaded for this session (`not_found` otherwise)
+  and a `path` of 1–4096 bytes without a control character or a bidirectional control (as for
+  `hqc_move`, `invalid_args`), and opens the archive with the limits of §20 (`invalid_args`
+  with the reason). Then it always asks the owner, whatever the session's mode and
+  `auto_approve`: a PendingRequest `publish` (§3) with the hub's `approval.request` in the
+  session's feed (§10.1), `author {kind: system}`, `tool: hqc_publish`, the description "The
+  agent asks to publish <path> at a public link: anyone who has the link can open it, without
+  signing in to hqc, until you unpublish it or delete this session." and on the next lines the
+  number of files and their size unpacked, then the first 50 names that are not hidden, every
+  hidden file (a name starting with `.`), every hidden folder as one line `<folder>/ (N
+  files)`, and "and N more" for the rest (`event.approval.request.publish.json`); options
+  `once` ("Publish") / `deny` ("Deny"). A session has at most one such request open: while that
+  of another call waits, the call is `unavailable` ("a publication already waits for the user's
+  answer"). The call is deferred as that of `hqc_move`: `ack` now, the `mcp.result` a frame of
+  its own later, kept in the request until the worker acknowledges it; the runtime's tool
+  timeout, `mcp.cancel`, stop, archiving, the agent stopping and a worker restart cancel it as a
+  move's. `deny`: `unavailable` ("the user did not allow the publication; nothing is
+  published"); a cancellation: `unavailable` too. `once`, once per `request_id`: the artifact
+  gets `published_at`, a `public_id` and the calling session as its `session_id` (§3), the feed
+  an `attachment` of `kind: site` authored by the agent, with the artifact's `name` and the
+  call's `caption` (its `event_id` is `once_id("hqc_publish", …)`), and the call `{url,
+  event_id}`: `url` is `<HQC_PUBLISH_BASE>/<public_id>/` for a folder,
+  `<HQC_PUBLISH_BASE>/<public_id>/<the file's name, percent-encoded>` for a file. A result the
+  hub fails to store is stored again after a pause as a move's; a hub that stopped before
+  storing it publishes on start (§3); a repeat of the call finds its request, still waiting or
+  with its stored result. A `site` is not attached: `hqc_attach` of one is `invalid_args`. The
+  description tells the agent to publish only when the user asks, that the link is public and
+  the user is asked first, and to give the url in its answer; `INSTRUCTIONS` (§7.2) say the
+  same in short.
 
 Session address: `<project-slug>/<session-slug>` or the id. A slug is unique within the project
 and does not change on rename.
@@ -3308,7 +3390,8 @@ and does not change on rename.
 A tool is listed in `tools/list` only once its task lands (iteration 3: `hqc_list_sessions`
 since 0.33, T30; `hqc_attach` since 0.34, T31; `hqc_send`, `hqc_ask` since 0.35, T32;
 `hqc_search_history` since 0.36, T33; `hqc_spawn` since 0.37, T34; `hqc_schedule` since 0.38, T35;
-`hqc_move` since 0.76; `hqc_rename` since 0.103; `hqc_room` since 0.172; `hqc_secret` and `hqc_ssh_keygen` since 0.147,
+`hqc_move` since 0.76; `hqc_rename` since 0.103; `hqc_room` since 0.172; `hqc_publish` since
+0.209; `hqc_secret` and `hqc_ssh_keygen` since 0.147,
 listed by the worker's MCP server only with `HQC_SECRET_TOOLS=1` in its environment, which the
 worker sets for a session that may have secrets); the list is shared by the worker's MCP
 server and the hub (`hqc_proto::mcp::TOOLS`), the hub's implementations are a registry next
@@ -3870,7 +3953,9 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   server instructions in the system prompt while the tools wait behind `ToolSearch` (§8.1), so
   the agent knows them from the first turn; without them it did not attach files unasked
   (checked on 2026-11-04 with Claude Code 2.1.310: haiku quoted them with only the tool names
-  visible).
+  visible). Since 0.209 they also say to publish a page or a file at a public link anyone can
+  open (`hqc_publish`) only when the user asks, that the user allows it in the chat first, and
+  to give the link in the answer.
 - Gets `session_token` only from `HQC_SESSION_TOKEN`; does not write it to tool
   results, runtime logs or files (§7).
 - Forwards every call to the worker daemon over a Unix socket `$HQC_HOME/mcp.sock` (mode
@@ -5805,6 +5890,15 @@ Nothing holds it but the owner: neither `POST /stop`, the turn watchdog, the age
 stopping, a worker restart nor archiving cancels it. The client draws it with the card of a
 worker's request, header "Move this session after its transcript?".
 
+**A publication** (since 0.209). An agent's `hqc_publish` (§7) is always an `approval.request`
+the hub writes in the calling session, `author {kind: system}`, `tool: hqc_publish`, the
+description of §7, options `once` / `deny`, with a PendingRequest `publish` (§3), whatever the
+session's mode; `auto_approve` never answers it. It is answered, counted and cancelled as a
+move's request (above): only the session owner answers (`403` for anyone else), without
+`message` (`400`). The client draws it as the move's card, with the header "The agent asks to
+publish" and the buttons "Publish" and "Deny", and never answers it on Enter or Esc: a public
+link is made by a click only.
+
 With `auto_approve` the hub answers with the first option with `canonical: once`, `by: auto`
 (calls under `deny` in the worker's `[permissions]` never reach the hub, §8.1, §14), except
 (since 0.180) a request with `human_only` (§4), which the runtime gives only to a person: it
@@ -5926,6 +6020,7 @@ The Google Docs model: everything is private, a Grant gives access. The function
 | answer `approval` | | | | worker owner only |
 | answer an MCP server's `clarify` (with `server`, §4; since 0.180) | | | | worker owner only |
 | answer a `move` request (an agent's `hqc_move`, §7, §10.1) | | | | session owner only |
+| answer a `publish` request (an agent's `hqc_publish`, §7, §10.1); unpublish (§6) | | | | session owner only (the artifact's owner) |
 | rename, archive, unarchive, delete a session | | | yes | yes |
 | create/delete a workspace | | | yes (with the worker owner's confirmation) | yes |
 | give grants | | | yes | yes |
@@ -5963,7 +6058,8 @@ The Google Docs model: everything is private, a Grant gives access. The function
 ## 12. Artifacts
 
 Storage: the hub's disk (`HQC_ARTIFACT_DIR`, file `<dir>/<sha256[0..2]>/<sha256>`; S3 —
-later), keyed by sha256, one content per hash. Kinds: file, image, diff, html, text.
+later), keyed by sha256, one content per hash. Kinds: file, image, diff, html, text; since
+0.209 site (below).
 Artifact limit 100 MB (the stream is written to a temporary file while sha256 is computed;
 exceeding it gives `413 too_large` and the file is deleted). Record: §3 Artifact; uploading
 the same file again by the same user under the same name returns the existing record, which
@@ -6062,6 +6158,46 @@ the call's row (§6). Agent → agent (since 0.46, T41): the
 `.hqc/inbox` like a user's files; the files of a reply into the asker's (§7, §7.1). In the
 feed a `peer.message` shows its files under its text like a `user.message`.
 
+**Publication** (since 0.209). A `site` (§3) is the zip of `hqc_publish` (§7). While it is
+published the hub serves it on the publication domain `HQC_PUBLISH_BASE`: `https://host[:port]`
+(`http://` only to a loopback host) without a path, neither the host of
+`HQC_ARTIFACT_PUBLIC_BASE` nor one of `HQC_PUBLIC_ORIGINS` (else the hub does not start); a
+registrable domain of its own is recommended (RUNBOOK §1.2), and it is outside Access and the
+sign-in (§20). Without the variable nothing is published (§7). On that host the hub answers only
+`GET` and `HEAD` of `/<public_id>/<path>`, and `/health`: `<public_id>` is the 32 lowercase hex
+characters of a published artifact, `<path>` is percent-decoded and names a file of the
+archive; a path ending in `/`, the link itself included, names its `index.html`. Anything else
+— another path or method, `/<public_id>` without the `/`, an id unknown or no longer published
+(unpublished, or its publishing session deleted), a missing entry, a folder — is `404` with
+`Cache-Control: no-store`, `X-Robots-Tag: noindex` and the artifact `sandbox` CSP. The entry is
+streamed out of the archive, no more than the size the archive declares for it, on one of 32
+blocking threads (§20); while all of them are taken the answer is `503` with `Retry-After: 5`.
+Headers: `Content-Type` by extension (`text/html; charset=utf-8`, `text/css; charset=utf-8`,
+`text/javascript; charset=utf-8`, images, fonts, `application/pdf`, …; anything else
+`application/octet-stream`), `Cache-Control: public, max-age=300`, `ETag` — the archive's
+sha256 (`304` on a matching `If-None-Match`), `X-Content-Type-Options: nosniff`,
+`Content-Security-Policy: sandbox allow-scripts; default-src 'self'; script-src 'self'
+'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;
+font-src 'self' data:` (that of HTML on the artifact domain with `'self'` beside each source,
+and `'wasm-unsafe-eval'` so that WebAssembly compiles), `X-Robots-Tag: noindex`,
+`Referrer-Policy: no-referrer`, and on `200` and `304` `Access-Control-Allow-Origin: *` (the link
+is the capability, so it exposes nothing new); no `X-Frame-Options`, no cookies. The page loads
+its own styles, scripts, images, fonts, ES modules, `fetch`/XHR and wasm from its host — as a
+sandbox without `allow-same-origin` it has no origin of its own, so these requests are
+cross-origin and need that header — and nothing from anywhere else. The sandbox has no
+`allow-same-origin`, `allow-popups` or `allow-forms`: Web Workers, `target=_blank` and popups,
+form submission, cookies and `localStorage` do not work, and links open in the same tab. `GET
+/api/artifacts/{id}` gives the owner the link as `public_url`, and `DELETE
+/api/artifacts/{id}/publication` removes it (§6): the hub answers `404` at once, a cache may
+keep a copy up to 5 minutes. Deleting the session that published it, or that session's project,
+takes the publication down too (its `session_id` becomes null: the link is `404`, `public_url`
+is gone and the cleanup counts it as unpublished); archiving the session does not. The client's
+confirmations of deleting a session or a project say that pages it published stop opening
+(always: the client does not know whether the hub has `HQC_PUBLISH_BASE`). In the feed the
+`attachment` of a `site` is a card with its name and caption, "Open" (the link in a new tab,
+`noopener noreferrer`) and "Unpublish"; `GET /api/artifacts/{id}` answers the owner only, so
+anyone else sees the name alone, and an unpublished one says "not published".
+
 **Project icons** (since 0.51, T49, §3 Project). `PUT /api/projects/{id}/icon` takes PNG, JPEG
 or WebP only, recognized by the content's magic bytes (the name and the declared type do not
 count: a PNG named `.webp` is a PNG; SVG and anything else is refused), square, 128 to 1024 px
@@ -6080,8 +6216,10 @@ artifact records that no event references (`artifact_ids` of `user.message` and,
 The file on disk is deleted only when no records are left for its sha256: first it is moved
 aside, then the hub checks the records again and, if one has appeared (an upload of the same
 file at that moment), puts it back; an upload, in turn, puts the file in place after writing the
-row if it is missing. `artifact_sessions` records go together with the artifact. There are no
-per-user quotas. Since 0.180 the whole text and the images of a tool result (`tool.result`
+row if it is missing. `artifact_sessions` records go together with the artifact. A published
+`site` is not deleted while its publishing session exists, archived or not (since 0.209);
+unpublished, or its session deleted, it goes as any other artifact. There are no per-user
+quotas. Since 0.180 the whole text and the images of a tool result (`tool.result`
 `artifact_id` and `artifact_ids`, §8.1) are files an event refers to, so they are kept for good,
 as attachments are: on a busy worker that is hundreds of MB a week at most (one week of the
 transcripts of one laptop: 168 MB of results over 4 KB and 629 MB of images, before the hub
@@ -6888,7 +7026,8 @@ send from a session in a lower mode (§7.1).
   it); `/api/*` is behind Cloudflare Access with JWT verification (in OIDC mode, behind the
   proxy's sign-in, the hub verifying the provider's ID token, §6); `/worker/*` is outside
   Access, worker tokens only, rate limit on enroll;
-  `artifacts.<hub-domain>` is public, signed links with a TTL only.
+  `artifacts.<hub-domain>` is public, signed links with a TTL only; the publication domain
+  (`HQC_PUBLISH_BASE`, since 0.209) is public too, published files only (§12).
 - The hub's dev mode (`HQC_DEV=1`, no Access) is allowed only on a loopback
   `HQC_HUB_LISTEN` address and without `HQC_ACCESS_*` or `HQC_OIDC_*`; otherwise the hub does
   not start (§6).
@@ -6981,6 +7120,11 @@ send from a session in a lower mode (§7.1).
   | `files` of `hqc_send`/`hqc_ask` (§7, since 0.46) | at most 32; each path by the rules of `hqc_attach` (above), on the sender's worker | `error invalid_args` / `not_found` from the worker, no call is sent |
   | `artifact_ids` of `hqc_send`/`hqc_ask` on the hub | at most 32, each an artifact of the owner linked to the calling session | `error invalid_args` / `not_found`, nothing is stored |
   | files of an `hqc_ask` reply (§7.1) | at most 32, artifacts of the target's owner only; downloaded by the asking worker with the limits of an input (100 MB each, 500 MB per reply) | the rest left out (warn in the hub's log) / that file reported with an `error` |
+  | `hqc_publish` packing on the worker (§7, since 0.209) | at most 10 000 files, 500 MiB together, paths up to 512 bytes, only regular files and folders, every entry inside the folder and `allowed_roots` after resolving symlinks; the zip up to 100 MB | `error invalid_args`, nothing is uploaded |
+  | `hqc_publish` archive on the hub (`hqc_proto::mcp::MAX_SITE_*`) | the file ends with its end record (no comment, not zip64) right after its central directory, whose records the hub walks itself before the zip reader opens it (and the reader must open that directory): at most 10 000, names up to 512 bytes, no extra field, no comment, stored or deflated; 500 MiB unpacked by the sizes the entries declare; names relative, without an empty, `.` or `..` component, a control character or a bidirectional control, each once (the records walked against the names the reader keeps); not encrypted, no links; `index.html` at the top or a single file; `path` 1–4096 bytes, showable | `error invalid_args`, no card |
+  | open `hqc_publish` requests per session | 1 | `error unavailable` |
+  | a published entry served (§12) | no more than the size its archive declares | the rest is not sent |
+  | published files streamed at once (§12, `hqc_hub::publish::MAX_STREAMS`) | 32, each on a blocking thread until its reader has it | `503` with `Retry-After: 5` |
 - Push: the hub POSTs to the subscription's `endpoint`, so only `https://` without
   userinfo and without a non-standard port on push service hosts is accepted: `fcm.googleapis.com`,
   `updates.push.services.mozilla.com`, `*.push.services.mozilla.com`, `*.push.apple.com`,
@@ -7045,6 +7189,31 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.208 → 0.209 (publish a page or a file at a public link)
+§7, §7.2: the tool `hqc_publish(path, caption?)` (issue #7). The worker packs a folder with
+`index.html`, or one file, into a deterministic zip, every entry inside the folder and
+`allowed_roots` (a link pointing out is refused by its name), and uploads it as an artifact of the
+new kind `site`; the hub opens it with limits and always asks the session owner with a card in
+the session's own chat ("Publish" / "Deny"), whatever the session's mode and `auto_approve`;
+`once` publishes it once per call, writes an `attachment` of `kind: site` and answers `{url,
+event_id}`, the url a random `public_id` on the publication domain. Without `HQC_PUBLISH_BASE`
+the tool is `unavailable`; `INSTRUCTIONS`: only when the user asks, the link is public, give it
+in the answer. §3: Artifact `kind: site`, `published_at`, `public_id`, a `site` never one record
+with another (migration `0052`); PendingRequest `publish`, published at hub start when the
+previous process stopped before it stored the result. §4: `attachment` with `kind: site`. §5.4:
+the upload of a `site`. §6: `public_url` in the artifact object, `DELETE
+/api/artifacts/{id}/publication`, `POST /api/artifacts` refuses `kind: site`, `publish` in `GET
+/api/requests`. §10.1, §11: answered by the session owner only, never by `auto_approve`, nor on
+Enter or Esc; the card names every hidden file and each hidden folder with its count. §12: the
+publication domain, what it serves and with which headers (`Access-Control-Allow-Origin: *` and
+`'wasm-unsafe-eval'`, so that the page's own fonts, modules, `fetch` and wasm load from its
+opaque origin; Web Workers, popups, forms, cookies and `localStorage` do not work), at most 32
+files streamed at once (`503` beyond), the feed's card; deleting the publishing session or its
+project takes a publication down, which the delete confirmations say, archiving does not; the
+cleanup keeps a published `site` while its session exists. §2.1, §20: the domain outside Access,
+the limits (the hub walks the archive's central directory itself before the zip reader opens
+it).
 
 ### 0.207 → 0.208 (the thinking shows while it is written)
 §4, §6, §8.1: while the model thought, the feed showed only the activity line, and the "Thinking"

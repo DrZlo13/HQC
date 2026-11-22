@@ -135,3 +135,8 @@ projects with `archived_at`, which `api.projects.json` (the project bar) leaves 
 
 SPEC 0.199: `event.clarify.request.preview.json` — a question whose options carry
 `option_previews` (each option's mockup as plain text, `""` for an option without one).
+
+SPEC 0.209: `api.artifact.site.json` — an artifact of kind `site` (the archive `hqc_publish`
+uploads) that is published: `public_url` (absent while it is not). `event.attachment.site.json`
+— the publication in the feed; `event.approval.request.publish.json` — the owner's card that
+comes before it (`tool: hqc_publish`).

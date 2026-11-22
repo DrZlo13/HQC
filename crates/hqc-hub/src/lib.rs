@@ -34,6 +34,7 @@ pub mod moves;
 pub mod pause;
 pub mod peers;
 pub mod providers;
+pub mod publish;
 pub mod push;
 pub mod requests;
 pub mod rooms;
@@ -186,6 +187,10 @@ pub fn router(app: AppState) -> Router {
             )),
         )
         .route("/api/artifacts/{id}", get(artifacts::meta))
+        .route(
+            "/api/artifacts/{id}/publication",
+            axum::routing::delete(artifacts::unpublish),
+        )
         .route("/api/artifacts/{id}/url", get(artifacts::url))
         .route("/artifacts/{id}", get(artifacts::signed))
         .route(
@@ -222,11 +227,12 @@ pub fn service(
 }
 
 /// Build the hub state over a migrated pool and start its background tasks. Before it returns,
-/// so before the hub serves anything, it finds the moves the previous process left
-/// ([`moves::left_on_start`]).
+/// so before the hub serves anything, it finds the moves and the publications the previous
+/// process left ([`moves::left_on_start`], [`publish::left_on_start`]).
 pub async fn start(db: PgPool, config: Config, push: Arc<dyn push::PushSender>) -> AppState {
     let app = AppState::new(db, config, push);
     moves::left_on_start(&app).await;
+    publish::left_on_start(&app).await;
     tokio::spawn(requests::expiry_loop(app.clone()));
     if let Some(limit) = app.config.timing.turn_watchdog {
         tokio::spawn(watchdog::turn_watchdog_loop(app.clone(), limit));

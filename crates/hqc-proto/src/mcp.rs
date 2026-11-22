@@ -36,6 +36,7 @@ pub const SPAWN: &str = "hqc_spawn";
 pub const ROOM: &str = "hqc_room";
 pub const SCHEDULE: &str = "hqc_schedule";
 pub const MOVE: &str = "hqc_move";
+pub const PUBLISH: &str = "hqc_publish";
 pub const RENAME: &str = "hqc_rename";
 /// Since SPEC 0.147, listed only to an agent whose worker has `session_secrets`
 /// ([`SECRET_TOOLS`]).
@@ -77,10 +78,12 @@ pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's 
     agents); history: hqc_search_history to find, hqc_read to read a session or a room in full, or \
     what a subagent is doing; later or recurring messages: hqc_schedule; moving this session to \
     another folder or project, only when the user asks (a folder that is not one of the user's \
-    workspaces in the same environment waits for the user to allow it): hqc_move; renaming a \
-    session: hqc_rename; where this machine allows it, a password or an ssh key from the user \
-    without it entering the conversation: hqc_secret, and an ssh key of your own for a device \
-    you set up: hqc_ssh_keygen.";
+    workspaces in the same environment waits for the user to allow it): hqc_move; publishing a \
+    page or a file at a public link anyone can open, only when the user asks (the user allows it \
+    in the chat first), then give the link in your answer: hqc_publish; renaming a session: \
+    hqc_rename; where this machine allows it, a password or an ssh key from the user without it \
+    entering the conversation: hqc_secret, and an ssh key of your own for a device you set up: \
+    hqc_ssh_keygen.";
 
 pub const TOOLS: &[Tool] = &[
     Tool {
@@ -561,6 +564,40 @@ pub const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: PUBLISH,
+        description: "Publish a page or a file from your workspace at a permanent public link: \
+            anyone who has the link can open it in a browser, on any device, without signing in \
+            to hqc, until the user unpublishes it or deletes this session. Call it only when \
+            the user asks you to \
+            publish something: the link is public. `path` is a folder with an `index.html` \
+            (the whole folder is published: the page loads its own styles, scripts, images, \
+            fonts, ES modules, fetch/XHR and wasm from it by relative links, and nothing from \
+            other sites; Web Workers, target=_blank and popups, form submission, cookies and \
+            localStorage do not work, links open in the same tab) or a single file; absolute \
+            or relative to your working directory, inside the session's \
+            workspace, at most 100 MB packed. The user is asked in the chat first, with the \
+            list of files; the call fails if the user denies it or does not answer before the \
+            tool call times out. Returns `{url, event_id}`: give the user the `url` in your \
+            answer.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "A folder with index.html, or one file; absolute or relative to the working directory."
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "A line shown with the publication in the chat."
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            })
+        },
+    },
+    Tool {
         name: RENAME,
         description: "Rename an hqc session of your owner: this one when `session` is absent, \
             otherwise the session at that address (<project-slug>/<session-slug>) or id. Leave \
@@ -639,6 +676,24 @@ pub struct AttachCall {
     pub caption: Option<String>,
 }
 
+/// `args` of the `mcp.call` for [`PUBLISH`] (since SPEC 0.209): the worker packs `path` into a
+/// zip itself and uploads it as an artifact of kind `site` (`PUT /worker/artifacts`, SPEC §12);
+/// `path` is the canonical path it packed, for the card that asks the owner.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishCall {
+    pub artifact_id: Uuid,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+}
+
+/// The limits of a published archive (SPEC §12, §20), the same on the worker that packs it and
+/// on the hub that opens it: files in it, their size unpacked, the length of a name in it.
+pub const MAX_SITE_FILES: usize = 10_000;
+pub const MAX_SITE_UNPACKED: u64 = 500 * 1024 * 1024;
+pub const MAX_SITE_NAME: usize = 512;
+
 pub fn tool(name: &str) -> Option<&'static Tool> {
     TOOLS.iter().find(|t| t.name == name)
 }
@@ -701,6 +756,7 @@ mod tests {
         assert!(tool(SEARCH_HISTORY).is_some());
         assert!(tool(READ).is_some());
         assert!(tool(MOVE).is_some());
+        assert!(tool(PUBLISH).is_some());
         assert!(tool(RENAME).is_some());
     }
 

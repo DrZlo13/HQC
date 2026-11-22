@@ -149,17 +149,22 @@ pub async fn answer(
                 event,
             )
         }
-        "move" | crate::mirror::FOLLOW => {
+        kind @ ("move" | crate::mirror::FOLLOW | "publish") => {
+            let publish = kind == crate::publish::KIND;
             if body.message.is_some() {
-                return Err(ApiError::BadRequest(
-                    "a move request takes no message".into(),
-                ));
+                return Err(ApiError::BadRequest(format!(
+                    "a {} request takes no message",
+                    if publish { kind } else { "move" }
+                )));
             }
-            // Only the session owner, whose session moves (SPEC §7, §9.2, §10.1).
+            // Only the session owner, whose session moves or whose files go public (SPEC §7,
+            // §9.2, §10.1).
             if s.owner_id != user.id {
-                return Err(ApiError::Forbidden(
-                    "only the session owner answers a move of it".into(),
-                ));
+                return Err(ApiError::Forbidden(if publish {
+                    "only the session owner answers a publication from it".into()
+                } else {
+                    "only the session owner answers a move of it".into()
+                }));
             }
             let option_id = body
                 .option_id
@@ -169,11 +174,16 @@ pub async fn answer(
                     "unknown option `{option_id}`"
                 )));
             }
-            // Allowed, the result is known once the session moved: none here. A follow has no
-            // call to answer.
+            // Allowed, the result is known once the session moved or the artifact is
+            // published: none here. A follow has no call to answer.
+            let denied = if publish {
+                crate::publish::denied
+            } else {
+                crate::moves::denied
+            };
             (
-                (p.kind == "move" && option_id != worker_approval::ONCE)
-                    .then(|| crate::moves::denied(request_id)),
+                (kind != crate::mirror::FOLLOW && option_id != worker_approval::ONCE)
+                    .then(|| denied(request_id)),
                 "approval.response",
                 json!({"request_id": request_id, "option_id": option_id, "by": user.id.to_string()}),
             )
@@ -329,7 +339,8 @@ pub async fn answer(
                 crate::mirror::allowed(app, p);
             }
         }
-        // An allowed move: the hub moves the session now and answers the call then.
+        // An allowed move or publication: the hub carries it out now and answers the call then.
+        None if p.kind == crate::publish::KIND => crate::publish::allowed(app, p),
         None => crate::moves::allowed(app, p),
     }
     Ok(EventRowOut {
@@ -369,7 +380,9 @@ async fn cancel_inner(
         return Ok(());
     };
     let ev_type = match p.kind.as_str() {
-        "approval" | "worker_approval" | "move" | crate::secrets::KIND => "approval.cancel",
+        "approval" | "worker_approval" | "move" | "publish" | crate::secrets::KIND => {
+            "approval.cancel"
+        }
         "clarify" => "clarify.cancel",
         _ => return Ok(()),
     };
@@ -397,6 +410,7 @@ async fn cancel_inner(
         "worker_approval" => Some(worker_response(&p.request_id, worker_approval::DENY)),
         "move" => Some(crate::moves::cancelled(&p.request_id, reason)),
         crate::secrets::KIND => Some(crate::secrets::cancelled(&p.request_id, reason)),
+        "publish" => Some(crate::publish::cancelled(&p.request_id, reason)),
         _ => Some(json!({"type": "clarify.response",
                          "payload": {"session_id": s.id, "request_id": p.request_id, "answers": {}}})),
     };
@@ -441,8 +455,8 @@ pub async fn cancel_open_of_session(
 }
 
 /// `auto_approve`: answer with the first `canonical: once` option, `by: auto` (SPEC §10.1);
-/// only the runtime's own approvals, never a move of the session (SPEC §7) nor one only a
-/// person may answer (`human_only`).
+/// only the runtime's own approvals, never a move of the session or a publication (SPEC §7)
+/// nor one only a person may answer (`human_only`).
 pub async fn auto_approve(app: &AppState, s: &SessionRow, request_id: &str) -> anyhow::Result<()> {
     let Some(p) = db::find_open_request(&app.db, s.id, request_id)
         .await?
@@ -751,9 +765,9 @@ struct OpenRow {
     event_id: Option<Uuid>,
 }
 
-/// Every open `approval`, `clarify`, `worker_approval`, `move` and `follow` in the sessions of
-/// `owner`, oldest first, each with its event and the sessions waiting on it (SPEC §6 `GET
-/// /api/requests`). Only the owner's sessions: another user's requests are never listed.
+/// Every open `approval`, `clarify`, `worker_approval`, `move`, `follow` and `publish` in the
+/// sessions of `owner`, oldest first, each with its event and the sessions waiting on it (SPEC
+/// §6 `GET /api/requests`). Only the owner's sessions: another user's requests are never listed.
 pub async fn open_of(app: &AppState, owner: Uuid) -> anyhow::Result<Vec<OpenRequest>> {
     let rows: Vec<OpenRow> = sqlx::query_as(
         "SELECT p.session_id, p.request_id, p.kind, pr.slug || '/' || s.slug AS address,
@@ -768,7 +782,7 @@ pub async fn open_of(app: &AppState, owner: Uuid) -> anyhow::Result<Vec<OpenRequ
          JOIN projects pr ON pr.id = s.project_id
          LEFT JOIN workers w ON w.id = s.worker_id
          WHERE p.closed_at IS NULL
-           AND p.kind IN ('approval', 'clarify', 'worker_approval', 'move', 'secret', 'follow')
+           AND p.kind IN ('approval', 'clarify', 'worker_approval', 'move', 'secret', 'follow', 'publish')
            AND s.owner_id = $1 AND NOT s.archived
          ORDER BY p.created_at, p.id",
     )

@@ -22,6 +22,7 @@
 pub mod attach;
 pub mod daemon;
 pub mod procs;
+pub mod publish;
 pub mod server;
 
 use std::collections::HashMap;

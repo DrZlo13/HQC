@@ -3445,6 +3445,35 @@ describe("worker's service session (T17, SPEC §10.2)", () => {
     );
   });
 
+  it("an agent's publication: what it shows, the files and a Publish button, no hotkeys (SPEC 0.209)", async () => {
+    const t = new Timeline();
+    t.apply(ev("event.approval.request.publish"));
+    const rid = raw("event.approval.request.publish").payload.request_id;
+    const { actions } = show(t, { hotkeyRequest: rid });
+    // Even with the keys given to it, Enter does not publish (and Esc does not deny).
+    await key("Enter");
+    await key("Escape");
+    expect(actions.approve).not.toHaveBeenCalled();
+    expect(root.querySelector(".perm kbd")).toBeNull();
+    expect(root.querySelector(".perm-title")!.textContent).toBe(
+      "The agent asks to publish",
+    );
+    expect(root.querySelector(".perm-what")!.textContent).toBe(
+      raw("event.approval.request.publish").payload.description,
+    );
+    const buttons = optionButtons();
+    expect(buttons.map((b) => b.childNodes[0].textContent)).toEqual([
+      "Publish",
+      CANONICAL_LABELS.deny,
+    ]);
+    expect(buttonByText("Reply with text instead")).toBeUndefined();
+    await act(async () => buttons[0].click());
+    expect(actions.approve).toHaveBeenCalledWith(
+      raw("event.approval.request.publish").payload.request_id,
+      "once",
+    );
+  });
+
   it('"requests only" keeps the request cards only', () => {
     const t = new Timeline();
     t.apply(log(1, "warn", "a"));

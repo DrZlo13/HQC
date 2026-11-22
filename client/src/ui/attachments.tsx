@@ -1,8 +1,9 @@
 // Attachments in the chat (SPEC §4 `attachment`, `user.message.artifact_ids`, §12): an
 // image inline, a diff as a diff, HTML in a sandboxed iframe when artifacts have their own
-// domain (a link otherwise), anything else a card with name, size and "download". Links
-// are signed and short-lived: asked for when shown or clicked, renewed on 403/410. An image
-// and a Markdown text open in a viewer over the chat.
+// domain (a link otherwise), a published `site` with its public link (SPEC 0.209), anything
+// else a card with name, size and "download". Links are signed and short-lived: asked for
+// when shown or clicked, renewed on 403/410. An image and a Markdown text
+// open in a viewer over the chat.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { formatSize, MAX_INLINE_TEXT, MAX_OPEN_TEXT, type ArtifactStore } from '../artifacts';
@@ -33,6 +34,7 @@ const KIND_LABELS: Record<ArtifactKind, string> = {
   diff: 'diff',
   html: 'HTML',
   text: 'text',
+  site: 'publication',
   unknown: 'attachment',
 };
 
@@ -82,6 +84,7 @@ export function AttachmentView({
   else if (store && k === 'diff' && meta && meta.size <= MAX_INLINE_TEXT)
     body = <DiffView id={id} name={n} store={store} actions={actions} />;
   else if (store && k === 'html') body = <HtmlView id={id} name={n} meta={meta} store={store} actions={actions} />;
+  else if (k === 'site') body = <SiteCard id={id} name={n} meta={meta} store={store} onMeta={setMeta} />;
   else body = <FileCard id={id} name={n} kind={k} meta={meta} actions={actions} />;
   return (
     <div class={`attachment attachment-kind-${k}`}>
@@ -132,6 +135,59 @@ function FileCard({
           Download
         </button>
       </div>
+    </div>
+  );
+}
+
+/** A publication (`hqc_publish`, SPEC 0.209): its public link opens in a new tab, and its owner
+ *  unpublishes it here. `GET /api/artifacts/{id}` answers the owner only: anyone else sees the
+ *  name alone. */
+function SiteCard({
+  id,
+  name,
+  meta,
+  store,
+  onMeta,
+}: {
+  id: string;
+  name: string;
+  meta: Artifact | null;
+  store?: ArtifactStore;
+  onMeta(m: Artifact): void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const link = meta?.public_url;
+  const unpublish = () => {
+    if (!store) return;
+    setBusy(true);
+    setError(null);
+    store
+      .unpublish(id)
+      .then(() => store.meta(id))
+      .then(onMeta, (e: Error) => setError(`Not unpublished: ${e.message}`))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <div class="card card-attachment">
+      <div class="card-title">
+        <span class="attachment-name">{name}</span>{' '}
+        <span class="muted">
+          {KIND_LABELS.site}
+          {meta && !link ? ' · not published' : ''}
+        </span>
+      </div>
+      {link && (
+        <div class="actions">
+          <a class="btn btn-small" href={link} target="_blank" rel="noopener noreferrer">
+            Open
+          </a>
+          <button type="button" class="btn btn-small" disabled={busy} onClick={unpublish}>
+            Unpublish
+          </button>
+        </div>
+      )}
+      {error && <div class="error-text">{error}</div>}
     </div>
   );
 }

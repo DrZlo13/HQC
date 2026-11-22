@@ -2450,7 +2450,7 @@ pub async fn running_turns(db: &PgPool) -> sqlx::Result<Vec<(Uuid, Option<Uuid>)
          WHERE s.turn_open AND NOT s.archived AND NOT s.last_turn_error AND s.locked_by <> 'vscode'
            AND NOT EXISTS (SELECT 1 FROM pending_requests p WHERE p.session_id = s.id
                            AND p.closed_at IS NULL
-                           AND p.kind IN ('approval', 'clarify', 'ask', 'move', 'secret', 'follow'))
+                           AND p.kind IN ('approval', 'clarify', 'ask', 'move', 'secret', 'follow', 'publish'))
            AND NOT {UNANSWERED_FAILED_INPUT}",
     ))
     .fetch_all(db)
@@ -3169,7 +3169,7 @@ pub async fn find_open_request(
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests
          WHERE session_id = $1 AND request_id = $2 AND closed_at IS NULL
-           AND kind IN ('approval', 'clarify', 'worker_approval', 'move', 'secret', 'follow')"
+           AND kind IN ('approval', 'clarify', 'worker_approval', 'move', 'secret', 'follow', 'publish')"
     ))
     .bind(session_id)
     .bind(request_id)
@@ -3260,13 +3260,13 @@ pub async fn set_request_result(db: &PgPool, id: Uuid, result: &Value) -> sqlx::
     Ok(())
 }
 
-/// `move` requests closed without a result that the owner allowed: the session's feed has its
-/// `approval.response` with `once` (SPEC §7). A request a cancellation closed without a frame
-/// (`mcp.cancel`, a worker restart) has none.
-pub async fn allowed_moves_without_result(db: &PgPool) -> sqlx::Result<Vec<PendingRow>> {
+/// Requests of `kind` (`move`, `publish`) closed without a result that the owner allowed: the
+/// session's feed has its `approval.response` with `once` (SPEC §7). A request a cancellation
+/// closed without a frame (`mcp.cancel`, a worker restart) has none.
+pub async fn allowed_without_result(db: &PgPool, kind: &str) -> sqlx::Result<Vec<PendingRow>> {
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests p
-         WHERE p.kind = 'move' AND p.closed_at IS NOT NULL AND p.result IS NULL
+         WHERE p.kind = $2 AND p.closed_at IS NOT NULL AND p.result IS NULL
            AND EXISTS (SELECT 1 FROM events e
                        WHERE e.session_id = p.session_id AND e.type = 'approval.response'
                          AND e.payload ->> 'request_id' = p.request_id
@@ -3274,6 +3274,7 @@ pub async fn allowed_moves_without_result(db: &PgPool) -> sqlx::Result<Vec<Pendi
          ORDER BY p.closed_at"
     ))
     .bind(hqc_proto::frame::worker_approval::ONCE)
+    .bind(kind)
     .fetch_all(db)
     .await
 }
@@ -3297,7 +3298,7 @@ pub async fn open_requests_of_session(
 ) -> sqlx::Result<Vec<PendingRow>> {
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests
-         WHERE session_id = $1 AND closed_at IS NULL AND kind IN ('approval', 'clarify', 'move', 'secret')"
+         WHERE session_id = $1 AND closed_at IS NULL AND kind IN ('approval', 'clarify', 'move', 'secret', 'publish')"
     ))
     .bind(session_id)
     .fetch_all(db)
@@ -3310,7 +3311,7 @@ pub async fn open_requests_of_worker(
 ) -> sqlx::Result<Vec<PendingRow>> {
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests p
-         WHERE p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'worker_approval', 'move', 'secret')
+         WHERE p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'worker_approval', 'move', 'secret', 'publish')
            AND p.session_id IN (SELECT id FROM sessions WHERE worker_id = $1)"
     ))
     .bind(worker_id)

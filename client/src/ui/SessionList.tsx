@@ -31,7 +31,7 @@ import {
   IconGlobe,
   IconTrash,
 } from './icons';
-import { ROOM_MODE_LABELS, agentsLabel, formatWhen, homePath } from './labels';
+import { ROOM_MODE_LABELS, UNPUBLISH_SESSION, agentsLabel, formatWhen, homePath } from './labels';
 import { newSessionWhere } from './NewSession';
 import { MoveSession, confirmDeleteProject } from './ProjectSettings';
 import { RequestsLink } from './requests';
@@ -516,7 +516,9 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
         >
           {menu.confirm && (
             <>
-              <p class="menu-note">Delete this session forever? Messages and history go too. Files on disk stay.</p>
+              <p class="menu-note">
+                Delete this session forever? Messages and history go too. Files on disk stay. {UNPUBLISH_SESSION}
+              </p>
               <button
                 type="button"
                 role="menuitem"

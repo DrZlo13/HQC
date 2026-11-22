@@ -794,7 +794,7 @@ describe('archive from the row (T50)', () => {
     await click(root.querySelector('.menu .btn-delete'));
     const menu = root.querySelector('.ctx-menu')!;
     expect(menu.querySelector('.menu-note')!.textContent).toBe(
-      'Delete this session forever? Messages and history go too. Files on disk stay.',
+      'Delete this session forever? Messages and history go too. Files on disk stay. Pages it published stop opening.',
     );
     expect([...menu.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Delete forever', 'Cancel']);
     // The question in place of the items: no Archive beside it.
@@ -1147,7 +1147,7 @@ describe('archive mode (T50)', () => {
     ]);
 
     await click(rows()[1].querySelector('.btn-delete'));
-    expect(rows()[1].querySelector('.row-confirm')!.textContent).toBe('Delete forever?DeleteCancel');
+    expect(rows()[1].querySelector('.row-confirm')!.textContent).toBe('Delete forever? Pages it published stop opening.DeleteCancel');
     await click(rows()[1].querySelector('.btn-confirm-delete'));
     expect(api.deleteSession).toHaveBeenCalledWith('older');
     expect(rows()).toHaveLength(1);
@@ -2326,7 +2326,7 @@ describe('SessionList (phone)', () => {
     });
     await click(root.querySelector('.menu .btn-delete'));
     expect(root.querySelector('.menu-note')!.textContent).toBe(
-      'Delete this session forever? Messages and history go too. Files on disk stay.',
+      'Delete this session forever? Messages and history go too. Files on disk stay. Pages it published stop opening.',
     );
     await click(root.querySelector('.btn-confirm-delete'));
     expect(api.deleteSession).toHaveBeenCalledWith('cave');

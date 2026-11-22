@@ -6,7 +6,7 @@ import type { Api } from './api';
 import { dataUrl, heicToJpeg } from './heic';
 import type { Artifact } from './proto';
 
-type Source = Pick<Api, 'artifact' | 'artifactLink'>;
+type Source = Pick<Api, 'artifact' | 'artifactLink' | 'unpublishArtifact'>;
 
 /** A link this close to its expiry is not handed out any more. */
 const MARGIN_MS = 30_000;
@@ -42,6 +42,12 @@ export class ArtifactStore {
       p.catch(() => this.metas.delete(id));
     }
     return p;
+  }
+
+  /** The owner unpublishes a `site` (SPEC 0.209); its metadata is asked for again. */
+  async unpublish(id: string): Promise<void> {
+    await this.api.unpublishArtifact(id);
+    this.metas.delete(id);
   }
 
   /** The cached signed link if it still lives, without asking the hub: an image shown again

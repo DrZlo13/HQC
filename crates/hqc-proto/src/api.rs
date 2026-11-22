@@ -935,6 +935,10 @@ pub struct Artifact {
     /// Hex sha256 of the content.
     pub sha256: String,
     pub created_at: DateTime<Utc>,
+    /// The public link of a published `site` (`hqc_publish`, since SPEC 0.209), in `GET
+    /// /api/artifacts/{id}`; absent while it is not published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
 }
 
 /// `GET /api/artifacts/{id}/url`: a signed link valid until `expires_at` (SPEC §12).
@@ -984,7 +988,8 @@ pub struct OpenRequest {
     pub session_id: Uuid,
     pub request_id: String,
     /// `approval` | `clarify` | `worker_approval` | `move` (an agent's `hqc_move`, SPEC §7) |
-    /// `follow` (a move after the transcript, SPEC §9.2).
+    /// `follow` (a move after the transcript, SPEC §9.2) | `publish` (an agent's `hqc_publish`,
+    /// since SPEC 0.209).
     pub kind: String,
     /// `<project-slug>/<session-slug>` of the request's session.
     pub address: String,
@@ -1510,6 +1515,10 @@ mod tests {
         roundtrip::<WorkspaceKeyList>(include_str!("../examples/wire/api.workspace.keys.json"));
         let a: Artifact = roundtrip(include_str!("../examples/wire/api.artifact.json"));
         assert_eq!(a.kind, crate::event::ArtifactKind::Image);
+        assert_eq!(a.public_url, None);
+        let site: Artifact = roundtrip(include_str!("../examples/wire/api.artifact.site.json"));
+        assert_eq!(site.kind, crate::event::ArtifactKind::Site);
+        assert!(site.public_url.is_some());
         roundtrip::<ArtifactUrl>(include_str!("../examples/wire/api.artifact.url.json"));
         let cl: CandidateList = roundtrip(include_str!("../examples/wire/api.candidates.json"));
         assert_eq!(cl.candidates.len(), 2);

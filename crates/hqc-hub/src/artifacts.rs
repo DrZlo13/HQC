@@ -944,14 +944,27 @@ pub fn is_artifact_host(cfg: &ArtifactConfig, headers: &HeaderMap) -> bool {
         .is_some_and(|want| host_is(&want, headers))
 }
 
-/// The `Host` of the request is `want` (`host[:port]`, lowercase; `:443` is no port).
+/// The `Host` of the request names the host of `want` (`host[:port]`). Compared by the name
+/// alone, lowercase, without a port or a trailing dot: a proxy routes `pages.example.net:8443`
+/// and `pages.example.net.` to the hub as `pages.example.net`, and such a request must not miss
+/// the content domain's own routes for the hub's authenticated ones.
 pub(crate) fn host_is(want: &str, headers: &HeaderMap) -> bool {
-    let host = headers
+    headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
-        .map(|h| h.trim().to_ascii_lowercase());
-    let strip = |h: String| h.strip_suffix(":443").map(String::from).unwrap_or(h);
-    host.map(strip) == Some(strip(want.to_string()))
+        .is_some_and(|h| host_name(h) == host_name(want))
+}
+
+/// `host[:port]` as a bare name: lowercase, no port, no trailing dot (an IPv6 literal keeps its
+/// brackets).
+pub(crate) fn host_name(h: &str) -> String {
+    let h = h.trim().to_ascii_lowercase();
+    let name = if h.starts_with('[') {
+        h.split_inclusive(']').next().unwrap_or("").to_string()
+    } else {
+        h.split(':').next().unwrap_or("").to_string()
+    };
+    name.trim_end_matches('.').to_string()
 }
 
 /// A text error for the content routes: they are opened by browsers and `<img>`, not the API.
@@ -1133,6 +1146,30 @@ pub fn upload_body_limit(cfg: &ArtifactConfig) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_host_is_matched_by_its_name_alone() {
+        let h = |v: &str| {
+            let mut m = HeaderMap::new();
+            m.insert(header::HOST, v.parse().unwrap());
+            m
+        };
+        for v in [
+            "pages.example.net",
+            "Pages.Example.NET",
+            "pages.example.net:443",
+            "pages.example.net:8443",
+            "pages.example.net.",
+            "pages.example.net.:8443",
+        ] {
+            assert!(host_is("pages.example.net", &h(v)), "{v}");
+        }
+        assert!(host_is("pages.example.net:443", &h("pages.example.net")));
+        assert!(!host_is("pages.example.net", &h("hqc.example.net")));
+        assert!(!host_is("pages.example.net", &h("xpages.example.net")));
+        assert!(!host_is("pages.example.net", &HeaderMap::new()));
+        assert_eq!(host_name("[::1]:8080"), "[::1]");
+    }
+
     use super::*;
 
     /// T53: a store on the root's device is reported in a container only; an unwritable

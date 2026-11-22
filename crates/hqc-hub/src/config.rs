@@ -144,12 +144,16 @@ fn check_publish_base(a: &ArtifactConfig, public_origins: &[String]) -> anyhow::
     let Some(host) = a.publish_host() else {
         return Ok(());
     };
-    if a.public_host().as_deref() == Some(host.as_str()) {
+    // Compared by the bare name, as requests are routed (`artifacts::host_is`).
+    let name = crate::artifacts::host_name(&host);
+    if a.public_host()
+        .is_some_and(|h| crate::artifacts::host_name(&h) == name)
+    {
         bail!("HQC_PUBLISH_BASE: the publication domain must not be the artifact domain");
     }
     if public_origins
         .iter()
-        .any(|o| host_of(o).as_deref() == Some(host.as_str()))
+        .any(|o| host_of(o).is_some_and(|h| crate::artifacts::host_name(&h) == name))
     {
         bail!("HQC_PUBLISH_BASE: the publication domain must not be the hub's own");
     }

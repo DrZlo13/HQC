@@ -479,8 +479,14 @@ export function callLine(tool: string, argsPreview: string): { shell: boolean; t
     const more = lines.slice(1).filter((l) => l.trim()).length;
     return { shell: true, text: oneLine(lines[0], 400), more: more || undefined, cut: read?.cut || undefined };
   }
+  return { shell: false, text: oneLine(callLineText(args), 400) };
+}
+
+/** What `callLine` writes for a call that is not a command, before it cuts it to one line: the
+ *  value of the first brief key, else the fields. */
+export function callLineText(args: Record<string, unknown>): string {
   const key = BRIEF_KEYS.find((k) => typeof args[k] === 'string' && args[k]);
-  return { shell: false, text: oneLine(key ? String(args[key]) : fieldsLine(args), 400) };
+  return key ? String(args[key]) : fieldsLine(args);
 }
 
 /** An object's fields on one line, each as Claude Code 2.1.325 shows a field of an MCP tool's
@@ -639,10 +645,14 @@ export function cutJson(s: string): { value: unknown; cut: boolean } | undefined
 
 /** A call's arguments as its opened row shows them: `args_preview` read as far as it goes
  *  (cut at 4 KB, SPEC §4) and written as indented JSON, the lines of a string each on a line of
- *  its own. `cut`: the preview was cut. Undefined if it is not JSON: then it is shown as it is. */
-export function argsText(argsPreview: string): { text: string; cut: boolean } | undefined {
+ *  its own, without the fields named in `skip`. `cut`: the preview was cut. Undefined if it is
+ *  not JSON: then it is shown as it is. */
+export function argsText(argsPreview: string, skip: string[] = []): { text: string; cut: boolean } | undefined {
   const read = cutJson(argsPreview);
-  return read && { text: indentedJson(read.value, ''), cut: read.cut };
+  if (!read) return undefined;
+  const value =
+    skip.length && isRecord(read.value) ? Object.fromEntries(Object.entries(read.value).filter(([k]) => !skip.includes(k))) : read.value;
+  return { text: indentedJson(value, ''), cut: read.cut };
 }
 
 function indentedJson(v: unknown, indent: string): string {
@@ -693,14 +703,17 @@ export interface ChangePart {
   diff: boolean;
 }
 
-const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+export const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** Tools whose card and row show what they change (`fileChange`), not their arguments. */
+export const CHANGE_TOOLS = ['Edit', 'MultiEdit', 'Write'];
 
 /** What an Edit, a MultiEdit or a Write changes, from its call's `args_preview`: a diff
  *  per edit (`old_string` → `new_string`), the content of a Write. `cut`: the preview is cut,
  *  so the last part may end early and later ones are missing. Undefined for other tools and
  *  for arguments without a change. */
 export function fileChange(tool: string, argsPreview: string): { parts: ChangePart[]; cut: boolean } | undefined {
-  if (tool !== 'Edit' && tool !== 'MultiEdit' && tool !== 'Write') return undefined;
+  if (!CHANGE_TOOLS.includes(tool)) return undefined;
   const read = cutJson(argsPreview);
   if (!read || !isRecord(read.value)) return undefined;
   const args = read.value;

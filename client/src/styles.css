@@ -4350,7 +4350,8 @@ a.relay-peer {
   font-variant-numeric: tabular-nums;
 }
 
-.perm-what {
+.perm-what,
+.perm-args {
   margin: 0 16px;
   border-radius: 8px;
   background: var(--code);
@@ -4358,7 +4359,8 @@ a.relay-peer {
   overflow-x: auto;
 }
 
-.perm-what pre {
+.perm-what pre,
+.perm-args pre {
   margin: 0;
   padding: 12px 14px;
   font: 13px/1.6 var(--mono);
@@ -4371,6 +4373,24 @@ a.relay-peer {
 
 .perm-prompt {
   color: var(--muted);
+}
+
+/* A Bash call's other fields sit under its command. */
+.perm-what + .perm-args,
+.perm > .perm-lines + .perm-args,
+.perm > .perm-cut + .perm-args {
+  margin-top: 8px;
+}
+/* The mark that a command or the arguments were cut, or that their box scrolls, under their frame
+   or inside it. */
+.perm > .perm-cut,
+.perm > .perm-lines {
+  margin: 6px 16px 0;
+}
+.perm-args .perm-cut,
+.perm-args .perm-lines {
+  margin: 0;
+  padding: 0 14px 10px;
 }
 
 /* What an Edit, a MultiEdit or a Write changes: a code block per edit. */
@@ -4390,6 +4410,7 @@ a.relay-peer {
   overflow-y: auto;
 }
 .perm-cut,
+.perm-lines,
 .tool-cut {
   margin-top: 6px;
   font-size: 12.5px;
@@ -4432,6 +4453,20 @@ a.relay-peer {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.perm-grants {
+  margin: 4px 16px 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.perm-grants li + li {
+  margin-top: 2px;
+}
+.perm-grants code {
+  overflow-wrap: anywhere;
 }
 
 .perm-more {
@@ -4569,7 +4604,8 @@ a.relay-peer {
 .perm-sheet .perm-sub {
   font-size: 13px;
 }
-.perm-sheet .perm-what pre {
+.perm-sheet .perm-what pre,
+.perm-sheet .perm-args pre {
   font-size: 14px;
 }
 .perm-sheet .perm-note {

@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hqc_proto::event::{
-    ApiRetry, ApprovalCanonical, Author, CancelReason, ClarifyAction, ClarifyAnswer,
-    ClarifyQuestion, ContextCompacted, Event, EventKind, LiveKind, LiveSubagent, SessionState,
+    ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
+    ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, GrantPlace, LiveKind,
+    LiveSubagent, OptionGrant, SessionState,
 };
 use hqc_proto::frame::{Activity, LeftoverCommand, Runtime, SessionInput, SlashCommand};
 use serde_json::{json, Value};
@@ -16,9 +17,9 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::engine::{
-    next_cron_fire, record_event_id, resurrected_cron_jobs, Action, Core, COMMAND_TEXT_LIMIT,
-    CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT, OPTION_PREVIEW_LIMIT,
-    OPTION_PREVIEW_TRUNCATED, PROMPT_INJECTION_TEXT,
+    args_preview, grant_rules, next_cron_fire, record_event_id, resurrected_cron_jobs, Action,
+    Core, COMMAND_TEXT_LIMIT, CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT,
+    OPTION_PREVIEW_LIMIT, OPTION_PREVIEW_TRUNCATED, PROMPT_INJECTION_TEXT,
 };
 use super::process::{CommandSpec, OsSpawner, Sig};
 use super::scripted::ScriptedClaude;
@@ -398,6 +399,25 @@ fn approval_options(evs: &[AdapterEvent]) -> Vec<(String, ApprovalCanonical)> {
         .expect("approval.request")
 }
 
+/// The `args_preview` and the options of the first `approval.request`.
+fn approval_card(evs: &[AdapterEvent]) -> (Option<String>, Vec<ApprovalOption>) {
+    events(evs)
+        .iter()
+        .find_map(|e| match &e.kind {
+            EventKind::ApprovalRequest {
+                args_preview,
+                options,
+                ..
+            } => Some((args_preview.clone(), options.clone())),
+            _ => None,
+        })
+        .expect("approval.request")
+}
+
+fn grant_of(options: &[ApprovalOption], id: &str) -> Option<OptionGrant> {
+    options.iter().find(|o| o.id == id).unwrap().grant.clone()
+}
+
 /// T13 (SPEC §8.1): when the turn ends the adapter reads the transcript and reports its
 /// last `ai-title` before `TurnEnded` (a tick during the turn may read it earlier).
 #[tokio::test]
@@ -511,7 +531,8 @@ async fn permission_allow_once() {
             ("deny".into(), ApprovalCanonical::Deny),
         ]
     );
-    let evs = events(&evs);
+    let evs_all = evs;
+    let evs = events(&evs_all);
     let call = evs
         .iter()
         .find_map(|e| match &e.kind {
@@ -526,6 +547,28 @@ async fn permission_allow_once() {
     assert_eq!(call.0, "toolu_01VkowPqKRFd3dYT6tKPSUwo");
     assert_eq!(call.1, "Bash");
     assert!(call.2.contains("touch hqc-marker-once"));
+    // The card carries the call's arguments, as the call does (SPEC 0.207), and says what
+    // `session` and `always` grant.
+    let (args, options) = approval_card(&evs_all);
+    assert_eq!(args.as_deref(), Some(call.2.as_str()));
+    assert_eq!(grant_of(&options, "once"), None);
+    assert_eq!(grant_of(&options, "deny"), None);
+    assert_eq!(
+        grant_of(&options, "session"),
+        Some(OptionGrant {
+            place: GrantPlace::Session,
+            rules: vec!["Bash(touch hqc-marker-once *)".into()],
+            exact: true,
+        })
+    );
+    assert_eq!(
+        grant_of(&options, "always"),
+        Some(OptionGrant {
+            place: GrantPlace::LocalSettings,
+            rules: vec!["Bash(touch hqc-marker-once *)".into()],
+            exact: false,
+        })
+    );
     let req = evs
         .iter()
         .find_map(|e| match &e.kind {
@@ -626,6 +669,29 @@ async fn permission_always_sends_only_local_add_rules() {
     assert_eq!(perms.len(), 1);
     want[1]["response"]["response"]["updatedPermissions"] = Value::Array(perms);
     assert_eq!(without_uuids(h.claude.stdin()), want);
+    // What `always` says it writes is what it sends (SPEC 0.207).
+    let (_, options) = approval_card(&evs);
+    assert_eq!(
+        grant_of(&options, "always"),
+        Some(OptionGrant {
+            place: GrantPlace::LocalSettings,
+            rules: vec!["Bash(touch hqc-marker *)".into()],
+            exact: false,
+        })
+    );
+}
+
+/// A rule too long for the card is cut on a char boundary and says so; a whole one is as it is.
+#[test]
+fn a_cut_grant_rule_ends_with_an_ellipsis() {
+    let whole = "Bash(ls)".to_string();
+    // 100 three-byte chars: 300 bytes, the 256-byte limit falls inside a char.
+    let long = format!("Bash({})", "日".repeat(100));
+    let rules = grant_rules([whole.clone(), long.clone()]);
+    assert_eq!(rules[0], whole);
+    assert!(rules[1].ends_with('…'));
+    assert!(rules[1].len() <= 256);
+    assert!(long.starts_with(rules[1].trim_end_matches('…')));
 }
 
 #[tokio::test]
@@ -2439,6 +2505,40 @@ fn approval_errors_and_restricted_always() {
     assert_eq!(core.session_rules(), 2);
     // Answered: a second answer is an error.
     assert!(core.answer_approval("r1", "once", None).is_err());
+}
+
+/// A request carries its call's arguments also when a subagent asks (SPEC 0.207), and an
+/// option's grant is the rules the answer acts on: restricted, `session` still lists them and
+/// there is no `always`.
+#[test]
+fn a_request_carries_the_call_and_the_grants() {
+    let fx = fixture!("permission-allow");
+    let mut v = lines(fx.stream)
+        .into_iter()
+        .find(|v| v["type"] == "control_request")
+        .unwrap();
+    v["request_id"] = json!("r1");
+    v["request"]["agent_id"] = json!("a8b8fdc3b4a031d4f");
+    let want = args_preview("Bash", &v["request"]["input"]);
+    let mut core = Core::new(Uuid::now_v7(), true);
+    let a = core.on_line(&v.to_string());
+    let (args, options) = match &a[0] {
+        Action::Emit(AdapterEvent::Event(e)) => match &e.kind {
+            EventKind::ApprovalRequest {
+                args_preview,
+                options,
+                ..
+            } => (args_preview.clone(), options.clone()),
+            _ => panic!(),
+        },
+        _ => panic!(),
+    };
+    assert_eq!(args, Some(want));
+    assert!(options.iter().all(|o| o.id != "always"));
+    assert_eq!(
+        grant_of(&options, "session").unwrap().rules,
+        ["Bash(touch hqc-marker-once *)"]
+    );
 }
 
 fn policy(allow: &[&str], deny: &[&str]) -> Arc<crate::permissions::Policy> {

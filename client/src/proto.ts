@@ -34,6 +34,8 @@ export type SessionState = (typeof SESSION_STATES)[number] | Unknown;
 export const CANONICALS = ['once', 'session', 'always', 'deny', 'deny_always'] as const;
 export type ApprovalCanonical = (typeof CANONICALS)[number] | Unknown;
 
+export const GRANT_PLACES = ['session', 'local_settings'] as const;
+export type GrantPlace = (typeof GRANT_PLACES)[number] | Unknown;
 export const POLICY_HINTS = ['allow', 'deny'] as const;
 export type PolicyHint = (typeof POLICY_HINTS)[number] | Unknown;
 
@@ -244,11 +246,22 @@ export interface ApprovalOption {
   id: string;
   label: string;
   canonical: ApprovalCanonical;
+  /** What the option grants beyond this call (since SPEC 0.207). */
+  grant?: OptionGrant;
+}
+/** Where a standing allowance is kept, the rules it holds (Claude Code's `toolName` or
+ *  `toolName(ruleContent)`), and whether the exact call is allowed too. */
+export interface OptionGrant {
+  place: GrantPlace;
+  rules: string[];
+  exact: boolean;
 }
 export interface ApprovalRequest {
   request_id: string;
   tool: string;
   description: string;
+  /** The call's arguments, as `tool.call.args_preview` (since SPEC 0.207). */
+  args_preview?: string;
   options: ApprovalOption[];
   expires_at?: string;
   /** A rule of the worker's `[permissions]` matches the call (SPEC §8.1, §14). */
@@ -491,6 +504,14 @@ function arr(o: Obj, k: string): unknown[] {
   return v;
 }
 
+function parseGrant(g: Obj): OptionGrant {
+  return {
+    place: tolerantEnum(g, 'place', GRANT_PLACES),
+    rules: present(g, 'rules') ? strArr(g, 'rules') : [],
+    exact: present(g, 'exact') ? bool(g, 'exact') : false,
+  };
+}
+
 function optStrArr(o: Obj, k: string): string[] | undefined {
   return present(o, k) ? strArr(o, k) : undefined;
 }
@@ -590,12 +611,14 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     request_id: str(p, 'request_id'),
     tool: str(p, 'tool'),
     description: str(p, 'description'),
+    args_preview: optStr(p, 'args_preview'),
     options: arr(p, 'options').map((v, i) => {
       const o = obj(v, `options[${i}]`);
       return {
         id: str(o, 'id'),
         label: str(o, 'label'),
         canonical: tolerantEnum(o, 'canonical', CANONICALS),
+        grant: present(o, 'grant') ? parseGrant(obj(o.grant, `options[${i}].grant`)) : undefined,
       };
     }),
     expires_at: optStr(p, 'expires_at'),

@@ -26,6 +26,13 @@ function rule(selector: string): Record<string, string> {
   throw new Error(`no rule ${selector}`);
 }
 
+describe('the permission card', () => {
+  it('shows the arguments of a call in a frame that scrolls when it is tall', () => {
+    expect(rule('.perm-what pre, .perm-args pre')['max-height']).toBe('240px');
+    expect(rule('.perm-what pre, .perm-args pre')['overflow-y']).toBe('auto');
+  });
+});
+
 describe('layout widths', () => {
   it('the chat column has no minimum and the session column narrows with the window', () => {
     // T49: project bar 72px, sidebar 280-310px unless its edge was dragged (`--list-w`), and

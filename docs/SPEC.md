@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.206, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
+Version 0.207, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -563,7 +563,7 @@ the client renders only them. The "source" column is the component that produces
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (short error text; since 0.194 an opened call row in the client shows it only when it is not the start of `result_preview`, which the Claude Code adapter cuts from the same text), `duration_ms?`, `artifact_id?` (a diff or a large result, §12; since 0.180 the Claude Code adapter's whole text of a result longer than `result_preview`, its first 2 MiB, kind `text`, §8.1), `artifact_ids[]?` (since 0.180: the result's images, kind `image`, in order; absent when none, §8.1) | adapter |
-| `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind}`, `subagent?{task_id, description}` (since 0.181: the subagent that asks, §10.1; absent for the agent itself and a subagent the adapter does not know) | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; since 0.180 `reason?` — why the runtime asks (Claude Code: `decision_reason`, at most 1024 bytes), `display_name?` — the runtime's name of the tool (at most 256 bytes), both absent when blank, and `human_only?` — `true` when only a person may answer it (§8.1): its `options` are `once` and `deny`, it has no `rule_suggestions`, and the hub's `auto_approve` leaves it to the owner (§10.1); absent when false. The client shows `reason` under the card's title and names the tool by `display_name` when there is one, an MCP server's tool as `<tool> (<server>)` (the runtime's `display_name` of one drops the server); `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for; the hub drops it from a worker's event |
+| `approval.request` | `request_id`, `tool`, `description`, `args_preview?`, `options[{id, label, canonical, grant?}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind}`, `subagent?{task_id, description}` (since 0.181: the subagent that asks, §10.1; absent for the agent itself and a subagent the adapter does not know) | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons; `args_preview` (since 0.207) — the call's arguments as `tool.call.args_preview` carries them (the same limit and form), so a card that does not stand right after its call (a subagent's, another session's, one in the Requests list) shows the whole command and every argument; absent from an older worker; `grant` of an option (since 0.207) — what choosing it grants besides this call: `{place, rules?[], exact?}`, `place` ∈ `session` (the worker's session rules, until the process ends) / `local_settings` (Claude Code writes the rules to `.claude/settings.local.json` at the root of the git repository containing the session's cwd, §8.1), `rules` — as Claude Code writes a rule, `toolName` or `toolName(ruleContent)`, at most 10, each at most 256 bytes (a rule cut there ends with `…`), `exact` — the exact call is allowed too; no field — the option grants nothing more (`once`, `deny`) or the worker does not say; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; since 0.180 `reason?` — why the runtime asks (Claude Code: `decision_reason`, at most 1024 bytes), `display_name?` — the runtime's name of the tool (at most 256 bytes), both absent when blank, and `human_only?` — `true` when only a person may answer it (§8.1): its `options` are `once` and `deny`, it has no `rule_suggestions`, and the hub's `auto_approve` leaves it to the owner (§10.1); absent when false. The client shows `reason` under the card's title and names the tool by `display_name` when there is one, an MCP server's tool as `<tool> (<server>)` (the runtime's `display_name` of one drops the server); `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for; the hub drops it from a worker's event |
 | `approval.response` | `request_id`, `option_id`, `by` (user id or `auto`), `message?` (the user's text instead of the call, only with a `deny`/`deny_always` option, §10.1) | client, or the hub with `auto_approve` |
 | `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived, since 0.180 withdrawn — the runtime withdrew its request, §8.1; the client says "withdrawn") | adapter, worker or hub. An answer from another device is not a cancellation: the first answer closes the request, the second gets `409 request_closed` (§10.1) |
 | `clarify.request` | `request_id`, `questions[{id, text, header?, options?: [string], option_descriptions?: [string], option_previews?: [string], multi?: bool, required?: bool, input?: "integer" \| "number"}]`, `subagent?{task_id, description}` (since 0.181, as on `approval.request`) | Claude Code adapter: the `AskUserQuestion` tool arrives as `can_use_tool`, the answer goes into `updatedInput.answers` (verified on 2.1.307 with `--permission-prompt-tool stdio`, §8.1). Since 0.69 `header` is the question's short label and `option_descriptions` what each option means, in the order and number of `options`, `""` for an option without one; each is absent when empty. Since 0.199 `option_previews` is each option's mockup (an ASCII sketch, code, a config) by the same rule, cut by the worker to 8 KiB with `\n… (truncated)` after it. The client shows `header` above the question, each description under its option, and an "Other" field: its text is the answer (with `multi`, an item of the array beside the checked labels); "Other" chosen with nothing typed is sent as `"Other"`, as the VS Code tab does. As in the tab, "Answer" stays disabled until every question has an answer: an option picked, a text typed (not only spaces) or "Other" chosen. A question with a preview shows it as plain text in `<pre>`, never rendered as markdown or HTML, not wrapped and scrolling sideways: on a desktop in a column beside the options, the preview of the option last under the pointer while the pointer is over the question (the "Other" row lets it go) or of the option with the keyboard focus (kept while the focus is in the preview), else of the first chosen one, else the first one that has a preview, the column as tall as the tallest preview of the question; on a phone under each chosen option that has one. ACP agents have no source for it. Since 0.180 also an MCP server's request for input (Claude Code: `elicitation`, §8.1), with `server?` — the server that asks, `message?` — its text, `url?` — the page it sends the person to, then with no `questions`; a question of its form carries `required: true` for a field the server requires and `input` (`integer`, `number`) for a free-text field whose answer must read as one, both absent otherwise and in the agent's questions; the client heads the card "<server> asks", shows the text above the questions, "required" beside a required question's header, the link (only an http, https or mailto one as a link, labelled with the address it opens, a host in its punycode form), no "Other", the submit button ("Done" for a link, the card then saying "Done"; unlike the agent's questions it waits only for what the form's schema says, which a server on the MCP SDK checks the answer against, refusing one that does not match (§8.1): every `required` question answered, an `integer` answer an optional minus and digits, at most 2^53 − 1 in size, a `number` one written in decimal (an optional minus, digits with an optional point, an optional exponent) that JavaScript's `Number()` reads as a finite number; a field neither required nor answered may stay empty) and "Decline" |
@@ -628,7 +628,7 @@ Rules:
 - Events are tolerant: unknown fields in `payload` are ignored; an event of an unknown
   `type` is parsed as "unknown" and stored and forwarded as is; clients do not
   render it but do not crash; an unknown enum value inside an event
-  (`state`, `canonical`, `mode`, `kind`, `reason`, `policy_hint`, since 0.180 `action`) reads as "unknown". An event
+  (`state`, `canonical`, `mode`, `kind`, `reason`, `policy_hint`, since 0.180 `action`, since 0.207 `place` of an option's `grant`) reads as "unknown". An event
   of a known `type` with an invalid `payload` is an error.
 
 - The user's files always go into `user.message.artifact_ids[]`, including without text
@@ -4106,7 +4106,12 @@ its directory list (checked on 2.1.307). If there are no such items, `always`
 is not offered; `session` → allow and a rule in the adapter
 until the process ends; for `Bash` and other tools that run commands, a suggestion without
 `ruleContent` ("the whole tool") is not turned into a session rule — only the exact input is
-remembered. Under `--restricted` (§8.4) local settings do not apply, so
+remembered. Since 0.207 the request carries `args_preview` (the call's arguments, as `tool.call`
+does, also for a subagent's request) and a `grant` on `session` (`place: session`, `exact: true`,
+`rules` — the rules of the suggestions the adapter takes into a session rule, in Claude Code's
+rule form: for `Bash` `Bash(<prefix> *)` or `Bash(<command>)`, for another tool `toolName`) and on
+`always` (`place: local_settings`, `rules` — the rules it sends in `updatedPermissions`), so the
+card says what each grants. Under `--restricted` (§8.4) local settings do not apply, so
 `always` maps to `session`. The hub stores no permissions of Claude Code's own; its only
 standing ones are hqc's allow rules of a folder (since 0.52, below). The
 `AskUserQuestion` tool arrives through the same `can_use_tool`: the adapter turns it into
@@ -5562,7 +5567,31 @@ shown as far as it goes and marked cut. An Edit with `replace_all` is marked "Al
 A call's row in the feed, opened, shows the same change in place of its arguments, and its
 result only if the call failed. Another call's opened row shows its arguments as indented JSON,
 each line of a string on a line of its own; a preview cut at 4 KB is shown as far as it goes and
-marked cut. The request goes to **the worker owner**; a collaborator with `write` sees the request
+marked cut. Since 0.207 the card shows what is asked whole: a Bash command in its frame as it will
+run (the lines of a script, not the last one), from the request's `args_preview`, else from the
+call right before it; the subtitle is the tool and the CLI's description. The frame is at most
+240 px high and scrolls inside, its scrollbar hidden on macOS and iOS, so when the command is
+taller than it (measured after the render and when the frame is resized: a long line wraps, a
+phone is narrower) a line under it says "N lines: the box scrolls" ("The command scrolls in the
+box" for a single line; "The call scrolls in the box" for the one line of another tool's call).
+A command cut at 4 KB is marked as cut, and only then: when the cut is in another field the
+command is whole and the arguments under it carry the cut mark. A Bash call's other fields
+(`timeout`, `run_in_background`…) stand under the command as indented JSON. The call of any other
+tool, except Edit, MultiEdit and Write, shows all its arguments as indented JSON (as an opened row
+of the feed) instead of the frame when it has more than one, or one whose line, as the row of the
+feed writes it, is longer than 400 characters (the row cuts it there) or has a string with a line
+break (a script in `code`); one short argument stays in the frame. The block has the same 240 px
+box and, when it scrolls, a line under it, "The arguments scroll in the box". A request from an
+older worker, which has no `args_preview` and no call before it, keeps its description line, with
+the tool's arguments, in the subtitle. A path outside the workspace is looked for in all
+arguments. Under the buttons a line per option that has a `grant` says what it grants (`Always in
+this session — Bash(npm test *) and this exact call, until the agent's process ends`; `Always
+allow — writes Bash(npm test *) to .claude/settings.local.json at the root of the session's git
+repository (outside one, of its folder): every Claude Code session there`: the file is not the
+folder's, nor the project's, which may have several folders, and the card cannot know the
+repository's root), and the button's tooltip says the same in a sentence ("…until the agent's
+process ends."); an option without a `grant` has its label for a tooltip and no line.
+The request goes to **the worker owner**; a collaborator with `write` sees the request
 but cannot answer it. Since 0.180 so does an MCP server's `clarify.request` (with `server`, §4,
 §8.1): the server runs with the worker owner's credentials (§11.1), and a collaborator's answer, say
 an accepted deploy confirmation, would be given in the owner's name; anyone else gets `403`. The
@@ -6977,6 +7006,24 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.206 → 0.207 (the permission card says what it asks and what it grants)
+§4, §8.1, §10.1: the card showed a multi-line command as its first line when it stood right after
+its call and as its last line otherwise (a subagent's request, another session's card, the
+Requests list), so a script was allowed unseen; an MCP call showed the first of a list of known
+keys (`message` of `{to, message, channel}`) with the rest as JSON in the subtitle or not at all;
+"Always allow" and "Always in this session" did not say what they allow. `approval.request` now
+carries `args_preview`, the call's arguments as `tool.call` does, and an option may carry a
+`grant` (`place` `session` / `local_settings`, `rules`, `exact`); `place` joins the tolerant
+enums. The card shows a Bash command whole as it will run (with its line count when its box
+scrolls, and the cut mark only when the command itself is cut), its other fields under it, every
+argument of another tool (not Edit, MultiEdit, Write) with more than one or with one that the
+row's line would cut or run together, a note when the box of the arguments scrolls, and a line per
+option with a grant under the buttons, naming `.claude/settings.local.json` at the root of the
+session's git repository and the end of the agent's process; a rule of a grant cut to 256 bytes
+ends with `…` within them; a request from an older worker, which has no arguments, keeps its
+description line.
+0.186–0.199 are taken by other open branches.
 
 ### 0.205 → 0.206 (the chat header reworked)
 §6 client layout and `permission_mode`, §7.1.1, §17.3: the chat header's "More" menu held

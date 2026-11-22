@@ -4,11 +4,12 @@
 // call. Answered or cancelled, it folds into a row "$ ls / · allowed". On a phone the open
 // request is a bottom sheet in place of the composer.
 
-import { useEffect, useRef, useState } from 'preact/hooks';
+import type { ComponentChildren } from 'preact';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { ApprovalOption, EventOf, RequestSubagent, RuleSuggestion } from '../proto';
 import { ruleError } from '../rules';
 import type { ChatActions, FolderActions } from './cards';
-import { callArgs, callLine, callPaths, fileChange, outsidePath, relativePaths, toolLabel } from './feed';
+import { CHANGE_TOOLS, argsText, callLine, callLineText, callPaths, cutJson, fileChange, isRecord, outsidePath, relativePaths, toolLabel } from './feed';
 import { CodeBlock } from './Markdown';
 import { useAction, useNow } from './hooks';
 import { IconCheck, IconCross, IconInfo, IconKey, IconShield } from './icons';
@@ -40,7 +41,31 @@ export function asker(subagent: RequestSubagent | undefined, agent: string): str
   return subagent ? `Subagent “${subagent.description}”` : agent;
 }
 
-/** What a request is about: the command or path, the CLI's description, the paths touched. */
+/** The length at which `callLine` cuts a call's one line: a single argument that would be cut
+ *  there is shown as a block. */
+const ONE_LINE_LIMIT = 400;
+
+/** Whether the content of a box (`max-height`, scrolls inside) is taller than the box, measured
+ *  after a render that changes `dep`, before it is painted, and when the box changes its size
+ *  (a phone turned, a window resized). */
+function useScrolls(box: { current: HTMLElement | null }, dep: unknown): boolean {
+  const [scrolls, setScrolls] = useState(false);
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el) return setScrolls(false);
+    const measure = () => setScrolls(el.scrollHeight > el.clientHeight);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const watch = new ResizeObserver(measure);
+    watch.observe(el);
+    return () => watch.disconnect();
+  }, [dep]);
+  return scrolls;
+}
+
+/** What a request is about: the command or path, the CLI's description, the paths touched, and
+ *  the arguments the card shows whole. The arguments come from the request itself (SPEC 0.207),
+ *  else from the call right before it. */
 export function requestView(event: EventOf<'approval.request'>, call?: EventOf<'tool.call'>) {
   const p = event.payload;
   // A worker's own request (SPEC §10.2): its description is the whole story.
@@ -49,21 +74,122 @@ export function requestView(event: EventOf<'approval.request'>, call?: EventOf<'
     .split('\n')
     .map((s) => s.trim())
     .filter(Boolean);
-  let what = call ? callLine(p.tool, call.payload.args_preview).text : '';
+  const preview = p.args_preview ?? call?.payload.args_preview;
+  const read = preview !== undefined ? cutJson(preview) : undefined;
+  const rec = read && isRecord(read.value) ? read.value : undefined;
+  // A Bash call without a command in its arguments is told by the description.
+  let what = preview !== undefined && (p.tool !== 'Bash' || typeof rec?.command === 'string') ? callLine(p.tool, preview).text : '';
   if (!what && !worker && lines.length > 1) what = lines[lines.length - 1];
   if (!what && !worker && p.tool === 'Bash') what = lines[0] ?? '';
-  const description = worker ? '' : lines.filter((l) => l !== what).join(' ');
-  const args = call
-    ? callArgs(call.payload.args_preview)
-    : p.tool === 'Bash'
-      ? { command: what }
-      : { file_path: what };
+  // A command is shown whole, as it will run; its description is the call's own.
+  const command = !worker && p.tool === 'Bash' && typeof rec?.command === 'string' && rec.command.trim() ? rec.command : undefined;
+  // The fields the card shows as indented JSON: every one of a call with several, what a Bash
+  // call has besides its command and description.
+  const skip = command !== undefined ? ['command', 'description'] : [];
+  const fields = rec && !worker && !CHANGE_TOOLS.includes(p.tool) ? Object.keys(rec).filter((k) => !skip.includes(k)) : [];
+  // One field is told by `callLine`, unless that would cut it: a text longer than the line, or
+  // one with a line break (a script) that the line would run together.
+  const longOnly =
+    fields.length === 1 &&
+    !!rec &&
+    (callLineText(rec).length > ONE_LINE_LIMIT || Object.values(rec).some((x) => typeof x === 'string' && x.includes('\n')));
+  const showArgs = command !== undefined ? fields.length > 0 : p.tool !== 'Bash' && (fields.length > 1 || longOnly);
+  // The preview ends where the cut value ends: the last key of the record is the cut one.
+  const cutCommand = command !== undefined && !!read?.cut && Object.keys(rec!).at(-1) === 'command';
+  const commandLines = command !== undefined ? command.replace(/\n$/, '').split('\n').length : 0;
+  const description = worker
+    ? ''
+    : command !== undefined
+      ? typeof rec?.description === 'string' && rec.description !== command
+        ? rec.description.split('\n').map((s) => s.trim()).filter(Boolean).join(' ')
+        : ''
+      : lines.filter((l) => l !== what && (preview === undefined || !l.startsWith(`${p.tool} {`))).join(' ');
+  const text = worker ? p.description : what;
+  const args = rec ?? (p.tool === 'Bash' ? { command: what } : { file_path: what });
   return {
     worker,
     shell: p.tool === 'Bash' && !!what,
-    what: worker ? p.description : what,
+    what: text,
+    // What the frame shows: the whole command, else the one line; with several arguments, none.
+    frame: showArgs && command === undefined ? '' : command ?? text,
+    cutCommand,
+    commandLines,
+    preview,
+    showArgs,
+    skip,
     description,
     paths: worker ? [] : callPaths(p.tool, args),
+  };
+}
+
+/** A call's arguments as indented JSON in a `pre` (the opened row of the feed, the permission
+ *  card), the cut mark under it unless `cutMarked` says the cut was in a field not shown here;
+ *  without the fields in `skip`. Not JSON: as it is. */
+export function CallArgs({
+  preview,
+  skip,
+  pre,
+  cutClass,
+  cutMarked = true,
+  scrollNote,
+}: {
+  preview: string;
+  skip?: string[];
+  pre: string;
+  cutClass: string;
+  cutMarked?: boolean;
+  scrollNote?: string;
+}) {
+  const a = argsText(preview, skip);
+  const box = useRef<HTMLPreElement>(null);
+  const scrolls = useScrolls(box, a?.text ?? preview);
+  return (
+    <>
+      <pre class={pre} ref={box}>
+        {a?.text ?? preview}
+      </pre>
+      {scrollNote && scrolls && <div class="perm-lines muted">{scrollNote}</div>}
+      {cutMarked && a?.cut && <div class={`${cutClass} muted`}>The preview is cut at 4 KB: the rest of the arguments are not shown.</div>}
+    </>
+  );
+}
+
+/** What an option grants beyond this call: a sentence for its button's tooltip and the same in
+ *  elements for the line under the buttons, the rules in `code`. None for an option that says
+ *  nothing (an old worker). */
+function grantText(o: ApprovalOption): { title: string; line: ComponentChildren } | undefined {
+  const g = o.grant;
+  if (!g || g.place === 'unknown') return undefined;
+  const list = g.rules.map((r, i) => (
+    <>
+      {i > 0 && ', '}
+      <code>{r}</code>
+    </>
+  ));
+  if (g.place === 'session') {
+    const rest = g.rules.length ? (g.exact ? ' and this exact call' : '') : 'only this exact call';
+    return {
+      title: `Allows ${g.rules.length ? g.rules.join(', ') : ''}${rest} until the agent's process ends.`,
+      line: (
+        <>
+          {list}
+          {rest}, until the agent's process ends
+        </>
+      ),
+    };
+  }
+  const written = g.rules.length ? g.rules.join(', ') : 'rules';
+  // Where the CLI writes it depends on the git repository of the session's cwd, which the card
+  // cannot know (SPEC §8.1).
+  const where = "at the root of the session's git repository (outside one, of its folder)";
+  return {
+    title: `Writes ${written} to .claude/settings.local.json ${where}: every Claude Code session there.`,
+    line: (
+      <>
+        writes {g.rules.length ? list : 'rules'} to <code>.claude/settings.local.json</code> {where}: every Claude Code session
+        there
+      </>
+    ),
   };
 }
 
@@ -306,8 +432,11 @@ function PermissionCard({
   }, [replying]);
   const v = requestView(event, call);
   const name = toolName(p.tool, p.display_name);
-  // What an edit or a write changes, from the call's arguments (cut at 4 KB, SPEC §4).
-  const change = call && !v.worker ? fileChange(p.tool, call.payload.args_preview) : undefined;
+  // What an edit or a write changes, from the call's arguments (cut at 4 KB, SPEC §4): the
+  // request's own, else the call's.
+  const change = v.preview !== undefined && !v.worker ? fileChange(p.tool, v.preview) : undefined;
+  const frameBox = useRef<HTMLPreElement>(null);
+  const frameScrolls = useScrolls(frameBox, v.frame);
   const outside = outsidePath(v.paths, actions.workspaceRoot);
   const note = v.worker ? null : noteText(event, outside, actions.workspaceRoot);
   const once = p.options.find((o) => o.canonical === 'once');
@@ -362,6 +491,10 @@ function PermissionCard({
     : [name, v.description].filter(Boolean).join(' · ');
   const outcome = outcomeText(event, actions);
   const others = p.options.filter((o) => o !== once && o !== deny);
+  const grants = p.options.flatMap((o) => {
+    const g = grantText(o);
+    return g ? [[o, g] as const] : [];
+  });
   const sendReply = () => {
     if (deny && reply.trim()) answer(deny, reply.trim());
   };
@@ -417,12 +550,27 @@ function PermissionCard({
           </span>
         )}
       </div>
-      {v.what && (
+      {v.frame && (
         <div class="perm-what">
-          <pre>
+          <pre ref={frameBox}>
             {v.shell && <span class="perm-prompt">$ </span>}
-            {v.what}
+            {v.frame}
           </pre>
+        </div>
+      )}
+      {frameScrolls && (
+        <div class="perm-lines muted">
+          {v.commandLines > 1
+            ? `${v.commandLines} lines: the box scrolls`
+            : v.commandLines
+              ? 'The command scrolls in the box'
+              : 'The call scrolls in the box'}
+        </div>
+      )}
+      {v.cutCommand && <div class="perm-cut muted">The command is cut at 4 KB: the rest is not shown.</div>}
+      {v.showArgs && v.preview !== undefined && (
+        <div class="perm-args">
+          <CallArgs preview={v.preview} skip={v.skip} pre="" cutClass="perm-cut" cutMarked={!v.cutCommand} scrollNote="The arguments scroll in the box" />
         </div>
       )}
       {change && (
@@ -447,7 +595,7 @@ function PermissionCard({
               class="btn btn-primary btn-allow"
               data-option={once.id}
               data-canonical={once.canonical}
-              title={once.label}
+              title={grantText(once)?.title ?? once.label}
               disabled={busy}
               onClick={() => answer(once)}
             >
@@ -463,7 +611,7 @@ function PermissionCard({
                 class={`btn btn-secondary ${isDeny(o) ? 'btn-deny-more' : ''}`}
                 data-option={o.id}
                 data-canonical={o.canonical}
-                title={o.label}
+                title={grantText(o)?.title ?? o.label}
                 disabled={busy}
                 onClick={() => answer(o)}
               >
@@ -499,6 +647,15 @@ function PermissionCard({
             )}
           </div>
         </div>
+      )}
+      {live && !replying && grants.length > 0 && (
+        <ul class="perm-grants muted">
+          {grants.map(([o, g]) => (
+            <li key={o.id}>
+              {optionLabel(o)} — {g.line}
+            </li>
+          ))}
+        </ul>
       )}
       {!replying && folderForm}
       {live && deny && !v.worker && !replying && (

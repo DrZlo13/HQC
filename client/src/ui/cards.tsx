@@ -17,7 +17,6 @@ import { ModelName, modelMenuItems, type ModelChoice } from './agentSettings';
 import { AttachmentView, PendingAttachments, type ViewedArtifact } from './attachments';
 import { ContextMenu } from './ContextMenu';
 import {
-  argsText,
   artifactPage,
   askTarget,
   between,
@@ -79,7 +78,7 @@ import {
 } from './labels';
 import { activityOf, elapsed, stats, Stats } from './LiveSubagents';
 import { CodeBlock, CopyButton, Markdown, markdownLine, safeHref } from './Markdown';
-import { asker, PermissionBlock } from './permission';
+import { asker, CallArgs, PermissionBlock } from './permission';
 import { PeerMessageBlock, ReplyFromBlock, ReplyToBlock, SentBlock } from './relay';
 import { firstSentences, SelectionContext } from './selection';
 
@@ -1261,7 +1260,6 @@ function ToolCallBody({
   const r = result?.payload;
   // An Edit, a MultiEdit or a Write shows its change, as its permission card does (SPEC §10.1).
   const change = call ? fileChange(call.payload.tool, call.payload.args_preview) : undefined;
-  const args = call && !change ? argsText(call.payload.args_preview) : undefined;
   return (
     <div class="tool-row-body">
       {change ? (
@@ -1275,8 +1273,7 @@ function ToolCallBody({
         call && (
           <>
             <div class="label">Arguments</div>
-            <pre class="pre">{args?.text ?? call.payload.args_preview}</pre>
-            {args?.cut && <div class="tool-cut muted">The preview is cut at 4 KB: the rest of the arguments are not shown.</div>}
+            <CallArgs preview={call.payload.args_preview} pre="pre" cutClass="tool-cut" />
           </>
         )
       )}

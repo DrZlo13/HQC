@@ -40,16 +40,17 @@ const typeInto = (el: HTMLInputElement | HTMLTextAreaElement, value: string) =>
 
 describe('rule syntax', () => {
   it('matches the hub: Bash patterns, tool names, never a whole Bash', () => {
-    for (const ok of ['Bash(python3 *)', 'Bash(git fetch:*)', 'Bash(npm test)', 'Edit', 'mcp__hqc', 'Bash(./tools/x.sh --out=a *)']) {
+    for (const ok of ['Bash(python3 *)', 'Bash(git fetch:*)', 'Bash(npm test)', 'Edit', 'mcp__hqc', 'mcp__claude-in-chrome', 'Bash(./tools/x.sh --out=a *)']) {
       expect(ruleError(ok), ok).toBeNull();
     }
-    for (const bad of ['', 'Bash', 'Bash()', 'Bash(a && b)', 'Bash(a  b)', 'Bash(echo $(id))', 'Bash(rm * x)', 'Read(./src/**)', ' Edit', 'Bash(x *']) {
+    for (const bad of ['', 'Bash', 'Bash()', 'Bash(a && b)', 'Bash(a  b)', 'Bash(echo $(id))', 'Bash(rm * x)', 'Read(./src/**)', ' Edit', 'Bash(x *', 'mcp__srv.x']) {
       expect(ruleError(bad), bad).not.toBeNull();
     }
     expect(ruleCommand('Bash(git push:*)')).toBe('git push');
     expect(ruleCommand('Edit')).toBeNull();
     expect(isToolName('Edit')).toBe(true);
     expect(isToolName('mcp__hqc__hqc_send')).toBe(true);
+    expect(isToolName('mcp__claude-in-chrome__navigate')).toBe(true);
     expect(isToolName('git push')).toBe(false);
   });
 });

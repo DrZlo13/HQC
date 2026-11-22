@@ -61,19 +61,43 @@ pub async fn add(
     if b.rules.is_empty() {
         return Err(ApiError::BadRequest("rules must not be empty".into()));
     }
-    for r in &b.rules {
+    add_rules(&app, &ws, &b.rules).await?;
+    list_of(&app, ws.id).await
+}
+
+/// Validate and store `rules` for the folder (rules it has already are kept) and send the
+/// new list to its worker.
+async fn add_rules(app: &AppState, ws: &db::WorkspaceRow, rules: &[String]) -> ApiResult<()> {
+    for r in rules {
         parse_allow_rule(r)
             .map_err(|e| ApiError::Unprocessable("invalid_rule", format!("{r}: {e}")))?;
     }
-    if !db::add_workspace_rules(&app.db, ws.id, &b.rules, MAX_RULES).await? {
+    if !db::add_workspace_rules(&app.db, ws.id, rules, MAX_RULES).await? {
         return Err(ApiError::Unprocessable(
             "too_many_rules",
             format!("a folder has at most {MAX_RULES} hqc rules"),
         ));
     }
-    tracing::info!(workspace_id = %ws.id, rules = ?b.rules, "hqc rules added");
-    send(&app, &ws).await?;
-    list_of(&app, ws.id).await
+    tracing::info!(workspace_id = %ws.id, ?rules, "hqc rules added");
+    send(app, ws).await?;
+    Ok(())
+}
+
+/// The answer `server_always` to the approval of `tool`: the folder of the session `s` gets
+/// the rule `mcp__<server>`, the server being the one of the request's tool, not the client's.
+pub async fn allow_server(
+    app: &AppState,
+    user: &CurrentUser,
+    s: &db::SessionRow,
+    tool: &str,
+) -> ApiResult<()> {
+    let server = hqc_proto::rules::mcp_server(tool)
+        .ok_or_else(|| ApiError::BadRequest("the request is not for an MCP tool".into()))?;
+    let id = s
+        .workspace_id
+        .ok_or_else(|| ApiError::BadRequest("the session has no folder".into()))?;
+    let ws = workspace_for(app, user, id).await?;
+    add_rules(app, &ws, &[format!("mcp__{server}")]).await
 }
 
 /// `DELETE /api/workspaces/{id}/rules/{rule_id}`.

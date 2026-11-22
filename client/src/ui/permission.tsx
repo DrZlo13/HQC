@@ -16,12 +16,12 @@ import { IconCheck, IconCross, IconInfo, IconKey, IconShield } from './icons';
 import { SecretForm } from './secrets';
 import {
   CANCEL_LABELS,
-  CANONICAL_OUTCOMES,
   WORKER_REQUEST_LABELS,
   formatTimer,
   homePath,
   isDeny,
   optionLabel,
+  optionOutcome,
 } from './labels';
 
 /** What the card says the agent, or (since 0.181) the subagent that asks, wants to do. */
@@ -225,7 +225,7 @@ export function outcomeText(event: EventOf<'approval.request'>, actions: ChatAct
   if (r.option_id === SECRET_GIVEN) return { ok: true, text: 'given' };
   const opt = event.payload.options.find((o) => o.id === r.option_id);
   const deny = opt ? isDeny(opt) : false;
-  let text = opt ? (opt.canonical === 'unknown' ? opt.label : CANONICAL_OUTCOMES[opt.canonical]) : r.option_id;
+  let text = opt ? optionOutcome(opt, event.payload.tool) : r.option_id;
   if (r.message) text = 'denied, replied with text';
   else if (r.by === 'auto') text = `${text} automatically`;
   return { ok: !deny, text };

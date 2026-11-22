@@ -2692,6 +2692,72 @@ fn folder_rules_in_can_use_tool() {
     assert_eq!(approvals(&a), 1);
 }
 
+/// An MCP tool's approval offers "all tools of this server" for the session, and as a folder
+/// rule when the session has a folder and is not restricted; answering the session one allows
+/// the server's other tools without a card and not another server's.
+#[test]
+fn an_mcp_server_is_allowed_whole() {
+    let mcp = |id: &str, tool: &str| {
+        json!({"type": "control_request", "request_id": id, "request": {
+            "subtype": "can_use_tool", "tool_name": tool, "input": {}}})
+        .to_string()
+    };
+    let with_folder = |restricted: bool| {
+        Core::new(Uuid::now_v7(), restricted).with_folder(
+            crate::permissions::FolderRules::default(),
+            std::path::PathBuf::from("/w/proj"),
+        )
+    };
+    let ids = |core: &mut Core, tool: &str| approval_of(&core.on_line(&mcp("r", tool))).0;
+
+    let mut core = with_folder(false);
+    assert_eq!(
+        ids(&mut core, "mcp__srv__one"),
+        ["once", "session", "server_session", "server_always", "deny"]
+    );
+    // Not an MCP tool, no folder, restricted: fewer options.
+    assert!(!ids(&mut core, "Edit")
+        .iter()
+        .any(|i| i.starts_with("server_")));
+    let mut core = Core::new(Uuid::now_v7(), false);
+    assert_eq!(
+        ids(&mut core, "mcp__srv__one"),
+        ["once", "session", "server_session", "deny"]
+    );
+    let mut core = with_folder(true);
+    assert_eq!(
+        ids(&mut core, "mcp__srv__one"),
+        ["once", "session", "server_session", "deny"]
+    );
+    // A request only a person may answer offers no standing answer (SPEC §8.1).
+    let mut core = with_folder(false);
+    let line = json!({"type": "control_request", "request_id": "h", "request": {
+        "subtype": "can_use_tool", "tool_name": "mcp__srv__one", "input": {},
+        "requires_user_interaction": true}})
+    .to_string();
+    assert_eq!(approval_of(&core.on_line(&line)).0, ["once", "deny"]);
+
+    let mut core = with_folder(false);
+    ids(&mut core, "mcp__srv__one");
+    let a = core.answer_approval("r", "server_session", None).unwrap();
+    assert_eq!(writes(&a)[0]["response"]["response"]["behavior"], "allow");
+    let a = core.on_line(&mcp("r2", "mcp__srv__two"));
+    assert_eq!(approvals(&a), 0);
+    assert_eq!(writes(&a)[0]["response"]["response"]["behavior"], "allow");
+    assert_eq!(approvals(&core.on_line(&mcp("r3", "mcp__srv2__two"))), 1);
+    assert_eq!(approvals(&core.on_line(&mcp("r4", "mcp__other__one"))), 1);
+
+    // `server_always` is allowed the same way; an answer for a tool that is not an MCP one
+    // is refused and the request stays open.
+    let mut core = with_folder(false);
+    ids(&mut core, "mcp__srv__one");
+    core.answer_approval("r", "server_always", None).unwrap();
+    assert_eq!(approvals(&core.on_line(&mcp("r2", "mcp__srv__two"))), 0);
+    ids(&mut core, "Edit");
+    assert!(core.answer_approval("r", "server_session", None).is_err());
+    assert!(core.answer_approval("r", "once", None).is_ok());
+}
+
 /// T12: `approval.request.policy_hint` is `allow` when an allow rule matches a call the CLI
 /// still asked about, absent otherwise.
 #[test]

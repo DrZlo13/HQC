@@ -296,6 +296,7 @@ const MODEL_REQUEST: &str = "hqc-model-";
 const BACKGROUND_REQUEST: &str = "hqc-background-";
 /// `request_id` prefix of our `stop_task` control requests.
 const STOP_TASK_REQUEST: &str = "hqc-stop-task-";
+const INTERRUPT_REQUEST: &str = "hqc-interrupt-";
 /// `patch.status` of a `task_updated` that ends a foreground call ([`Core::foreground`]).
 const CALL_ENDED: [&str; 3] = ["completed", "failed", "killed"];
 
@@ -506,6 +507,8 @@ pub struct Core {
     /// end, not a withdrawal ([`Core::on_cancel_request`]).
     stopping: bool,
     turn: u64,
+    /// The ids of the `interrupt` requests the CLI answered.
+    interrupt_answers: HashSet<String>,
     pending: HashMap<String, Pending>,
     rules: SessionRules,
     /// `[permissions]` of the worker config, for `policy_hint` and denying what a deny
@@ -651,6 +654,7 @@ impl Core {
             self_turn: false,
             stopping: false,
             turn: 0,
+            interrupt_answers: HashSet::new(),
             pending: HashMap::new(),
             rules: SessionRules::default(),
             policy: Arc::default(),
@@ -740,7 +744,12 @@ impl Core {
 
     /// Whether turn number `turn` (from [`Core::interrupt`]) is still running.
     pub fn turn_running(&self, turn: u64) -> bool {
-        (self.in_turn || self.self_turn) && self.turn == turn
+        self.turn_open() && self.turn == turn
+    }
+
+    /// Whether a turn runs, ours or the CLI's own.
+    pub fn turn_open(&self) -> bool {
+        self.in_turn || self.self_turn
     }
 
     /// Whether a turn the CLI started by itself runs, until its `result`.
@@ -761,7 +770,13 @@ impl Core {
 
     /// A turn runs, or a subagent does.
     pub fn working(&self) -> bool {
-        self.in_turn || self.self_turn || !self.live.is_empty()
+        self.turn_open() || !self.live.is_empty()
+    }
+
+    /// [`Core::working`] or a background task of the CLI's list: what keeps a process from
+    /// being closed through its stdin ([`Adapter::close`]).
+    pub fn busy(&self) -> bool {
+        self.working() || self.background_work() > 0
     }
 
     /// The CLI's session id, from its latest `system/init`.
@@ -863,18 +878,26 @@ impl Core {
     }
 
     /// `control_request` `interrupt` for the running turn, also one the CLI started by
-    /// itself; `None` if no turn runs.
-    pub fn interrupt(&mut self) -> Option<(Action, u64)> {
-        if !self.in_turn && !self.self_turn {
+    /// itself, with the turn's number and the request's id ([`Core::interrupt_answered`]);
+    /// `None` if no turn runs.
+    pub fn interrupt(&mut self) -> Option<(Action, u64, String)> {
+        if !self.turn_open() {
             return None;
         }
         self.stopping = true;
+        let request_id = format!("{INTERRUPT_REQUEST}{}", Uuid::now_v7());
         let req = json!({
             "type": "control_request",
-            "request_id": format!("hqc-interrupt-{}", Uuid::now_v7()),
+            "request_id": request_id,
             "request": {"subtype": "interrupt"},
         });
-        Some((Action::Write(req), self.turn))
+        Some((Action::Write(req), self.turn, request_id))
+    }
+
+    /// Whether the CLI answered the `interrupt` with this id; the answer is taken out of
+    /// the set, so it is told once.
+    pub fn interrupt_answered(&mut self, request_id: &str) -> bool {
+        self.interrupt_answers.remove(request_id)
     }
 
     /// Switch the running process to `mode` (T38): `control_request {subtype:
@@ -1097,6 +1120,7 @@ impl Core {
         self.in_turn = false;
         self.self_turn = false;
         self.stopping = false;
+        self.interrupt_answers.clear();
         let mut out: Vec<Action> = self.release_compaction(None).into_iter().collect();
         out.extend(self.flush(false));
         // A subagent end held while the subagent still counted ([`Core::held_ends`]) is its
@@ -1406,6 +1430,9 @@ impl Core {
                 Some("model_refusal_no_fallback") => {
                     vec![self.emit_system(MODEL_REFUSAL, refusal_line(&v))]
                 }
+                // A CLI that exits with status 0 (after its stdin is closed) reports a disk
+                // that was full: what it could not write is lost.
+                Some("session_writes_lost") => self.on_writes_lost(&v),
                 _ => vec![],
             },
             _ => vec![],
@@ -1443,8 +1470,8 @@ impl Core {
     /// The CLI's answer to our `initialize` (its slash commands with their descriptions, its
     /// models and account, or an error), `set_permission_mode`, `set_model` (a refusal of the
     /// latest one is a line and the model kept, another answer logged), `background_tasks` or
-    /// `stop_task` (both logged); every other `control_response`, the echo of one of ours, is
-    /// skipped.
+    /// `stop_task` (both logged), or `interrupt` (noted for [`Core::interrupt_answered`]);
+    /// every other `control_response`, the echo of one of ours, is skipped.
     fn on_control_response(&mut self, v: &Value) -> Vec<Action> {
         let r = &v["response"];
         let id = r["request_id"].as_str().unwrap_or("");
@@ -1457,6 +1484,10 @@ impl Core {
             };
             self.listed = Some(list);
             return self.report_commands();
+        }
+        if id.starts_with(INTERRUPT_REQUEST) {
+            self.interrupt_answers.insert(id.to_owned());
+            return vec![];
         }
         if id.starts_with(STOP_TASK_REQUEST) {
             if r["subtype"] == "success" {
@@ -1527,6 +1558,45 @@ impl Core {
         }
         tracing::warn!(session_id = %self.session_id, error = %r["error"], "claude refused the permission mode switch");
         vec![]
+    }
+
+    /// `system/session_writes_lost` (CLI 2.1.317): a line when the transcript is among what
+    /// was lost; the global config alone is only logged.
+    fn on_writes_lost(&self, v: &Value) -> Vec<Action> {
+        let code = v["error_code"].as_str();
+        let lost = |what: &str| {
+            v["lost"]
+                .as_array()
+                .is_some_and(|l| l.iter().any(|w| w == what))
+        };
+        tracing::warn!(session_id = %self.session_id, error_code = code.unwrap_or(""), lost = %v["lost"], "claude could not write to disk");
+        if !lost("transcript") {
+            return vec![];
+        }
+        let (why, fix) = match code {
+            Some("ENOSPC") => (
+                "the disk is full (ENOSPC)".to_owned(),
+                "Free up space on the worker's disk",
+            ),
+            Some("EDQUOT") => (
+                "the disk quota is used up (EDQUOT)".to_owned(),
+                "Free up space or raise the quota on the worker's disk",
+            ),
+            Some(other) => (
+                format!("a write to the worker's disk failed ({other})"),
+                "Check the worker's disk",
+            ),
+            None => (
+                "a write to the worker's disk failed".to_owned(),
+                "Check the worker's disk",
+            ),
+        };
+        vec![self.emit_system(
+            "transcript_not_saved",
+            format!(
+                "Transcript not saved: {why}; resuming this session may miss part of its conversation. {fix}"
+            ),
+        )]
     }
 
     /// `slash_commands` and `terminal_slash_commands` of `system/init`, for

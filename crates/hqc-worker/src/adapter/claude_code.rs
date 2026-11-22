@@ -7,11 +7,17 @@
 //!   (a process that never got a prompt left no transcript to resume).
 //! - Every process gets `control_request {subtype: initialize}` first
 //!   ([`engine::Core::initialize`]).
-//! - `stop` sends `control_request {subtype: interrupt}`; if no `result` follows within
+//! - `stop` sends `control_request {subtype: interrupt}`; a CLI that does not answer it within
+//!   [`ClaudeOptions::interrupt_answer`] while the turn runs is hung: the process group gets
+//!   SIGTERM, and SIGKILL 5 s after that. If it answers but no `result` follows within
 //!   [`ClaudeOptions::stop_grace`], the process group gets SIGINT; if the turn still runs
 //!   another `stop_grace` later, SIGTERM, and SIGKILL 5 s after that, so a process stuck in a
 //!   tool call is stopped with what it started.
 //! - `kill` sends SIGTERM to the process group, SIGKILL after 5 s.
+//! - `close` lets a process with nothing running (no turn, subagent or background task) exit
+//!   by itself: its stdin is closed, and if it is still there after
+//!   [`ClaudeOptions::exit_grace`], it is killed as above; one that works is killed as above at
+//!   once. A CLI that exits so can report what it could not write to the transcript.
 //! - A process that exits by itself is reported as [`AdapterEvent::Exited`].
 //! - While it runs, its token rate is counted every 2 s ([`rate`]).
 
@@ -122,6 +128,8 @@ impl Drop for Clearing {
 }
 
 const KILL_GRACE: Duration = Duration::from_secs(5);
+/// How often a Stop looks for the CLI's answer to its `interrupt`.
+const INTERRUPT_POLL: Duration = Duration::from_millis(100);
 /// How long the output of an exited process is still read when its stdout stays open
 /// (held by a grandchild).
 const EXIT_DRAIN: Duration = Duration::from_secs(2);
@@ -251,6 +259,11 @@ pub struct ClaudeOptions {
     pub native_messaging: NativeMessaging,
     /// Interrupt → SIGINT fallback delay, and SIGINT → SIGTERM.
     pub stop_grace: Duration,
+    /// How long a CLI has to answer `interrupt` (the Claude app waits 1.5 s); one that does
+    /// not, while the turn runs, is ended.
+    pub interrupt_answer: Duration,
+    /// How long a CLI has to exit after its stdin is closed ([`Adapter::close`]).
+    pub exit_grace: Duration,
     /// A process that dies this soon after spawning fails `start` instead of being
     /// reported as `Exited` (bad flags, unknown `--resume` id, not logged in).
     pub early_exit: Duration,
@@ -273,6 +286,8 @@ impl Default for ClaudeOptions {
             ask_mode: "default".into(),
             native_messaging: NativeMessaging::Off,
             stop_grace: Duration::from_secs(10),
+            interrupt_answer: Duration::from_secs(2),
+            exit_grace: Duration::from_secs(5),
             early_exit: Duration::from_millis(500),
             own_records: Arc::default(),
             ssh: crate::ssh::Store::in_home(
@@ -404,7 +419,8 @@ struct Proc {
 
 struct Io {
     session_id: Uuid,
-    stdin: tokio::sync::Mutex<Pin<Box<dyn AsyncWrite + Send>>>,
+    /// `None` once closed ([`Io::close_stdin`]).
+    stdin: tokio::sync::Mutex<Option<Pin<Box<dyn AsyncWrite + Send>>>>,
     events: EventSink,
     signal: SignalFn,
     /// The session's transcript, where the CLI writes `ai-title` (SPEC §8.1); another one
@@ -434,7 +450,8 @@ impl Io {
                 Action::Write(v) => {
                     let mut line = serde_json::to_vec(&v)?;
                     line.push(b'\n');
-                    let mut w = self.stdin.lock().await;
+                    let mut guard = self.stdin.lock().await;
+                    let w = guard.as_mut().context("claude stdin is closed")?;
                     w.write_all(&line)
                         .await
                         .context("writing to claude stdin")?;
@@ -511,6 +528,11 @@ impl Io {
         if let Err(e) = (self.signal)(s) {
             tracing::warn!(session_id = %self.session_id, ?s, "signalling claude failed: {e}");
         }
+    }
+
+    /// Closes the process's stdin: a CLI with nothing to do exits on its end.
+    async fn close_stdin(&self) {
+        *self.stdin.lock().await = None;
     }
 }
 
@@ -847,6 +869,43 @@ impl ClaudeCodeAdapter {
         Ok((Launch::Fork { at }, copy, cron))
     }
 
+    /// Ends the process and waits for the monitor, which reads what the CLI still writes.
+    /// `soft`: its stdin is closed first, and it gets [`ClaudeOptions::exit_grace`] to exit by
+    /// itself (a CLI that does reports what it could not write, SPEC §8.1); otherwise, or if
+    /// it does not, SIGTERM to the group, SIGKILL after [`KILL_GRACE`].
+    async fn end(&mut self, soft: bool) -> anyhow::Result<()> {
+        let Some(mut p) = self.proc.take() else {
+            return Ok(());
+        };
+        p.killing.store(true, Ordering::SeqCst);
+        let mut alive = p.exited.borrow().is_none();
+        let mut by_itself = !alive;
+        if alive && soft {
+            p.io.close_stdin().await;
+            alive = !wait_exit(&mut p.exited, self.opts.exit_grace).await;
+            by_itself = !alive;
+            if alive {
+                tracing::warn!(session_id = %self.session_id, "claude did not exit after its stdin was closed; sending SIGTERM");
+            }
+        }
+        if alive {
+            p.io.signal(Sig::Terminate);
+            if !wait_exit(&mut p.exited, KILL_GRACE).await {
+                tracing::warn!(session_id = %self.session_id, "claude ignored SIGTERM; sending SIGKILL");
+                p.io.signal(Sig::Kill);
+                wait_exit(&mut p.exited, KILL_GRACE).await;
+            }
+        }
+        if tokio::time::timeout(KILL_GRACE, &mut p.monitor)
+            .await
+            .is_err()
+        {
+            p.monitor.abort();
+        }
+        tracing::info!(session_id = %self.session_id, soft, by_itself, "claude ended");
+        Ok(())
+    }
+
     async fn spawn(&mut self, spec: &StartSpec, why: &str) -> anyhow::Result<()> {
         if self.proc.is_some() {
             self.kill().await?;
@@ -1020,7 +1079,7 @@ impl ClaudeCodeAdapter {
         let core = Arc::new(Mutex::new(core));
         let io = Arc::new(Io {
             session_id: self.session_id,
-            stdin: tokio::sync::Mutex::new(spawned.stdin),
+            stdin: tokio::sync::Mutex::new(Some(spawned.stdin)),
             events: self.events.clone(),
             signal: spawned.signal,
             transcript: Mutex::new(transcript),
@@ -1212,14 +1271,36 @@ impl Adapter for ClaudeCodeAdapter {
         let Ok(p) = self.running() else {
             return Ok(());
         };
-        let Some((req, turn)) = lock(&p.core).interrupt() else {
+        let Some((req, turn, request_id)) = lock(&p.core).interrupt() else {
             return Ok(());
         };
         tracing::info!(session_id = %self.session_id, "interrupting the turn");
         p.io.run(vec![req]).await?;
         let (core, io, grace) = (p.core.clone(), p.io.clone(), self.opts.stop_grace);
+        let answer_within = self.opts.interrupt_answer;
         let mut exited = p.exited.clone();
         tokio::spawn(async move {
+            // The CLI answers `interrupt` at once, before the turn's `result`; one that does
+            // not is hung, and no signal but a fatal one reaches its event loop.
+            let answer_deadline = tokio::time::Instant::now() + answer_within;
+            while !lock(&core).interrupt_answered(&request_id) {
+                if !lock(&core).turn_running(turn) {
+                    return;
+                }
+                if tokio::time::Instant::now() >= answer_deadline {
+                    tracing::warn!(session_id = %io.session_id, "no answer to the interrupt; ending the process");
+                    io.signal(Sig::Terminate);
+                    tokio::select! {
+                        _ = tokio::time::sleep(KILL_GRACE) => io.signal(Sig::Kill),
+                        _ = exited.wait_for(Option::is_some) => {}
+                    }
+                    return;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(INTERRUPT_POLL) => {}
+                    _ = exited.wait_for(Option::is_some) => return,
+                }
+            }
             tokio::select! {
                 _ = tokio::time::sleep(grace) => {}
                 _ = exited.wait_for(Option::is_some) => return,
@@ -1270,27 +1351,13 @@ impl Adapter for ClaudeCodeAdapter {
     }
 
     async fn kill(&mut self) -> anyhow::Result<()> {
-        let Some(mut p) = self.proc.take() else {
-            return Ok(());
-        };
-        p.killing.store(true, Ordering::SeqCst);
-        let alive = p.exited.borrow().is_none();
-        if alive {
-            p.io.signal(Sig::Terminate);
-            if !wait_exit(&mut p.exited, KILL_GRACE).await {
-                tracing::warn!(session_id = %self.session_id, "claude ignored SIGTERM; sending SIGKILL");
-                p.io.signal(Sig::Kill);
-                wait_exit(&mut p.exited, KILL_GRACE).await;
-            }
-        }
-        if tokio::time::timeout(KILL_GRACE, &mut p.monitor)
-            .await
-            .is_err()
-        {
-            p.monitor.abort();
-        }
-        tracing::info!(session_id = %self.session_id, "claude killed");
-        Ok(())
+        self.end(false).await
+    }
+
+    async fn close(&mut self) -> anyhow::Result<()> {
+        // Work, the CLI's own turn too, is not left to finish: it ends as with `kill`.
+        let working = self.proc.as_ref().is_some_and(|p| lock(&p.core).busy());
+        self.end(!working).await
     }
 
     async fn set_permission_mode(&mut self, mode: PermissionMode) -> anyhow::Result<()> {

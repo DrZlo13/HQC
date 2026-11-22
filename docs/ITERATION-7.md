@@ -45,13 +45,21 @@ speaks the old HTTP+SSE transport.
   #59 proposed. The hub puts the names of the session's servers into `session.start`; a change
   reaches a session at its next process start.
 - **The hub is the MCP client.** It speaks the Streamable HTTP transport (MCP 2025-06-18 and
-  2025-11-25: `POST` with JSON or an SSE answer, `Mcp-Session-Id`, a new session on `404`). It
-  keeps one MCP session per server and owner, not one per agent: the tools are the same for every
-  agent, and `tools/list` is cached until the server says `notifications/tools/list_changed` or
-  an hour passes.
+  2025-11-25: `POST` with JSON or an SSE answer, `Mcp-Session-Id`, a new session on `404`).
+  - **One MCP session per hqc session and server**, as today, where every CLI process opens its
+    own. A server may keep state in it: gitmost keeps its "new comments" mark there, and curator
+    writes the session id into its audit log. The hub opens the session on the first call of that
+    hqc session to that server. It closes it (`DELETE` with `Mcp-Session-Id`) when the agent's
+    process stops, or after an hour without a call.
+  - `serverInfo`, `instructions` and `tools/list` are the same for every agent, so the hub caches
+    them per server. The cache lasts until the server says `notifications/tools/list_changed` or
+    an hour passes. The relay gives the CLI the server's `instructions`, which the CLI puts into
+    the agent's context: 7 of vvzvlad's 9 servers have them, such as portainer's "call
+    `get_guidance` first".
 - **Two ways to sign in.**
-  - A static header: `Authorization: Bearer …` or another header name, for a personal token
-    (GitHub PAT, context7, Tavily).
+  - Static headers, one or more (`Authorization: Bearer …`, or any name), for a personal token
+    (GitHub PAT, context7, Tavily). Portainer needs two: `Authorization` for the MCP server and
+    `X-Portainer-API-Key`.
   - OAuth 2.1 with PKCE, as MCP's authorization spec has it:
     - discovery through the server's `401` and its protected-resource metadata (RFC 9728), then
       the authorization server's metadata (RFC 8414);
@@ -69,8 +77,24 @@ speaks the old HTTP+SSE transport.
   value back once stored. Values appear in no log line, event or error.
 - **What passes through.** `tools/list` and `tools/call` with their content blocks (text,
   image, resource links, structured content) as the server returns them, and
-  `notifications/cancelled` from the CLI. A result over 1 MiB is cut, with a line that says so.
-  A call times out after 120 s. No progress notifications in this iteration.
+  `notifications/cancelled` from the CLI. No progress notifications in this iteration: a server
+  sends them to keep an HTTP call alive past the CLI's 300 s of silence, and a stdio relay does
+  not need that.
+- **A large result comes whole.** Real results are large: a screenshot in base64 up to 1.5 MB, a
+  page read up to 5.8 MB, a whole publication of 2 MB. A cut JSON or base64 is useless, and for an
+  over-limit text result the CLI already saves it to a file and gives the agent the path. So
+  nothing is cut:
+  - a result up to 512 KiB goes in the frame;
+  - a larger one, up to 64 MiB, the hub stores as a short-lived artifact of the owner (kind
+    `mcp_result`, removed after the worker downloads it or after an hour), and the frame carries
+    its id and sha256;
+  - the relay downloads it as it downloads attachments and hands the CLI the result whole;
+  - over 64 MiB the call is a tool error that says how large the result was.
+- **A timeout per server.** Some calls are slow by design: vvzvlad's research tries up to 13
+  providers, 25 s each, and 5 % of its `search_and_read` calls take over 120 s. Each server has a
+  timeout, 300 s by default, 30 s to 1800 s, so that a server with its own deadline (portainer
+  waits 120 s on Portainer) answers with its own error first. The hub's timeout error says that
+  the call may still have completed on the server, and to check before retrying.
 - **Errors are the tool's, not the session's.** If the server is unreachable, returns 5xx or has
   to be signed in again, the call is a tool error with hqc's text, so the agent tells the user. A
   server that fails `initialize` at a session's start is still listed, and its calls answer with
@@ -88,30 +112,39 @@ Sections: §5.3, §5.4, §7.2, §14.
   `{"command": "<hqc-worker>", "args": ["mcp", "--upstream", "<name>"]}`. The process reaches
   the worker's daemon over its socket with the session token, as `hqc-worker mcp` does.
 - The stdio process:
-  - implements `initialize`, giving the server's name and the hub's cached `serverInfo`;
+  - implements `initialize`, giving the hub's cached `serverInfo` and `instructions` of the
+    server;
   - forwards `ping`, `tools/list` and `tools/call`, and `notifications/cancelled` for an open
     call;
   - answers anything else with `-32601`.
-- A worker → hub frame `mcp.upstream {request_id, session_id, server, method, params}`, answered
-  `result {request_id, upstream: <the JSON-RPC result>}` or `error` with a code
-  (`mcp_unavailable`, `mcp_sign_in`, `mcp_timeout`, `mcp_too_large`). It is never queued in the
-  outbox: an upstream call while the hub is unreachable fails at once. `mcp.upstream_cancel
-  {request_id}` carries a cancel.
+- A worker → hub frame `mcp.upstream {request_id, session_id, server, method, params}`.
+  - It is answered `result {request_id, upstream?: <the JSON-RPC result>, upstream_artifact?:
+    {id, size, sha256}}`, or `error` with a code: `mcp_unavailable`, `mcp_sign_in`,
+    `mcp_timeout`, `mcp_too_large`.
+  - It is never queued in the outbox: an upstream call while the hub is unreachable fails at
+    once.
+  - `mcp.upstream_cancel {request_id}` carries a cancel.
+  - The worker's report that the agent's process stopped also lets the hub close that session's
+    MCP sessions.
 
 Acceptance: the common checks. Worker tests:
 - without `hub_mcp`, the names are dropped and only `hqc` is in `--mcp-config`;
 - a restricted session and a foreign session get none;
 - `--mcp-config` holds no URL or header;
-- the stdio process round trip against a fake hub (`tools/list`, `tools/call`, a cancel, an
-  error code shown as a tool error);
+- the stdio process round trip against a fake hub (`initialize` with `instructions`,
+  `tools/list`, `tools/call`, a cancel, an error code shown as a tool error, a result through an
+  `mcp_result` artifact);
 - a live test behind `HQC_LIVE_CLAUDE=1` (`claude-haiku-5-5`, max-turns ≤ 2): a fake upstream
   tool shows as `mcp__<name>__<tool>` in `system/init`.
 
 ## T64. Servers on the hub: storage, the client, static headers
 
 Sections: §3, §5.3, §6, §20.
-- Migration: `mcp_servers` (owner, name, url, auth kind, encrypted headers, all projects or not,
-  status, last error, cached `serverInfo` and tools) and `mcp_server_projects`.
+- Migration:
+  - `mcp_servers`: owner, name, url, auth kind, encrypted headers (one or more), timeout, all
+    projects or not, status, last error, and the cached `serverInfo`, `instructions` and tools;
+  - `mcp_server_projects`;
+  - `mcp_sessions`: hqc session, server, `Mcp-Session-Id`, last call.
 - REST, owner only:
   - `GET/POST/PATCH/DELETE /api/mcp/servers`;
   - `POST /api/mcp/servers/{id}/test`: `initialize` and `tools/list` now, returning the status
@@ -121,7 +154,8 @@ Sections: §3, §5.3, §6, §20.
   - the name is unique per owner;
   - header values are write-only.
 - The hub's Streamable HTTP client:
-  - timeouts, the 1 MiB cap, a bounded number of calls in flight per server and per session;
+  - the server's timeout, a bounded number of calls in flight per server and per session;
+  - a large result stored as an `mcp_result` artifact (above);
   - no redirects to another host;
   - private and loopback addresses refused unless `HQC_MCP_ALLOW_PRIVATE=1`, so a server's URL
     cannot reach the hub's own network by surprise **[decision]**.
@@ -137,7 +171,12 @@ Acceptance: the common checks. Hub tests against a fake MCP server:
   log);
 - without `HQC_MCP_KEY`, adding a server with a header is `422`;
 - a private address is refused;
-- the result cap and the timeout;
+- a 3 MiB result reaches the fake worker whole through an `mcp_result` artifact, which is gone
+  afterwards;
+- over 64 MiB, a tool error;
+- the timeout's error text;
+- two hqc sessions get two MCP sessions, and stopping one process closes its own;
+- `instructions` reach the relay's `initialize`;
 - a new MCP session after the server's `404`.
 
 ## T65. OAuth
@@ -167,8 +206,8 @@ By hand: Linear or Notion signed in from a phone.
 Sections: §6 client layout.
 - Settings → MCP servers:
   - the list with each server's status (ok, failing with the error, sign in) and its tools;
-  - add: name, URL, sign in with none, a header (name and value, the value a password field) or
-    OAuth (with an optional client id and secret);
+  - add: name, URL, timeout, sign in with none, headers (name and value, the value a password
+    field, more than one) or OAuth (with an optional client id and secret);
   - "Sign in", "Test", delete;
   - "All projects" or the chosen projects.
 - A project's settings list the servers it gets.

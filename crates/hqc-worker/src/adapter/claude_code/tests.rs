@@ -10127,3 +10127,14 @@ fn no_content_is_no_message() {
         .collect();
     assert!(messages.is_empty(), "{messages:?}");
 }
+
+#[test]
+fn grant_rules_past_the_cap_say_how_many_more() {
+    let ten: Vec<String> = (0..10).map(|i| format!("Bash(cmd{i}:*)")).collect();
+    assert_eq!(grant_rules(ten.clone()), ten);
+    let twelve: Vec<String> = (0..12).map(|i| format!("Bash(cmd{i}:*)")).collect();
+    let shown = grant_rules(twelve.clone());
+    assert_eq!(shown.len(), 10);
+    assert_eq!(shown[..9], twelve[..9]);
+    assert_eq!(shown[9], "… 3 more");
+}

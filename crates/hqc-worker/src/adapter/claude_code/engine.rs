@@ -3656,9 +3656,18 @@ fn option(id: &str, label: &str, canonical: ApprovalCanonical) -> ApprovalOption
 /// that was cut ends with "…" (within the limit), so the card does not show a stub as the rule
 /// the CLI writes whole.
 pub(super) fn grant_rules(rules: impl IntoIterator<Item = String>) -> Vec<String> {
-    rules
+    let rules: Vec<String> = rules.into_iter().collect();
+    // Past the cap the last item says how many more the option grants: the card never shows
+    // fewer rules than "Always" adds as if that were all of them.
+    let keep = if rules.len() > GRANT_RULES {
+        GRANT_RULES - 1
+    } else {
+        rules.len()
+    };
+    let more = rules.len() - keep;
+    let mut out: Vec<String> = rules
         .into_iter()
-        .take(GRANT_RULES)
+        .take(keep)
         .map(|r| {
             let whole = hqc_proto::replace_nul(&r);
             if whole.len() <= GRANT_RULE_LIMIT {
@@ -3669,7 +3678,11 @@ pub(super) fn grant_rules(rules: impl IntoIterator<Item = String>) -> Vec<String
             text.push('…');
             text
         })
-        .collect()
+        .collect();
+    if more > 0 {
+        out.push(format!("… {more} more"));
+    }
+    out
 }
 
 /// The CLI's own description plus what is being touched: the command, file, URL or the

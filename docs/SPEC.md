@@ -526,13 +526,14 @@ turn}` (the folder, the call's `project`, the chain of the call's turn, §7.1), 
 `result` — the `mcp.result` frame once the move was carried out or refused, the owner denied it
 or the hub cancelled the request. An allowed move closes the row first, without a `result`, and
 fills it in when the move is done. On start, before it serves anything, the hub finds every
-such row closed without a `result` whose session's feed has the owner's `approval.response`
-with `once` (the previous process stopped while it carried the move out; a row a cancellation
-closed without a frame has no such answer), keeps them in memory by the row's `worker_id`, and
-carries each out once that worker sends `hello`, when the move can be done; rows of this
-process are never among them. A hub that failed to store the result carries the move out again
-at once. Either way a move already done answers as a repeat, and the input after it is stored
-once (§7).
+such row closed without a `result` that carries the owner's mark (the previous process stopped
+while it carried the move out; the owner's `once` closes the row and puts `allowed_by`, the
+owner's id, into its `payload`, and a row a cancellation closed without a frame has no mark; the
+session's feed is not consulted, a worker's own approval may reuse the request id), keeps them
+in memory by the row's `worker_id`, and carries each out once that worker sends `hello`, when
+the move can be done; rows of this process are never among them. A hub that failed to store the
+result carries the move out again at once. Either way a move already done answers as a repeat,
+and the input after it is stored once (§7).
 
 A `follow` (since 0.95) is a row of the session whose transcript is continued in a workspace of
 another environment, waiting for the owner's answer (§9.2, §10.1): `request_id` — derived from
@@ -558,9 +559,9 @@ session's worker, `payload` — the hub's `approval.request` plus `publish: {art
 entry}` (`entry` — the name of the one file of an archive of a file, else null), no
 `expires_at`, `result` — the `mcp.result` frame. An allowed publication closes the row first,
 without a `result`, and fills it in once published. On start, before it serves anything, the
-hub carries out at once every such row closed without a `result` whose session's feed has the
-owner's `once` (a publication needs no worker); the result goes to the worker when it is
-connected, or after its `hello`. A publication done before the stop answers from its
+hub carries out at once every such row closed without a `result` that carries the owner's mark
+`allowed_by`, as a `move` does (a publication needs no worker); the result goes to the worker
+when it is connected, or after its `hello`. A publication done before the stop answers from its
 `attachment` with the link the artifact has then.
 
 ### ScheduledMessage

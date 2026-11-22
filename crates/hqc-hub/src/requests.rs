@@ -312,13 +312,20 @@ pub async fn answer(
         }
         _ => return Err(ApiError::NotFound),
     };
-    if !db::close_request(&app.db, p.id, frame.as_ref()).await? {
+    let once = ev_payload["option_id"] == worker_approval::ONCE;
+    // An allowed move or publication is closed with the owner's mark: only a marked request is
+    // carried out after a restart.
+    let closed = if once && (p.kind == crate::moves::KIND || p.kind == crate::publish::KIND) {
+        db::close_allowed(&app.db, p.id, user.id).await?
+    } else {
+        db::close_request(&app.db, p.id, frame.as_ref()).await?
+    };
+    if !closed {
         return Err(ApiError::Conflict(
             "request_closed",
             "the request is already closed".into(),
         ));
     }
-    let once = ev_payload["option_id"] == worker_approval::ONCE;
     let row = events::store_hub_event(
         app,
         s,

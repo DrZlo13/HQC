@@ -28,7 +28,7 @@ pub mod rate;
 pub mod rules;
 pub mod scripted;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -561,6 +561,78 @@ impl Launch {
     }
 }
 
+/// The ids of the subagents a transcript names in the `toolUseResult.agentId` of its `user` and
+/// `assistant` records, but not in the summary a compaction writes (`isCompactSummary`,
+/// `isVisibleInTranscriptOnly`). An id that is not made of letters, digits, `_` and `-` is
+/// left out: it becomes part of a file name.
+fn referenced_agent_ids(transcript: &str) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    for line in transcript.lines().filter(|l| l.contains("\"agentId\"")) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if !matches!(v["type"].as_str(), Some("user" | "assistant"))
+            || v["isCompactSummary"] == true
+            || v["isVisibleInTranscriptOnly"] == true
+        {
+            continue;
+        }
+        if let Some(id) = v["toolUseResult"]["agentId"].as_str().filter(|id| {
+            !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        }) {
+            ids.insert(id.to_owned());
+        }
+    }
+    ids
+}
+
+/// Copies the transcript of each subagent in `ids` and its `.meta.json` from `from` to `to`
+/// (0600, as the transcripts are); the `.jsonl` up to its last line break, since the CLI may be
+/// writing a line of it. A file the source lacks is skipped, any other failure is logged: the
+/// fork does not depend on it.
+fn copy_subagent_transcripts(from: &Path, to: &Path, ids: &BTreeSet<String>) {
+    if ids.is_empty() {
+        return;
+    }
+    // 0700, as the CLI makes its own folders.
+    let mut d = std::fs::DirBuilder::new();
+    d.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut d, 0o700);
+    if let Err(e) = d.create(to) {
+        tracing::warn!("subagents folder {}: {e}", to.display());
+        return;
+    }
+    for id in ids {
+        for name in [format!("agent-{id}.jsonl"), format!("agent-{id}.meta.json")] {
+            let mut bytes = match std::fs::read(from.join(&name)) {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    tracing::warn!("subagent transcript {name}: {e}");
+                    continue;
+                }
+            };
+            if name.ends_with(".jsonl") {
+                bytes.truncate(bytes.iter().rposition(|&b| b == b'\n').map_or(0, |n| n + 1));
+            }
+            let mut o = std::fs::OpenOptions::new();
+            o.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+            if let Err(e) = o
+                .open(to.join(&name))
+                .and_then(|mut f| std::io::Write::write_all(&mut f, &bytes))
+            {
+                tracing::warn!("subagent transcript {name} copy: {e}");
+            }
+        }
+    }
+}
+
 /// The copy of a fork's source transcript, cut right after the record the fork starts at
 /// (SPEC §8.1). On `--resume` the CLI reads a transcript from its newest record back to the
 /// last compaction, so a record before a later compaction of the source is not found (`No
@@ -826,7 +898,9 @@ impl ClaudeCodeAdapter {
     /// session's own folder, cut at the record of the first of `f.at_event_ids` in it, and
     /// written up to that record to [`fork_copy_path`], which the CLI resumes. The records the fork
     /// copies are registered as the adapter's, so the mirror does not take them for another
-    /// writer's. It returns the cron jobs the CLI resurrects in the copy
+    /// writer's. The transcripts of the subagents the copied part names ([`referenced_agent_ids`])
+    /// are copied into the new session's folder, where the CLI looks for them and does not bring
+    /// them on `--fork-session`. It returns the cron jobs the CLI resurrects in the copy
     /// ([`resurrected_cron_jobs`] of the copied part).
     fn fork(
         &self,
@@ -864,6 +938,11 @@ impl ClaudeCodeAdapter {
         for u in copied {
             self.opts.own_records.add(uuid, u);
         }
+        copy_subagent_transcripts(
+            &paths::subagents_dir(dir, &spec.workdir, &from),
+            &paths::subagents_dir(dir, &spec.workdir, &uuid),
+            &referenced_agent_ids(&text[..end]),
+        );
         // The CLI resurrects the cron jobs of the copy's conversation as it does on a resume.
         let cron = resurrected_cron_jobs(&text[..end], chrono::Utc::now().timestamp_millis());
         Ok((Launch::Fork { at }, copy, cron))

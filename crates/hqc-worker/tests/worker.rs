@@ -1211,6 +1211,109 @@ async fn idle_timeout_waits_for_an_armed_wakeup() {
     w.stop().await;
 }
 
+// The row of a cron job of the agent with the next fire in `due_in_ms`.
+fn cron_row(due_in_ms: Option<u64>) -> LiveSubagent {
+    LiveSubagent {
+        task_id: "cron-1".into(),
+        description: "Every minute".into(),
+        activity: None,
+        total_tokens: None,
+        tool_uses: None,
+        duration_ms: 0,
+        call_id: None,
+        kind: Some(LiveKind::Cron),
+        stoppable: false,
+        due_in_ms,
+        retry: None,
+    }
+}
+
+// idle_timeout (SPEC §17.3): a cron job of the agent dies with the process, so the agent is not
+// idle before its next fire; once the job is gone, the usual timeout counts.
+#[tokio::test]
+async fn idle_timeout_waits_for_a_cron_job() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut cfg = env.config(&hub.url());
+    cfg.idle_timeout = Some(Duration::from_millis(300));
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    adapters
+        .emit(
+            sid,
+            AdapterEvent::LiveSubagents(vec![cron_row(Some(60_000))]),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        !adapters.calls().contains(&FakeCall::Kill(sid)),
+        "never idle before the cron job fires"
+    );
+    adapters
+        .emit(sid, AdapterEvent::LiveSubagents(vec![]))
+        .await;
+    adapters
+        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
+        .await;
+    w.stop().await;
+}
+
+// The deadline is the latest of the times, not the nearest: a wakeup long past does not let the
+// process go before the next fire of a cron job.
+#[tokio::test]
+async fn a_cron_job_due_later_than_a_stale_wakeup_holds() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut cfg = env.config(&hub.url());
+    cfg.idle_timeout = Some(Duration::from_millis(300));
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let past = chrono::Utc::now() - chrono::Duration::seconds(1);
+    adapters.emit(sid, AdapterEvent::Wakeup(Some(past))).await;
+    adapters
+        .emit(
+            sid,
+            AdapterEvent::LiveSubagents(vec![cron_row(Some(60_000))]),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        !adapters.calls().contains(&FakeCall::Kill(sid)),
+        "the later cron fire holds the process"
+    );
+    w.stop().await;
+}
+
+// A cron job already due, or one whose next fire is unknown, holds nothing.
+#[tokio::test]
+async fn a_due_cron_job_does_not_hold() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut cfg = env.config(&hub.url());
+    cfg.idle_timeout = Some(Duration::from_millis(300));
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    adapters
+        .emit(sid, AdapterEvent::LiveSubagents(vec![cron_row(Some(0))]))
+        .await;
+    adapters
+        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
+        .await;
+    w.stop().await;
+}
+
 // After `/clear` the session goes on in another transcript (SPEC §8.1): the hub hears of it, and
 // the worker's next start of the agent resumes that one.
 #[tokio::test]

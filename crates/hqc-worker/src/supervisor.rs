@@ -81,8 +81,10 @@
 //! - `idle_timeout` (SPEC §17.3): an idle process (no turn, the runtime's own included:
 //!   [`Adapter::runs_own_turn`]; no subagent running, no background task the runtime lists:
 //!   [`AdapterEvent::BackgroundTasks`]) is killed, the next input resumes it; one whose agent
-//!   armed a wakeup ([`AdapterEvent::Wakeup`]) is idle only from the wakeup's time on. A
-//!   reconnect and a holder report (`Cmd::Resync`, `Cmd::Held`) are no activity of the agent.
+//!   armed a wakeup ([`AdapterEvent::Wakeup`]) or has a cron job (a `kind: cron` row of
+//!   [`AdapterEvent::LiveSubagents`] with `due_in_ms`) is idle only from the latest of those
+//!   times on. A reconnect and a holder report (`Cmd::Resync`, `Cmd::Held`) are no activity of
+//!   the agent.
 //! - `max_sessions`: at most that many agent processes at once; one more start is
 //!   `agent_start_failed`, retryable.
 //! - Workspaces hqc makes and deletes (T45): `workspace.create` is acked at once and runs in
@@ -101,7 +103,7 @@ use std::time::Duration;
 
 use std::path::{Path, PathBuf};
 
-use hqc_proto::event::{ArtifactKind, EventKind, PeerMode};
+use hqc_proto::event::{ArtifactKind, EventKind, LiveKind, PeerMode};
 use hqc_proto::frame::{
     error_code, worker_approval, Ack, ClaudeAuthResult, ClaudeLoginDoneResult, ClaudeLoginResult,
     Envelope, HeldBy, HubFrame, LockedBy, PermissionMode, ProcessState, RequestResult, ResultBody,
@@ -1375,8 +1377,9 @@ impl Session {
         let t = self.idle_timeout?;
         // A background subagent or command outlives the turn and may be silent for long (a
         // build). A turn the runtime started by itself is a turn as well: it is silent while it
-        // waits for an approval or an answer, or runs a long command. An armed wakeup dies with
-        // the process: the agent is idle from its time on.
+        // waits for an approval or an answer, or runs a long command. An armed wakeup and a cron
+        // job die with the process: the agent is idle from the latest of their times on (a job
+        // without a known next fire holds nothing).
         (self.state == ProcessState::Running
             && self.turn.is_none()
             && !self.adapter.runs_own_turn()
@@ -1386,8 +1389,15 @@ impl Session {
             && self.subagents == 0
             && self.background_tasks == 0)
             .then(|| {
+                let crons = self.live.iter().flat_map(|(rows, at)| {
+                    rows.iter()
+                        .filter(|r| r.kind == Some(LiveKind::Cron))
+                        .filter_map(move |r| r.due_in_ms.map(|d| *at + Duration::from_millis(d)))
+                });
                 self.wake_at
-                    .map_or(self.last_activity, |w| w.max(self.last_activity))
+                    .into_iter()
+                    .chain(crons)
+                    .fold(self.last_activity, Instant::max)
                     + t
             })
     }

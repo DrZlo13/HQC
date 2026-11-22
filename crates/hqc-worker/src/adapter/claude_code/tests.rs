@@ -4548,6 +4548,90 @@ async fn a_fork_starts_from_the_source_transcript() {
     assert!(format!("{e:#}").contains("not in"), "{e:#}");
 }
 
+/// A fork takes the transcripts of the subagents its copied part names (`toolUseResult.agentId`)
+/// into the new session's folder, where the CLI looks for them: the `.jsonl` up to its last
+/// line break and the `.meta.json`, 0600. A subagent only the later part names, and an id that
+/// is no file name, are left out.
+#[tokio::test]
+async fn a_fork_takes_the_transcripts_of_its_subagents() {
+    let (text, ids) = two_turns();
+    let mut lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+    let result = |id: &str| {
+        json!({"type": "user", "uuid": Uuid::new_v4(), "isSidechain": false,
+            "message": {"role": "user", "content": []},
+            "toolUseResult": {"agentId": id, "status": "async_launched"}})
+        .to_string()
+    };
+    lines.insert(1, result("a1"));
+    lines.insert(2, result("../x"));
+    lines.push(result("late"));
+    let (source, runtime) = (Uuid::new_v4(), Uuid::new_v4());
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let from = super::paths::transcript_path(config.path(), work.path(), &source);
+    std::fs::create_dir_all(from.parent().unwrap()).unwrap();
+    std::fs::write(&from, lines.join("\n")).unwrap();
+    let theirs = super::paths::subagents_dir(config.path(), work.path(), &source);
+    std::fs::create_dir_all(&theirs).unwrap();
+    std::fs::write(
+        theirs.join("agent-a1.jsonl"),
+        "{\"n\":1}\n{\"n\":2}\n{\"n\":3",
+    )
+    .unwrap();
+    std::fs::write(theirs.join("agent-a1.meta.json"), "{\"agentType\":\"x\"}").unwrap();
+    std::fs::write(theirs.join("agent-late.jsonl"), "{}\n").unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let mut s = spec(Uuid::now_v7(), work.path(), runtime);
+    s.fork = Some(hqc_proto::frame::ForkFrom {
+        runtime_session_id: source.to_string(),
+        at_event_ids: vec![super::engine::record_event_id(&ids[1], 1)],
+    });
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let mine = super::paths::subagents_dir(config.path(), work.path(), &runtime);
+    let mut names: Vec<_> = std::fs::read_dir(&mine)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["agent-a1.jsonl", "agent-a1.meta.json"]);
+    assert_eq!(
+        std::fs::read_to_string(mine.join("agent-a1.jsonl")).unwrap(),
+        "{\"n\":1}\n{\"n\":2}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(mine.join("agent-a1.meta.json")).unwrap(),
+        "{\"agentType\":\"x\"}"
+    );
+    #[cfg(unix)]
+    for n in &names {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(mine.join(n))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "{n}: {mode:o}");
+    }
+    // Nothing outside the new session's folder: the project folder has the source's files and
+    // the new folder only.
+    let project = mine.parent().unwrap().parent().unwrap();
+    let mut top: Vec<_> = std::fs::read_dir(project)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    top.sort();
+    let mut want = vec![
+        format!("{source}"),
+        format!("{source}.jsonl"),
+        runtime.to_string(),
+    ];
+    want.sort();
+    assert_eq!(top, want);
+    a.kill().await.unwrap();
+}
+
 /// `show_in_vscode` (the default from the worker config): the child gets
 /// `CLAUDE_CODE_ENTRYPOINT=claude-vscode`, whatever the worker's own environment says;
 /// without it the variable is removed and the CLI writes its own `sdk-cli`.
@@ -8417,6 +8501,49 @@ fn an_ambient_task_of_a_subagent_does_not_keep_it_running() {
 {"type":"system","subtype":"task_updated","task_id":"A","patch":{"status":"completed"}}
 {"type":"system","subtype":"task_notification","task_id":"A","status":"completed","summary":"Published the page."}
 {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"w1","task_type":"monitor_ws","description":"Comments on the page","parent_task_id":"A","ambient":true}]}
+{"type":"result","subtype":"success","num_turns":1}"#;
+    let want: [&[&str]; 7] = [
+        &["background_tasks:1", "subagents:1"],
+        &[],
+        &[],
+        &[],
+        &[],
+        &["background_tasks:0"],
+        &["subagents:0", "turn_ended"],
+    ];
+    assert_eq!(task_counts(LINES.lines()), want);
+}
+
+/// A task whose work runs outside the process (`off_host: true`, 2.1.325 in a cloud session) is
+/// no background work: the count leaves it out.
+#[test]
+fn an_off_host_task_is_no_background_work() {
+    const LINES: &str = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"w1","task_type":"mcp_task","description":"Work in the cloud","off_host":true}]}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"w1","task_type":"mcp_task","description":"Work in the cloud","off_host":true},{"task_id":"b1","task_type":"local_bash","description":"Run the checks"}]}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"w1","task_type":"mcp_task","description":"Work in the cloud","off_host":true}]}
+{"type":"system","subtype":"background_tasks_changed","tasks":[]}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"w2","task_type":"mcp_task","description":"Work in the cloud","off_host":true}]}"#;
+    let want: [&[&str]; 5] = [
+        &[],
+        &["background_tasks:1"],
+        &["background_tasks:0"],
+        &[],
+        &[],
+    ];
+    assert_eq!(task_counts(LINES.lines()), want);
+}
+
+/// A subagent ends without a report (`handback`) and an `off_host` task of it stays in the list
+/// with the subagent as its `parent_task_id`. The task does not keep the subagent counted: it
+/// ends at the next line of another kind.
+#[test]
+fn an_off_host_task_of_a_subagent_does_not_keep_it_running() {
+    const LINES: &str = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"A","task_type":"local_agent"}]}
+{"type":"system","subtype":"task_started","task_id":"A","description":"Start the work","is_backgrounded":true,"task_type":"local_agent"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"A","task_type":"local_agent"},{"task_id":"w1","task_type":"mcp_task","description":"Work in the cloud","parent_task_id":"A","off_host":true}]}
+{"type":"system","subtype":"task_updated","task_id":"A","patch":{"status":"completed"}}
+{"type":"system","subtype":"task_notification","task_id":"A","status":"completed","summary":"Started the work."}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"w1","task_type":"mcp_task","description":"Work in the cloud","parent_task_id":"A","off_host":true}]}
 {"type":"result","subtype":"success","num_turns":1}"#;
     let want: [&[&str]; 7] = [
         &["background_tasks:1", "subagents:1"],

@@ -4203,6 +4203,36 @@ a.relay-peer {
   accent-color: var(--accent);
 }
 
+/* Previews of a question's options (SPEC 0.199): plain text never wrapped, so that an ASCII
+   mockup keeps its shape, scrolling sideways inside itself; the fieldset does not grow to its
+   longest line. A desktop puts them beside the options, a phone under the chosen one. */
+.question-previews {
+  min-width: 0;
+}
+
+.question-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.choice-preview {
+  white-space: pre;
+  word-break: normal;
+  overflow-x: auto;
+}
+
+/* All previews of the question stacked in one cell, only the current one visible: the
+   column keeps the height of the tallest. */
+.question-preview {
+  display: grid;
+}
+
+.question-preview > .choice-preview {
+  grid-area: 1 / 1;
+}
+
 .actions {
   display: flex;
   flex-wrap: wrap;

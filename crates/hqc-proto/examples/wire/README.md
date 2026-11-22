@@ -129,3 +129,6 @@ person declined it (`action: decline`).
 
 Archived projects (§3 Project): `api.projects.archived.json` — `GET /api/projects?archived=1`, the
 projects with `archived_at`, which `api.projects.json` (the project bar) leaves out.
+
+SPEC 0.199: `event.clarify.request.preview.json` — a question whose options carry
+`option_previews` (each option's mockup as plain text, `""` for an option without one).

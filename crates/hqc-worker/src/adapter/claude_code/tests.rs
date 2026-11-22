@@ -17,7 +17,8 @@ use uuid::Uuid;
 
 use super::engine::{
     next_cron_fire, record_event_id, resurrected_cron_jobs, Action, Core, COMMAND_TEXT_LIMIT,
-    CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT, PROMPT_INJECTION_TEXT,
+    CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT, OPTION_PREVIEW_LIMIT,
+    OPTION_PREVIEW_TRUNCATED, PROMPT_INJECTION_TEXT,
 };
 use super::process::{CommandSpec, OsSpawner, Sig};
 use super::scripted::ScriptedClaude;
@@ -675,6 +676,7 @@ async fn ask_user_question_becomes_clarify() {
                 "crates/hqc-proto: event and frame schema".into(),
                 "client/: TypeScript PWA".into()
             ]),
+            option_previews: None,
             multi: Some(false),
             required: false,
             input: None,
@@ -3223,6 +3225,58 @@ fn an_mcp_servers_request_over_256_kib_is_cancelled() {
     assert!(core
         .answer_clarify("e1", &BTreeMap::new(), Some(ClarifyAction::Decline))
         .is_err());
+}
+
+/// SPEC 0.199: each option's `preview` goes into `option_previews` by the rule of
+/// `option_descriptions`: paired with the labels, `""` for an option without one, U+0000
+/// replaced, absent when no option has one. A preview over `OPTION_PREVIEW_LIMIT` bytes is
+/// cut on a char boundary and gets the truncation mark.
+#[test]
+fn clarify_option_previews() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let x = |n: usize| "x".repeat(n);
+    // "é" is two bytes across the limit: the cut drops it whole.
+    let long = format!("{}é tail", x(OPTION_PREVIEW_LIMIT - 1));
+    let req = json!({"type": "control_request", "request_id": "q1", "request": {
+        "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+            {"question": "Which layout?", "multiSelect": false, "options": [
+                {"label": "Sidebar", "preview": "| a |\u{0}| <b>b</b> |"},
+                {"label": "Tabs", "description": "On top"},
+                {"preview": "no label"},
+                {"label": "Exact", "preview": x(OPTION_PREVIEW_LIMIT)},
+                {"label": "Long", "preview": long}]},
+            {"question": "Which checks?", "multiSelect": true, "options": [
+                {"label": "fmt", "description": "rustfmt"}, {"label": "clippy"}]}]}}});
+    let a = core.on_line(&req.to_string());
+    let qs = match &a[..] {
+        [Action::Emit(AdapterEvent::Event(e))] => match &e.kind {
+            EventKind::ClarifyRequest { questions, .. } => questions.clone(),
+            k => panic!("{k:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        qs[0].options,
+        Some(vec![
+            "Sidebar".into(),
+            "Tabs".into(),
+            "Exact".into(),
+            "Long".into()
+        ])
+    );
+    assert_eq!(
+        qs[0].option_previews,
+        Some(vec![
+            "| a |\u{FFFD}| <b>b</b> |".into(),
+            "".into(),
+            x(OPTION_PREVIEW_LIMIT),
+            format!("{}{OPTION_PREVIEW_TRUNCATED}", x(OPTION_PREVIEW_LIMIT - 1)),
+        ])
+    );
+    assert_eq!(OPTION_PREVIEW_TRUNCATED, "\n… (truncated)");
+    assert_eq!(qs[1].option_previews, None);
+    let wire = serde_json::to_value(&qs[1]).unwrap();
+    assert!(wire.get("option_previews").is_none());
 }
 
 /// A denial is the VS Code tab's (cc_remote docs/SPEC.md §2.12): "No" stops the turn

@@ -200,6 +200,12 @@ const CRON_OFFSET_CAP_MS: f64 = 1_800_000.0;
 const CRON_CACHE_LEAD_MS: i64 = 15_000;
 const CRON_CACHE_TTL_MS: i64 = 300_000;
 pub const ERROR_TEXT_LIMIT: usize = 300;
+/// Cap of one option's `preview` of `AskUserQuestion` in `clarify.request.option_previews`
+/// (SPEC §4, §8.1), in UTF-8 bytes, so that one question does not swell the event and the
+/// feed: a longer one is cut on a char boundary and [`OPTION_PREVIEW_TRUNCATED`] follows.
+pub const OPTION_PREVIEW_LIMIT: usize = 8192;
+/// The mark after an option's preview cut to [`OPTION_PREVIEW_LIMIT`].
+pub const OPTION_PREVIEW_TRUNCATED: &str = "\n… (truncated)";
 
 /// A denial without text, sent with `interrupt: true`: what the "No" of the VS Code tab sends
 /// (extension 2.1.309, cc_remote docs/SPEC.md §2.12). The CLI ends the turn at once with
@@ -3514,18 +3520,22 @@ pub(crate) fn parse_questions(input: &Value) -> Option<(Vec<ClarifyQuestion>, Ve
     for (i, q) in qs.iter().enumerate() {
         // The raw question goes back to the CLI as the key of its answer.
         let raw = q["question"].as_str()?;
-        // Labels and descriptions pair up: an option without a label is dropped with its
-        // description.
-        let (options, descriptions): (Vec<String>, Vec<String>) = q["options"]
+        // Labels, descriptions and previews pair up: an option without a label is dropped
+        // with its description and preview.
+        let (options, (descriptions, previews)): (Vec<String>, (Vec<String>, Vec<String>)) = q
+            ["options"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(|o| {
                 let label = o["label"].as_str()?;
-                Some((text(label), text(o["description"].as_str().unwrap_or(""))))
+                let description = text(o["description"].as_str().unwrap_or(""));
+                let preview = option_preview(o["preview"].as_str().unwrap_or(""));
+                Some((text(label), (description, preview)))
             })
             .unzip();
         let described = descriptions.iter().any(|d| !d.is_empty());
+        let previewed = previews.iter().any(|p| !p.is_empty());
         questions.push(ClarifyQuestion {
             id: (i + 1).to_string(),
             text: text(raw),
@@ -3535,6 +3545,7 @@ pub(crate) fn parse_questions(input: &Value) -> Option<(Vec<ClarifyQuestion>, Ve
                 .map(text),
             options: (!options.is_empty()).then_some(options),
             option_descriptions: described.then_some(descriptions),
+            option_previews: previewed.then_some(previews),
             multi: q["multiSelect"].as_bool(),
             required: false,
             input: None,
@@ -3600,6 +3611,7 @@ fn form_fields(req: &Value) -> Option<(Vec<ClarifyQuestion>, Fields)> {
                 .map(|t| preview(t, QUESTION_TEXT_LIMIT)),
             options,
             option_descriptions: None,
+            option_previews: None,
             multi: None,
             required: required.contains(&name),
             input: match field {
@@ -3643,6 +3655,16 @@ fn content(
         out.insert(name.clone(), v);
     }
     out
+}
+
+/// [`text`] of an option's preview, cut to [`OPTION_PREVIEW_LIMIT`] with
+/// [`OPTION_PREVIEW_TRUNCATED`] after it.
+fn option_preview(s: &str) -> String {
+    let full = text(s);
+    if full.len() <= OPTION_PREVIEW_LIMIT {
+        return full;
+    }
+    preview(&full, OPTION_PREVIEW_LIMIT) + OPTION_PREVIEW_TRUNCATED
 }
 
 /// The text of a `tool_result` block's `content` (a string or text parts).

@@ -182,6 +182,10 @@ pub struct ClarifyQuestion {
     /// without one (since SPEC 0.67); absent when no option has a description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub option_descriptions: Option<Vec<String>>,
+    /// A mockup of each option shown as plain text (`AskUserQuestion`'s `preview`), by the
+    /// rule of `option_descriptions` (since SPEC 0.199); absent when no option has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_previews: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi: Option<bool>,
     /// A field an MCP server's form requires (its schema's `required`, since SPEC 0.180).
@@ -971,6 +975,22 @@ mod tests {
             serde_json::from_str(include_str!("../examples/wire/event.tool.result.json")).unwrap();
         let p = &serde_json::to_value(&plain).unwrap()["payload"];
         assert!(p.get("artifact_ids").is_none());
+    }
+
+    /// SPEC 0.199: each option's preview, in the order and number of `options`, `""` for an
+    /// option without one.
+    #[test]
+    fn clarify_request_previews_roundtrip() {
+        let src = include_str!("../examples/wire/event.clarify.request.preview.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::ClarifyRequest { questions, .. } = &e.kind else {
+            panic!("not clarify.request: {:?}", e.kind);
+        };
+        let previews = questions[0].option_previews.as_deref().unwrap();
+        assert_eq!(previews.len(), questions[0].options.as_ref().unwrap().len());
+        assert!(previews[0].starts_with("+--------+") && previews[2].is_empty());
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
     }
 
     #[test]

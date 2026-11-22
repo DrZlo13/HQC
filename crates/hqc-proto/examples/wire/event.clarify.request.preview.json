@@ -1,0 +1,37 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-00000000010b",
+  "seq": 43,
+  "ts": "2026-10-22T10:00:05Z",
+  "author": {
+    "kind": "agent",
+    "id": "0199f3a2-7c10-7000-8000-000000000001"
+  },
+  "type": "clarify.request",
+  "payload": {
+    "request_id": "req-3",
+    "questions": [
+      {
+        "id": "q1",
+        "text": "Which layout should the settings page use?",
+        "header": "Layout",
+        "options": [
+          "Sidebar",
+          "Tabs",
+          "One page"
+        ],
+        "option_descriptions": [
+          "Sections in a left column",
+          "Sections as tabs on top",
+          ""
+        ],
+        "option_previews": [
+          "+--------+------------------+\n| Look   | Theme: [Dark v]  |\n| Rules  |                  |\n+--------+------------------+",
+          "[ Look ] [ Rules ]\n+---------------------------+\n| Theme: [Dark v]           |\n+---------------------------+",
+          ""
+        ],
+        "multi": false
+      }
+    ]
+  }
+}

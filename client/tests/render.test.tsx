@@ -3381,6 +3381,142 @@ describe("the feed like the Claude Code tab", () => {
     expect(other(1, "input[type=text]").value).toBe("miri");
   });
 
+  // SPEC 0.199: the options' previews, plain text in `<pre>`, never rendered.
+  const MARKUP = "<b>Look</b> | Theme: [Dark v]";
+  const previewed = () =>
+    ev("event.clarify.request.preview", (e) => {
+      e.seq = 1;
+      e.payload.questions[0].option_previews[0] = MARKUP;
+    });
+  const TABS = raw("event.clarify.request.preview").payload.questions[0]
+    .option_previews[1];
+  const onPhone = () =>
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      matches: true,
+      media,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  const radio = (v: string) =>
+    root.querySelector<HTMLInputElement>(`input[value="${v}"]`)!;
+  const labelOf = (v: string) => radio(v).closest("label")!;
+
+  it("on a desktop shows beside the options the preview pointed at, else the chosen, else the first one that has one", async () => {
+    const t = new Timeline();
+    t.apply(previewed());
+    show(t);
+    const split = root.querySelector(".card-clarify fieldset .question-split")!;
+    expect([...split.children].map((c) => c.className)).toEqual([
+      "question-choices",
+      "question-preview",
+    ]);
+    expect(
+      split.querySelectorAll(".question-choices .choice:not(.choice-other)"),
+    ).toHaveLength(3);
+    // Every preview stays in the one cell, so the column keeps its height; exactly the
+    // current one is visible, the others hidden from the eye and from a screen reader.
+    const pres = () => [
+      ...split.querySelectorAll<HTMLElement>(".question-preview > pre.choice-preview"),
+    ];
+    const visible = () => {
+      expect(pres().map((p) => p.textContent)).toEqual([MARKUP, TABS]);
+      for (const p of pres())
+        expect(p.getAttribute("aria-hidden") === "true").toBe(
+          p.style.visibility === "hidden",
+        );
+      return pres()
+        .filter((p) => p.style.visibility !== "hidden")
+        .map((p) => p.textContent);
+    };
+    // The first one that has a preview; its markup is text.
+    expect(visible()).toEqual([MARKUP]);
+    expect(pres()[0].querySelector("b")).toBeNull();
+    const pointer = (v: string, type: string) =>
+      act(() => void labelOf(v).dispatchEvent(new MouseEvent(type)));
+    await pointer("Tabs", "mouseenter");
+    expect(visible()).toEqual([TABS]);
+    // The pointer leaves the option for the preview column: the preview stays, to be scrolled.
+    await pointer("Tabs", "mouseleave");
+    expect(visible()).toEqual([TABS]);
+    // The option under the pointer has no preview: none is visible.
+    await pointer("One page", "mouseenter");
+    expect(visible()).toEqual([]);
+    // The Other row and leaving the question let the pointed option go.
+    const enter = (el: Element, type: string) =>
+      act(() => void el.dispatchEvent(new MouseEvent(type)));
+    await enter(split.querySelector(".choice-other")!, "mouseenter");
+    expect(visible()).toEqual([MARKUP]);
+    await pointer("Tabs", "mouseenter");
+    await enter(split, "mouseleave");
+    expect(visible()).toEqual([MARKUP]);
+    await act(() => radio("Tabs").click());
+    expect(visible()).toEqual([TABS]);
+    await act(() => void radio("Sidebar").dispatchEvent(new FocusEvent("focus")));
+    expect(visible()).toEqual([MARKUP]);
+    // Focus moving into the preview keeps the option; elsewhere it lets it go.
+    await act(
+      () =>
+        void radio("Sidebar").dispatchEvent(
+          new FocusEvent("blur", { relatedTarget: pres()[0] }),
+        ),
+    );
+    expect(visible()).toEqual([MARKUP]);
+    await act(() => void radio("Sidebar").dispatchEvent(new FocusEvent("focus")));
+    await act(() => void radio("Sidebar").dispatchEvent(new FocusEvent("blur")));
+    expect(visible()).toEqual([TABS]);
+    expect(root.querySelectorAll(".question-choices .choice-preview")).toHaveLength(0);
+  });
+
+  it("on a phone opens the chosen option's preview under it, as text", async () => {
+    onPhone();
+    try {
+      const t = new Timeline();
+      t.apply(previewed());
+      show(t);
+      const q = root.querySelector(".card-clarify fieldset")!;
+      expect(q.querySelector(".question-split")).toBeNull();
+      expect(q.querySelector(".choice-preview")).toBeNull();
+      const pre = () => q.querySelectorAll("pre.choice-preview");
+      await act(() => radio("Sidebar").click());
+      expect(pre()).toHaveLength(1);
+      expect(pre()[0].previousElementSibling).toBe(labelOf("Sidebar"));
+      expect(pre()[0].textContent).toBe(MARKUP);
+      expect(pre()[0].querySelector("b")).toBeNull();
+      await act(() => radio("Tabs").click());
+      expect(pre()).toHaveLength(1);
+      expect(pre()[0].previousElementSibling).toBe(labelOf("Tabs"));
+      expect(pre()[0].textContent).toBe(TABS);
+      await act(() => radio("One page").click());
+      expect(pre()).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("draws no preview block for a question without previews, on a desktop or a phone", async () => {
+    const none = () => {
+      expect(root.querySelector(".choice-preview")).toBeNull();
+      expect(root.querySelector(".question-split")).toBeNull();
+      expect(
+        [...root.querySelectorAll(".card-clarify fieldset")].map((f) => f.className),
+      ).toEqual(["question", "question", "question"]);
+    };
+    const t = new Timeline();
+    t.apply(clarify());
+    show(t);
+    await act(() => radio("Hub").click());
+    none();
+    render(null, root);
+    onPhone();
+    try {
+      show(t);
+      await act(() => radio("Hub").click());
+      none();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   // The worker writes `args_preview` as compact JSON with the keys sorted (serde_json).
   const approvalFor = (seq: number, tool: string) =>
     ev("event.approval.request", (e) => {

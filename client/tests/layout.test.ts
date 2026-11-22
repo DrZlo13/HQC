@@ -80,6 +80,10 @@ describe('layout widths', () => {
     expect(rule('.md-table')['overflow-x']).toBe('auto');
     expect(rule('.md-table th, .md-table td')['overflow-wrap']).toBe('normal');
     expect(rule('.pre')['overflow']).toBe('auto');
+    // SPEC 0.199: an option's preview is never wrapped and its question does not grow with it.
+    expect(rule('.choice-preview')['white-space']).toBe('pre');
+    expect(rule('.choice-preview')['overflow-x']).toBe('auto');
+    expect(rule('.question-previews')['min-width']).toBe('0');
     expect(rule('.timeline')['overflow-y']).toBe('auto');
   });
 

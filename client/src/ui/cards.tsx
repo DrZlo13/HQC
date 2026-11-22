@@ -6,7 +6,7 @@
 // invalid events render as a collapsed row and never throw.
 
 import type { SecretFields } from '../api';
-import type { ComponentChildren } from 'preact';
+import { Fragment, type ComponentChildren } from 'preact';
 import { useMemo, useState } from 'preact/hooks';
 import type { Activity, ClarifyAction, ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, ModelProvider, SessionState } from '../proto';
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
@@ -1361,7 +1361,11 @@ interface OtherAnswer {
  *  option's description under its label, checkboxes for a multi question, and "Other" whose
  *  text is the answer (with multi, beside the checked labels). An MCP server's request
  *  (`server`) is headed by the server, has its text above the questions, its link with Done in
- *  place of questions, no "Other", its required fields marked, and Decline. */
+ *  place of questions, no "Other", its required fields marked, and Decline. The options'
+ *  previews (SPEC 0.199) are plain text, never rendered: on a desktop beside the options, the
+ *  one of the option last under the pointer while the pointer is over the question, or of the
+ *  option with the keyboard focus (kept when the focus moves into the preview), else of the
+ *  chosen one, else the first one that has a preview; on a phone under the chosen option. */
 export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.request'>; actions: ChatActions }) {
   const p = event.payload;
   const fate = actions.timeline.requestFate(p.request_id);
@@ -1382,10 +1386,23 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
   const open = (!fate.response && !fate.cancel) || later;
   const [answers, setAnswers] = useState<Record<string, ClarifyAnswer>>({});
   const [others, setOthers] = useState<Record<string, OtherAnswer>>({});
+  // Per question, the option under the pointer or the keyboard focus (desktop previews).
+  const [pointed, setPointed] = useState<Record<string, number>>({});
   const { busy, error, run } = useAction();
+  const phone = useIsPhone();
   const given = fate.response && 'answers' in fate.response ? fate.response.answers : replayed;
   const declined = !!fate.response && 'action' in fate.response && fate.response.action === 'decline';
   const href = p.url ? safeHref(p.url) : null;
+
+  const point = (q: ClarifyQuestion, i: number) => setPointed((pt) => ({ ...pt, [q.id]: i }));
+  // Without an option, whichever one is pointed at.
+  const unpoint = (q: ClarifyQuestion, i?: number) =>
+    setPointed((pt) => {
+      if (!(q.id in pt) || (i !== undefined && pt[q.id] !== i)) return pt;
+      const rest = { ...pt };
+      delete rest[q.id];
+      return rest;
+    });
 
   const set = (q: ClarifyQuestion, v: string, checked: boolean) => {
     setAnswers((a) => {
@@ -1487,34 +1504,55 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
           checked: s.other.on,
           onChange: (e: Event) => setOther(q, { on: (e.currentTarget as HTMLInputElement).checked }),
         };
-        return (
-          <fieldset key={q.id} class="question" disabled={!open || busy}>
-            <legend>
-              {(q.header || q.required) && (
-                <span class="question-header">{[q.header, q.required && 'required'].filter(Boolean).join(' · ')}</span>
-              )}
-              <span class="question-text">{q.text}</span>
-            </legend>
+        const previews = q.option_previews?.some((v) => v) ? q.option_previews : undefined;
+        const chosen = q.options?.findIndex((o) => s.picked.includes(o)) ?? -1;
+        // A desktop shows beside the options the preview of the option pointed at, else of the
+        // chosen one, else the first one that has a preview.
+        const beside =
+          previews && !phone ? (pointed[q.id] ?? (chosen >= 0 ? chosen : previews.findIndex((v) => v))) : undefined;
+        // The pointed option stays while the pointer is over the question, so its preview can be
+        // scrolled and selected; the Other row and leaving the question let it go.
+        const hoverOf = (i: number) => (beside === undefined ? {} : { onMouseEnter: () => point(q, i) });
+        // Focus that moves into the preview column (a scrollable <pre>) keeps the option too.
+        const focusOf = (i: number) =>
+          beside === undefined
+            ? {}
+            : {
+                onFocus: () => point(q, i),
+                onBlur: (e: FocusEvent) => {
+                  const to = e.relatedTarget as Element | null;
+                  if (!to?.closest('.question-preview')) unpoint(q, i);
+                },
+              };
+        const choices = (
+          <>
             {q.options?.map((o, i) => {
               const desc = q.option_descriptions?.[i];
+              const preview = previews?.[i];
+              const picked = s.picked.includes(o);
               const input = {
                 name,
                 value: o,
-                checked: s.picked.includes(o),
+                checked: picked,
                 onChange: (e: Event) => set(q, o, (e.currentTarget as HTMLInputElement).checked),
+                ...focusOf(i),
               };
               return (
-                <label key={o} class="choice">
-                  {q.multi ? <input type="checkbox" {...input} /> : <input type="radio" {...input} />}
-                  <span class="choice-body">
-                    <span class="choice-label">{o}</span>
-                    {desc && <span class="choice-desc">{desc}</span>}
-                  </span>
-                </label>
+                <Fragment key={o}>
+                  <label class="choice" {...hoverOf(i)}>
+                    {q.multi ? <input type="checkbox" {...input} /> : <input type="radio" {...input} />}
+                    <span class="choice-body">
+                      <span class="choice-label">{o}</span>
+                      {desc && <span class="choice-desc">{desc}</span>}
+                    </span>
+                  </label>
+                  {/* A phone opens the preview under the chosen option. */}
+                  {phone && picked && !!preview && <pre class="pre choice-preview">{preview}</pre>}
+                </Fragment>
               );
             })}
             {!!q.options?.length && p.server === undefined && (
-              <div class="choice choice-other">
+              <div class="choice choice-other" onMouseEnter={beside === undefined ? undefined : () => unpoint(q)}>
                 {q.multi ? <input type="checkbox" {...other} /> : <input type="radio" {...other} />}
                 {/* Typing into the field chooses Other, as in the tab. */}
                 <input
@@ -1529,6 +1567,39 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
                   }}
                 />
               </div>
+            )}
+          </>
+        );
+        return (
+          <fieldset key={q.id} class={previews ? 'question question-previews' : 'question'} disabled={!open || busy}>
+            <legend>
+              {(q.header || q.required) && (
+                <span class="question-header">{[q.header, q.required && 'required'].filter(Boolean).join(' · ')}</span>
+              )}
+              <span class="question-text">{q.text}</span>
+            </legend>
+            {previews && beside !== undefined ? (
+              <div class="question-split" onMouseLeave={() => unpoint(q)}>
+                <div class="question-choices">{choices}</div>
+                {/* Every preview in one cell, only the current one visible: the column is as tall
+                    as the tallest preview, so the options do not move under the pointer. */}
+                <div class="question-preview">
+                  {previews.map((v, i) =>
+                    v ? (
+                      <pre
+                        key={i}
+                        class="pre choice-preview"
+                        style={i === beside ? undefined : { visibility: 'hidden' }}
+                        aria-hidden={i === beside ? undefined : 'true'}
+                      >
+                        {v}
+                      </pre>
+                    ) : null,
+                  )}
+                </div>
+              </div>
+            ) : (
+              choices
             )}
             {!q.options?.length && (
               <input

@@ -1249,16 +1249,15 @@ async fn idle_timeout_waits_for_a_cron_job() {
         )
         .await;
     tokio::time::sleep(Duration::from_millis(800)).await;
-    assert!(
-        !adapters.calls().contains(&FakeCall::Kill(sid)),
+    assert_eq!(
+        ends(&adapters.calls(), sid),
+        0,
         "never idle before the cron job fires"
     );
     adapters
         .emit(sid, AdapterEvent::LiveSubagents(vec![]))
         .await;
-    adapters
-        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
-        .await;
+    adapters.wait_for("idle kill", |c| ends(c, sid) > 0).await;
     w.stop().await;
 }
 
@@ -1285,8 +1284,9 @@ async fn a_cron_job_due_later_than_a_stale_wakeup_holds() {
         )
         .await;
     tokio::time::sleep(Duration::from_millis(800)).await;
-    assert!(
-        !adapters.calls().contains(&FakeCall::Kill(sid)),
+    assert_eq!(
+        ends(&adapters.calls(), sid),
+        0,
         "the later cron fire holds the process"
     );
     w.stop().await;
@@ -1308,9 +1308,7 @@ async fn a_due_cron_job_does_not_hold() {
     adapters
         .emit(sid, AdapterEvent::LiveSubagents(vec![cron_row(Some(0))]))
         .await;
-    adapters
-        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
-        .await;
+    adapters.wait_for("idle kill", |c| ends(c, sid) > 0).await;
     w.stop().await;
 }
 

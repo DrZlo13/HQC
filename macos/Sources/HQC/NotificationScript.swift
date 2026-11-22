@@ -363,6 +363,14 @@ enum NotificationScript {
             const p = e.payload || {};
             const d = p.description || '';
             if ((e.author && e.author.kind === 'system') || WORKER_TOOLS.includes(p.tool)) return d;
+            // The request's own arguments (SPEC 0.207, `approval.request.args_preview`): the command
+            // Allow allows, never one guessed from another call.
+            const own = callArgs(p.args_preview);
+            const mine = WHAT_KEYS.map((key) => own[key]).find((v) => typeof v === 'string' && v);
+            if (mine) {
+              const rest = d === mine ? '' : d.endsWith(`\\n${mine}`) ? d.slice(0, d.length - mine.length).trim() : d;
+              return rest ? `${mine}\\n${rest}` : mine;
+            }
             const whats = p.subagent
               ? []
               : calls
@@ -382,7 +390,8 @@ enum NotificationScript {
             }
             // engine.rs preview(): the worker cuts at 4096 bytes, on a character's boundary.
             const cut = new TextEncoder().encode(d).length >= 4093;
-            if (cut && whats.length === 1) return `${whats[0]}\\n${d}`;
+            // A cut description with no call that ends it whole: the command is not known here, and
+            // a single pending call of the tool need not be the request's.
             const lines = d.split('\\n');
             if (lines.length < 2 && !cut) return d;
             if (lines.length === 2 && !cut) return `${lines[1]}\\n${lines[0]}`;

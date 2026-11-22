@@ -84,7 +84,7 @@ build: $(ICON) ## Build a release HQC.app bundle (compile + assemble + sign: ad-
 		'</plist>' \
 		> "$(APP)/Contents/Info.plist"
 	@echo "==> Signing ($(SIGN_IDENTITY))..."
-	codesign --force --deep --sign "$(SIGN_IDENTITY)" "$(APP)"
+	codesign --force --deep --options runtime --sign "$(SIGN_IDENTITY)" "$(APP)"
 	@echo "==> Done. Created $(APP) (run: open $(APP))"
 
 .PHONY: run

@@ -2768,6 +2768,13 @@ describe("messages", () => {
     expect(root.querySelector(".msg-pending")!.textContent).toContain(
       "Run the tests",
     );
+    // Being sent: a clock in the bubble where its time will stand, no line under the bubble.
+    const pending = root.querySelector(".msg-pending")!;
+    expect([...pending.children].map((c) => c.className)).toEqual(["msg-bubble"]);
+    const clock = pending.querySelector(".msg-bubble")!.firstElementChild!;
+    expect(clock.className).toBe("msg-time msg-sending");
+    expect([clock.getAttribute("aria-label"), clock.getAttribute("title")]).toEqual(["Sending", "Sending"]);
+    expect(clock.querySelector("svg.icon")).not.toBeNull();
     t.apply(ev("event.user.message"));
     show(t);
     expect(root.querySelector(".msg-pending")).toBeNull();
@@ -2783,6 +2790,8 @@ describe("messages", () => {
     // Discard as buttons of one size.
     const alert = root.querySelector(".msg-failed .send-alert")!;
     expect(alert.getAttribute("role")).toBe("alert");
+    // Not being sent any more: no clock in the bubble.
+    expect(root.querySelector(".msg-sending")).toBeNull();
     expect(
       [...alert.children].map((c) => [c.className, c.textContent]),
     ).toEqual([

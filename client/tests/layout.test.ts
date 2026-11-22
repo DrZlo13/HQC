@@ -265,3 +265,12 @@ describe('layout widths', () => {
     expect(rule('.phone-new-session')['bottom']).toBe('calc(var(--wline-h) + env(safe-area-inset-bottom) + 16px)');
   });
 });
+
+describe('a chat loading its first page', () => {
+  it('stands the spinner and the word in the middle of the empty feed', () => {
+    expect(rule('.feed:has(> .feed-loading)')['min-height']).toBe('100%');
+    const loading = rule('.feed-loading');
+    expect([loading['flex'], loading['align-items'], loading['justify-content']]).toEqual(['1', 'center', 'center']);
+    expect(rule('.spinner')['animation']).toBe('spin 0.8s linear infinite');
+  });
+});

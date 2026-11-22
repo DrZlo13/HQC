@@ -3222,7 +3222,7 @@ describe('a new session', () => {
     expect(api.createSession).toHaveBeenCalledWith('p1', undefined, { workspace_id: 'w1', cwd: 'net', permission_mode: 'ask', model: 'haiku' });
     // On its way: shown as being sent, the input clear, the chips holding what was sent.
     expect(win()!.querySelector('.msg-pending')!.textContent).toContain('Hello there');
-    expect(win()!.querySelector('.msg-pending')!.textContent).toContain('sending…');
+    expect(win()!.querySelector('.msg-pending .msg-bubble .msg-sending')!.getAttribute('aria-label')).toBe('Sending');
     expect(input().value).toBe('');
     expect([...root.querySelectorAll<HTMLButtonElement>('.new-chip')].every((c) => c.disabled)).toBe(true);
 

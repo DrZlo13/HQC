@@ -386,12 +386,15 @@ export const IconFolder = ({ size = 14 }: { size?: number }) => (
   </Svg>
 );
 
-export const IconModel = ({ size = 14 }: { size?: number }) => (
+/** A clock: the model chip of a new session, and a message being sent, where its time will stand. */
+export const IconClock = ({ size = 14 }: { size?: number }) => (
   <Svg size={size}>
     <circle cx="10" cy="10" r="6.5" />
     <path d="M10 6.5v3.5l2.5 1.5" />
   </Svg>
 );
+
+export const IconModel = IconClock;
 
 /** A window with its left panel: "Sessions" of a chat's header slides the session column out. */
 export const IconPanel = ({ size = 16 }: { size?: number }) => (

@@ -3390,6 +3390,17 @@ describe('switching chats', () => {
     await act(async () => void (await new Promise((r) => setTimeout(r, 20))));
   }
 
+  it('a chat whose first page is not in yet shows a spinner and "Loading…" in the empty feed', async () => {
+    const { api, app } = setup('idle');
+    api.eventsBefore.mockReturnValue(new Promise(() => {}) as never);
+    await mountChat(app);
+    const loading = root.querySelector('.feed > .feed-loading')!;
+    expect(loading.getAttribute('role')).toBe('status');
+    expect(loading.textContent).toBe('Loading…');
+    expect(loading.querySelector('.spinner')!.getAttribute('aria-hidden')).toBe('true');
+    expect(root.querySelector('.feed .empty')).toBeNull();
+  });
+
   it('a chat opened before shows its feed in the first frame, resubscribes after its last seq, then fetches its newest page again', async () => {
     const { api, app } = setup('idle');
     const { subs, subscribe } = subscriptions(app);

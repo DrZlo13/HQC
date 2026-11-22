@@ -923,7 +923,13 @@ export function Chat({
           }}
         >
           <div class="feed" ref={feed}>
-            {!loaded && <div class="empty">Loading…</div>}
+            {/* The first page on its way: a spinner and the word in the middle of the empty feed. */}
+            {!loaded && (
+              <div class="feed-loading" role="status">
+                <span class="spinner" aria-hidden="true" />
+                Loading…
+              </div>
+            )}
             <FeedBlocks blocks={start ? blocks.slice(start) : blocks} actions={actions} />
             {requestsOnly && items.length === 0 && <div class="empty">No requests</div>}
             {t.streaming && <StreamingMessage text={t.streaming} />}

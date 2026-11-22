@@ -1500,12 +1500,14 @@ describe('header', () => {
       await mount(app);
       const pause = $('.btn-pause')!;
       expect(pause.textContent).toBe('Pause');
+      // The pause stops a running turn at once (SPEC 0.191), not after it.
+      expect(pause.title).toBe('The agent stops now; messages wait for Resume');
       expect(pause.nextElementSibling!.classList.contains('btn-stop')).toBe(true);
       await act(async () => pause.click());
       expect(api.pauseSession).toHaveBeenCalledWith('s1');
       render(null, root);
       await mount(app, true);
-      expect($('.btn-pause')!.getAttribute('aria-label')).toBe('Pause after this turn');
+      expect($('.btn-pause')!.getAttribute('aria-label')).toBe('Pause session');
       expect($('.btn-pause')!.nextElementSibling!.classList.contains('btn-stop')).toBe(true);
       render(null, root);
     }
@@ -1612,7 +1614,7 @@ describe('header', () => {
     expect([...$('.chat-head-top')!.children].map((c) => c.getAttribute('aria-label') ?? c.classList[0])).toEqual([
       'Back to sessions',
       'chat-title',
-      'Pause after this turn',
+      'Pause session',
       'Stop the agent',
       'menu-box',
     ]);

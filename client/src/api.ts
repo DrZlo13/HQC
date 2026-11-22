@@ -622,8 +622,8 @@ export class Api {
     await this.req('POST', `/api/sessions/${enc(id)}/restart`);
   }
 
-  /** Stops the agent once its turn ends and holds input until {@link Api.resumeSession}
-   *  (SPEC §17.3). */
+  /** Stops a running turn at once, as Stop does, and the agent's process with it (at once when
+   *  no turn runs); holds input until {@link Api.resumeSession} (SPEC §17.3). */
   async pauseSession(id: string): Promise<void> {
     await this.req('POST', `/api/sessions/${enc(id)}/pause`);
   }

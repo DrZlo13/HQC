@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.209, 2026-11-20. Status: the architecture agreed after six reviews and a survey of
+Version 0.211, 2026-11-22. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2309,7 +2309,7 @@ trimmed (an empty or unchanged one sends nothing), Esc keeps the old one, a refu
 chat's notice "Not renamed: …"; not for an archived or a service session, a room and a room's
 agent included. While the agent works (`running`, `waiting`, `queued`; not an archived or a
 service session, a room or one paused already) "Pause" (§17.3) stands right before Stop (on a
-phone an icon, "Pause after this turn"); a paused session that is not archived has "Resume" in
+phone an icon, "Pause session"); a paused session that is not archived has "Resume" in
 its place, before Stop while its turn still runs; their refusals are the chat's notice ("Not
 paused: …", "Not resumed: …").
 "More" (⋯) holds, as far as each applies: on a phone where the session runs and the cost (above),
@@ -7190,6 +7190,14 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
+### 0.210 → 0.211 (the header's Pause says the pause is at once)
+§6 client layout: the header's Pause came with 0.206 in the words of the pause before 0.191,
+"Pause after this turn" on a phone and "The agent stops when this turn ends; messages wait for
+Resume" as the tooltip on a computer, while since 0.191 a pause stops a running turn at once.
+They are now "Pause session" and "The agent stops now; messages wait for Resume". The 0.206
+record said "More" held Pause before it; it held the mode, the model, Rename and the browser,
+and Pause was only in the row's menu. Client only. 0.210 is taken by #164.
+
 ### 0.208 → 0.209 (publish a page or a file at a public link)
 §7, §7.2: the tool `hqc_publish(path, caption?)` (issue #7). The worker packs a folder with
 `index.html`, or one file, into a deterministic zip, every entry inside the folder and
@@ -7262,8 +7270,9 @@ description line.
 0.186–0.199 are taken by other open branches.
 
 ### 0.205 → 0.206 (the chat header reworked)
-§6 client layout and `permission_mode`, §7.1.1, §17.3: the chat header's "More" menu held
-everything, Pause among it, also for an idle session. The permission mode and the model are now
+§6 client layout and `permission_mode`, §7.1.1, §17.3: the chat header's "More" menu held the
+mode, the model, Rename and the browser; Pause and Restart were only in the row's menu, Pause
+also for an idle session; Folder rules was a button of its own. The permission mode and the model are now
 round pills beside the state, each opening its menu: the mode a switch Ask | Auto | Allow all
 with the browser's item under it; the model the Claude families, each with its versions in a
 submenu, "Another model…", the providers and the worker's usage limits, the same menu in a new

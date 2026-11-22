@@ -778,7 +778,7 @@ type HoverHandlers = {
 
 /** A session's state mark: a dot of its group (amber waits, the accent works, a ring is
  *  idle), `</>` while it is open in VS Code and not working there, the pause sign in the ring's
- *  colour while it is paused (one still finishing its turn before the pause keeps its dot); a
+ *  colour while it is paused (one whose turn the pause is stopping keeps its dot); a
  *  room's is its icon, in the dot's colors, with `room` (`roomTip`) for its tooltip. `color`:
  *  the project's own, for a working dot in a list of several projects, where `--accent` is the
  *  last opened one's. */

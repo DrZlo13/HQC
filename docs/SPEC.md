@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.211, 2026-11-22. Status: the architecture agreed after six reviews and a survey of
+Version 0.212, 2026-11-22. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2041,7 +2041,8 @@ the rest is marked "later"):
   `PUT` → `200 {favorite_at}` (again: the same time), `DELETE` → `204` (also when there was
   none). A session's change reaches the user's clients as `session.summary`; a project's has no
   frame, another device sees it at the next `GET /api/projects`. The client shows the open
-  project's starred sessions in a Favorites block pinned above its session groups, newest first,
+  project's starred sessions as a Favorites group above its session groups, in the list's one
+  scroll (since 0.212; before, a block pinned over the list with a scroll of its own), newest first,
   without the project's name in the row (since 0.114; before, the starred sessions of every
   project began every project's list); a starred session is listed there only, not again in its
   group (Reorder still lists every session), so a project whose sessions are all starred shows
@@ -2250,8 +2251,10 @@ session, below). "⋯" (since 0.206) holds the list's order — State, Recent an
 shown checked, none while Reorder runs — and "Reorder…"; then "New room…" (§7.1.1); then, on a
 phone, whose project screen has no bar to right-click, Add to (Remove from) favorites, and the
 end of the bar's menu above: Project settings…, Archive project (Restore) and Delete project….
-Under the head the project's favorites (§3 Favorite) pinned over the scrolling list, under the
-name "Favorites" and their count as any group's, then the groups (below). A row is a dot — amber
+Under the head the scrolling list: a new session's "Draft" while one is open (below), the
+project's favorites (§3 Favorite) under the name "Favorites" and their count as any group's, then
+the groups (below); another project's list opens at its top (since 0.212), not at the scroll the
+previous one left. A row is a dot — amber
 waiting, red error, the project color pulsing while it works, an empty ring idle, `</>` while it
 is open in VS Code and not working there, (since 0.206) the pause sign, muted and titled
 "Paused", for a paused session that neither works nor waits (one still ending its turn keeps its
@@ -7189,6 +7192,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.211 → 0.212 (the favorites scroll with the session list)
+§6 client layout: a project's favorites were a block pinned over its session list, on a phone
+and in the Spacious look at most half of the column, scrolling inside it; a favorite past the
+block's fold was out of sight, a session that waits for the user among them while the project
+showed it waiting. The Favorites group now stands in the list's one scroll, on a desktop and a
+phone alike, first but for a new session's "Draft", which stays above it so that its current
+row is in sight however many favorites there are. On a desktop the column is not mounted again
+for another project and kept the scroll of the one left, which now would hide the favorites:
+another project's list opens at its top.
 
 ### 0.210 → 0.211 (the header's Pause says the pause is at once)
 §6 client layout: the header's Pause came with 0.206 in the words of the pause before 0.191,

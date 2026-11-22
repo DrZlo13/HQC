@@ -1399,11 +1399,31 @@ impl Core {
                         v["model_restriction"]["at"].as_str(),
                         m,
                     ),
-                    (_, Some(t)) if v["level"] != "info" && !t.trim().is_empty() => {
+                    // "Stop hook failed: " with no reason after it says nothing; the
+                    // desktop app hides it too.
+                    (_, Some(t))
+                        if v["level"] != "info"
+                            && !t.trim().is_empty()
+                            && t.trim() != "Stop hook failed:" =>
+                    {
                         vec![self.emit_system(RUNTIME_NOTICE, text(t))]
                     }
                     _ => vec![],
                 },
+                // The CLI's Stop-hook notices are not lines, as in the VS Code tab and the
+                // desktop app: `stop-hook-error` is the terminal's "Stop hook error occurred ·
+                // ctrl+o to see", sent the first time in a row a Stop hook blocks the end of
+                // the turn and when a Stop hook fails (its output is only in the terminal's
+                // transcript view); `stop-hook-block-cap` repeats the `informational` line of
+                // the same cap.
+                Some("notification")
+                    if matches!(
+                        v["key"].as_str(),
+                        Some("stop-hook-error" | "stop-hook-block-cap")
+                    ) =>
+                {
+                    vec![]
+                }
                 Some("notification") => match v["text"].as_str() {
                     Some(t) if !t.trim().is_empty() => vec![self.emit_system(RUNTIME_NOTICE, text(t))],
                     _ => vec![],

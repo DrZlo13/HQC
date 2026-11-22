@@ -5915,6 +5915,40 @@ fn cli_notices_are_lines() {
     );
 }
 
+/// SPEC §8.1: the CLI's Stop-hook notices give no line, as in the VS Code tab and the desktop
+/// app — neither `stop-hook-error` (cli:756279, cli:756784: a Stop hook blocked the end of the
+/// turn or failed) nor `stop-hook-block-cap`, which repeats the `informational` line of the same cap
+/// (cli:762106), the one line that stays; nor, as in the desktop app, "Stop hook failed: " with
+/// no reason (cli:756301), while one with a reason stays.
+#[test]
+fn stop_hook_notices_are_not_lines() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let cap = "A hook blocked the turn from ending 9 consecutive times \u{2014} overriding and ending turn.";
+    let a = play(
+        &mut core,
+        &[
+            r#"{"type":"system","subtype":"notification","key":"stop-hook-error","text":"Stop hook error occurred · ctrl+o to see","priority":"immediate"}"#.to_owned(),
+            format!(r#"{{"type":"system","subtype":"informational","content":"{cap}","level":"warning"}}"#),
+            format!(r#"{{"type":"system","subtype":"notification","key":"stop-hook-block-cap","text":"{cap}","priority":"high","color":"warning"}}"#),
+            r#"{"type":"system","subtype":"informational","content":"Stop hook failed: ","level":"warning"}"#.to_owned(),
+            r#"{"type":"system","subtype":"informational","content":"Stop hook failed: spawn ENOENT","level":"warning"}"#.to_owned(),
+        ]
+        .join("\n"),
+    );
+    assert_eq!(
+        system_events(&a),
+        [
+            ("runtime_notice".into(), cap.into()),
+            (
+                "runtime_notice".into(),
+                "Stop hook failed: spawn ENOENT".into()
+            ),
+        ]
+    );
+}
+
 /// SPEC §4, §8.1: the CLI went on with another model (`model_fallback`, `model_consent_fallback`,
 /// fields after cli:108527): a line "<model> → <fallback>: <the CLI's words>", and the turn's
 /// `usage` names the model that answered; a refusal with no other model

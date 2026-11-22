@@ -1569,6 +1569,21 @@ select.input {
   inset: 0;
   z-index: 39;
 }
+/* A phone row's long press opens its menu while the finger is still down: iOS then takes the
+   press, now on the layer or the menu, for its own and selects the page's text under its
+   Copy / Look Up bar. Neither starts a selection or the browser's menu; a field in a menu (a
+   room agent's name and prompt) is still typed into and selected. */
+.menu-scrim,
+.menu.ctx-menu {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+.ctx-menu input,
+.ctx-menu textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
 
 /* The workers as one line at the bottom of a desktop column: how many are online, the open
    session's machine and how many run there; their list opens above it. */

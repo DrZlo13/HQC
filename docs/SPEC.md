@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.214, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.215, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -7228,6 +7228,19 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.214 → 0.215 (.git and .hqc are never published; the card names secrets first)
+§7, §20: the card of a publication could understate what goes public: it named the first 50
+files that are not hidden, so an `id_rsa` or a `credentials.json` past them was only in "and N
+more", and showed a hidden folder as one line, so a token in `.git/config` went unseen. The
+worker no longer packs an entry named `.git` or `.hqc`, at any depth inside a published folder
+(the published path itself is not checked); the tool's description says so. The card always
+names a file whose last component looks like a secret (`.env*`, `credentials*`, `id_rsa*`,
+`id_dsa*`, `id_ecdsa*`, `id_ed25519*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, any case), also past
+the first 50 and inside a hidden folder, and lists the files in three groups, each in the
+archive's order: the secrets, the other hidden files and the hidden folders, the first 50
+others. The macOS app's notification of a publication keeps this order instead of putting the
+hidden lines first.
 
 ### 0.213 → 0.214 (a move or a publication after a restart only on the owner's mark)
 §3 `move`, `publish`: a hub that stopped while it carried out an allowed move or publication

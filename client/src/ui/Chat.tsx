@@ -575,8 +575,9 @@ export function Chat({
           />,
         ]
       : [];
-  // Pause beside Stop (SPEC §17.3): the agent stops once its turn ends; Resume in its place
-  // starts it again. Restart in "More" kills the process and starts it on the same history.
+  // Pause beside Stop (SPEC §17.3): a running turn is stopped now and the agent's process ends
+  // with it; Resume in its place starts it again. Restart in "More" kills the process and
+  // starts it on the same history.
   const pause = () => act(() => app.api.pauseSession(sessionId), 'Not paused');
   const resume = () => act(() => app.api.resumeSession(sessionId), 'Not resumed');
   const restart = () => act(() => app.api.restartSession(sessionId), 'Not restarted');
@@ -780,14 +781,14 @@ export function Chat({
         </button>
       )}
       {/* Pause only while the agent works (SPEC §17.3), right before Stop; a paused session has
-          Resume in its place, and Stop still while its turn runs to its end. */}
+          Resume in its place, and Stop still while the turn it cut short ends. */}
       {info && canPause(info) &&
         (phone ? (
-          <button type="button" class="icon-btn icon-btn-round btn-pause" aria-label="Pause after this turn" onClick={pause}>
+          <button type="button" class="icon-btn icon-btn-round btn-pause" aria-label="Pause session" onClick={pause}>
             <IconPause size={14} />
           </button>
         ) : (
-          <button type="button" class="btn btn-small btn-outline btn-pause" title="The agent stops when this turn ends; messages wait for Resume" onClick={pause}>
+          <button type="button" class="btn btn-small btn-outline btn-pause" title="The agent stops now; messages wait for Resume" onClick={pause}>
             <IconPause size={12} />
             Pause
           </button>

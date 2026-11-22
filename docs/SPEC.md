@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.209, 2026-11-20. Status: the architecture agreed after six reviews and a survey of
+Version 0.210, 2026-11-22. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2309,7 +2309,7 @@ trimmed (an empty or unchanged one sends nothing), Esc keeps the old one, a refu
 chat's notice "Not renamed: …"; not for an archived or a service session, a room and a room's
 agent included. While the agent works (`running`, `waiting`, `queued`; not an archived or a
 service session, a room or one paused already) "Pause" (§17.3) stands right before Stop (on a
-phone an icon, "Pause after this turn"); a paused session that is not archived has "Resume" in
+phone an icon, "Pause session"); a paused session that is not archived has "Resume" in
 its place, before Stop while its turn still runs; their refusals are the chat's notice ("Not
 paused: …", "Not resumed: …").
 "More" (⋯) holds, as far as each applies: on a phone where the session runs and the cost (above),
@@ -7190,6 +7190,15 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
+### 0.209 → 0.210 (the header's Pause says the pause is at once)
+§6 client layout: the header's Pause came with 0.206 in the words of the pause before 0.191,
+"Pause after this turn" on a phone and "The agent stops when this turn ends; messages wait for
+Resume" as the tooltip on a computer, while since 0.191 a pause stops a running turn at once.
+They are now "Pause session" and "The agent stops now; messages wait for Resume". The 0.206
+record said "More" held Pause before it; it held, besides Schedules and Move to project…, the
+mode, the model, Rename and the browser, Pause was only in the row's menu, and Folder rules and
+Restart session came into "More" with 0.206. Client only. 0.210 is taken by #164.
+
 ### 0.208 → 0.209 (publish a page or a file at a public link)
 §7, §7.2: the tool `hqc_publish(path, caption?)` (issue #7). The worker packs a folder with
 `index.html`, or one file, into a deterministic zip, every entry inside the folder and
@@ -7262,22 +7271,24 @@ description line.
 0.186–0.199 are taken by other open branches.
 
 ### 0.205 → 0.206 (the chat header reworked)
-§6 client layout and `permission_mode`, §7.1.1, §17.3: the chat header's "More" menu held
-everything, Pause among it, also for an idle session. The permission mode and the model are now
-round pills beside the state, each opening its menu: the mode a switch Ask | Auto | Allow all
-with the browser's item under it; the model the Claude families, each with its versions in a
-submenu, "Another model…", the providers and the worker's usage limits, the same menu in a new
-session's model chip and in "Switch model" under a refusal. The title is renamed in place (a
-pencil on hover, on a phone a tap). Pause stands before Stop only while the agent works, also in
-the row's menu; a paused session has Resume in its place, and its row shows the pause sign.
-"More" keeps Schedules, Move to project…, Folder rules and Restart session; Folder rules left
-the row's menu. The meta row says "on <worker>". On a phone the header's buttons stand on the
-title's line, the state has a line of its own, the pills another with "started by" after them
-instead of a last line of its own, and where the session runs is in "More". The session column
-head's "⋯" took the list's order, "Reorder…" and "New room…" and dropped Open in new tab and the
-favorites item, both in the project's right-click menu (a phone, without the bar, keeps the
-favorites item); Favorites has no pin, and the room's icon is two speech bubbles. Client only.
-0.186–0.196 are taken by open branches.
+§6 client layout and `permission_mode`, §7.1.1, §17.3: the chat header's "More" menu held,
+besides Schedules and Move to project…, the mode, the model, Rename and the browser; Pause and
+Restart were only in the row's menu, Pause also for an idle session; Folder rules was a button
+of its own. The permission mode and the model are now round pills beside the state, each opening
+its menu: the mode a switch Ask | Auto | Allow all with the browser's item under it; the model
+the Claude families, each with its versions in a submenu, "Another model…", the providers and
+the worker's usage limits, the same menu in a new session's model chip and in "Switch model"
+under a refusal. The title is renamed in place (a pencil on hover, on a phone a tap). Pause
+stands before Stop only while the agent works, also in the row's menu; a paused session has
+Resume in its place, and its row shows the pause sign. "More" keeps Schedules and Move to
+project… and gains Folder rules and Restart session; Folder rules left the row's menu. The meta
+row says "on <worker>". On a phone the header's buttons stand on the title's line, the state has
+a line of its own, the pills another with "started by" after them instead of a last line of its
+own, and where the session runs is in "More". The session column head's "⋯" took the list's
+order, "Reorder…" and "New room…" and dropped Open in new tab and the favorites item, both in
+the project's right-click menu (a phone, without the bar, keeps the favorites item); Favorites
+has no pin, and the room's icon is two speech bubbles. Client only. 0.186–0.196 are taken by
+open branches.
 
 ### 0.204 → 0.205 (a subagent's cards and rows on a phone: the task before the counts)
 §6, §4: on a phone a subagent's start card cut its task to a few letters, as "Agent started:",

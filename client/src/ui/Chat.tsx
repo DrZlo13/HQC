@@ -36,6 +36,7 @@ import {
 } from './icons';
 import { MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatCost, homePath, modeConfirm, modelName, shownModel } from './labels';
 import { LiveSubagents } from './LiveSubagents';
+import { Loading } from './Loading';
 import { CopyButton } from './Markdown';
 import { SelectionContext, useChatSelection } from './selection';
 import { PermissionBlock, SECRET_GIVEN } from './permission';
@@ -923,15 +924,15 @@ export function Chat({
           }}
         >
           <div class="feed" ref={feed}>
-            {/* The first page on its way: a spinner and the word in the middle of the empty feed. */}
+            {/* The empty feed's note in its middle: the first page on its way, or no requests
+                once it is in (before, the feed has no items either). */}
             {!loaded && (
-              <div class="feed-loading" role="status">
-                <span class="spinner" aria-hidden="true" />
-                Loading…
+              <div class="feed-note">
+                <Loading center />
               </div>
             )}
             <FeedBlocks blocks={start ? blocks.slice(start) : blocks} actions={actions} />
-            {requestsOnly && items.length === 0 && <div class="empty">No requests</div>}
+            {requestsOnly && loaded && items.length === 0 && <div class="feed-note">No requests</div>}
             {t.streaming && <StreamingMessage text={t.streaming} />}
             <FeedBlocks blocks={under} actions={actions} />
             {!system && <WaitedRequests app={app} sessionId={sessionId} />}

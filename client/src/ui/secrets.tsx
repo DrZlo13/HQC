@@ -8,6 +8,7 @@ import type { SecretFields, SecretGiven, WorkspaceKey } from '../api';
 import type { SecretAsked } from '../proto';
 import { useAction } from './hooks';
 import { IconKey } from './icons';
+import { Loading } from './Loading';
 
 /** A name as the worker takes it: letters, digits, `_`, `-` and `.`, not starting with `.`
  *  or `-`, 1 to 64 characters. */
@@ -245,7 +246,7 @@ export function WorkspaceKeys({
         Keys remembered for this workspace: every session here gets them in its ssh-agent. Added from a chat with
         “Remember for this workspace” or made by the agent with hqc_ssh_keygen.
       </p>
-      {keys === undefined && <div class="muted">Loading…</div>}
+      {keys === undefined && <Loading />}
       {keys === null && <div class="muted ws-keys-off">Not available: {failed}</div>}
       {keys && keys.length === 0 && <div class="muted ws-keys-none">No keys</div>}
       {keys && keys.length > 0 && (

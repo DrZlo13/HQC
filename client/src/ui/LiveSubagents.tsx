@@ -20,6 +20,7 @@ import { buildFeed } from './feed';
 import { useNow } from './hooks';
 import { IconStop } from './icons';
 import { count, retryLabel } from './labels';
+import { Loading } from './Loading';
 
 /** How often an open history is fetched again. */
 const REFRESH_MS = 2000;
@@ -319,7 +320,11 @@ function HistoryPanel({ taskId, history }: { taskId: string; history: SubagentHi
     >
       {page?.truncated && <div class="live-agents-note">Earlier steps are not shown.</div>}
       {page && !page.events.length && <div class="live-agents-note">Nothing yet.</div>}
-      {!page && !error && <div class="live-agents-note">Loading…</div>}
+      {!page && !error && (
+        <div class="live-agents-note">
+          <Loading />
+        </div>
+      )}
       {error && <div class="live-agents-note">{error}</div>}
       <div class="feed live-agents-feed">
         <FeedBlocks blocks={feed.blocks} actions={{ ...history.actions, timeline: feed.timeline }} />

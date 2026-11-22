@@ -266,11 +266,14 @@ describe('layout widths', () => {
   });
 });
 
-describe('a chat loading its first page', () => {
-  it('stands the spinner and the word in the middle of the empty feed', () => {
-    expect(rule('.feed:has(> .feed-loading)')['min-height']).toBe('100%');
-    const loading = rule('.feed-loading');
-    expect([loading['flex'], loading['align-items'], loading['justify-content']]).toEqual(['1', 'center', 'center']);
+describe('notes and spinners', () => {
+  it('stands the empty feed\'s note in its middle, and a centred "Loading…" spinner over the word', () => {
+    expect(rule('.feed:has(> .feed-note)')['min-height']).toBe('100%');
+    const note = rule('.feed-note');
+    expect([note['flex'], note['align-items'], note['justify-content']]).toEqual(['1', 'center', 'center']);
+    expect(rule('.loading-center')['flex-direction']).toBe('column');
     expect(rule('.spinner')['animation']).toBe('spin 0.8s linear infinite');
+    // In a line the spinner is as tall as the text; centred, 20 px.
+    expect([rule('.spinner')['width'], rule('.loading-center .spinner')['width']]).toEqual(['1em', '20px']);
   });
 });

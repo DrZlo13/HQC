@@ -15,6 +15,7 @@ import { colorLabel } from '../theme';
 import { AppearanceDialog, ProjectGlyph, projectName } from './Appearance';
 import { useSubscription } from './hooks';
 import { IconBack, IconCross, IconPlus, IconShield } from './icons';
+import { Loading } from './Loading';
 import { UNPUBLISH_PROJECT, homePath } from './labels';
 import { atWorkAfterTurn } from './sessions';
 
@@ -601,7 +602,11 @@ function ImportFromClaude({
         </select>
       </label>
       {loadError && <div class="error-text">{loadError}</div>}
-      {list === null && !loadError && <div class="muted small">…</div>}
+      {list === null && !loadError && (
+        <div class="muted small">
+          <Loading />
+        </div>
+      )}
       {list && list.length === 0 && !loadError && <div class="muted small">No Claude Code sessions found</div>}
       {list && list.length > 0 && (
         <ul class="candidate-list">
@@ -675,7 +680,11 @@ function FolderTree({ app, worker, onPick }: { app: AppState; worker: string; on
         )}
       </div>
       {browseError && <div class="error-text">{browseError}</div>}
-      {entries === null && !browseError && <div class="muted small">…</div>}
+      {entries === null && !browseError && (
+        <div class="muted small">
+          <Loading />
+        </div>
+      )}
       {entries && entries.length === 0 && !browseError && <div class="muted small">No subfolders</div>}
       {entries && entries.length > 0 && (
         <ul class="dir-list">

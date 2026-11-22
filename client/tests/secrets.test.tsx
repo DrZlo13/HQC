@@ -360,6 +360,16 @@ describe('the workspace’s ssh keys', () => {
     return api;
   }
 
+  it('shows a spinner and "Loading…" until the keys are in', async () => {
+    const api = setup();
+    api.workspaceKeys.mockImplementation(() => new Promise(() => {}) as never);
+    await flush();
+    await flush();
+    const loading = $('section[aria-label="SSH keys"] > .loading')!;
+    expect(loading.textContent).toBe('Loading…');
+    expect(loading.querySelector('.spinner')).not.toBeNull();
+  });
+
   it('lists them and deletes one after a confirmation', async () => {
     const api = setup();
     await flush();

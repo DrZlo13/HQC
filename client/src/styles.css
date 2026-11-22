@@ -3479,9 +3479,14 @@ select.input {
   font-style: italic;
   color: color-mix(in srgb, var(--muted) 60%, transparent);
 }
-/* What a task spent, after its text: never cut. */
+/* What a task spent, after its text: the text gives way first; the spending is cut only where it
+   does not fit beside the label (a long subagent's on a phone), not to push the line past the
+   feed. */
 .fold-stats {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
@@ -3983,7 +3988,8 @@ a.relay-peer {
   justify-content: center;
 }
 
-/* The task takes the room left; the type cuts first, down to a few letters. */
+/* The task takes the room left; the type cuts first, down to a few letters, and so does the end
+   card's spending, down to nothing. */
 .subagent-task {
   flex: 0 1 auto;
   min-width: 0;
@@ -4077,8 +4083,15 @@ a.relay-peer {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+/* The end card's head: "Agent finished:", the state and the spending of a long subagent
+   ("367.6k tokens · 265 tools · 1h 17m 22s") are wider than a phone's card, and a part that
+   does not give way pushes the head past the card and the feed sideways. */
 .subagent-head .subagent-stats {
+  flex: 0 1000 auto;
+  min-width: 0;
   margin-left: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* The end's text: its start dimmed in italics, as a background task's line shows it; open, as

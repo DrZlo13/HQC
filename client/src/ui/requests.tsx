@@ -25,7 +25,10 @@ function requestActions(app: AppState, r: OpenRequest, timeline: Timeline): Chat
     openArtifact: () => {},
     system: r.system,
     giveSecret: app.takesSecrets(r.worker_id)
-      ? async (requestId, f) => void (await app.api.giveSecret(r.session_id, f, requestId))
+      ? async (requestId, f) => {
+          await app.api.giveSecret(r.session_id, f, requestId);
+          app.dropRequest(r);
+        }
       : undefined,
   };
 }

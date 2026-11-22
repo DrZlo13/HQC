@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.192, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
+Version 0.193, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -4983,9 +4983,13 @@ longest, as the adapter's, §8.1); non-empty `thinking` → `agent.thinking`. Si
 `assistant` text with `message.model` `<synthetic>` → `agent.message` with `runtime: true`
 (§8.1), `final` by its `stop_reason` as any other, since 0.168 with `refusal: true` when that is
 `refusal`; since 0.180 an `assistant` text that is
-exactly `(no content)` gives none, as from the adapter; a `user` record with `origin.kind:
-task-notification` (2.1.312: `origin {kind, producer: session-task, runId}`, `promptSource:
-system`, `turnOrigin: task_notification`, text
+exactly `(no content)` gives none, as from the adapter; since 0.193 none for the synthetic
+text "No response requested." without `isApiErrorMessage`: the placeholder the CLI writes on a
+resume for a turn that ended without a reply (its process died in it, or it was interrupted),
+which it shows nothing for itself; the same text with `isApiErrorMessage` (its fallback for a
+rate limit) stays a reply; a `user` record with `origin.kind: task-notification` (2.1.312:
+`origin {kind, producer: session-task, runId}`, `promptSource: system`, `turnOrigin:
+task_notification`, text
 `<task-notification><task-id>…<status>…</status><summary>…</summary>…`) → `system
 task_notification` with the `<summary>`, else "Background task", never a `user.message` and not
 a prompt (an answer after it points at the last prompt a person typed). Since 0.135 one that came
@@ -6739,6 +6743,14 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
+### 0.192 → 0.193 (no red "No response requested." after a lost or interrupted turn)
+§9.1: when Claude Code resumes a session whose last turn ended without a reply (its process died
+in it, or it was interrupted), it writes for that turn a synthetic reply "No response
+requested." (2.1.312, `isApiErrorMessage: false`), and draws nothing for it. The mirror took it
+into the chat as the runtime's reply, a red line under a turn already shown lost or
+interrupted, which tells the user nothing. The mirror now gives no event for it; the same text
+with `isApiErrorMessage`, the CLI's fallback for a rate limit, stays. Only the worker changes.
+(0.186–0.198 are taken by other branches.)
 ### 0.191 → 0.192 (a turn the runtime starts by itself is not idle)
 §17.3: `idle_timeout` counted a turn Claude Code starts by itself (e.g. after a background
 task's end or on a wakeup) as idleness, since no input of hqc's opened it. Such a turn that

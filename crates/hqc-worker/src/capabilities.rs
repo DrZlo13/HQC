@@ -1,5 +1,7 @@
 //! `hello.capabilities` (SPEC §3 Worker, §5.4): `{claude_code?: {version, moves?}, acp_agents:
-//! []}`; `moves`: the worker moves a session's transcript into its new folder (SPEC §8.1).
+//! [], vault?}`; `moves`: the worker moves a session's transcript into its new folder (SPEC
+//! §8.1); `vault: true` (added by `Worker::hello`, with `session_secrets` and `vault` on): an
+//! `hqc_secret` may take its value from Vaultwarden through the worker's `rbw`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

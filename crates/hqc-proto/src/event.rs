@@ -251,6 +251,10 @@ pub enum AnswerInput {
 pub struct SecretAsk {
     pub name: String,
     pub kind: crate::frame::SecretKind,
+    /// The Vaultwarden entry the agent proposes (only where its worker reads Vaultwarden,
+    /// in its `worker.toml`); the owner confirms or changes it on the card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<String>,
 }
 
 /// One subagent of `subagents.live` (SPEC §4, since 0.101), or (since 0.127) one background

@@ -1010,13 +1010,43 @@ pub enum SecretKind {
 /// Longest secret value or private key `secret.put` takes, in bytes.
 pub const MAX_SECRET: usize = 64 * 1024;
 
-/// `secret.put {request_id, session_id, kind, name, value?, passphrase?, remember?, comment?}`
-/// -> `result` [`SecretPutResult`] or `error` (since SPEC 0.147, §5.3). `request_id` equals the
+/// A line a person is shown: no control character, no line separator, no bidirectional
+/// control that reorders what is shown.
+pub fn shown_line(s: &str) -> bool {
+    !s.chars().any(|c| {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{2028}' | '\u{2029}' | '\u{061C}' | '\u{200E}' | '\u{200F}'
+            )
+            || ('\u{202A}'..='\u{202E}').contains(&c)
+            || ('\u{2066}'..='\u{2069}').contains(&c)
+    })
+}
+
+/// Longest Vaultwarden entry name or id `secret.put` takes, in characters.
+pub const MAX_VAULT_ENTRY: usize = 200;
+
+/// Check the `vault` of `secret.put`: one shown line of 1 to [`MAX_VAULT_ENTRY`] characters.
+pub fn check_vault_entry(entry: &str) -> Result<(), String> {
+    if (1..=MAX_VAULT_ENTRY).contains(&entry.chars().count()) && shown_line(entry) {
+        Ok(())
+    } else {
+        Err(format!(
+            "vault is one line of 1 to {MAX_VAULT_ENTRY} characters, without control characters"
+        ))
+    }
+}
+
+/// `secret.put {request_id, session_id, kind, name, value?, vault?, passphrase?, remember?,
+/// comment?}` -> `result` [`SecretPutResult`] or `error` (since SPEC 0.147, §5.3). `request_id` equals the
 /// frame `id`. The worker takes it only with `session_secrets`, for a session of its owner
 /// that is not restricted and whose agent runs now; `value` is the secret (`secret`) or the
-/// private key (`ssh_key`), absent for `ssh_keygen`; `passphrase` decrypts a key and is not
-/// kept; `remember` keeps an `ssh_key` for the session's workspace (`ssh_keygen` always
-/// does); `comment` is the comment of a made key. Never logged, never in the outbox.
+/// private key (`ssh_key`), absent for `ssh_keygen`; instead of `value`, `vault` names the
+/// Vaultwarden (Bitwarden) entry that holds it, which the worker reads itself with `rbw` (only
+/// with `vault` on in its `worker.toml`): exactly one of the two for `secret` and `ssh_key`;
+/// `passphrase` decrypts a key and is not kept; `remember` keeps an `ssh_key` for the session's
+/// workspace (`ssh_keygen` always does); `comment` is the comment of a made key. Never logged, never in the outbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretPut {
     pub request_id: String,
@@ -1025,6 +1055,8 @@ pub struct SecretPut {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<SecretValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passphrase: Option<SecretValue>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1895,6 +1927,10 @@ mod tests {
         (
             "secret.put",
             include_str!("../examples/wire/hub.secret.put.json"),
+        ),
+        (
+            "secret.put",
+            include_str!("../examples/wire/hub.secret.put.vault.json"),
         ),
         (
             "secret.put",

@@ -8253,6 +8253,11 @@ button.ps-look {
   flex: none;
   width: 180px;
 }
+.secret-source {
+  align-self: flex-start;
+  width: 220px;
+  max-width: 100%;
+}
 .secret-name {
   flex: 1 1 140px;
   min-width: 0;

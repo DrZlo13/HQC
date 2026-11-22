@@ -634,6 +634,30 @@ fn keygen(dir: &std::path::Path, name: &str, passphrase: &str) -> String {
     std::fs::read_to_string(path).unwrap()
 }
 
+/// The file the fake `rbw` of [`fake_rbw`] touches on every call.
+fn rbw_marker(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("rbw-called")
+}
+
+/// A fake `rbw` in `dir`: it touches [`rbw_marker`] on every call; `unlocked` fails while
+/// `locked` exists; `list` has one entry, `home-wifi` with the id `id-wifi`; `get -- id-wifi`
+/// prints `vaulted-pass`, `get` of any other id fails.
+fn fake_rbw(dir: &std::path::Path, locked: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("rbw");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ntouch {}\ncase \"$1\" in unlocked) [ -e {} ] && exit 1; exit 0;; list) printf 'id-wifi\\thome-wifi\\tLogin\\n';; get) [ \"$3\" = id-wifi ] || {{ echo 'no entry found' >&2; exit 1; }}; echo vaulted-pass;; esac\n",
+            rbw_marker(dir).display(),
+            locked.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
 /// SPEC 0.147 (T57): with `session_secrets` the agent's process gets `HQC_SECRETS`, an
 /// ssh-agent of its own (empty at first) and the secret tools; `secret.put` writes a secret,
 /// loads a key, keeps one for the workspace that the next process loads, makes one; refusals
@@ -662,18 +686,22 @@ async fn secrets_and_keys_reach_the_running_agent() {
         Arc::new(claude.clone()),
     );
     let mut config = hqc_worker::config::Config::parse(&format!(
-        "{}session_secrets = true\n",
+        "{}session_secrets = true\nvault = true\n",
         env.config_toml("http://127.0.0.1:1")
     ))
     .unwrap();
     let mut hub = FakeHub::start().await;
     config.hub_url = hub.url();
     config.secrets = hqc_worker::secrets::Stores::in_home(&home_path);
+    // A fake `rbw`: `unlocked` fails while the `locked` file exists; `get` prints the value.
+    let locked = home_path.join("locked");
+    config.rbw_bin = fake_rbw(&home_path, &locked);
     let stores = config.secrets.clone();
     let w = start_worker_factory(&env, config, Arc::new(factory));
     let mut c = hub.accept().await;
     let hello = c.handshake().await;
     assert_eq!(hello["payload"]["session_secrets"], true);
+    assert_eq!(hello["payload"]["capabilities"]["vault"], true, "{hello}");
 
     let sid = Uuid::now_v7();
     c.frame("session.start", env.start_payload(sid)).await;
@@ -723,6 +751,64 @@ async fn secrets_and_keys_reach_the_running_agent() {
         std::fs::read_to_string(format!("{dir}/WIFI_PASS")).unwrap(),
         "hunter2-wifi"
     );
+
+    // A secret from Vaultwarden: the worker's `rbw` gives the value, the frame had none.
+    let r = ask(
+        &mut c,
+        put("secret", "VAULT_PASS", json!({"vault": "home-wifi"})),
+    )
+    .await;
+    assert_eq!(r["type"], "result", "{r}");
+    assert_eq!(r["payload"]["secret"]["path"], "$HQC_SECRETS/VAULT_PASS");
+    assert!(!r.to_string().contains("vaulted-pass"), "{r}");
+    assert_eq!(
+        std::fs::read_to_string(format!("{dir}/VAULT_PASS")).unwrap(),
+        "vaulted-pass"
+    );
+    // A locked vault, both a value and an entry, and a bad entry are refused, nothing written.
+    std::fs::write(&locked, "").unwrap();
+    let r = ask(
+        &mut c,
+        put("secret", "LOCKED_PASS", json!({"vault": "home-wifi"})),
+    )
+    .await;
+    assert_eq!(r["type"], "error", "{r}");
+    assert!(
+        r["payload"]["message"].as_str().unwrap().contains("locked"),
+        "{r}"
+    );
+    assert!(!std::path::Path::new(&format!("{dir}/LOCKED_PASS")).exists());
+    std::fs::remove_file(&locked).unwrap();
+    // Refused by the worker's own checks, before it runs `rbw` at all: the fake touches its
+    // marker on any call.
+    for (p, why) in [
+        (
+            put(
+                "secret",
+                "BOTH",
+                json!({"vault": "home-wifi", "value": "v"}),
+            ),
+            "not both",
+        ),
+        (
+            put("secret", "BAD_ENTRY", json!({"vault": "a\nb"})),
+            "vault is one line",
+        ),
+        (
+            put("ssh_keygen", "KEYGEN", json!({"vault": "home-wifi"})),
+            "ssh_keygen takes no vault entry",
+        ),
+    ] {
+        let _ = std::fs::remove_file(rbw_marker(&home_path));
+        let r = ask(&mut c, p.clone()).await;
+        assert_eq!(r["type"], "error", "{p} -> {r}");
+        assert!(
+            r["payload"]["message"].as_str().unwrap().contains(why),
+            "{p} -> {r}"
+        );
+        assert!(!rbw_marker(&home_path).exists(), "rbw ran for {p}");
+    }
+    assert!(!std::path::Path::new(&format!("{dir}/BOTH")).exists());
 
     // A key with a passphrase: wrong, then right, and kept for the workspace.
     let keys = tempfile::tempdir().unwrap();
@@ -828,6 +914,70 @@ async fn secrets_and_keys_reach_the_running_agent() {
     assert_eq!(r["payload"]["key_deleted"], true, "{r}");
     assert_eq!(stores.workspace(&env.workspace()).list().unwrap().len(), 1);
     w.stop().await;
+}
+
+/// The vault is offered only with `vault` and `session_secrets` both on: a worker with
+/// `session_secrets` alone has no `capabilities.vault` and refuses an entry; `vault` alone is
+/// not `session_secrets`.
+#[tokio::test]
+async fn the_vault_needs_both_flags() {
+    for (extra, secrets) in [
+        ("session_secrets = true\n", true),
+        ("vault = true\n", false),
+    ] {
+        let env = Env::new();
+        let home = tempfile::Builder::new()
+            .prefix("hqc-vault-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let home_path = home.path().canonicalize().unwrap();
+        let claude = ScriptedClaude::new(&fixture("stream-permission-allow-2.1.307.jsonl"));
+        let factory = ClaudeCodeAdapters::new(
+            ClaudeOptions {
+                config_dir: Some(env.dir.path().join("claude-config")),
+                ssh: hqc_worker::ssh::Store::in_home(&home_path),
+                ..ClaudeOptions::default()
+            },
+            Arc::new(claude.clone()),
+        );
+        let mut config = hqc_worker::config::Config::parse(&format!(
+            "{}{extra}",
+            env.config_toml("http://127.0.0.1:1")
+        ))
+        .unwrap();
+        let mut hub = FakeHub::start().await;
+        config.hub_url = hub.url();
+        config.secrets = hqc_worker::secrets::Stores::in_home(&home_path);
+        config.rbw_bin = fake_rbw(&home_path, &home_path.join("locked"));
+        let w = start_worker_factory(&env, config, Arc::new(factory));
+        let mut c = hub.accept().await;
+        let hello = c.handshake().await;
+        assert!(
+            hello["payload"]["capabilities"].get("vault").is_none(),
+            "{hello}"
+        );
+        let sid = Uuid::now_v7();
+        c.frame("session.start", env.start_payload(sid)).await;
+        c.expect("ack").await;
+        c.send(
+            json!({"id": "v-1", "type": "secret.put", "payload": {"request_id": "v-1",
+                      "session_id": sid, "kind": "secret", "name": "A", "vault": "home-wifi"}}),
+        )
+        .await;
+        let r = loop {
+            let f = c.recv().await;
+            if f["id"] == "v-1" {
+                break f;
+            }
+        };
+        assert_eq!(r["type"], "error", "{r}");
+        let msg = r["payload"]["message"].as_str().unwrap();
+        if secrets {
+            assert!(msg.contains("reads no Vaultwarden"), "{msg}");
+        }
+        assert!(!r.to_string().contains("vaulted-pass"), "{r}");
+        w.stop().await;
+    }
 }
 
 /// SPEC 0.147: without `session_secrets` (the default) the process gets none of it and

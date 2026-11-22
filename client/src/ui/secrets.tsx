@@ -42,20 +42,26 @@ export function SecretForm({
   const [kind, setKind] = useState<SecretFields['kind']>(asked?.kind ?? 'secret');
   const [name, setName] = useState(asked?.name ?? '');
   const [value, setValue] = useState('');
+  // The agent proposed a Vaultwarden entry: the card starts there; "Type it" is today's form.
+  const [fromVault, setFromVault] = useState(!!asked?.vault);
+  const [entry, setEntry] = useState(asked?.vault ?? '');
   const [passphrase, setPassphrase] = useState('');
   const [remember, setRemember] = useState(false);
   const { busy, error, run } = useAction();
   const first = useRef<HTMLInputElement>(null);
   const valueField = useRef<HTMLInputElement & HTMLTextAreaElement>(null);
   useEffect(() => {
+    // A card that opens on a Vaultwarden entry takes no focus: an Enter typed in the composer
+    // at that moment would give the secret unseen.
+    if (asked?.vault) return;
     (asked ? valueField : first).current?.focus();
   }, []);
   const key = kind === 'ssh_key';
   const nameError = name ? secretNameError(name) : null;
-  const canGive = !busy && !secretNameError(name) && value.trim() !== '';
+  const canGive = !busy && !secretNameError(name) && (fromVault ? entry.trim() !== '' : value.trim() !== '');
   const give = () => {
     if (!canGive) return;
-    const f: SecretFields = { kind, name, value };
+    const f: SecretFields = fromVault ? { kind, name, vault: entry.trim() } : { kind, name, value };
     if (key) {
       if (passphrase) f.passphrase = passphrase;
       if (remember) f.remember = true;
@@ -115,7 +121,41 @@ export function SecretForm({
         </div>
       )}
       {nameError && <div class="error-text small">{nameError}</div>}
-      {key ? (
+      {asked?.vault && (
+        <div class="seg-group secret-source" role="radiogroup" aria-label="Source">
+          {(
+            [
+              [true, 'Vaultwarden'],
+              [false, 'Type it'],
+            ] as const
+          ).map(([v, label]) => (
+            <button
+              key={label}
+              type="button"
+              role="radio"
+              aria-checked={fromVault === v}
+              class={`seg ${fromVault === v ? 'is-on' : ''}`}
+              disabled={busy}
+              onClick={() => setFromVault(v)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+      {fromVault ? (
+        <input
+          class="input mono secret-entry"
+          aria-label="Vaultwarden entry"
+          placeholder="Vaultwarden entry"
+          value={entry}
+          disabled={busy}
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck={false}
+          onInput={(e) => setEntry((e.currentTarget as HTMLInputElement).value)}
+        />
+      ) : key ? (
         <textarea
           ref={valueField}
           class="input mono secret-key"
@@ -168,7 +208,9 @@ export function SecretForm({
         </>
       )}
       <div class="secret-hint muted small">
-        {key
+        {fromVault
+          ? 'The worker reads this entry with rbw: the value does not pass through hqc.'
+          : key
           ? 'The key goes into the agent’s ssh-agent; the agent never sees it.'
           : 'The agent gets a file with it, not the value: it stays out of the chat and the transcript.'}
       </div>

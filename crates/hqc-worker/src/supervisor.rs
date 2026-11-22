@@ -1672,8 +1672,34 @@ impl Session {
         let Some(proc) = self.adapter.secrets() else {
             anyhow::bail!("the agent is not running: give it once it runs");
         };
+        // A vault entry is read here, by this machine's `rbw`: the value never came from the hub.
+        let vaulted = match put.vault.as_deref() {
+            None => None,
+            Some(entry) => {
+                let Some(rbw) = &allowed.rbw else {
+                    anyhow::bail!(
+                        "this worker reads no Vaultwarden: vault is off in its worker.toml"
+                    );
+                };
+                if put.kind == SecretKind::SshKeygen {
+                    anyhow::bail!("ssh_keygen takes no vault entry");
+                }
+                if put.value.is_some() {
+                    anyhow::bail!("give the value or the vault entry, not both");
+                }
+                hqc_proto::frame::check_vault_entry(entry).map_err(anyhow::Error::msg)?;
+                tracing::info!(session_id = %self.id, %entry, "reading a secret from Vaultwarden");
+                Some(crate::vault::read(rbw, entry).await?)
+            }
+        };
+        if put.vault.is_none() && put.value.is_none() && put.kind != SecretKind::SshKeygen {
+            anyhow::bail!("give the value or a vault entry");
+        }
         let value = || -> anyhow::Result<&str> {
-            match put.value.as_ref().map(|v| v.0.as_str()) {
+            match vaulted
+                .as_deref()
+                .or_else(|| put.value.as_ref().map(|v| v.0.as_str()))
+            {
                 Some(v) if v.len() > hqc_proto::frame::MAX_SECRET => anyhow::bail!(
                     "the value is longer than {} KiB",
                     hqc_proto::frame::MAX_SECRET / 1024

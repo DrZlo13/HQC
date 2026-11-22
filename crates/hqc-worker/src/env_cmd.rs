@@ -83,6 +83,7 @@ pub fn summary(cfg: &Config) -> String {
         "session_secrets: {}",
         if cfg.session_secrets { "on" } else { "off" }
     );
+    let _ = writeln!(out, "vault: {}", if cfg.vault { "on" } else { "off" });
     let _ = writeln!(
         out,
         "browser: {}",

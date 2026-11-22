@@ -1,0 +1,157 @@
+import Foundation
+import Observation
+
+/// The app's connection to one hub: who is signed in, the projects, live session summaries and
+/// the open requests. Views read it from the environment.
+@MainActor
+@Observable
+final class AppModel {
+    enum Phase: Equatable {
+        /// No hub address yet, or the user signed out.
+        case setup
+        /// Checking the stored sign-in with `GET /api/me`.
+        case connecting
+        /// The hub wants a Cloudflare Access sign-in.
+        case signIn
+        case ready
+    }
+
+    var phase: Phase = .setup
+    var hubURL: URL?
+    var me: Me?
+    var projects: [Project] = []
+    var requests: [OpenRequest] = []
+    var socketState: HubSocket.State = .closed
+    var lastError: String?
+    /// Live summaries by session id, from the `summary` frames.
+    private(set) var summaries: [String: SessionSummary] = [:]
+
+    private(set) var client: HubClient?
+    private(set) var socket: HubSocket?
+
+    private static let hubKey = "hubURL"
+
+    init() {
+        if let s = UserDefaults.standard.string(forKey: Self.hubKey), let url = URL(string: s) {
+            hubURL = url
+            phase = .connecting
+        }
+    }
+
+    private func tokenAccount(_ url: URL) -> String { "cf-access:\(url.host() ?? "")" }
+
+    /// `https://` is added when the user types no scheme; a path is dropped.
+    static func normalize(_ input: String) -> URL? {
+        var s = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        if !s.contains("://") { s = "https://" + s }
+        guard var c = URLComponents(string: s), let host = c.host, !host.isEmpty,
+              c.scheme == "https" || c.scheme == "http" else { return nil }
+        c.path = ""
+        c.query = nil
+        c.fragment = nil
+        return c.url
+    }
+
+    func setHub(_ url: URL) {
+        hubURL = url
+        UserDefaults.standard.set(url.absoluteString, forKey: Self.hubKey)
+        Task { await connect() }
+    }
+
+    /// Called by the login page once Access set its cookie on the hub's host.
+    func signedIn(token: String) {
+        guard let hubURL else { return }
+        Keychain.write(token, account: tokenAccount(hubURL))
+        Task { await connect() }
+    }
+
+    func signOut() {
+        if let hubURL { Keychain.delete(tokenAccount(hubURL)) }
+        socket?.stop()
+        socket = nil
+        client = nil
+        me = nil
+        projects = []
+        requests = []
+        summaries = [:]
+        phase = .signIn
+    }
+
+    func forgetHub() {
+        signOut()
+        hubURL = nil
+        UserDefaults.standard.removeObject(forKey: Self.hubKey)
+        phase = .setup
+    }
+
+    func connect() async {
+        guard let hubURL else { phase = .setup; return }
+        phase = .connecting
+        lastError = nil
+        let endpoint = HubEndpoint(baseURL: hubURL, accessToken: Keychain.read(tokenAccount(hubURL)))
+        let client = HubClient(endpoint: endpoint)
+        do {
+            me = try await client.me()
+        } catch HubError.signInRequired {
+            phase = .signIn
+            return
+        } catch {
+            lastError = error.localizedDescription
+            phase = .signIn
+            return
+        }
+        self.client = client
+        socket?.stop()
+        let socket = HubSocket(endpoint: endpoint)
+        socket.onState = { [weak self] s in self?.socketState = s }
+        socket.onSummary = { [weak self] list in
+            guard let self else { return }
+            for s in list { self.summaries[s.session_id] = s }
+        }
+        socket.onRequests = { [weak self] list in self?.requests = list }
+        socket.onSignInRequired = { [weak self] in self?.signOut() }
+        self.socket = socket
+        socket.start()
+        phase = .ready
+        await refresh()
+    }
+
+    func refresh() async {
+        guard let client else { return }
+        do {
+            projects = try await client.projects().filter { $0.archived_at == nil }
+        } catch HubError.signInRequired {
+            signOut()
+            return
+        } catch {
+            lastError = error.localizedDescription
+        }
+        // The `requests` frame keeps the list current; this load only fills it sooner, so a hub
+        // without the endpoint leaves it to the frame.
+        if let r = try? await client.requests() { requests = r }
+    }
+
+    func foreground() {
+        socket?.nudge()
+        Task { await refresh() }
+    }
+
+    func summary(_ sessionID: String) -> SessionSummary? { summaries[sessionID] }
+
+    func project(_ id: String) -> Project? { projects.first { $0.id == id } }
+
+    func requests(for sessionID: String) -> [OpenRequest] {
+        requests.filter { $0.session_id == sessionID }
+    }
+
+    /// Answers a request and drops it from the list at once; the next `requests` frame confirms.
+    func answer(_ request: OpenRequest, option: ApprovalOption) async throws {
+        guard let client else { return }
+        try await client.approve(sessionID: request.session_id, requestID: request.request_id, optionID: option.id)
+        requests.removeAll { $0.id == request.id }
+    }
+
+    /// Unread sessions across projects, for the badge on the projects tab.
+    var unreadCount: Int { summaries.values.filter { $0.unread > 0 }.count }
+}

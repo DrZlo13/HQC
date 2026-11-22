@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.212, 2026-11-22. Status: the architecture agreed after six reviews and a survey of
+Version 0.213, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -50,7 +50,8 @@ outbound only, over WebSocket. Inside: a native Claude Code adapter, a generic A
 for Hermes and any agent from the ACP registry, the hqc MCP server, the VS Code session mirror,
 workspace operations, a local config with restrictions and environments.
 
-**Client** — a web app, later Tauri and mobile. Talks only to the hub.
+**Client** — a web app; a native iOS app (`ios/`, since 0.213) over the same API; later Tauri.
+Talks only to the hub.
 
 Deployment: the hub sits in the home DMZ behind Cloudflare Tunnel. People sign in through
 Cloudflare Access (SSO), workers through a separate route with their own tokens (§6, §20).
@@ -6982,7 +6983,8 @@ send from a session in a lower mode (§7.1).
   Rust SDK), **[verify]** that it is current. Secure store for the worker token: Keychain
   on macOS (ssh keys of environments are 0600 files, §14); on Linux and Windows in the first version the worker token is a 0600 file (§5.1),
   libsecret and DPAPI later.
-- Client: TypeScript, responsive web, PWA; Tauri on the same code later.
+- Client: TypeScript, responsive web, PWA; Tauri on the same code later. iOS: Swift and SwiftUI
+  (`ios/`, since 0.213), the same REST API and `/api/ws`, no hub change.
 - Shared crates: `hqc-proto` (event and frame schema, versioned),
   `hqc-claude-jsonl` (transcript parser), adapters as separate crates.
 
@@ -7195,6 +7197,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.212 → 0.213 (a native iOS client)
+§2, §18: a native iOS client in `ios/` (Swift, SwiftUI, iOS 26) besides the web client. It uses
+only what §6 already gives the web client: `GET /api/me`, `/api/projects`, a project's
+sessions and workspaces, `GET /api/requests`, a session's events by `before_seq`, `POST /input`
+with `client_op_id`, `/stop`, `/retry`, `/archive`, `PATCH` of `permission_mode`, the answer to a
+request, `PUT /read_cursor`, and `/api/ws` with `subscribe_summary` and `subscribe` from the last
+`seq` on every reconnect. Behind Access it signs in through the login page in a web view and
+sends the `CF_Authorization` cookie with each request; on the WebSocket upgrade it sends
+`Origin` as the hub's origin, which §20 checks (a native client has no Origin of its own). No
+hub, worker or protocol change.
 
 ### 0.211 → 0.212 (Pause while a subagent works after the turn)
 §6 client layout: Pause was offered for `running`, `waiting` and `queued` only, so a session

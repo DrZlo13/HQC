@@ -1872,6 +1872,12 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
       e.ts = at(seq);
       e.payload = { text, code: "task_notification", call_id, status, task_id };
     });
+  const attachment = (seq: number, name: string) =>
+    ev("event.attachment", (e) => {
+      e.seq = seq;
+      e.ts = at(seq);
+      e.payload = { artifact_id: `a-${name}`, kind: "text", name };
+    });
   const failure = (seq: number, call_id: string, result_preview: string, error_text?: string) =>
     ev("event.tool.result", (e) => {
       e.seq = seq;
@@ -2274,6 +2280,52 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
     show(t);
     expect(root.querySelector(".subagent-end")).toBeNull();
     expect(root.querySelectorAll("details.line-system-task_notification")).toHaveLength(2);
+  });
+
+  it("a finished task's output file folds into its Background task line", () => {
+    const t = new Timeline();
+    t.apply(call(1, "sh", "Bash", { command: "cargo build", run_in_background: true }));
+    t.apply(result(2, "sh"));
+    t.apply(notification(61, "sh", "completed", "b1", 'Background command "cargo build" completed (exit code 0)'));
+    t.apply(attachment(62, "b1.output"));
+    const blocks = buildFeed(t.items(), t);
+    // No block of its own: the line takes the file.
+    expect(blocks.map((b) => b.kind)).toEqual(["tools", "task"]);
+    expect(blocks[1].kind === "task" && blocks[1].files.length).toBe(1);
+    show(t);
+    const fold = root.querySelector("details.line-system-task_notification")!;
+    expect(fold.querySelector(".card-attachment .attachment-name")!.textContent).toBe("b1.output");
+    // No card of its own beside the line, either.
+    expect([...root.querySelectorAll(".card-attachment")]).toHaveLength(1);
+  });
+
+  it("an attachment that is no task's output keeps its card of its own", () => {
+    const t = new Timeline();
+    t.apply(call(1, "sh", "Bash", { command: "cargo build", run_in_background: true }));
+    t.apply(result(2, "sh"));
+    t.apply(notification(61, "sh", "completed", "b1", 'Background command "cargo build" completed (exit code 0)'));
+    t.apply(attachment(62, "report.txt"));
+    const blocks = buildFeed(t.items(), t);
+    expect(blocks.map((b) => b.kind)).toEqual(["tools", "task", "item"]);
+    expect(blocks[1].kind === "task" && blocks[1].files.length).toBe(0);
+    show(t);
+    expect(root.querySelector("details.line-system-task_notification .card-attachment")).toBeNull();
+    expect(root.querySelectorAll(".card-attachment")).toHaveLength(1);
+  });
+
+  it("a folded output does not split the tool group it lands in", () => {
+    const t = new Timeline();
+    t.apply(call(1, "sh", "Bash", { command: "cargo build", run_in_background: true }));
+    t.apply(result(2, "sh"));
+    t.apply(notification(61, "sh", "completed", "b1", 'Background command "cargo build" completed (exit code 0)'));
+    // The output is uploaded beside the session's loop, so it can land between the calls of
+    // the next turn (SPEC §8.1).
+    t.apply(call(62, "r1", "Read", { file_path: "a.txt" }));
+    t.apply(attachment(63, "b1.output"));
+    t.apply(call(64, "r2", "Read", { file_path: "b.txt" }));
+    const blocks = buildFeed(t.items(), t);
+    expect(blocks.map((b) => b.kind)).toEqual(["tools", "task", "tools"]);
+    expect(blocks[2].kind === "tools" && blocks[2].rows.length).toBe(2);
   });
 });
 
@@ -2997,6 +3049,8 @@ describe("the feed like the Claude Code tab", () => {
     expect(fold.querySelector(".fold-text")!.textContent).toBe(
       'Background command "npm test" completed (exit code 0)All 12 suites passed',
     );
+    // Without an output file, nothing after the text.
+    expect(fold.textContent!.endsWith("All 12 suites passed")).toBe(true);
     expect(root.querySelector(".msg-agent")).toBeNull();
   });
 

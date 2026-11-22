@@ -27,7 +27,10 @@ Settings… (⌘,) holds:
 
 - **Servers**: the hubs, by name and address (`https://` is added when no scheme is typed). Each
   server is a tab, picked by the switch in the window's bar when there are two or more. With
-  no server the app opens Settings at launch.
+  no server the app opens Settings at launch. Type the address the hub's page ends up on, its
+  scheme and port too: the notifications, the Dock badge, the bar's colour and the cards' Allow
+  and Deny work only on the server's own origin, so a server typed as `http://` that redirects
+  to `https://` gets none of them.
 - **Shortcuts**: the app's own shortcuts, working while the app is active; New Session in
   Project works from any app, and brings the window up. They act on the active tab's page
   through the client's own controls (New Session in Project: the client's own function, which

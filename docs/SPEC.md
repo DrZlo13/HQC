@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.199, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
+Version 0.200, 2026-11-21. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1423,7 +1423,7 @@ MCP calls (worker → hub → worker):
   `background_tasks` (since 0.104) — how many background tasks the runtime lists for the agent
   now: its own background commands and monitors, its background subagents and their commands
   (Claude Code: the list of `background_tasks_changed`, since 0.166 without the tasks marked
-  `ambient`, §8.1), 0 when it is stopped; absent —
+  `ambient`, since 0.200 nor those marked `off_host`, §8.1), 0 when it is stopped; absent —
   0, and like `subagents` every report says it. The hub stores it as the session's
   `background_tasks` and sets 0 on a worker restart.
   `foreground_calls` (since 0.125) — the `call_id`s of the calls of the agent itself that the
@@ -4237,9 +4237,9 @@ the background since) cannot outlive the main turn and stops counting at its `re
 latest, as an interrupt, a denied call or `error_max_turns` during it may bring neither line;
 the count goes into `session.state.subagents` (§5.4). `system` `background_tasks_changed`
 (2.1.312) carries `tasks[]` (`task_id`, `task_type`, `parent_task_id` for a task a subagent
-started, as in its `task_started`, and `ambient`): the CLI's whole list of the session's
-running background tasks, subagents and shell commands, sent on every change and `[]` at the
-end. Since 0.181 the adapter drops its entries with `ambient: true` before anything below reads
+started, as in its `task_started`, `ambient` and, since 0.200, `off_host`): the CLI's whole list
+of the session's running background tasks, subagents and shell commands, sent on every change
+and `[]` at the end. Since 0.181 the adapter drops its entries with `ambient: true` before anything below reads
 the list (2.1.312, the CLI's description of the field: "True for tasks that are not activity
 (every skip_transcript task, plus every live-update watcher …); hosts should exclude them from
 activity indicators"): such a task is not counted in `background_tasks`, is no row and keeps no
@@ -4271,7 +4271,10 @@ are no activity, its own housekeeping (`skip_transcript`) and every live-update 
 the one that follows the comments on a page the agent published with Claude Code's Artifact tool
 (`monitor_ws`, `persistent`, no timeout, so it stays for the whole process; it leaves the list
 and comes back when its connection is renewed). The SDK tells hosts to leave such tasks out of
-activity, and the VS Code tab does.
+activity, and the VS Code tab does. Since 0.200 a task with `off_host: true` is not counted
+either, nor does it keep the subagent it names as `parent_task_id`: 2.1.325 marks so a task whose
+work runs outside the process ("show the task as running, but a host need not stay up for it"),
+and only in a cloud session, so it does not occur on the workers today.
 Since 0.113 the adapter sends the subagents of that count one by one as `subagents.live` (§4),
 whenever they or a title change and on every `system` `task_progress` of one of them (2.1.312:
 `task_id`, `description` — what it does now, "Running Sleep for 6 seconds" —, `usage
@@ -4689,7 +4692,17 @@ the copy `<record>` is the newest. Checked live on 2.1.312 with haiku: a session
 then "BANANA", then `/compact`, forked before "BANANA" through the hub; the worker started the
 fork from the copy and it answered "APPLE", while `--resume <source>` with the same record
 exits with that error. The adapter registers the copied main-chain records as its own (§9.3),
-so the mirror neither imports them nor takes them for another writer. The CLI writes the switch into the transcript as a typed `/model <name>` record; the
+so the mirror neither imports them nor takes them for another writer. Since 0.200 the worker also
+copies the transcripts of the subagents the copied part names (`toolUseResult.agentId` of its
+`user` and `assistant` records, but not of a compaction summary — `isCompactSummary`,
+`isVisibleInTranscriptOnly` —, an id of letters, digits, `_` and `-` only) from the source's
+`<project folder>/<source id>/subagents/` into the new session's, `agent-<id>.jsonl` up to its
+last line break — whole as it is at the fork, not cut at the fork's message — and
+`agent-<id>.meta.json` beside it (mode 0600, the folders 0700): the CLI looks for a subagent's
+transcript there and does not bring it on `--fork-session`, so `SendMessage` to such a subagent in
+the fork failed with "No transcript found for agent ID" (checked live: with both files put there
+before the start it works). A file the source lacks is skipped; any other failure is logged and the
+fork goes on. The CLI writes the switch into the transcript as a typed `/model <name>` record; the
 adapter counts it as its own input (§9.3), so the mirror imports no prompt from it (since 0.77).
 
 Interrupting a turn (`session.stop`): the adapter sends `control_request {subtype:
@@ -6471,7 +6484,13 @@ send from a session in a lower mode (§7.1).
   runtime starts by itself (Claude Code: e.g. after a background task's end or on a wakeup,
   §8.1) is not idle until its `result`, as a turn of hqc's is not: before, the timeout counted
   from its last output, so such a turn that waited longer than `idle_timeout` for an approval or
-  an answer, or ran a command that long, was killed and lost.
+  an answer, or ran a command that long, was killed and lost. Since 0.200 a cron job of the
+  agent (`CronCreate`) holds the unload off as a wakeup does: the timeout counts from the latest of the
+  last activity, the wakeup's time and the next fire of each cron job the worker last listed
+  (`due_in_ms` of its `kind: cron` row, §4; a job whose next fire is not known holds nothing),
+  so an unload no longer kills a job that has yet to fire. While such a job waits, the process
+  holds its slot of `max_sessions`: a new session waits for a slot (`waiting_for_slot`), as it
+  does beside any running agent.
 - Restart (since 0.130, `POST /api/sessions/{id}/restart`, §6): the hub sends `session.kill` and
   right after it `session.start` with `mode: resume`: the process ends and starts again at once,
   resuming its transcript, so its MCP servers and settings are read anew. A turn that runs is
@@ -6793,6 +6812,18 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
+### 0.199 → 0.200 (a cron job outlives an idle unload; a fork takes its subagents' transcripts; an `off_host` task is no work)
+§17.3, §8.1, §5.4: three worker fixes. (1) The deadline of `idle_timeout` is the latest of the
+agent's last activity, the time of its armed wakeup and the next fire of each cron job the worker
+last listed (`due_in_ms` of the `kind: cron` rows of `subagents.live`), plus the timeout; a stale
+wakeup does not let the process go before a later cron fire, a job with no known next fire holds
+nothing. Before, only the wakeup was counted and the unload killed the cron job, which then never
+fired. (2) A session forked from a message copies the transcripts of the subagents the cut part
+names into the new session's `subagents/` folder, so the agent can continue them with
+`SendMessage`; the CLI does not bring them on `--fork-session`. (3) A task of the CLI's
+`background_tasks_changed` list with `off_host: true` (2.1.325, cloud sessions only) is not
+counted in `session.state.background_tasks` and keeps no subagent as `parent_task_id`, as
+`ambient` ones. 0.186–0.207 are taken by other open branches.
 ### 0.198 → 0.199 (previews of a question's options)
 §4, §8.1: Claude Code's `AskUserQuestion` lets each option carry a `preview` (a mockup, code, a
 diagram as text), and the question card did not show it. `clarify.request` questions now carry

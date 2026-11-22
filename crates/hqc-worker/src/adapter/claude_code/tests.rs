@@ -5882,7 +5882,7 @@ fn a_refused_answer_is_retracted() {
     );
 }
 
-/// SPEC §8.1 (0.202): the message that asks the model again after a response whose tool call
+/// SPEC §8.1 (0.195): the message that asks the model again after a response whose tool call
 /// the CLI could not parse (2.1.325) names that response's records in `retracted_message_uuids`:
 /// their events are retracted at once, before any next answer.
 #[test]
@@ -5930,7 +5930,7 @@ fn an_answer_the_cli_dropped_is_retracted_when_it_asks_again() {
     );
 }
 
-/// SPEC §4, §8.1 (0.202): the CLI refused the model asked for and runs on another
+/// SPEC §4, §8.1 (0.195): the CLI refused the model asked for and runs on another
 /// (`system/informational` with `model_restriction`, 2.1.325): a `system model_not_switched`
 /// line with the model it runs on, kept as the session's, not the notice's own text.
 #[test]
@@ -5957,7 +5957,7 @@ fn a_restricted_model_is_a_line_and_the_kept_model() {
     );
 }
 
-/// SPEC §8.1 (0.202): a pick of a model the organization does not allow (2.1.325): the CLI sends
+/// SPEC §8.1 (0.195): a pick of a model the organization does not allow (2.1.325): the CLI sends
 /// the `model_restriction` line and then the `restricted_by_org` error of the `set_model`; one
 /// line in all.
 #[test]
@@ -6004,7 +6004,7 @@ fn a_refused_pick_of_a_restricted_model_is_one_line() {
     );
 }
 
-/// SPEC §8.1 (0.202): a `model_restriction` line of an earlier pick, after the user picked
+/// SPEC §8.1 (0.195): a `model_restriction` line of an earlier pick, after the user picked
 /// another model, gives neither a line nor its model.
 #[test]
 fn a_restriction_of_an_earlier_pick_is_only_logged() {

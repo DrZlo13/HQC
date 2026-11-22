@@ -159,9 +159,9 @@ function remove(app: AppState, s: SessionInfo, current?: string): void {
  *  first screen is `PhoneHome`). T50: the delayed archive with Undo, State / Recent / Custom
  *  and Reorder, archive mode. A row's actions are its menu (a right click; a long press on a
  *  phone); the header is one row (on a phone after "‹" back to the projects) and the favorites
- *  are pinned over the list; on a desktop the row under the mouse has round archive and
- *  favorites buttons past the column's edge, the workers are one line at the bottom and the
- *  column's right edge sets its width. */
+ *  are a group of the list, scrolling with it; on a desktop the row under the mouse has round
+ *  archive and favorites buttons past the column's edge, the workers are one line at the bottom
+ *  and the column's right edge sets its width. */
 export function SessionList({
   app,
   current,
@@ -228,7 +228,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     const items = reorder.map((id) => app.sessions.get(id)).filter((s): s is SessionInfo => !!s && !s.archived);
     groups = items.length ? [{ id: 'reorder', label: 'Drag to reorder', plain: true, items }] : [];
   } else {
-    // A favorite is listed once, in the Favorites block; Reorder still holds every session.
+    // A favorite is listed once, in the Favorites group; Reorder still holds every session.
     const list = app.sortedSessions().filter((s) => !s.favorite_at && s.id !== draft?.started);
     groups = groupSessions(list, mode, now, (pid && app.orders.get(pid)?.session_ids) || []);
   }
@@ -300,6 +300,11 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   const [dragId, setDragId] = useState<string | null>(null);
   const focusGrip = useRef<string | null>(null);
   const scroll = useRef<HTMLDivElement>(null);
+  // Another project's list opens at its top, its favorites first: on a desktop the column is not
+  // mounted again, and the scroll the previous project left would hide them.
+  useLayoutEffect(() => {
+    if (scroll.current) scroll.current.scrollTop = 0;
+  }, [pid]);
   useLayoutEffect(() => {
     const id = focusGrip.current;
     if (!id) return;
@@ -386,9 +391,11 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       onMenu={(x, y) => openMenu(s.id, x, y)}
     />
   );
-  // Pinned over the scrolling list.
+  // A group of the list, the first but for a new session's Draft, scrolling with the others: a
+  // block of its own scroll hid the favorites past its fold, a session that needs the user among
+  // them.
   const favoriteGroup = favorites.length > 0 && (
-    <div class="session-group group-favorites fav-pinned">
+    <div class="session-group group-favorites">
       <div class="group-head">
         <span class="group-label">Favorites</span>
         <span class="group-count">{favorites.length}</span>
@@ -462,13 +469,14 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
           />
         </div>
       )}
-      {favoriteGroup}
       <div
         class="session-scroll"
         ref={scroll}
         onScroll={rowHover ? hideRowButtons : undefined}
       >
+        {/* The new session first, its current row in sight above however many favorites. */}
         {draft && !reorder && <DraftRow app={app} />}
+        {favoriteGroup}
         {groups.map((g) => (
           <div key={g.id} class={`session-group group-${g.id}`}>
             <div class="group-head">
@@ -559,7 +567,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
             aria-label={`${buttonsFor.favorite_at ? 'Remove from' : 'Add to'} favorites «${titleOf(buttonsFor)}»`}
             title={buttonsFor.favorite_at ? 'Remove from favorites' : 'Add to favorites'}
             onClick={() => {
-              // The row moves between the Favorites block and its group: its buttons go.
+              // The row moves between the Favorites group and its own group: its buttons go.
               hideRowButtons();
               toggleFavorite(app, buttonsFor);
             }}

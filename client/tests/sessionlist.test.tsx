@@ -4,8 +4,8 @@
 // machine, the project rail with its "needs you" badge. T50: the order on the hub (State /
 // Recent / Custom, Reorder by the keyboard), the delayed archive with Undo, archive mode. The
 // one row menu (a right click; a long press on a phone), the row's archive and favorites
-// buttons, the one-row header with the order and project menus, the pinned favorites, the
-// column's width.
+// buttons, the one-row header with the order and project menus, the favorites as a group of the
+// scrolling list, the column's width.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'preact';
@@ -463,14 +463,14 @@ describe('SessionList (desktop column)', () => {
       expect(fav()!.classList.contains('is-on')).toBe(false);
       await click(fav());
       expect(api.setSessionFavorite).toHaveBeenLastCalledWith('cave', true);
-      expect(root.querySelector('.fav-pinned')!.textContent).toContain('Cave scene port');
+      expect(root.querySelector('.group-favorites')!.textContent).toContain('Cave scene port');
       expect(bar()).toBeNull();
       await ev(rowOf('Cave scene port'), 'pointerenter');
       expect(fav()!.getAttribute('aria-label')).toBe('Remove from favorites «Cave scene port»');
       expect(fav()!.classList.contains('is-on')).toBe(true);
       await click(fav());
       expect(api.setSessionFavorite).toHaveBeenLastCalledWith('cave', false);
-      expect(root.querySelector('.fav-pinned')).toBeNull();
+      expect(root.querySelector('.group-favorites')).toBeNull();
 
       // Not for a touch, not while the row's menu is open.
       await ev(rowOf('Stone textures'), 'pointerenter', 'touch');
@@ -2403,11 +2403,11 @@ describe('favorites', () => {
     const rows = [...root.querySelectorAll<HTMLElement>('.group-favorites .session-item')];
     expect(rows[0].querySelector('.session-row')!.getAttribute('href')).toBe('#/s/prof');
     expect(rows[0].querySelector('.session-row')!.classList.contains('is-current')).toBe(true);
-    // Pinned over the list on a desktop: not in its scroll.
-    expect(root.querySelector('.fav-pinned.group-favorites')).not.toBeNull();
-    expect(root.querySelector('.session-scroll .group-favorites')).toBeNull();
+    // The first group of the list's one scroll, not a block of its own over it.
+    expect(root.querySelector('.session-scroll > .session-group')!.classList.contains('group-favorites')).toBe(true);
+    expect(root.querySelector('.sessions > .group-favorites')).toBeNull();
     // Its head is the name alone, as every group's.
-    expect(root.querySelector('.fav-pinned .group-head svg, .group-pin')).toBeNull();
+    expect(root.querySelector('.group-favorites .group-head svg, .group-pin')).toBeNull();
     // In its own project the other one is listed.
     await act(() => app.selectProject('p0'));
     expect(favoriteTitles()).toEqual(['Migration plan']);
@@ -2419,11 +2419,33 @@ describe('favorites', () => {
     expect(root.querySelector('.group-favorites')).toBeNull();
   });
 
-  it("on a phone's project screen too they are pinned over the scrolling list", async () => {
+  it('a new session open in the project stands above them: its current row in sight however many they are', async () => {
+    const app = makeApp(LIST.map((s) => (s.id === 'cave' ? { ...s, favorite_at: at(30) } : s)));
+    app.openNewSession('p1');
+    await mount(<SessionList app={app} />);
+    expect(groups().slice(0, 2).map((g) => g[0])).toEqual(['Draft', 'Favorites']);
+  });
+
+  it('another project opens at the top of its list, its favorites in sight: the scroll left behind does not carry over', async () => {
+    const app = makeApp([
+      ...LIST.map((s) => (s.id === 'cave' ? { ...s, favorite_at: at(30) } : s)),
+      sess('plan', 'Migration plan', 'idle', at(50), { project_id: 'p0', favorite_at: at(0.1) }),
+    ]);
+    await mount(<SessionList app={app} />);
+    const scroller = root.querySelector<HTMLElement>('.session-scroll')!;
+    scroller.scrollTop = 500;
+    await act(() => app.selectProject('p0'));
+    // The same column, not mounted again.
+    expect(root.querySelector('.session-scroll')).toBe(scroller);
+    expect(favoriteTitles()).toEqual(['Migration plan']);
+    expect(scroller.scrollTop).toBe(0);
+  });
+
+  it("on a phone's project screen too they scroll with the list, its first group", async () => {
     await mount(<SessionList app={makeApp(LIST.map((s) => (s.id === 'cave' ? { ...s, favorite_at: at(30) } : s)))} phone />);
-    expect(root.querySelector('.sessions-phone > .fav-pinned.group-favorites')).not.toBeNull();
-    expect(root.querySelector('.session-scroll .group-favorites')).toBeNull();
-    expect(root.querySelector('.fav-pinned .group-head svg, .group-pin')).toBeNull();
+    expect(root.querySelector('.sessions-phone > .session-scroll > .session-group')!.classList.contains('group-favorites')).toBe(true);
+    expect(root.querySelector('.sessions-phone > .group-favorites')).toBeNull();
+    expect(root.querySelector('.group-favorites .group-head svg, .group-pin')).toBeNull();
   });
 
   it("the row's menu adds a session to the favorites and takes it out; the summary of another device too", async () => {
@@ -4522,12 +4544,12 @@ describe('a phone (< 900 px)', () => {
     expect(phoneAll()).toHaveLength(4);
   });
 
-  it('`#/p/<id>` is the project: its favorites pinned over the groups; "+" opens its new session', async () => {
+  it('`#/p/<id>` is the project: its favorites the first group; "+" opens its new session', async () => {
     const { app } = phoneApp();
     app.sessions.set('cave', { ...app.sessions.get('cave')!, favorite_at: at(1) });
     await open(app, '#/p/p1');
     expect(root.querySelector('.layout > .sessions-phone > .side-head .project-title')!.textContent).toBe('physics-mp');
-    expect(root.querySelector('.sessions-phone > .fav-pinned .session-title')!.textContent).toBe('Cave scene port');
+    expect(root.querySelector('.sessions-phone > .session-scroll > .group-favorites .session-title')!.textContent).toBe('Cave scene port');
     expect(groups().map((g) => g[0])).toEqual(['Favorites', 'Needs you', 'Running', 'Idle · Yesterday']);
     expect(root.querySelector('.phone-home, .chips, .fab, .wline')).toBeNull();
     await click(root.querySelector('.side-head .btn-new-session'));

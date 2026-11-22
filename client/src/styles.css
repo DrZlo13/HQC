@@ -1206,21 +1206,6 @@ select.input {
   background: var(--row-on);
 }
 
-/* The favorites pinned over the scrolling list on a desktop, a shadow under them; in the
-   Spacious look at most half the column, scrolling inside. */
-.fav-pinned {
-  flex: 0 1 auto;
-  min-height: 0;
-  max-height: 50%;
-  padding: 0 8px 10px;
-  position: relative;
-  z-index: 1;
-  box-shadow: 0 6px 8px -7px color-mix(in srgb, var(--shade) 55%, transparent);
-}
-.fav-pinned .session-list {
-  min-height: 0;
-  overflow-y: auto;
-}
 /* The width repeats the flex basis: Safari sizes an inline-flex box (a project's running mark)
    by its items' widths, so a dot without one let the count beside it overflow. */
 .dot {
@@ -1375,10 +1360,6 @@ select.input {
 :root.list-compact .sessions:not(.sessions-phone) .session-group > .group-head {
   padding: 3px 8px;
   font-size: 10.5px;
-}
-:root.list-compact .sessions:not(.sessions-phone) .fav-pinned {
-  max-height: none;
-  padding: 2px 8px 8px;
 }
 :root.list-compact .sessions:not(.sessions-phone) .session-item > .session-row {
   align-items: center;
@@ -2556,10 +2537,6 @@ select.input {
 .sessions-phone .archive-acts .btn-ghost {
   background: var(--surface);
   border-color: var(--border);
-}
-/* The favorites pinned over a project's list, its rows from edge to edge. */
-.sessions-phone .fav-pinned {
-  padding: 0 0 6px;
 }
 /* The dots out of a row keep their line: the workers line's, a project's running mark. */
 .sessions-phone .wline .dot,

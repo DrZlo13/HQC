@@ -1454,7 +1454,7 @@ describe('live subagents', () => {
     await act(async () =>
       render(<LiveSubagents agents={agents} receivedAt={1000} schedules={[]} schedulesAt={1000} onSchedules={() => {}} now={() => 1000} />, root),
     );
-    expect(rows().map((r) => r[0])).toEqual(['Agent: Review links, part A', 'Agent: Review links, part B: Reading notes.md']);
+    expect(rows().map((r) => r[0])).toEqual(['Subagent: Review links, part A', 'Subagent: Review links, part B: Reading notes.md']);
   });
 
   it('says on its row that a subagent retries a request to the model API (SPEC 0.179)', async () => {
@@ -1718,7 +1718,7 @@ describe("an answer of this client, before the hub's state and events come", () 
     expect(root.textContent).not.toContain('Waiting for approval');
     // The call waited 42 s for the answer: it counts as running from the answer, so the line
     // does not name it at once (SPEC §17.1).
-    expect($('.activity')!.textContent).toBe('Agent is working');
+    expect($('.live-agents-row')!.textContent).toBe('Main agent: Working');
   });
 
   it('the Requests list drops a request answered in its chat', async () => {

@@ -86,15 +86,18 @@ struct SignInView: View {
             GlassEffectContainer(spacing: 12) {
                 VStack(spacing: 12) {
                     Button {
-                        showLogin = true
+                        Task { await app.signInWithBrowser() }
                     } label: {
-                        Label("Sign in with Cloudflare Access", systemImage: "person.badge.key")
+                        Label("Sign in", systemImage: "person.badge.key")
                             .font(.headline)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 6)
                     }
                     .buttonStyle(.glassProminent)
                     .controlSize(.large)
+
+                    Button("Sign in inside the app") { showLogin = true }
+                        .buttonStyle(.glass)
 
                     HStack(spacing: 12) {
                         Button("Try again") { Task { await app.connect() } }

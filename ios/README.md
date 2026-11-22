@@ -1,50 +1,57 @@
 # hqc for iOS
 
 A native iPhone and iPad client for the hub, in Swift and SwiftUI with the iOS 26 Liquid Glass
-design: the projects, their sessions, a session's chat, and the permission requests and
-questions of every agent in one place. It talks to the hub's REST API and `/api/ws` exactly as
-the web client does (SPEC §6); nothing in the hub or the worker changes for it.
+design. It covers what you do with hqc day to day, against the hub's REST API and `/api/ws` as
+the web client does (SPEC §6), plus two hub routes made for it: sign-in through the system
+browser and Apple push (SPEC 0.214).
 
 ## What it does
 
-- **Projects → sessions → chat.** The session list shows each session's live state, subagents
-  and unread count from the `summary` frames; swipe to archive. "New session" picks one of
-  the project's workspaces and a permission mode.
+- **Projects, sessions, rooms.** Live state, subagents and unread counts from the `summary`
+  frames; favorites first; swipe to favorite, archive or unarchive; archived sessions on demand.
+  New project, new session (workspace and permission mode), new room (its agents with names,
+  models and system prompts, conversation or council); rename, favorite and archive a project.
 - **Chat.** User and peer messages, the agent's Markdown answer streamed from `agent.delta`,
-  its thinking (collapsed), tool calls folded with their results (tap to open the arguments and
-  output), attachments, and system lines. Retracted events are hidden. The composer is a glass
-  capsule whose send button morphs into Stop while the agent works. The "More" menu switches
-  the session's permission mode and offers Retry after an error.
-- **Requests.** Permission cards carry the agent's real options (Allow once, for the session,
-  always, Deny…); question cards (AskUserQuestion) have single- and multi-choice options with
-  their descriptions and an "Other" answer. They appear inline in the chat and, for every
-  session at once, in the Requests tab, from the `requests` frame.
-- **Reading.** Opening a chat moves the read cursor (`PUT /read_cursor`).
-
-Not in this first version: attachments upload and preview, rooms' own controls, schedules,
-search, workers and workspace management, and push notifications (the hub sends Web Push, which
-a native app does not receive; APNs would need a hub change). The web app covers those; Settings
-links to it.
+  its thinking, tool calls folded with their results, images and files, system lines; retracted
+  events hidden. The composer is a glass capsule: attach photos or files (uploaded at once,
+  `POST /api/artifacts`), complete `/` commands, and the send button turns into Stop while the
+  agent works. What the agent runs in the background (subagents, commands, wakeups) sits above
+  the input, each with Stop where the runtime allows it. Images show inline; any artifact opens
+  in QuickLook; a published page opens at its public link.
+- **Session controls.** Permission mode, model, schedules, pause and resume, restart, retry,
+  rename, favorite, archive, unarchive, delete. A room lists its agents, each opening its own
+  session.
+- **Requests.** Permission cards with the agent's real options and question cards
+  (AskUserQuestion) inline in the chat and, for every session, in the Requests tab.
+- **Schedules.** A session's schedules: once at a time or on a cron pattern, on and off, delete.
+- **Search.** Every session's messages, commands, output and answers (`GET /api/search`).
+- **Workers.** Online state, Claude Code's account on each machine and its sign-in from the
+  phone (the worker runs `claude auth login`), revoking, and confirming a new machine's
+  enrollment code (also from an `hqc-app://enroll?code=XXXX-XXXX` link). Workspaces: add a folder
+  of a worker through a browser of its `allowed_roots`, or remove one.
+- **Notifications.** Apple push for permission requests, questions, final answers, room posts
+  and failed input, when the hub has an APNs key (RUNBOOK §1.10). "Allow once" and "Deny" on an
+  approval's notification answer it without opening the app; a tap opens the session. While a
+  chat is on screen, its notices show no banner.
 
 ## Signing in
 
-Behind Cloudflare Access (RUNBOOK §1.6) the app opens the hub in a web view, where Access shows
-its login page; once Access sets its `CF_Authorization` cookie on the hub's host, the app keeps
-that value in its Keychain and sends it as a cookie with every request and the WebSocket
-upgrade, with `Origin` set to the hub's origin (SPEC §20). When Access lets the session expire,
-the next request comes back as a redirect and the app asks to sign in again. Set the Access
-application's **Session Duration** long (RUNBOOK suggests a month).
-
-Google and other identity providers that refuse embedded web views do not work in this login;
-Access's one-time PIN by email does. A hub without Access (dev mode on loopback) needs no
-sign-in.
+"Sign in" opens the hub in the system browser (`ASWebAuthenticationSession`), so Cloudflare
+Access runs with every identity provider, Google included, and with the browser's own Access
+session. The hub hands back a one-time code, which the app exchanges with a verifier only it
+holds for the Access token (SPEC §6); the token stays in the app's Keychain and goes as the
+`CF_Authorization` cookie with every request and the WebSocket upgrade, with `Origin` set to
+the hub's origin (SPEC §20). "Sign in inside the app" keeps the older way, Access's page in a
+web view, for a hub without the native route. When Access lets the session expire, the next
+request comes back as a redirect and the app asks to sign in again. A hub without Access (dev
+mode on loopback) needs no sign-in.
 
 ## Build and run
 
 Xcode 26 or newer (the iOS 26 SDK), no dependencies:
 
 ```sh
-open ios/HQC.xcodeproj        # then Run on a simulator or a device (set your team for a device)
+open ios/HQC.xcodeproj        # then Run on a simulator, or on a device with your team set
 ```
 
 or from the command line:
@@ -55,21 +62,25 @@ xcodebuild -project HQC.xcodeproj -scheme HQC \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
+On a device, set your team under Signing & Capabilities, and a bundle id of yours if the default
+is taken; for push, the hub's `HQC_APNS_TOPIC` must be that bundle id. The push entitlement is
+in `HQC.entitlements`; the `hqc-app` link scheme and the photo library text in `HQC-Info.plist`.
+
 To try it without a hub, start the web client's mock (`cd client && npm ci && node
-mock/server.mjs`) and enter `http://localhost:8787` in the app on a simulator: it speaks the
-hub's shapes, streams a turn, and asks a permission request (or questions, when the message
-contains "question"). The mock has no `GET /api/requests` and sends no `requests` frame, so the
-Requests tab stays empty there.
+mock/server.mjs`) and enter `http://localhost:8787` in the app on a simulator: it streams a
+turn and asks a permission request (or questions, when the message contains "question"). The
+mock has no requests list, rooms, schedules, search or workers; for those run a hub in dev mode
+(`tools/dev.sh up`, or `HQC_DEV=1` by hand, RUNBOOK §0.1) and enter its address.
 
 ## Layout
 
 | folder | what |
 |---|---|
-| `HQC/App` | the app, the root view (setup, sign-in, the tabs) |
+| `HQC/App` | the app, the app delegate (push, notification actions), the tabs |
 | `HQC/Model` | the hub's objects and events, decoded as tolerantly as the web client's `proto.ts` |
-| `HQC/Net` | REST client, the `/api/ws` socket with resubscribe-from-`seq` on reconnect, Keychain |
-| `HQC/State` | `AppModel` (projects, summaries, requests) and `ChatModel` (one chat's timeline) |
-| `HQC/Views` | SwiftUI screens and the feed's rows |
+| `HQC/Net` | REST client, the `/api/ws` socket with resubscribe-from-`seq`, the browser sign-in, Keychain |
+| `HQC/State` | `AppModel` (projects, summaries, requests, navigation, push) and `ChatModel` (one chat) |
+| `HQC/Views` | SwiftUI screens: projects, chat and its rows, artifacts, rooms, schedules, search, workers |
 
 The project uses a file-system synchronized group: new files under `HQC/` join the target
 without editing the project file.

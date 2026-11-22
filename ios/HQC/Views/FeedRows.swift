@@ -30,11 +30,14 @@ struct FeedRow: View {
                 if let id = ev.requestID { await model.clarify(requestID: id, answers: answers) }
             }
         case .attachment(let ev):
-            Label(ev.payload["name"]?.string ?? "Attachment", systemImage: "paperclip")
-                .font(.subheadline)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.fill.tertiary, in: .capsule)
+            if let id = ev.payload["artifact_id"]?.string {
+                VStack(alignment: .leading, spacing: 4) {
+                    ArtifactView(id: id)
+                    if let caption = ev.payload["caption"]?.string, !caption.isEmpty {
+                        Text(caption).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
         case .note(_, let text, let level):
             NoteRow(text: text, level: level)
         }
@@ -48,6 +51,9 @@ struct UserBubble: View {
         HStack {
             Spacer(minLength: 48)
             VStack(alignment: .trailing, spacing: 4) {
+                let ids = event.payload["artifact_ids"]?.stringArray ?? []
+                if !ids.isEmpty { ArtifactStrip(ids: ids, alignment: .trailing) }
+                if !event.text.isEmpty {
                 Text(event.text)
                     .textSelection(.enabled)
                     .padding(.horizontal, 14)
@@ -57,6 +63,7 @@ struct UserBubble: View {
                     .contextMenu {
                         Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = event.text }
                     }
+                }
                 switch event.delivery {
                 case "sending":
                     Label("Sending", systemImage: "clock").labelStyle(.iconOnly)
@@ -87,6 +94,8 @@ struct PeerBubble: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .background(.fill.secondary, in: .rect(cornerRadius: 20))
+            let ids = event.payload["artifact_ids"]?.stringArray ?? []
+            if !ids.isEmpty { ArtifactStrip(ids: ids) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -199,6 +208,11 @@ struct ToolRow: View {
                 VStack(alignment: .leading, spacing: 8) {
                     if !args.isEmpty { CodeBlock(text: args) }
                     if !output.isEmpty { CodeBlock(text: output, tint: failed ? .red : nil) }
+                    if let full = result?.payload["artifact_id"]?.string {
+                        ArtifactView(id: full)
+                    }
+                    let images = result?.payload["artifact_ids"]?.stringArray ?? []
+                    if !images.isEmpty { ArtifactStrip(ids: images) }
                 }
                 .padding([.horizontal, .bottom], 10)
                 .transition(.opacity.combined(with: .move(edge: .top)))

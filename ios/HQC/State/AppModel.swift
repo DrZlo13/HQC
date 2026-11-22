@@ -25,6 +25,17 @@ final class AppModel {
     var lastError: String?
     /// Live summaries by session id, from the `summary` frames.
     private(set) var summaries: [String: SessionSummary] = [:]
+    /// The selected tab and the Projects tab's navigation, so a notification can open a chat.
+    var tab: MainTab = .projects
+    var path: [Route] = []
+    /// The session whose chat is on screen: its notices show no banner.
+    var watching: String?
+    /// The device token for Apple push, once the system hands it over.
+    var deviceToken: String?
+    var pushEnabledOnHub = false
+    let artifacts = ArtifactStore()
+    /// An enrollment code from a link (`hqc-app://enroll?code=…`), shown for confirmation.
+    var enrollCode: EnrollCode?
 
     private(set) var client: HubClient?
     private(set) var socket: HubSocket?
@@ -67,6 +78,9 @@ final class AppModel {
     }
 
     func signOut() {
+        if let token = deviceToken, let client {
+            Task { try? await client.unregisterDevice(token: token) }
+        }
         if let hubURL { Keychain.delete(tokenAccount(hubURL)) }
         socket?.stop()
         socket = nil
@@ -114,7 +128,55 @@ final class AppModel {
         self.socket = socket
         socket.start()
         phase = .ready
+        path = []
         await refresh()
+        pushEnabledOnHub = await client.apnsEnabled()
+        await registerDeviceIfReady()
+    }
+
+    /// Sends the device token to the hub once both are there (SPEC §16).
+    func registerDeviceIfReady() async {
+        guard let token = deviceToken, let client, pushEnabledOnHub else { return }
+        #if DEBUG
+        let sandbox = true
+        #else
+        let sandbox = false
+        #endif
+        do { try await client.registerDevice(token: token, sandbox: sandbox) } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func didRegister(deviceToken data: Data) {
+        deviceToken = data.map { String(format: "%02x", $0) }.joined()
+        Task { await registerDeviceIfReady() }
+    }
+
+    /// `hqc-app://enroll?code=…` and `hqc-app://session/<id>`; the sign-in callback is caught by
+    /// its own session and never comes here.
+    func handle(url: URL) {
+        guard url.scheme == "hqc-app" else { return }
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        switch url.host() {
+        case "enroll":
+            if let code = items.first(where: { $0.name == "code" })?.value { enrollCode = EnrollCode(code: code) }
+        case "session":
+            let id = url.lastPathComponent
+            if !id.isEmpty, id != "/" { open(sessionID: id) }
+        default:
+            break
+        }
+    }
+
+    /// Opens a session's chat on the Projects tab (a notification, a search hit).
+    func open(sessionID: String, title: String = "") {
+        tab = .projects
+        var p: [Route] = []
+        if let s = summaries[sessionID], let project = project(s.project_id) {
+            p.append(.project(project))
+        }
+        p.append(.session(id: sessionID, title: summaries[sessionID]?.title ?? title))
+        path = p
     }
 
     func refresh() async {
@@ -152,6 +214,32 @@ final class AppModel {
         requests.removeAll { $0.id == request.id }
     }
 
+    /// Signs in through the system browser, where every identity provider works (SPEC §6).
+    func signInWithBrowser() async {
+        guard let hubURL else { return }
+        do {
+            let token = try await NativeSignIn.run(hub: hubURL)
+            signedIn(token: token)
+        } catch NativeSignIn.Failure.cancelled {
+            return
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
     /// Unread sessions across projects, for the badge on the projects tab.
     var unreadCount: Int { summaries.values.filter { $0.unread > 0 }.count }
+}
+
+enum MainTab: Hashable { case projects, requests, search, settings }
+
+/// A screen of the Projects tab's stack.
+enum Route: Hashable {
+    case project(Project)
+    case session(id: String, title: String)
+}
+
+struct EnrollCode: Identifiable, Hashable {
+    let code: String
+    var id: String { code }
 }

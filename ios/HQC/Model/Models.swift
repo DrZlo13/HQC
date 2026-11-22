@@ -131,14 +131,18 @@ nonisolated struct SessionInfo: Decodable, Identifiable, Hashable, Sendable {
     /// `agent.model`: the model hqc starts the agent with; absent: the runtime's default.
     let model: String?
     let room_mode: String?
+    let room_id: String?
     let favorite_at: String?
+    let paused_at: String?
+    let archived_at: String?
+    let commands: [String]
 
     var isRoom: Bool { room_mode != nil }
 
     private enum Keys: String, CodingKey {
         case id, project_id, workspace_id, worker_id, title, slug, state, unread, last_seq, last_read_seq
         case archived, updated_at, system, held_by, permission_mode, effective_permission_mode
-        case agent, model, room_mode, favorite_at
+        case agent, model, room_mode, room_id, favorite_at, paused_at, archived_at, commands
     }
 
     /// As the web client's `parseSessionInfo`: what may be absent has a default, and a mode this
@@ -166,7 +170,11 @@ nonisolated struct SessionInfo: Decodable, Identifiable, Hashable, Sendable {
         let agent = (try? c.decodeIfPresent(JSONValue.self, forKey: .agent)) ?? nil
         model = agent?["model"]?.string
         room_mode = try c.decodeIfPresent(String.self, forKey: .room_mode)
+        room_id = try c.decodeIfPresent(String.self, forKey: .room_id)
         favorite_at = try c.decodeIfPresent(String.self, forKey: .favorite_at)
+        paused_at = try c.decodeIfPresent(String.self, forKey: .paused_at)
+        archived_at = try c.decodeIfPresent(String.self, forKey: .archived_at)
+        commands = (try? c.decodeIfPresent([String].self, forKey: .commands)) ?? []
     }
 }
 

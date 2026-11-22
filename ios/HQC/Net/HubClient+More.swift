@@ -1,0 +1,234 @@
+import Foundation
+import UniformTypeIdentifiers
+
+/// The rest of the hub's REST API (SPEC §6) the app uses.
+extension HubClient {
+    private func decode<T: Decodable>(_ data: Data, as: T.Type = T.self) throws -> T {
+        do { return try Self.decoder.decode(T.self, from: data) } catch {
+            throw HubError.badResponse("\(T.self): \(error)")
+        }
+    }
+
+    // MARK: native sign-in and Apple push
+
+    /// `POST /worker/native/token`: a one-time code and its verifier for the Access token.
+    func nativeToken(code: String, verifier: String) async throws -> String {
+        let data = try await send("POST", "/worker/native/token", body: ["code": code, "verifier": verifier])
+        let v = try decode(data, as: JSONValue.self)
+        guard let t = v["token"]?.string else { throw HubError.badResponse("no token") }
+        return t
+    }
+
+    func apnsEnabled() async -> Bool {
+        (try? await get("/api/push/apns", as: JSONValue.self))?["enabled"]?.bool ?? false
+    }
+
+    func registerDevice(token: String, sandbox: Bool) async throws {
+        _ = try await send("POST", "/api/push/apns", body: ["token": token, "sandbox": sandbox])
+    }
+
+    func unregisterDevice(token: String) async throws {
+        _ = try await send("DELETE", "/api/push/apns", body: ["token": token])
+    }
+
+    // MARK: projects
+
+    func createProject(name: String, description: String) async throws -> Project {
+        var body: [String: Any] = ["name": name]
+        if !description.isEmpty { body["description"] = description }
+        return try decode(try await send("POST", "/api/projects", body: body))
+    }
+
+    func patchProject(_ id: String, _ patch: [String: Any]) async throws -> Project {
+        try decode(try await send("PATCH", "/api/projects/\(Self.enc(id))", body: patch))
+    }
+
+    func setProjectFavorite(_ id: String, _ on: Bool) async throws {
+        _ = try await send(on ? "PUT" : "DELETE", "/api/projects/\(Self.enc(id))/favorite")
+    }
+
+    func archiveProject(_ id: String) async throws {
+        _ = try await send("POST", "/api/projects/\(Self.enc(id))/archive")
+    }
+
+    // MARK: sessions
+
+    func patchSession(_ id: String, _ patch: [String: Any]) async throws -> SessionInfo {
+        try decode(try await send("PATCH", "/api/sessions/\(Self.enc(id))", body: patch))
+    }
+
+    func sessionAction(_ id: String, _ action: String) async throws {
+        _ = try await send("POST", "/api/sessions/\(Self.enc(id))/\(action)")
+    }
+
+    func deleteSession(_ id: String) async throws {
+        _ = try await send("DELETE", "/api/sessions/\(Self.enc(id))")
+    }
+
+    func setSessionFavorite(_ id: String, _ on: Bool) async throws {
+        _ = try await send(on ? "PUT" : "DELETE", "/api/sessions/\(Self.enc(id))/favorite")
+    }
+
+    func stopTask(sessionID: String, taskID: String) async throws {
+        _ = try await send("POST", "/api/sessions/\(Self.enc(sessionID))/tasks/\(Self.enc(taskID))/stop")
+    }
+
+    // MARK: rooms
+
+    func createRoom(
+        projectID: String, title: String, mode: RoomMode, workspaceID: String?, agents: [RoomAgentDraft]
+    ) async throws -> SessionInfo {
+        var body: [String: Any] = [
+            "mode": mode.rawValue,
+            "agents": agents.map { a -> [String: Any] in
+                var o: [String: Any] = [:]
+                if !a.name.trimmingCharacters(in: .whitespaces).isEmpty { o["name"] = a.name }
+                if !a.model.trimmingCharacters(in: .whitespaces).isEmpty { o["model"] = a.model }
+                if !a.prompt.trimmingCharacters(in: .whitespaces).isEmpty { o["system_prompt"] = a.prompt }
+                return o
+            },
+        ]
+        if !title.isEmpty { body["title"] = title }
+        if let workspaceID { body["workspace_id"] = workspaceID }
+        return try decode(try await send("POST", "/api/projects/\(Self.enc(projectID))/rooms", body: body))
+    }
+
+    // MARK: artifacts (SPEC §12)
+
+    /// `POST /api/artifacts`, multipart `file`; the same file uploaded again is the same artifact.
+    func upload(data: Data, name: String, mime: String) async throws -> Artifact {
+        guard let url = URL(string: "/api/artifacts", relativeTo: endpoint.baseURL) else {
+            throw HubError.badResponse("bad path")
+        }
+        let boundary = "hqc-\(UUID().uuidString)"
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        endpoint.authorize(&req)
+        let safeName = name.replacingOccurrences(of: "\"", with: "'")
+        var body = Data()
+        body.append(Data("--\(boundary)\r\n".utf8))
+        body.append(Data("Content-Disposition: form-data; name=\"file\"; filename=\"\(safeName)\"\r\n".utf8))
+        body.append(Data("Content-Type: \(mime)\r\n\r\n".utf8))
+        body.append(data)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        let (resp, r) = try await session.upload(for: req, from: body)
+        guard let http = r as? HTTPURLResponse else { throw HubError.badResponse("not HTTP") }
+        if (300..<400).contains(http.statusCode) { throw HubError.signInRequired }
+        guard (200..<300).contains(http.statusCode) else {
+            let obj = (try? JSONSerialization.jsonObject(with: resp)) as? [String: Any]
+            throw HubError.http(status: http.statusCode, code: obj?["error"] as? String,
+                                message: obj?["message"] as? String ?? "Upload failed")
+        }
+        return try decode(resp)
+    }
+
+    func artifact(_ id: String) async throws -> Artifact {
+        try await get("/api/artifacts/\(Self.enc(id))")
+    }
+
+    /// The file's bytes, through the signed link the hub gives for ten minutes.
+    func artifactData(_ id: String) async throws -> Data {
+        let link: ArtifactURL = try await get("/api/artifacts/\(Self.enc(id))/url")
+        guard let url = URL(string: link.url, relativeTo: endpoint.baseURL) else {
+            throw HubError.badResponse("bad artifact link")
+        }
+        var req = URLRequest(url: url)
+        // The link may be on the hub's own domain, behind Access.
+        if url.host() == endpoint.baseURL.host() { endpoint.authorize(&req) }
+        let (data, r) = try await session.data(for: req)
+        guard let http = r as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw HubError.badResponse("artifact download failed")
+        }
+        return data
+    }
+
+    // MARK: schedules (SPEC §16)
+
+    func schedules(sessionID: String?) async throws -> [Schedule] {
+        let q = sessionID.map { "?session_id=\(Self.enc($0))" } ?? ""
+        return try await get("/api/schedules\(q)", as: ScheduleList.self).schedules
+    }
+
+    func createSchedule(sessionID: String, message: String, cron: String?, at: Date?) async throws -> Schedule {
+        var body: [String: Any] = [
+            "session_id": sessionID, "message": message, "timezone": TimeZone.current.identifier,
+        ]
+        if let cron { body["cron"] = cron }
+        if let at { body["at"] = ISO8601DateFormatter().string(from: at) }
+        return try decode(try await send("POST", "/api/schedules", body: body))
+    }
+
+    func setSchedule(_ id: String, enabled: Bool) async throws -> Schedule {
+        try decode(try await send("PATCH", "/api/schedules/\(Self.enc(id))", body: ["enabled": enabled]))
+    }
+
+    func deleteSchedule(_ id: String) async throws {
+        _ = try await send("DELETE", "/api/schedules/\(Self.enc(id))")
+    }
+
+    // MARK: search (SPEC §15)
+
+    func search(_ q: String, projectID: String? = nil, cursor: String? = nil) async throws -> SearchPage {
+        var c = URLComponents()
+        c.queryItems = [URLQueryItem(name: "q", value: q), URLQueryItem(name: "per_session", value: "3")]
+        if let projectID { c.queryItems?.append(URLQueryItem(name: "project", value: projectID)) }
+        if let cursor { c.queryItems?.append(URLQueryItem(name: "cursor", value: cursor)) }
+        return try await get("/api/search?\(c.percentEncodedQuery ?? "")")
+    }
+
+    // MARK: workers, enrollment, folders
+
+    func workers() async throws -> [WorkerInfo] {
+        try await get("/api/workers?include_revoked=1", as: WorkerList.self).workers
+    }
+
+    func revokeWorker(_ id: String) async throws {
+        _ = try await send("DELETE", "/api/workers/\(Self.enc(id))")
+    }
+
+    func enrollInfo(code: String) async throws -> EnrollInfo {
+        try await get("/api/workers/enroll/\(Self.enc(code))")
+    }
+
+    func enrollConfirm(code: String, replace: String?) async throws -> EnrollConfirmed {
+        var body: [String: Any] = ["code": code]
+        if let replace { body["replace_worker_id"] = replace }
+        return try decode(try await send("POST", "/api/workers/enroll/confirm", body: body))
+    }
+
+    func claudeStatus(workerID: String) async throws -> ClaudeAuthStatus {
+        try await get("/api/workers/\(Self.enc(workerID))/claude")
+    }
+
+    func claudeLogin(workerID: String) async throws -> ClaudeLogin {
+        try decode(try await send("POST", "/api/workers/\(Self.enc(workerID))/claude/login"))
+    }
+
+    func claudeLoginCode(workerID: String, loginID: String, code: String) async throws -> ClaudeLoginDone {
+        try decode(try await send(
+            "POST", "/api/workers/\(Self.enc(workerID))/claude/login/\(Self.enc(loginID))", body: ["code": code]))
+    }
+
+    func dirs(workerID: String, path: String?) async throws -> [DirEntry] {
+        var q = ""
+        if let path, let e = path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(["&", "=", "+"])) {
+            q = "?path=\(e)"
+        }
+        return try await get("/api/workers/\(Self.enc(workerID))/dirs\(q)", as: DirList.self).entries
+    }
+
+    func createWorkspace(projectID: String, workerID: String, path: String, label: String?) async throws -> Workspace {
+        var body: [String: Any] = ["project_id": projectID, "worker_id": workerID, "path": path]
+        if let label, !label.isEmpty { body["label"] = label }
+        return try decode(try await send("POST", "/api/workspaces", body: body))
+    }
+
+    func deleteWorkspace(_ id: String) async throws {
+        _ = try await send("DELETE", "/api/workspaces/\(Self.enc(id))")
+    }
+}
+
+extension UTType {
+    var mime: String { preferredMIMEType ?? "application/octet-stream" }
+}

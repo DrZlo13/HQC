@@ -60,7 +60,7 @@ private nonisolated final class NoRedirect: NSObject, URLSessionTaskDelegate, Se
 /// The hub's REST API (SPEC §6), the calls the app makes.
 nonisolated final class HubClient: Sendable {
     let endpoint: HubEndpoint
-    private let session: URLSession
+    let session: URLSession
 
     init(endpoint: HubEndpoint) {
         self.endpoint = endpoint
@@ -72,9 +72,9 @@ nonisolated final class HubClient: Sendable {
         session = URLSession(configuration: config, delegate: NoRedirect(), delegateQueue: nil)
     }
 
-    private static let decoder = JSONDecoder()
+    static let decoder = JSONDecoder()
 
-    private func send(_ method: String, _ path: String, body: [String: Any]? = nil) async throws -> Data {
+    func send(_ method: String, _ path: String, body: [String: Any]? = nil) async throws -> Data {
         guard let url = URL(string: path, relativeTo: endpoint.baseURL) else {
             throw HubError.badResponse("bad path \(path)")
         }
@@ -99,7 +99,7 @@ nonisolated final class HubClient: Sendable {
         throw HubError.http(status: http.statusCode, code: code, message: message)
     }
 
-    private func get<T: Decodable>(_ path: String, as: T.Type = T.self) async throws -> T {
+    func get<T: Decodable>(_ path: String, as: T.Type = T.self) async throws -> T {
         let data = try await send("GET", path)
         do {
             return try Self.decoder.decode(T.self, from: data)
@@ -108,7 +108,7 @@ nonisolated final class HubClient: Sendable {
         }
     }
 
-    private static func enc(_ s: String) -> String {
+    static func enc(_ s: String) -> String {
         s.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(["/"])) ?? s
     }
 
@@ -157,10 +157,12 @@ nonisolated final class HubClient: Sendable {
     }
 
     /// A repeated `clientOpID` returns the same stored message (SPEC §6), so a retry is safe.
-    func input(sessionID: String, text: String, clientOpID: String) async throws -> HubEvent {
+    func input(
+        sessionID: String, text: String, clientOpID: String, artifactIDs: [String] = []
+    ) async throws -> HubEvent {
         let data = try await send(
             "POST", "/api/sessions/\(Self.enc(sessionID))/input",
-            body: ["text": text, "artifact_ids": [String](), "client_op_id": clientOpID]
+            body: ["text": text, "artifact_ids": artifactIDs, "client_op_id": clientOpID]
         )
         return try Self.decoder.decode(InputResponse.self, from: data).event
     }

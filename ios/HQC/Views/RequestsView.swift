@@ -78,6 +78,12 @@ extension AppModel {
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.openURL) private var openURL
+
+    private var notificationState: String {
+        if !app.pushEnabledOnHub { return "Off on the hub" }
+        return app.deviceToken == nil ? "Not allowed" : "On"
+    }
 
     var body: some View {
         Form {
@@ -93,14 +99,36 @@ struct SettingsView: View {
                     }
                 }
             }
+            Section("Machines") {
+                NavigationLink {
+                    WorkersView()
+                } label: {
+                    Label("Workers", systemImage: "desktopcomputer")
+                }
+                Button {
+                    app.enrollCode = EnrollCode(code: "")
+                } label: {
+                    Label("Confirm a worker code", systemImage: "number")
+                }
+            }
+            Section {
+                LabeledContent("Notifications") {
+                    Text(notificationState)
+                }
+                Button("Notification settings", systemImage: "bell.badge") {
+                    if let u = URL(string: UIApplication.openNotificationSettingsURLString) { openURL(u) }
+                }
+            } footer: {
+                if !app.pushEnabledOnHub {
+                    Text("The hub sends no Apple push yet: set HQC_APNS_KEY_FILE, HQC_APNS_KEY_ID, HQC_APNS_TEAM_ID and HQC_APNS_TOPIC on it (RUNBOOK §1.10).")
+                }
+            }
             Section {
                 if let url = app.hubURL {
                     Link(destination: url) {
                         Label("Open the web app", systemImage: "safari")
                     }
                 }
-            } footer: {
-                Text("Workers, workspaces, rooms and schedules are managed in the web app.")
             }
             Section {
                 Button("Sign out", role: .destructive) { app.signOut() }

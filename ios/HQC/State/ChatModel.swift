@@ -13,6 +13,8 @@ final class ChatModel {
     private(set) var streaming = ""
     /// The thinking being written.
     private(set) var thinking = ""
+    /// What the agent runs now (`subagents.live`): subagents, background commands, wakeups.
+    private(set) var live: [LiveTask] = []
     private(set) var loading = true
     private(set) var hasOlder = false
     var error: String?
@@ -70,19 +72,21 @@ final class ChatModel {
         }
     }
 
-    func send(_ text: String) async {
+    func send(_ text: String, artifacts: [Artifact] = []) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let client = app?.client else { return }
+        guard !trimmed.isEmpty || !artifacts.isEmpty, let client = app?.client else { return }
+        let ids = artifacts.map(\.id)
         let op = UUID().uuidString
         // Shown at once, marked as sending, until the hub's copy with a `seq` replaces it.
         pending[op] = HubEvent(
             session_id: sessionID, event_id: "local-\(op)", seq: nil,
             ts: ISO8601DateFormatter().string(from: .now), type: "user.message",
-            author: .init(kind: "user", id: app?.me?.id), payload: .object(["text": .string(trimmed)]),
+            author: .init(kind: "user", id: app?.me?.id),
+            payload: .object(["text": .string(trimmed), "artifact_ids": .array(ids.map(JSONValue.string))]),
             client_op_id: op, delivery: "sending")
         rebuild()
         do {
-            let ev = try await client.input(sessionID: sessionID, text: trimmed, clientOpID: op)
+            let ev = try await client.input(sessionID: sessionID, text: trimmed, clientOpID: op, artifactIDs: ids)
             pending[op] = nil
             apply(ev)
         } catch {
@@ -105,6 +109,39 @@ final class ChatModel {
             try await app?.client?.setPermissionMode(sessionID: sessionID, mode)
             info = try await app?.client?.session(sessionID)
         } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    /// Pause, resume, restart, archive, unarchive (SPEC §17.3, §17.4).
+    func act(_ action: String) async {
+        do {
+            try await app?.client?.sessionAction(sessionID, action)
+            info = try await app?.client?.session(sessionID)
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func patch(_ fields: [String: Any]) async {
+        do {
+            info = try await app?.client?.patchSession(sessionID, fields)
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func setFavorite(_ on: Bool) async {
+        do {
+            try await app?.client?.setSessionFavorite(sessionID, on)
+            info = try await app?.client?.session(sessionID)
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func stopTask(_ task: LiveTask) async {
+        do { try await app?.client?.stopTask(sessionID: sessionID, taskID: task.id) } catch {
             self.error = error.localizedDescription
         }
     }
@@ -145,6 +182,10 @@ final class ChatModel {
             } else {
                 streaming += ev.text
             }
+            return
+        }
+        if ev.type == "subagents.live" {
+            live = LiveTask.list(from: ev.payload)
             return
         }
         // Only stored events are drawn (SPEC §5.2); other transport-only frames are dropped.
@@ -189,6 +230,7 @@ final class ChatModel {
     private func resetStream() {
         streaming = ""
         thinking = ""
+        live = []
     }
 
     /// Folds the events into what the feed draws: a tool call with its result, a request with

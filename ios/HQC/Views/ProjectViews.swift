@@ -3,6 +3,7 @@ import SwiftUI
 /// The projects, the personal one first, then favorites, then by name.
 struct ProjectsView: View {
     @Environment(AppModel.self) private var app
+    @State private var creating = false
 
     private var sorted: [Project] {
         app.projects.sorted { a, b in
@@ -20,21 +21,41 @@ struct ProjectsView: View {
                     .listRowInsets(EdgeInsets())
             }
             ForEach(sorted) { project in
-                NavigationLink(value: project) {
-                    ProjectRow(project: project)
+                NavigationLink(value: Route.project(project)) {
+                    ProjectRow(project: project, unread: unread(project))
+                }
+                .swipeActions(edge: .leading) {
+                    Button(project.favorite_at == nil ? "Favorite" : "Unfavorite",
+                           systemImage: project.favorite_at == nil ? "star" : "star.slash") {
+                        Task {
+                            try? await app.client?.setProjectFavorite(project.id, project.favorite_at == nil)
+                            await app.refresh()
+                        }
+                    }
+                    .tint(.yellow)
                 }
             }
         }
         .navigationTitle("Projects")
-        .navigationDestination(for: Project.self) { SessionListView(project: $0) }
-        .navigationDestination(for: SessionInfo.self) { ChatView(sessionID: $0.id, title: $0.title) }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button("New project", systemImage: "plus") { creating = true }
+            }
+        }
         .refreshable { await app.refresh() }
         .overlay {
             if app.projects.isEmpty {
                 ContentUnavailableView("No projects yet", systemImage: "folder",
-                                       description: Text("Create one in the web app."))
+                                       description: Text("Create one with +."))
             }
         }
+        .sheet(isPresented: $creating) {
+            NewProjectSheet().presentationDetents([.medium])
+        }
+    }
+
+    private func unread(_ p: Project) -> Int {
+        app.summaries.values.filter { $0.project_id == p.id && $0.unread > 0 }.count
     }
 }
 
@@ -53,6 +74,7 @@ struct ProjectTile: View {
 
 struct ProjectRow: View {
     let project: Project
+    var unread = 0
 
     var body: some View {
         HStack(spacing: 14) {
@@ -67,6 +89,15 @@ struct ProjectRow: View {
                 if let d = project.description, !d.isEmpty {
                     Text(d).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                 }
+            }
+            Spacer()
+            if unread > 0 {
+                Text("\(unread)")
+                    .font(.caption2.bold())
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(.tint, in: .capsule)
+                    .foregroundStyle(.white)
             }
         }
         .padding(.vertical, 4)
@@ -90,41 +121,99 @@ struct ConnectionBanner: View {
     }
 }
 
-/// One project's live sessions, newest first, with their state from the live summaries.
+/// One project's sessions and rooms, favorites first, then the newest; archived ones on demand.
 struct SessionListView: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
     let project: Project
     @State private var sessions: [SessionInfo] = []
     @State private var loading = true
     @State private var error: String?
-    @State private var showNew = false
-    @State private var opened: SessionInfo?
+    @State private var sheet: ProjectSheet?
+    @State private var showArchived = false
+    @State private var renaming = false
+    @State private var newName = ""
+
+    private var current: Project { app.project(project.id) ?? project }
 
     private var visible: [SessionInfo] {
-        sessions.filter { !$0.archived }.sorted { $0.updated_at > $1.updated_at }
+        sessions
+            .filter { $0.archived == showArchived && $0.room_id == nil }
+            .sorted { a, b in
+                if (a.favorite_at != nil) != (b.favorite_at != nil) { return a.favorite_at != nil }
+                return a.updated_at > b.updated_at
+            }
     }
 
     var body: some View {
         List {
             ForEach(visible) { s in
-                NavigationLink(value: s) {
+                NavigationLink(value: Route.session(id: s.id, title: s.title)) {
                     SessionRow(session: s, summary: app.summary(s.id), waiting: !app.requests(for: s.id).isEmpty)
                 }
                 .swipeActions {
-                    Button("Archive", systemImage: "archivebox") {
+                    if s.archived {
+                        Button("Unarchive", systemImage: "tray.and.arrow.up") {
+                            Task {
+                                try? await app.client?.sessionAction(s.id, "unarchive")
+                                await load()
+                            }
+                        }
+                        .tint(.green)
+                    } else {
+                        Button("Archive", systemImage: "archivebox") {
+                            Task {
+                                try? await app.client?.archive(sessionID: s.id)
+                                await load()
+                            }
+                        }
+                        .tint(.indigo)
+                    }
+                }
+                .swipeActions(edge: .leading) {
+                    Button(s.favorite_at == nil ? "Favorite" : "Unfavorite",
+                           systemImage: s.favorite_at == nil ? "star" : "star.slash") {
                         Task {
-                            try? await app.client?.archive(sessionID: s.id)
+                            try? await app.client?.setSessionFavorite(s.id, s.favorite_at == nil)
                             await load()
                         }
                     }
-                    .tint(.indigo)
+                    .tint(.yellow)
                 }
             }
         }
-        .navigationTitle(project.displayName)
+        .navigationTitle(showArchived ? "Archived" : current.displayName)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button("New session", systemImage: "square.and.pencil") { showNew = true }
+                Menu {
+                    Button("New session", systemImage: "square.and.pencil") { sheet = .newSession }
+                    Button("New room", systemImage: "person.3") { sheet = .newRoom }
+                    Divider()
+                    Button("Workspaces", systemImage: "folder") { sheet = .workspaces }
+                    Toggle(isOn: $showArchived) { Label("Show archived", systemImage: "archivebox") }
+                    Button(current.favorite_at == nil ? "Add to favorites" : "Remove from favorites",
+                           systemImage: current.favorite_at == nil ? "star" : "star.slash") {
+                        Task {
+                            try? await app.client?.setProjectFavorite(project.id, current.favorite_at == nil)
+                            await app.refresh()
+                        }
+                    }
+                    if !project.is_personal {
+                        Button("Rename", systemImage: "pencil") {
+                            newName = current.name
+                            renaming = true
+                        }
+                        Button("Archive project", systemImage: "archivebox", role: .destructive) {
+                            Task {
+                                try? await app.client?.archiveProject(project.id)
+                                await app.refresh()
+                                dismiss()
+                            }
+                        }
+                    }
+                } label: {
+                    Label("New", systemImage: "plus")
+                }
             }
         }
         .overlay {
@@ -132,25 +221,48 @@ struct SessionListView: View {
                 ProgressView()
             } else if visible.isEmpty {
                 ContentUnavailableView {
-                    Label("No sessions", systemImage: "bubble.left.and.bubble.right")
+                    Label(showArchived ? "Nothing archived" : "No sessions", systemImage: "bubble.left.and.bubble.right")
                 } description: {
-                    Text(error ?? "Start one and talk to an agent on your machine.")
+                    Text(error ?? (showArchived ? "" : "Start one and talk to an agent on your machine."))
                 } actions: {
-                    Button("New session") { showNew = true }.buttonStyle(.glassProminent)
+                    if !showArchived {
+                        Button("New session") { sheet = .newSession }.buttonStyle(.glassProminent)
+                    }
                 }
             }
         }
         .refreshable { await load() }
         .task { await load() }
-        .sheet(isPresented: $showNew) {
-            NewSessionSheet(project: project) { created in
-                showNew = false
-                sessions.insert(created, at: 0)
-                opened = created
+        .onChange(of: app.summaries.count) { _, _ in Task { await load() } }
+        .alert("Rename project", isPresented: $renaming) {
+            TextField("Name", text: $newName)
+            Button("Rename") {
+                Task {
+                    _ = try? await app.client?.patchProject(project.id, ["name": newName])
+                    await app.refresh()
+                }
             }
-            .presentationDetents([.medium, .large])
+            Button("Cancel", role: .cancel) {}
         }
-        .navigationDestination(item: $opened) { ChatView(sessionID: $0.id, title: $0.title) }
+        .sheet(item: $sheet) { s in
+            switch s {
+            case .newSession:
+                NewSessionSheet(project: project) { created in
+                    sheet = nil
+                    sessions.insert(created, at: 0)
+                    app.path.append(.session(id: created.id, title: created.title))
+                }
+                .presentationDetents([.medium, .large])
+            case .newRoom:
+                NewRoomSheet(project: project) { room in
+                    sheet = nil
+                    sessions.insert(room, at: 0)
+                    app.path.append(.session(id: room.id, title: room.title))
+                }
+            case .workspaces:
+                NavigationStack { WorkspacesView(project: project) }
+            }
+        }
     }
 
     private func load() async {
@@ -163,6 +275,11 @@ struct SessionListView: View {
         }
         loading = false
     }
+}
+
+enum ProjectSheet: String, Identifiable {
+    case newSession, newRoom, workspaces
+    var id: String { rawValue }
 }
 
 struct SessionRow: View {
@@ -181,12 +298,18 @@ struct SessionRow: View {
                     if session.isRoom {
                         Image(systemName: "person.3.fill").font(.caption).foregroundStyle(.secondary)
                     }
+                    if session.system {
+                        Image(systemName: "desktopcomputer").font(.caption).foregroundStyle(.secondary)
+                    }
                     Text(summary?.title ?? session.title)
                         .font(unread > 0 ? .body.weight(.semibold) : .body)
                         .lineLimit(1)
+                    if session.favorite_at != nil {
+                        Image(systemName: "star.fill").font(.caption2).foregroundStyle(.yellow)
+                    }
                 }
                 HStack(spacing: 6) {
-                    Text(state.label)
+                    Text(session.paused_at != nil ? "Paused" : state.label)
                     if let n = summary?.subagents, n > 0 {
                         Text("· \(n) subagent\(n == 1 ? "" : "s")")
                     }
@@ -229,6 +352,43 @@ struct StateDot: View {
     }
 }
 
+struct NewProjectSheet: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var description = ""
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Name", text: $name)
+                TextField("Description (optional)", text: $description, axis: .vertical)
+                if let error { Text(error).foregroundStyle(.red).font(.footnote) }
+            }
+            .navigationTitle("New project")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Create", systemImage: "checkmark") {
+                        Task {
+                            do {
+                                let p = try await app.client?.createProject(name: name, description: description)
+                                await app.refresh()
+                                dismiss()
+                                if let p { app.path = [.project(p)] }
+                            } catch {
+                                self.error = error.localizedDescription
+                            }
+                        }
+                    }
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+        }
+    }
+}
+
 struct NewSessionSheet: View {
     @Environment(AppModel.self) private var app
     let project: Project
@@ -248,22 +408,7 @@ struct NewSessionSheet: View {
                     TextField("Title (optional)", text: $title)
                 }
                 Section("Folder") {
-                    if workspaces.isEmpty {
-                        Text("This project has no workspace yet. Add one in the web app: project → Workspaces.")
-                            .font(.footnote).foregroundStyle(.secondary)
-                    } else {
-                        Picker("Workspace", selection: $workspaceID) {
-                            ForEach(workspaces) { w in
-                                VStack(alignment: .leading) {
-                                    Text(w.displayName)
-                                    Text(w.path).font(.caption).foregroundStyle(.secondary)
-                                }
-                                .tag(Optional(w.id))
-                            }
-                        }
-                        .pickerStyle(.inline)
-                        .labelsHidden()
-                    }
+                    WorkspacePicker(workspaces: workspaces, selection: $workspaceID, project: project)
                 }
                 Section("Permissions") {
                     Picker("Mode", selection: $mode) {
@@ -283,11 +428,13 @@ struct NewSessionSheet: View {
                         .disabled(busy || workspaces.isEmpty)
                 }
             }
-            .task {
-                workspaces = (try? await app.client?.workspaces(projectID: project.id)) ?? []
-                workspaceID = project.default_workspace_id ?? workspaces.first?.id
-            }
+            .task { await loadWorkspaces() }
         }
+    }
+
+    private func loadWorkspaces() async {
+        workspaces = (try? await app.client?.workspaces(projectID: project.id)) ?? []
+        workspaceID = workspaceID ?? project.default_workspace_id ?? workspaces.first?.id
     }
 
     private func create() async {
@@ -300,6 +447,35 @@ struct NewSessionSheet: View {
             onCreated(s)
         } catch {
             self.error = error.localizedDescription
+        }
+    }
+}
+
+/// The project's workspaces to pick from, or a way to add the first one.
+struct WorkspacePicker: View {
+    let workspaces: [Workspace]
+    @Binding var selection: String?
+    let project: Project
+
+    var body: some View {
+        if workspaces.isEmpty {
+            NavigationLink {
+                WorkspacesView(project: project)
+            } label: {
+                Label("Add a workspace first", systemImage: "folder.badge.plus")
+            }
+        } else {
+            Picker("Workspace", selection: $selection) {
+                ForEach(workspaces) { w in
+                    VStack(alignment: .leading) {
+                        Text(w.displayName)
+                        Text(w.path).font(.caption).foregroundStyle(.secondary)
+                    }
+                    .tag(Optional(w.id))
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
         }
     }
 }

@@ -140,15 +140,9 @@ struct ChatView: View {
                         onSecret: model.worker?.session_secrets == true ? { givingSecret = true } : nil,
                         onSend: send, onStop: { Task { await model.stopAgent() } })
                 } else if model.state == .locked_vscode {
-                    VStack(spacing: 8) {
-                        InfoBar(text: "This session is open in VS Code. Close it there, or take it over to continue here.",
-                                systemImage: "chevron.left.forwardslash.chevron.right")
-                        Button("Take over", systemImage: "arrow.uturn.down.circle") {
-                            Task { await model.takeover() }
-                        }
-                        .buttonStyle(.glassProminent)
+                    LockBar(heldBy: model.info?.held_by, notice: model.takeoverNotice) {
+                        Task { await model.takeover() }
                     }
-                    .padding(.bottom, 8)
                 } else if model.info?.archived == true {
                     Button("Unarchive", systemImage: "tray.and.arrow.up") { Task { await model.act("unarchive") } }
                         .buttonStyle(.glassProminent)
@@ -239,6 +233,14 @@ struct ChatView: View {
             // A turn's end is when a usage window most often fills up.
             if old.isBusy && !new.isBusy { Task { await model.loadWorker() } }
         }
+        // Who holds the session open changes outside the app: look again while it is locked,
+        // so Take over appears once it is closed there.
+        .task(id: model.state == .locked_vscode) {
+            while model.state == .locked_vscode && !Task.isCancelled {
+                await model.refreshInfo()
+                try? await Task.sleep(for: .seconds(10))
+            }
+        }
         // And every minute while the chat is open.
         .task(id: model.sessionID) {
             while !Task.isCancelled {
@@ -249,7 +251,9 @@ struct ChatView: View {
     }
 
     private var subtitle: String {
-        var parts = [isPaused ? "Paused" : model.state.label]
+        var parts = [isPaused ? "Paused"
+                     : model.state == .locked_vscode ? (model.info?.held_by.map { "Open in \($0.holder)" } ?? model.state.label)
+                     : model.state.label]
         if let mode = model.info?.effective_permission_mode ?? model.info?.permission_mode, mode != .ask {
             parts.append(mode.label)
         }
@@ -837,6 +841,55 @@ struct ModelSheet: View {
             }
             .contentShape(.rect)
         }
+    }
+}
+
+/// In place of the input while another app ran the session last (SPEC §9.3), as the web
+/// client's lock bar: open there right now, it has to be closed there first (the hub refuses a
+/// takeover then); only written from there, "Take over here".
+struct LockBar: View {
+    @Environment(\.palette) private var palette
+    let heldBy: HeldBy?
+    let notice: String?
+    let onTakeover: () -> Void
+    @State private var busy = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: "lock.fill").foregroundStyle(palette.muted)
+                Text(heldBy.map { "Open in \($0.holder). Close it there to write from here." }
+                     ?? "VS Code or Claude Code ran this session last.")
+                    .font(.footnote)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                if heldBy == nil {
+                    Button {
+                        busy = true
+                        onTakeover()
+                        Task {
+                            try? await Task.sleep(for: .seconds(1))
+                            busy = false
+                        }
+                    } label: {
+                        if busy { ProgressView().controlSize(.small) } else { Text("Take over here") }
+                    }
+                    .buttonStyle(.glassProminent)
+                    .controlSize(.small)
+                    .disabled(busy)
+                }
+            }
+            if let notice {
+                Text(notice).font(.caption).foregroundStyle(palette.waiting)
+                    .transition(.opacity)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .glassEffect(.regular, in: .rect(cornerRadius: 20))
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+        .animation(.snappy, value: notice)
     }
 }
 

@@ -100,13 +100,37 @@ final class ChatModel {
     }
 
     /// Continue here what VS Code was driving.
+    /// Why a takeover did not happen, said under the lock bar (not in an alert).
+    var takeoverNotice: String?
+
+    /// Continue here what another app (VS Code, the Claude app) last ran (SPEC §9.3). The hub
+    /// refuses while it is still open there (`vscode_open`) or wrote in the last 30 s
+    /// (`vscode_active`); each says what to do, as the web client does.
     func takeover() async {
+        takeoverNotice = nil
         do {
             try await app?.client?.takeover(sessionID: sessionID)
-            info = try await app?.client?.session(sessionID)
+            Feedback.play(.success)
+            await refreshInfo()
+        } catch HubError.http(_, let code, let message) where code == "vscode_open" {
+            takeoverNotice = message
+            Feedback.play(.error)
+            await refreshInfo()
+        } catch HubError.http(_, let code, _) where code == "vscode_active" {
+            takeoverNotice = "It is still writing to this session; you can take it over after 30 s of quiet."
+            Feedback.play(.error)
+        } catch HubError.http(_, let code, _) where code == "worker_offline" {
+            takeoverNotice = "The session's machine is offline; take it over once it is back."
+            Feedback.play(.error)
         } catch {
-            self.error = error.localizedDescription
+            takeoverNotice = "Not taken over: \(error.localizedDescription)"
+            Feedback.play(.error)
         }
+    }
+
+    /// The session again: who holds it open, its mode and model.
+    func refreshInfo() async {
+        if let fresh = try? await app?.client?.session(sessionID) { info = fresh }
     }
 
     func background(callID: String) async {

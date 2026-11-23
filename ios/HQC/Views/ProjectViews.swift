@@ -435,7 +435,9 @@ struct SessionRow: View {
                     }
                 }
                 HStack(spacing: 6) {
-                    Text(session.paused_at != nil ? "Paused" : state.label).lineLimit(1).fixedSize()
+                    Text(session.paused_at != nil ? "Paused"
+                         : state == .locked_vscode ? (session.held_by.map { "Open in \($0.holder)" } ?? state.label)
+                         : state.label).lineLimit(1).fixedSize()
                     if let n = summary?.subagents, n > 0 {
                         Text("· \(n) subagent\(n == 1 ? "" : "s")")
                     }

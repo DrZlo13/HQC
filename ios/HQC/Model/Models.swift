@@ -114,6 +114,15 @@ nonisolated struct Project: Codable, Identifiable, Hashable, Sendable {
 nonisolated struct HeldBy: Codable, Hashable, Sendable {
     let entrypoint: String
     let status: String
+
+    /// The app that holds the session open, as people know it.
+    var holder: String {
+        switch entrypoint {
+        case "claude-vscode": "VS Code"
+        case "claude-desktop": "the Claude app"
+        default: "Claude Code"
+        }
+    }
 }
 
 /// `GET /api/sessions/{id}` and the lists (SPEC §6), the fields the app uses.

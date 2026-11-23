@@ -123,6 +123,34 @@ function loadList(): {
   }
 }
 
+/** The sessions by id; `version` moves on every change, so what is derived from all of them is
+ *  kept until then (`AppState.marked`). A session is never changed in place, only replaced. */
+class SessionMap extends Map<string, SessionInfo> {
+  version = 0;
+  set(id: string, s: SessionInfo): this {
+    this.version++;
+    return super.set(id, s);
+  }
+  delete(id: string): boolean {
+    this.version++;
+    return super.delete(id);
+  }
+  clear(): void {
+    this.version++;
+    super.clear();
+  }
+}
+
+/** What the projects' marks count, from one pass over the sessions: the bar asks every
+ *  project on every render, and a hub's summary renders it again, so a pass per project and per
+ *  mark was quadratic in a long list. */
+interface Marked {
+  version: number;
+  counted: readonly SessionInfo[];
+  byProject: Map<string, SessionInfo[]>;
+  browser: Set<string>;
+}
+
 export class AppState {
   me: Me | null = null;
   /** The session column's dragged width, on this device; the look itself is the user's
@@ -130,7 +158,9 @@ export class AppState {
   device: DeviceLayout = loadDevice();
   error: string | null = null;
   readonly projects = new Map<string, Project>();
-  readonly sessions = new Map<string, SessionInfo>();
+  readonly sessions: Map<string, SessionInfo> = new SessionMap();
+  /** `countedSessions` and `projectBrowser` of the sessions' current version. */
+  private marked: Marked | null = null;
   /** By project id; filled by `loadWorkspaces`. */
   readonly workspaces = new Map<string, Workspace[]>();
   /** The project shown in the left column; the personal one until another is picked. */
@@ -798,10 +828,31 @@ export class AppState {
 
   /** The sessions the projects' marks count (of project `projectId`, else of all), each as the
    *  lists show it: not archived, not a service session, not a room's member. */
-  countedSessions(projectId?: string): SessionInfo[] {
-    return [...this.sessions.values()]
-      .filter((s) => (projectId === undefined || s.project_id === projectId) && !s.archived && !s.system && !s.room_id)
-      .map((s) => this.shown(s));
+  countedSessions(projectId?: string): readonly SessionInfo[] {
+    const m = this.marks();
+    return projectId === undefined ? m.counted : (m.byProject.get(projectId) ?? []);
+  }
+
+  /** `countedSessions` and the projects with a browser, computed once per version of the
+   *  sessions. */
+  private marks(): Marked {
+    const version = (this.sessions as SessionMap).version;
+    if (this.marked?.version === version) return this.marked;
+    const counted: SessionInfo[] = [];
+    const byProject = new Map<string, SessionInfo[]>();
+    const browser = new Set<string>();
+    for (const s of this.sessions.values()) {
+      if (s.archived || s.system) continue;
+      if (s.browser) browser.add(s.project_id);
+      if (s.room_id) continue;
+      const shown = this.shown(s);
+      counted.push(shown);
+      const list = byProject.get(s.project_id);
+      if (list) list.push(shown);
+      else byProject.set(s.project_id, [shown]);
+    }
+    this.marked = { version, counted, byProject, browser };
+    return this.marked;
   }
 
   /** The user's favorite sessions of the project (the current one by default), the newest
@@ -1003,10 +1054,7 @@ export class AppState {
 
   /** Whether one of the project's sessions has the browser (SPEC 0.148). */
   projectBrowser(projectId: string): boolean {
-    for (const s of this.sessions.values()) {
-      if (s.project_id === projectId && !s.archived && !s.system && s.browser) return true;
-    }
-    return false;
+    return this.marks().browser.has(projectId);
   }
 
   /** Whether one of the project's sessions has unread events, among the ones

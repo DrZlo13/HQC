@@ -4702,3 +4702,26 @@ describe('the browser of a session (SPEC 0.149)', () => {
     expect([tile('physics-mp'), tile('Personal')]).toEqual([true, false]);
   });
 });
+
+describe("the projects' marks", () => {
+  it('are counted once per change of the sessions, not per project and mark on every render', async () => {
+    const app = makeApp([...LIST, sess('notes', 'Notes', 'idle', at(0.5), { project_id: 'p0', unread: 1 })]);
+    const shown = vi.spyOn(app, 'shown');
+    await mount(<ProjectRail app={app} />);
+    // One pass over the six sessions the marks count: LIST and Notes, not the service sessions.
+    expect(shown).toHaveBeenCalledTimes(6);
+    expect([app.projectWaiting('p1'), app.projectRunning('p1'), app.projectUnread('p0')]).toEqual([1, true, true]);
+    shown.mockClear();
+    // A render with the same sessions (a change of anything else: a project picked, a menu
+    // opened) counts nothing again. A hub's summary sets its session, so it is one pass.
+    await mount(<ProjectRail app={app} />);
+    expect(shown).not.toHaveBeenCalled();
+    // A change of a session: one more pass, and the marks see it.
+    app.sessions.set('prof', { ...app.sessions.get('prof')!, state: 'waiting' });
+    expect(app.projectWaiting('p1')).toBe(2);
+    expect(shown).toHaveBeenCalledTimes(6);
+    // A session gone: the same.
+    app.sessions.delete('net');
+    expect(app.projectWaiting('p1')).toBe(1);
+  });
+});

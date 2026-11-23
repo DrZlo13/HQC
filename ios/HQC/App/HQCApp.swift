@@ -28,18 +28,28 @@ struct HQCApp: App {
 
 struct RootView: View {
     @Environment(AppModel.self) private var app
-    /// The splash covers the launch until the hub answered (or the app knows it needs setup).
+    /// The launch splash, until its short animation is done; it never waits for the hub.
     @State private var splash = true
+
+    /// A set-up app opens its main screen at once, also while it connects: the lists show
+    /// skeletons and a "Connecting…" bubble until the hub answers. One branch for both phases,
+    /// so the main screen keeps its identity (and its navigation) when the connection lands.
+    private var showsMain: Bool {
+        app.onboarded && (app.phase == .ready || app.phase == .connecting)
+    }
 
     var body: some View {
         ZStack {
             content
+                // The counter-motion to the splash pushing through: the app rises to full size.
+                .scaleEffect(splash ? 0.94 : 1)
             if splash {
                 SplashView {
-                    splash = false
+                    // Near-critically damped and unhurried, so the push-through registers.
+                    withAnimation(.spring(response: 0.75, dampingFraction: 0.98)) { splash = false }
                     app.splashDone = true
                 }
-                .transition(.identity)
+                .transition(.pushThrough)
                 .zIndex(1)
             }
         }
@@ -48,33 +58,20 @@ struct RootView: View {
 
     private var content: some View {
         Group {
-            switch app.phase {
-            case .setup:
-                OnboardingView(start: app.hubURL == nil && !app.onboarded ? .welcome : .hub)
-            case .connecting:
-                // What the splash opens onto when the hub is slow: the same icon, and a spinner.
-                VStack(spacing: 22) {
-                    Image("Logo")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 112, height: 112)
-                        .clipShape(.rect(cornerRadius: 26, style: .continuous))
-                        .shadow(color: .black.opacity(0.18), radius: 20, y: 10)
-                    ProgressView()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .paletteBackground()
-            case .signIn:
-                OnboardingView(start: .signIn)
-            case .ready:
-                if app.onboarded {
-                    AdaptiveRoot()
-                } else {
+            if showsMain {
+                AdaptiveRoot()
+            } else {
+                switch app.phase {
+                case .setup, .connecting:
+                    OnboardingView(start: app.hubURL == nil && !app.onboarded ? .welcome : .hub)
+                case .signIn:
+                    OnboardingView(start: .signIn)
+                case .ready:
                     OnboardingView(start: .notifications)
                 }
             }
         }
-        .animation(.smooth, value: app.phase)
+        .animation(.smooth, value: showsMain)
     }
 }
 

@@ -33,6 +33,10 @@ final class AppModel {
     var isRegular = false
     /// The launch splash has opened onto the app; onboarding starts its animation then.
     var splashDone = false
+    /// The hub's project list has arrived once since connecting; until then lists show skeletons.
+    var projectsLoaded = false
+    /// The wait before the next connection attempt at launch, doubling while the hub is away.
+    private var retryDelay: TimeInterval = 0
     /// Request ids seen so far; nil until the first list arrives.
     private var knownRequests: Set<String>?
     var selectedProjectID: String?
@@ -124,6 +128,7 @@ final class AppModel {
         client = nil
         me = nil
         projects = []
+        projectsLoaded = false
         requests = []
         knownRequests = nil
         summaries = [:]
@@ -151,10 +156,23 @@ final class AppModel {
             return
         } catch {
             lastError = error.localizedDescription
-            // Not reachable: a known hub asks to try again; a new address is asked for again.
-            phase = me == nil && !onboarded ? .setup : .signIn
+            if onboarded {
+                // Not reachable at launch: stay on the main screen with its "Connecting…" bubble
+                // and try again, sooner first (2, 4, 8 … 30 s).
+                retryDelay = min(max(retryDelay * 2, 2), 30)
+                let delay = retryDelay
+                Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(delay))
+                    guard let self, self.phase == .connecting, self.client == nil else { return }
+                    await self.connect()
+                }
+                return
+            }
+            // A new address that is not reachable is asked for again.
+            phase = me == nil ? .setup : .signIn
             return
         }
+        retryDelay = 0
         self.client = client
         socket?.stop()
         let socket = HubSocket(endpoint: endpoint)
@@ -245,6 +263,7 @@ final class AppModel {
         guard let client else { return }
         do {
             projects = try await client.projects().filter { $0.archived_at == nil }
+            projectsLoaded = true
         } catch HubError.signInRequired {
             signOut()
             return

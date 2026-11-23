@@ -16,6 +16,14 @@ struct AdaptiveRoot: View {
                 MainTabs()
             }
         }
+        .overlay(alignment: .top) {
+            if app.phase == .connecting || (app.phase == .ready && app.socketState != .open) {
+                ConnectionBanner(connecting: app.phase == .connecting || !app.projectsLoaded)
+                    .padding(.top, 6)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(duration: 0.4), value: app.phase == .connecting || app.socketState == .open)
         .onChange(of: width, initial: true) { _, w in app.isRegular = w == .regular }
         .sheet(item: Bindable(app).enrollCode) { c in
             NavigationStack { EnrollView(initialCode: c.code) }
@@ -89,6 +97,9 @@ struct DesktopLayout: View {
                     if let project = app.selectedProject {
                         SessionListView(project: project)
                             .id(project.id)
+                    } else if !app.projectsLoaded {
+                        SkeletonList(rows: 6, icon: 10)
+                            .paletteBackground(\.side)
                     } else {
                         ContentUnavailableView("No project", systemImage: "folder")
                     }
@@ -179,6 +190,11 @@ struct ProjectRail: View {
             Rectangle().fill(palette.border.opacity(0.6)).frame(width: 28, height: 0.5)
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 10) {
+                    if !app.projectsLoaded && app.projects.isEmpty {
+                        ForEach(0..<3, id: \.self) { _ in
+                            SkeletonBlock(cornerRadius: 11).frame(width: 40, height: 40)
+                        }
+                    }
                     ForEach(app.sortedProjects) { p in
                         let selected = pane == .sessions && p.id == app.selectedProjectID
                         Button {

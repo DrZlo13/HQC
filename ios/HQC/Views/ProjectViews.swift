@@ -15,10 +15,10 @@ struct ProjectsView: View {
 
     var body: some View {
         List {
-            if app.socketState != .open {
-                ConnectionBanner(state: app.socketState)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets())
+            if !app.projectsLoaded && app.projects.isEmpty {
+                ForEach(0..<4, id: \.self) { i in
+                    SkeletonRow(icon: 44, widths: [0.45 - Double(i % 2) * 0.12, 0.7])
+                }
             }
             ForEach(sorted) { project in
                 NavigationLink(value: Route.project(project)) {
@@ -45,7 +45,7 @@ struct ProjectsView: View {
         }
         .refreshable { await app.refresh() }
         .overlay {
-            if app.projects.isEmpty {
+            if app.projects.isEmpty && app.projectsLoaded {
                 ContentUnavailableView("No projects yet", systemImage: "folder",
                                        description: Text("Create one with +."))
             }
@@ -113,20 +113,21 @@ struct ProjectRow: View {
     }
 }
 
+/// The bubble floating at the top while the app is not live with its hub.
 struct ConnectionBanner: View {
-    let state: HubSocket.State
+    /// Never live since launch: "Connecting…"; live before and lost: "Offline, reconnecting…".
+    let connecting: Bool
 
     var body: some View {
         HStack(spacing: 8) {
             ProgressView().controlSize(.small)
-            Text(state == .connecting ? "Connecting…" : "Offline, reconnecting…")
+            Text(connecting ? "Connecting…" : "Offline, reconnecting…")
                 .font(.footnote.weight(.medium))
+                .contentTransition(.opacity)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .glassEffect(.regular.tint(.orange.opacity(0.25)), in: .capsule)
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 6)
     }
 }
 
@@ -246,7 +247,7 @@ struct SessionListView: View {
         }
         .overlay {
             if loading && sessions.isEmpty {
-                ProgressView()
+                SkeletonList(rows: 5, icon: 10)
             } else if visible.isEmpty {
                 ContentUnavailableView {
                     Label(showArchived ? "Nothing archived" : "No sessions", systemImage: "bubble.left.and.bubble.right")

@@ -105,8 +105,8 @@ struct ChatView: View {
         .scrollDismissesKeyboard(.interactively)
         // A tap in the feed puts the keyboard away (the inner display has no key for it).
         .simultaneousGesture(TapGesture().onEnded { hideKeyboard() })
-        .overlay {
-            if model.loading { ProgressView() }
+        .overlay(alignment: .top) {
+            if model.loading && model.items.isEmpty { ChatSkeleton() }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             ComposerArea {
@@ -140,7 +140,10 @@ struct ChatView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbar }
         .toolbar(.hidden, for: .tabBar)
-        .task {
+        // Starts when the hub is connected: a chat opened from a notification at launch waits
+        // under its skeleton for the connection, then loads.
+        .task(id: app.client != nil) {
+            guard app.client != nil, model.info == nil else { return }
             await model.start(app: app)
         }
         .onAppear { app.watching = model.sessionID }

@@ -158,7 +158,8 @@ struct OnboardingView: View {
                     Text(e).font(.footnote).foregroundStyle(palette.danger).multilineTextAlignment(.center)
                 }
             }
-            primary(busy ? "Connecting…" : "Continue", disabled: AppModel.normalize(address) == nil || busy) {
+            let connecting = busy || app.phase == .connecting
+            primary(connecting ? "Connecting…" : "Continue", disabled: AppModel.normalize(address) == nil || connecting) {
                 connect()
             }
             Link(destination: URL(string: "https://github.com/DrZlo13/HQC/blob/master/docs/RUNBOOK.md")!) {

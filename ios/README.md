@@ -43,7 +43,9 @@ Agents are felt and heard while their chat is open: a glassy click per tool call
 at most), a low pair when one fails, a knock for a permission request, a rising three notes for
 a question, a chime when the turn ends and a falling pair when it fails; a request in another
 session knocks too. Sending, answering, copying and moving around tick. The launch splash breathes
-the icon in once and opens a circle from it onto the app (under a second); onboarding builds
+the icon in, then pushes through the viewer (scaling up, blurring out) while the app rises
+beneath it, under a second; a set-up app opens its main screen at once, with skeletons and a
+"Connecting…" bubble until the hub answers, and retries while the hub is away; onboarding builds
 itself line by line, each line a tap and a note up the scale. Every cue's haptic taps and tones
 come from one list of notes (`HQC/App/Feedback.swift`), so they land together; the tones are
 synthesized, soft and short, go through the `.ambient` session (they mix with music and follow

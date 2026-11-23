@@ -219,6 +219,9 @@ export class AppState {
   private refreshing: Promise<void> | null = null;
   /** The sessions the hub pushed a summary of while the lists were on their way. */
   private pushedWhileRefreshing = new Set<string>();
+  /** The sessions being fetched alone (`fetchNewSession`), each with the newest summary that
+   *  came for it meanwhile, which is merged once it lands. */
+  private readonly fetchingSessions = new Map<string, SessionSummary | null>();
   /** Counts the user's changes to projects and sessions (`edited`), for `refreshSessions`. */
   private edits = 0;
   /** By session id, the least recently used first. */
@@ -361,7 +364,7 @@ export class AppState {
       this.userKnown.resolve();
     }
     this.socket.onRequests((list) => this.setRequests(list));
-    this.socket.onSummary((list) => this.mergeSummary(list));
+    this.socket.onSummary((list, whole) => this.mergeSummary(list, whole));
     this.socket.start();
     this.watchPageLeave(globalThis as unknown as Window);
     this.changed();
@@ -470,13 +473,20 @@ export class AppState {
     }
   }
 
-  mergeSummary(list: SessionSummary[]): void {
+  /** `whole`: the list is the hub's `summary` of every session, not one changed. */
+  mergeSummary(list: SessionSummary[], whole = false): void {
     let unknown = false;
     for (const s of list) {
       if (this.refreshing) this.pushedWhileRefreshing.add(s.session_id);
       const known = this.sessions.get(s.session_id);
       if (!known) {
-        unknown = true;
+        // A session created elsewhere: when one session's frame names it in a project this
+        // client knows, it alone is fetched (for its title and folder); a frame of every
+        // session (after a reconnect) may name many, and another project needs the list too.
+        if (whole) unknown = true;
+        else if (this.fetchingSessions.has(s.session_id)) this.fetchingSessions.set(s.session_id, s);
+        else if (this.project(s.project_id)) void this.fetchNewSession(s.session_id);
+        else unknown = true;
         continue;
       }
       // Archived or restored elsewhere: `archived_at` is not in the summary (T50).
@@ -512,9 +522,34 @@ export class AppState {
         paused_at: s.paused_at,
       });
     }
-    // A session created elsewhere: fetch the list again for its title.
+    // A session of a project this client does not know, or moved into one: the lists again.
     if (unknown) void this.refreshSessions().catch(() => {});
     this.changed();
+  }
+
+  /** A session created elsewhere, in a project on this page: the session alone, not the whole
+   *  list. A summary that came meanwhile is newer than the answer, but older than whatever else
+   *  brought the session here first (a list, the reply to this client's own request), so it is
+   *  merged only into the session this fetch added. Errors are dropped, the next summary of the
+   *  session tries again. */
+  private async fetchNewSession(id: string): Promise<void> {
+    this.fetchingSessions.set(id, null);
+    let added = false;
+    try {
+      const info = await this.api.session(id);
+      if (!this.sessions.has(id)) {
+        this.sessions.set(id, this.keepRead(info));
+        added = true;
+        // Moved meanwhile into a project this page does not have: the lists bring it.
+        if (!this.project(info.project_id)) void this.refreshSessions().catch(() => {});
+      }
+    } catch {
+      // Offline or gone.
+    }
+    const later = this.fetchingSessions.get(id);
+    this.fetchingSessions.delete(id);
+    if (later && added) this.mergeSummary([later]);
+    else this.changed();
   }
 
   setRequests(list: OpenRequest[]): void {

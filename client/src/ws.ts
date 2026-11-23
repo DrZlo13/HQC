@@ -1,7 +1,9 @@
 // WebSocket /api/ws (SPEC §6): `subscribe {session_id, after_seq}` per open chat,
 // `subscribe_summary` for the session list and the open requests. Frames are flat JSON (crates/hqc-proto
 // client_frame). On every (re)connect the client repeats each subscription from the last
-// `seq` it has seen.
+// `seq` it has seen. Where the browser can inflate, the connection asks for `?deflate=raw`: the
+// hub then sends binary messages, one raw DEFLATE stream with a sync flush after each frame, each
+// frame's JSON followed by "\n" (`Inflater`); a text message is a frame as it is.
 
 import {
   parseServerFrame,
@@ -39,10 +41,69 @@ export interface HubSocketOptions {
   maxDelayMs?: number;
 }
 
+/** Whether this browser inflates raw DEFLATE (`DecompressionStream`). */
+function canInflate(): boolean {
+  try {
+    new DecompressionStream('deflate-raw');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** One connection's compressed stream: the binary messages go in in order, each complete line
+ *  of the inflated text comes out through `onLine`. A broken stream calls `onError`; after
+ *  `close` nothing comes out. */
+class Inflater {
+  private readonly writer: WritableStreamDefaultWriter<BufferSource>;
+  private readonly reader: ReadableStreamDefaultReader<string>;
+  private closed = false;
+
+  constructor(
+    private readonly onLine: (line: string) => void,
+    private readonly onError: () => void,
+  ) {
+    const inflate = new DecompressionStream('deflate-raw');
+    this.writer = inflate.writable.getWriter();
+    this.reader = inflate.readable.pipeThrough(new TextDecoderStream()).getReader();
+    void this.read().catch(() => this.fail());
+  }
+
+  write(data: ArrayBuffer): void {
+    this.writer.write(new Uint8Array(data)).catch(() => this.fail());
+  }
+
+  close(): void {
+    this.closed = true;
+    this.writer.abort().catch(() => {});
+    this.reader.cancel().catch(() => {});
+  }
+
+  private fail(): void {
+    if (!this.closed) this.onError();
+  }
+
+  private async read(): Promise<void> {
+    let rest = '';
+    for (;;) {
+      const { done, value } = await this.reader.read();
+      if (done) return;
+      rest += value;
+      for (let i = rest.indexOf('\n'); i >= 0; i = rest.indexOf('\n')) {
+        const line = rest.slice(0, i);
+        rest = rest.slice(i + 1);
+        if (this.closed) return;
+        this.onLine(line);
+      }
+    }
+  }
+}
+
 export class HubSocket {
   private ws: WebSocket | null = null;
+  private inflater: Inflater | null = null;
   private readonly subs = new Map<string, SessionSubscriber>();
-  private readonly summaryListeners = new Set<(s: SessionSummary[]) => void>();
+  private readonly summaryListeners = new Set<(s: SessionSummary[], whole: boolean) => void>();
   private readonly requestListeners = new Set<(r: OpenRequest[]) => void>();
   private readonly stateListeners = new Set<(s: ConnState) => void>();
   /** Per session, the `subscribe` frames sent on this socket whose `subscribed` has not come:
@@ -69,6 +130,8 @@ export class HubSocket {
     this.ws?.close();
     this.ws = null;
     this.unanswered.clear();
+    this.inflater?.close();
+    this.inflater = null;
     this.setState('closed');
   }
 
@@ -91,8 +154,8 @@ export class HubSocket {
     };
   }
 
-  /** `summary` (every session) and `session.summary` (one changed) both come as a list. */
-  onSummary(fn: (s: SessionSummary[]) => void): () => void {
+  /** `summary` (every session, `whole`) and `session.summary` (one changed) both come as a list. */
+  onSummary(fn: (s: SessionSummary[], whole: boolean) => void): () => void {
     this.summaryListeners.add(fn);
     if (this.summaryListeners.size === 1) this.send({ type: 'subscribe_summary' });
     return () => this.summaryListeners.delete(fn);
@@ -130,9 +193,12 @@ export class HubSocket {
   private open(): void {
     const Ctor = this.opts.WebSocketImpl ?? WebSocket;
     this.setState('connecting');
-    const ws = new Ctor(this.opts.url);
+    const inflate = canInflate();
+    const url = inflate ? `${this.opts.url}${this.opts.url.includes('?') ? '&' : '?'}deflate=raw` : this.opts.url;
+    const ws = new Ctor(url);
     this.ws = ws;
     this.unanswered.clear();
+    if (inflate) ws.binaryType = 'arraybuffer';
     ws.onopen = () => {
       if (this.ws !== ws) return;
       this.attempt = 0;
@@ -142,12 +208,21 @@ export class HubSocket {
     };
     ws.onmessage = (m) => {
       if (this.ws !== ws) return;
-      this.dispatch(m.data);
+      if (typeof m.data === 'string') {
+        this.dispatch(m.data);
+        return;
+      }
+      // A frame comes out of the stream a moment later; `close` of the inflater, on every path
+      // that replaces the socket, stops the ones still on their way.
+      this.inflater ??= new Inflater((line) => this.dispatch(line), () => ws.close());
+      this.inflater.write(m.data as ArrayBuffer);
     };
     ws.onclose = () => {
       if (this.ws !== ws) return;
       this.ws = null;
       this.unanswered.clear();
+      this.inflater?.close();
+      this.inflater = null;
       for (const sub of this.subs.values()) sub.onReset();
       this.setState('closed');
       this.schedule();
@@ -193,10 +268,10 @@ export class HubSocket {
         this.subs.get(frame.session_id)?.onDelivery(frame);
         break;
       case 'summary':
-        for (const fn of this.summaryListeners) fn(frame.sessions);
+        for (const fn of this.summaryListeners) fn(frame.sessions, true);
         break;
       case 'session.summary':
-        for (const fn of this.summaryListeners) fn([frame.session]);
+        for (const fn of this.summaryListeners) fn([frame.session], false);
         break;
       case 'requests':
         for (const fn of this.requestListeners) fn(frame.requests);

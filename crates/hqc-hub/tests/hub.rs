@@ -190,6 +190,63 @@ async fn the_latest_tasks_query_uses_its_index() {
     assert!(plan.contains("events_tasks"), "{plan}");
 }
 
+/// `?deflate=raw` (SPEC §6): the frames come as one compressed stream, the same ones a plain
+/// connection gets as text, the live ones after the backlog too.
+#[tokio::test]
+async fn deflate_stream_carries_the_frames_of_a_plain_connection() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Compressed").await;
+    ack_start(&mut w, &sid).await;
+    // Enough text, with a newline, quotes and non-ASCII in it, to fill the compressor's
+    // output buffer several times over.
+    for i in 0..60u64 {
+        let text: String = (0..400u64)
+            .map(|j| char::from(b'a' + ((i * 31 + j * j * 7 + j / 3) % 26) as u8))
+            .chain(" \"quoted\"\nline two é я 日本".chars())
+            .collect();
+        w.event(agent_event(
+            &sid,
+            "agent.message",
+            json!({"text": text, "final": false}),
+        ))
+        .await;
+    }
+
+    let mut plain = FakeClient::connect(&hub).await;
+    let mut packed = FakeClient::connect_deflate(&hub).await;
+    let mut seen = vec![];
+    for c in [&mut plain, &mut packed] {
+        c.send(json!({"type": "subscribe_summary"})).await;
+        c.send(json!({"type": "subscribe", "session_id": sid, "after_seq": 0}))
+            .await;
+        let mut frames = vec![];
+        let (mut requests, mut subscribed) = (false, false);
+        while !(requests && subscribed) {
+            let f = c.recv().await;
+            requests |= f["type"] == "requests";
+            subscribed |= f["type"] == "subscribed";
+            frames.push(f);
+        }
+        seen.push(frames);
+    }
+    assert!(seen[0].len() > 60, "{} frames", seen[0].len());
+    assert_eq!(seen[0], seen[1]);
+
+    // A frame after the backlog continues the same stream.
+    let ev = agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "later", "final": true}),
+    );
+    w.event(ev).await;
+    let (a, b) = (plain.until("event").await, packed.until("event").await);
+    assert_eq!(a["event"]["payload"]["text"], "later");
+    assert_eq!(a, b);
+    hub.finish().await;
+}
+
 /// 2. The same event_id twice: one stored event, the same seq.
 #[tokio::test]
 async fn duplicate_event_keeps_seq() {

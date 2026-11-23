@@ -955,9 +955,45 @@ pub fn agent_event(session_id: &str, ty: &str, payload: Value) -> Value {
     })
 }
 
+/// The inflating side of a `/api/ws?deflate=raw` connection (SPEC §6): the binary messages
+/// are one raw DEFLATE stream, each frame's JSON followed by `\n`.
+struct Inflate {
+    z: flate2::Decompress,
+    /// The text inflated so far that does not end a frame yet.
+    partial: Vec<u8>,
+    /// Frames inflated and not read yet.
+    ready: VecDeque<Value>,
+}
+
+impl Inflate {
+    fn push(&mut self, mut input: &[u8]) {
+        let mut out = Vec::with_capacity(8192);
+        loop {
+            if out.len() == out.capacity() {
+                out.reserve(8192);
+            }
+            let before = self.z.total_in();
+            self.z
+                .decompress_vec(input, &mut out, flate2::FlushDecompress::Sync)
+                .expect("inflate");
+            input = &input[(self.z.total_in() - before) as usize..];
+            if input.is_empty() && out.len() < out.capacity() {
+                break;
+            }
+        }
+        self.partial.extend_from_slice(&out);
+        while let Some(i) = self.partial.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.partial.drain(..=i).collect();
+            self.ready
+                .push_back(serde_json::from_slice(&line[..i]).expect("a JSON frame"));
+        }
+    }
+}
+
 /// A client on `/api/ws`.
 pub struct FakeClient {
     ws: Ws,
+    inflate: Option<Inflate>,
 }
 
 impl FakeClient {
@@ -986,8 +1022,51 @@ impl FakeClient {
             req.headers_mut().insert("Origin", o.parse().unwrap());
         }
         match tokio_tungstenite::connect_async(req).await {
-            Ok((ws, _)) => Ok(Self { ws }),
+            Ok((ws, _)) => Ok(Self { ws, inflate: None }),
             Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// `/api/ws?deflate=raw`: the hub's frames come as one compressed stream, read here as the
+    /// same frames [`FakeClient::connect`] gets; a text message on it fails the test.
+    pub async fn connect_deflate(hub: &TestHub) -> Self {
+        let mut req = format!("{}/api/ws?deflate=raw", hub.ws_base)
+            .into_client_request()
+            .unwrap();
+        req.headers_mut()
+            .insert("Origin", hub.base.parse().unwrap());
+        let (ws, _) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("client connect");
+        Self {
+            ws,
+            inflate: Some(Inflate {
+                z: flate2::Decompress::new(false),
+                partial: vec![],
+                ready: VecDeque::new(),
+            }),
+        }
+    }
+
+    /// The next frame within `timeout`.
+    async fn frame(&mut self, timeout: Duration) -> Option<Value> {
+        let Some(inflate) = self.inflate.as_mut() else {
+            return recv_json(&mut self.ws, timeout).await;
+        };
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(f) = inflate.ready.pop_front() {
+                return Some(f);
+            }
+            let m = tokio::time::timeout_at(deadline, self.ws.next())
+                .await
+                .ok()??;
+            match m.expect("websocket error") {
+                Message::Binary(b) => inflate.push(&b),
+                Message::Text(t) => panic!("a text message on a deflate connection: {t}"),
+                Message::Close(_) => return None,
+                _ => continue,
+            }
         }
     }
 
@@ -999,9 +1078,7 @@ impl FakeClient {
     }
 
     pub async fn recv(&mut self) -> Value {
-        recv_json(&mut self.ws, WAIT)
-            .await
-            .expect("client: no frame from hub")
+        self.frame(WAIT).await.expect("client: no frame from hub")
     }
 
     /// Send that may fail: the hub may close the connection while this is still writing.
@@ -1035,7 +1112,7 @@ impl FakeClient {
     }
 
     pub async fn expect_silence(&mut self, d: Duration) {
-        if let Some(f) = recv_json(&mut self.ws, d).await {
+        if let Some(f) = self.frame(d).await {
             panic!("client: unexpected frame {f}");
         }
     }

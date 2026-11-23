@@ -3067,6 +3067,31 @@ describe("messages", () => {
     expect(reopened.usageTotals().cost).toBe(3.25);
   });
 
+  it("counts the session's tokens as its cost: the latest total plus the last one before each /clear", () => {
+    const at = (seq: number) =>
+      `0199f3a2-7c10-7000-8000-0000000004${String(seq).padStart(2, "0")}`;
+    const usage = (seq: number, tokens?: number) =>
+      ev("event.usage", (e) => {
+        e.seq = seq;
+        e.event_id = at(seq);
+        e.payload = { input_tokens: 10, output_tokens: 5, session_tokens: tokens };
+      });
+    const cleared = (seq: number) =>
+      ev("event.system", (e) => {
+        e.seq = seq;
+        e.event_id = at(seq);
+        e.payload = { text: "Conversation cleared", code: "conversation_cleared" };
+      });
+    const none = new Timeline();
+    none.apply(usage(1));
+    expect(none.usageTotals().tokens).toBeUndefined();
+    const t = new Timeline();
+    for (const e of [usage(1, 100), usage(2, 250)]) t.apply(e);
+    expect(t.usageTotals().tokens).toBe(250);
+    for (const e of [cleared(3), usage(4, 40)]) t.apply(e);
+    expect(t.usageTotals().tokens).toBe(290);
+  });
+
   it("draws the line of a usage with no tokens but a cost, as /compact's", () => {
     const t = new Timeline();
     t.apply(agentText(1, "All tests passed.", true));

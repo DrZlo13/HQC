@@ -463,16 +463,22 @@ export class Timeline {
   /** Model of the last `usage` that names one, and the session's cost: the runtime's own
    *  running total of the last `usage` that has one (`session_cost_usd`, T27) plus the last
    *  total before each `/clear`, after which the runtime counts from 0 again (`system
-   *  conversation_cleared`, SPEC §8.1), else the sum of `cost_usd` over the loaded history. */
-  usageTotals(): { model?: string; cost?: number } {
+   *  conversation_cleared`, SPEC §8.1), else the sum of `cost_usd` over the loaded history.
+   *  `tokens` is counted the same way from `session_tokens` (SPEC 0.229), with no fallback: none
+   *  when no `usage` has one. */
+  usageTotals(): { model?: string; cost?: number; tokens?: number } {
     let model: string | undefined;
     let sum: number | undefined;
     let total: number | undefined;
     let before: number | undefined;
+    let tokensTotal: number | undefined;
+    let tokensBefore: number | undefined;
     for (const e of this.events()) {
       if (e.type === "system" && e.payload.code === "conversation_cleared") {
         if (total !== undefined) before = (before ?? 0) + total;
         total = undefined;
+        if (tokensTotal !== undefined) tokensBefore = (tokensBefore ?? 0) + tokensTotal;
+        tokensTotal = undefined;
         continue;
       }
       if (e.type !== "usage") continue;
@@ -481,12 +487,18 @@ export class Timeline {
         sum = (sum ?? 0) + e.payload.cost_usd;
       if (e.payload.session_cost_usd !== undefined)
         total = e.payload.session_cost_usd;
+      if (e.payload.session_tokens !== undefined)
+        tokensTotal = e.payload.session_tokens;
     }
     const runtime =
       before === undefined && total === undefined
         ? undefined
         : (before ?? 0) + (total ?? 0);
-    return { model, cost: runtime ?? sum };
+    const tokens =
+      tokensBefore === undefined && tokensTotal === undefined
+        ? undefined
+        : (tokensBefore ?? 0) + (tokensTotal ?? 0);
+    return { model, cost: runtime ?? sum, tokens };
   }
 
   /** The goal of the session while one is set (SPEC 0.218), from the stored `system goal`

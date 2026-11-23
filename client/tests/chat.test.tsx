@@ -2784,6 +2784,65 @@ describe('cost (T27)', () => {
   });
 });
 
+describe('the session\'s tokens in the header (SPEC 0.229)', () => {
+  const history = [
+    ev('event.user.message', 1, (e) => (e.payload.artifact_ids = [])),
+    ev('event.agent.message', 2),
+    ev('event.usage', 3, (e) => (e.payload = { input_tokens: 2, output_tokens: 5, cost_usd: 2.25, session_cost_usd: 2.25, session_tokens: 3_412_345 })),
+  ];
+
+  it('names the tokens after the cost, with the exact number on hover', async () => {
+    const { app } = setup('idle', { history, commands: [] });
+    await mount(app);
+    expect($('.chat-cost')!.textContent).toBe('$2.25 · 3.4M tokens this session');
+    expect($('.chat-cost')!.getAttribute('title')).toBe(
+      '3,412,345 tokens: input, output, cache reads and cache writes, as Claude Code counts them for the cost',
+    );
+  });
+
+  it('shows the tokens of a session on a provider, which has no cost shown', async () => {
+    const { app } = setup('idle', { history, commands: [], provider: { id: 'pr1', label: 'Qwen' } });
+    await mount(app);
+    expect($('.chat-cost')!.textContent).toBe('3.4M tokens this session');
+  });
+
+  it('shows the cost alone, with no title, while no usage has the tokens', async () => {
+    const { app } = setup('idle', { commands: [] });
+    await mount(app);
+    expect($('.chat-cost')!.textContent).toBe('$0.07 this session');
+    expect($('.chat-cost')!.getAttribute('title')).toBeNull();
+  });
+
+  it("sums a room's agents' tokens, an agent on a provider's too", async () => {
+    const { app, api } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]] });
+    const room = app.sessions.get('s1')!;
+    const member = (id: string, more: Partial<SessionInfo> = {}) =>
+      app.sessions.set(id, { ...room, id, title: id, slug: id, room_mode: undefined, room_id: 's1', ...more });
+    member('m1');
+    member('m2', { provider: { id: 'pr1', label: 'Qwen' } });
+    const spent = (id: string, usd: number, tokens: number) => [
+      ev('event.usage', 1, (e) => ((e.session_id = id), (e.payload = { input_tokens: 1, output_tokens: 1, cost_usd: usd, session_tokens: tokens }))),
+    ];
+    const own = (id: string) => (id === 'm1' ? spent(id, 0.3, 1_000_000) : id === 'm2' ? spent(id, 5, 500_000) : id === 's1' ? [HISTORY[0]] : []);
+    const page = (id: string) => {
+      const events = own(id);
+      return { events, invalid: [], maxSeq: events.length ? 1 : 0, minSeq: events.length ? 1 : 0, count: events.length };
+    };
+    api.events.mockImplementation(async (id: string) => page(id));
+    api.eventsBefore.mockImplementation(async (id: string) => page(id));
+    await mount(app);
+    for (let i = 0; i < 20 && !$('.chat-cost'); i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    expect($('.chat-cost')!.textContent).toBe('$0.30 · 1.5M tokens this room');
+  });
+
+  it('says the same in the phone\'s "More" menu', async () => {
+    const { app } = setup('idle', { history, commands: [] });
+    await mount(app, true);
+    await act(async () => $('.btn-more')!.click());
+    expect($('.menu-info')!.textContent).toContain('$2.25 · 3.4M tokens this session');
+  });
+});
+
 describe('context and cache in the header (SPEC 0.222)', () => {
   const T0 = Date.parse('2026-11-20T12:00:00Z');
   const usage = (seq: number, at: number, fields: Record<string, number>) =>

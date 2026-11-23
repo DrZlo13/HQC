@@ -406,6 +406,9 @@ export interface Usage {
   cost_usd?: number;
   /** The runtime's running total of the whole session after this turn (T27). */
   session_cost_usd?: number;
+  /** The runtime's running token total of the whole session after this turn: input, output,
+   *  cache reads and cache writes (SPEC 0.229). */
+  session_tokens?: number;
   model?: string;
   /** Tokens the main agent's context holds after this turn (SPEC §4, 0.222). */
   context_tokens?: number;
@@ -746,6 +749,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     cache_write: optNum(p, 'cache_write'),
     cost_usd: optNum(p, 'cost_usd'),
     session_cost_usd: optNum(p, 'session_cost_usd'),
+    session_tokens: optNum(p, 'session_tokens'),
     model: optStr(p, 'model'),
     context_tokens: optNum(p, 'context_tokens'),
     context_limit: optNum(p, 'context_limit'),

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.232, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.233, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2987,7 +2987,8 @@ header and the session's row say "Pausing" (since 0.191; "Pausing after this tur
 of the state.
 `activity` (since 0.179): what the agent waits on now (`retrying`, `compacting`, `thinking`),
 from `session.state` (§5.4), kept in the hub's memory; absent — none. The chat's main agent
-row (§17.1) shows it in place of "Working"; a client ignores a `kind` it does not know.
+row (§17.1) shows it in place of "Working" and (since 0.233) of "Input queued"; a client ignores a
+`kind` it does not know.
 `permission_mode` and `effective_permission_mode` (since 0.42, T38): §3 Session; absent —
 null. The client shows the mode in the chat header as a round pill beside the state:
 `effective_permission_mode`, else `permission_mode`; "Auto" and (since 0.129) "Allow all" in
@@ -7368,7 +7369,10 @@ tokens" — since 0.227 a count that runs up to each new estimate, as in the VS 
 number shown, linearly, over the time since the estimate before it (0.3–3 s), redrawn every
 100 ms, the first estimate and a smaller one (a new thinking block) shown at once —; a waiting
 `hqc_ask` is "Waiting for a reply from <session>"), `queued` — "Main agent:
-Input queued", `paused` — "Paused" in the header and the session's row,
+Input queued"; since 0.233, when the session has an `activity`, that activity in its place, the
+row drawn as a running one (Claude Code echoes an input, which opens its turn, only after the
+auto-compaction it runs before it, so the input waits while the agent compacts), `paused` —
+"Paused" in the header and the session's row,
 `waiting` — "Main agent: Waiting for approval" if the open request is not in the feed (otherwise
 its card is that row). In a room each agent at work has its row, led by its name in place of
 "Main agent: ". The row is not in the feed, so the feed's window gets shorter when the block appears at
@@ -7924,6 +7928,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.232 → 0.233 (a compaction before a waiting input is shown)
+§6, §17.1: with the context past its threshold Claude Code runs an auto-compaction before it takes
+the next input and echoes that input only after it, so for the whole compaction (93 s on a live
+session) the input stayed pending, no turn was open, the session was `queued`, and the main
+agent's row said "Input queued" whatever the worker reported. The worker and the hub already
+passed "compacting" on; the client dropped it in `queued`. Now an `activity` stands in place of
+"Input queued", the row drawn as a running one: "Main agent: Compacting the conversation…". Only
+the client changed.
 
 ### 0.231 → 0.232 (a side question to a session's agent)
 §4: the events `side.question` (the hub's, the owner's) and `side.answer` (the adapter's); §5.3:

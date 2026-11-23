@@ -36,6 +36,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         if granted { UIApplication.shared.registerForRemoteNotifications() }
     }
 
+    /// Registers again on launch when the user allowed notifications before.
+    @MainActor
+    static func registerIfAllowed() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        if settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional {
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+    }
+
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         Task { @MainActor in Self.model?.didRegister(deviceToken: deviceToken) }
     }

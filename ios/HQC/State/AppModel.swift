@@ -28,12 +28,44 @@ final class AppModel {
     /// The selected tab and the Projects tab's navigation, so a notification can open a chat.
     var tab: MainTab = .projects
     var path: [Route] = []
+    /// Regular width (the desktop layout): the selected project and session, and what was
+    /// pushed over the chat (a room's agent).
+    var isRegular = false
+    var selectedProjectID: String?
+    var selectedSessionID: String?
+    var detailPath: [Route] = []
     /// The session whose chat is on screen: its notices show no banner.
     var watching: String?
     /// The device token for Apple push, once the system hands it over.
     var deviceToken: String?
     var pushEnabledOnHub = false
     let artifacts = ArtifactStore()
+    /// Whether the user went through onboarding's last step on this device.
+    var onboarded: Bool = UserDefaults.standard.bool(forKey: "onboarded")
+
+    func finishOnboarding() {
+        onboarded = true
+        UserDefaults.standard.set(true, forKey: "onboarded")
+    }
+
+    /// The hub's palette for this user, and whether the app follows the device's light or dark
+    /// setting with that palette's family (kept on this device).
+    var theme: ThemeName = .warm
+    var followSystem: Bool = UserDefaults.standard.object(forKey: "followSystem") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(followSystem, forKey: "followSystem") }
+    }
+
+    func effectiveTheme(systemIsDark: Bool) -> ThemeName {
+        followSystem ? theme.variant(light: !systemIsDark) : theme
+    }
+
+    /// Saves the palette on the hub, as the web client's Settings does.
+    func setTheme(_ t: ThemeName) {
+        theme = t
+        UserDefaults.standard.set(t.rawValue, forKey: "theme")
+        guard let client else { return }
+        Task { _ = try? await client.send("PATCH", "/api/me", body: ["theme": t.rawValue]) }
+    }
     /// An enrollment code from a link (`hqc-app://enroll?code=…`), shown for confirmation.
     var enrollCode: EnrollCode?
 
@@ -43,6 +75,7 @@ final class AppModel {
     private static let hubKey = "hubURL"
 
     init() {
+        if let t = UserDefaults.standard.string(forKey: "theme").flatMap(ThemeName.init(rawValue:)) { theme = t }
         if let s = UserDefaults.standard.string(forKey: Self.hubKey), let url = URL(string: s) {
             hubURL = url
             phase = .connecting
@@ -107,12 +140,14 @@ final class AppModel {
         let client = HubClient(endpoint: endpoint)
         do {
             me = try await client.me()
+            if let t = me?.theme.flatMap(ThemeName.init(rawValue:)) { theme = t }
         } catch HubError.signInRequired {
             phase = .signIn
             return
         } catch {
             lastError = error.localizedDescription
-            phase = .signIn
+            // Not reachable: a known hub asks to try again; a new address is asked for again.
+            phase = me == nil && !onboarded ? .setup : .signIn
             return
         }
         self.client = client
@@ -168,8 +203,15 @@ final class AppModel {
         }
     }
 
-    /// Opens a session's chat on the Projects tab (a notification, a search hit).
+    /// Opens a session's chat (a notification, a search hit, a new session): selected in the
+    /// desktop layout, pushed on the Projects tab otherwise.
     func open(sessionID: String, title: String = "") {
+        if isRegular {
+            if let s = summaries[sessionID] { selectedProjectID = s.project_id }
+            selectedSessionID = sessionID
+            detailPath = []
+            return
+        }
         tab = .projects
         var p: [Route] = []
         if let s = summaries[sessionID], let project = project(s.project_id) {
@@ -177,6 +219,21 @@ final class AppModel {
         }
         p.append(.session(id: sessionID, title: summaries[sessionID]?.title ?? title))
         path = p
+    }
+
+    var selectedProject: Project? { selectedProjectID.flatMap { project($0) } }
+
+    /// The personal project first, then favorites, then by name, as the web client's bar.
+    var sortedProjects: [Project] {
+        projects.sorted { a, b in
+            if a.is_personal != b.is_personal { return a.is_personal }
+            if (a.favorite_at != nil) != (b.favorite_at != nil) { return a.favorite_at != nil }
+            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
+    }
+
+    func unread(project: String) -> Int {
+        summaries.values.filter { $0.project_id == project && $0.unread > 0 }.count
     }
 
     func refresh() async {

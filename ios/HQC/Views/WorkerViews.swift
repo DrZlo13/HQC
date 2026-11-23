@@ -40,6 +40,7 @@ struct WorkersView: View {
             }
         }
         .navigationTitle("Workers")
+        .paletteBackground()
         .task { await load() }
         .refreshable { await load() }
         .overlay {
@@ -305,6 +306,7 @@ struct WorkspacesView: View {
             if let error { Section { Text(error).foregroundStyle(.red).font(.footnote) } }
         }
         .navigationTitle("Workspaces")
+        .paletteBackground()
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {

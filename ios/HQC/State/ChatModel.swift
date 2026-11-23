@@ -265,7 +265,18 @@ final class ChatModel {
             case "agent.thinking":
                 if !ev.text.isEmpty { out.append(.thinking(ev)) }
             case "tool.call":
-                out.append(.tool(call: ev, result: ev.callID.flatMap { results[$0] }))
+                // Calls one after another fold into one group, as the web client's feed does.
+                let call = ToolCallItem(call: ev, result: ev.callID.flatMap { results[$0] })
+                if case .tools(let calls)? = out.last {
+                    out[out.count - 1] = .tools(calls + [call])
+                } else {
+                    out.append(.tools([call]))
+                }
+            case "usage":
+                // Under the answer it ended: tokens in and out, cache, cost.
+                if ev.payload["input_tokens"]?.double != nil || ev.payload["output_tokens"]?.double != nil {
+                    out.append(.usage(ev))
+                }
             case "approval.request":
                 let open = !(ev.requestID.map(closed.contains) ?? true)
                 out.append(.approval(ev, open: open))
@@ -301,7 +312,8 @@ enum FeedItem: Identifiable {
     case peer(HubEvent)
     case agent(HubEvent)
     case thinking(HubEvent)
-    case tool(call: HubEvent, result: HubEvent?)
+    case tools([ToolCallItem])
+    case usage(HubEvent)
     case approval(HubEvent, open: Bool)
     case clarify(HubEvent, open: Bool)
     case attachment(HubEvent)
@@ -309,11 +321,23 @@ enum FeedItem: Identifiable {
 
     var id: String {
         switch self {
-        case .user(let e), .peer(let e), .agent(let e), .thinking(let e), .attachment(let e):
+        case .user(let e), .peer(let e), .agent(let e), .thinking(let e), .attachment(let e), .usage(let e):
             e.event_id
-        case .tool(let call, _): call.event_id
+        case .tools(let calls): calls.first?.call.event_id ?? "tools"
         case .approval(let e, _), .clarify(let e, _): e.event_id
         case .note(let id, _, _): id
         }
     }
+}
+
+/// A tool call and its result, once it came.
+struct ToolCallItem: Identifiable {
+    let call: HubEvent
+    let result: HubEvent?
+    var id: String { call.event_id }
+
+    var tool: String { call.payload["tool"]?.string ?? "Tool" }
+    var argsPreview: String { call.payload["args_preview"]?.string ?? "" }
+    var failed: Bool { result?.payload["error"]?.bool == true }
+    var durationMs: Double? { result?.payload["duration_ms"]?.double }
 }

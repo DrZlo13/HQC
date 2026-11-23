@@ -58,6 +58,8 @@ nonisolated struct Me: Codable, Sendable {
     let email: String
     let display_name: String?
     let personal_project_id: String
+    /// The web client's base palette (T49), the same on every device.
+    let theme: String?
 }
 
 nonisolated struct ProjectIcon: Codable, Hashable, Sendable {

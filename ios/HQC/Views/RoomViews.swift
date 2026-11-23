@@ -105,7 +105,11 @@ struct RoomAgentsView: View {
             ForEach(agents) { a in
                 Button {
                     dismiss()
-                    app.path.append(.session(id: a.id, title: a.title))
+                    if app.isRegular {
+                        app.detailPath.append(.session(id: a.id, title: a.title))
+                    } else {
+                        app.path.append(.session(id: a.id, title: a.title))
+                    }
                 } label: {
                     SessionRow(session: a, summary: app.summary(a.id), waiting: !app.requests(for: a.id).isEmpty)
                 }

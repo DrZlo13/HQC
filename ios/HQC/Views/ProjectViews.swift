@@ -37,6 +37,7 @@ struct ProjectsView: View {
             }
         }
         .navigationTitle("Projects")
+        .paletteBackground()
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button("New project", systemImage: "plus") { creating = true }
@@ -73,12 +74,14 @@ struct ProjectTile: View {
 }
 
 struct ProjectRow: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.palette) private var palette
     let project: Project
     var unread = 0
 
     var body: some View {
-        HStack(spacing: 14) {
-            ProjectTile(project: project)
+        HStack(spacing: 12) {
+            ProjectBadge(project: project)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(project.displayName).font(.headline)
@@ -86,8 +89,14 @@ struct ProjectRow: View {
                         Image(systemName: "star.fill").font(.caption2).foregroundStyle(.yellow)
                     }
                 }
-                if let d = project.description, !d.isEmpty {
-                    Text(d).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                if app.projectWorking(project.id) {
+                    let agents = app.projectAgents(project.id)
+                    Text("\(agents) agent\(agents == 1 ? "" : "s") · \(Int(app.projectRate(project.id))) tokens/s")
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(palette.text2)
+                        .contentTransition(.numericText())
+                } else if let d = project.description, !d.isEmpty {
+                    Text(d).font(.subheadline).foregroundStyle(palette.muted).lineLimit(1)
                 }
             }
             Spacer()
@@ -148,8 +157,26 @@ struct SessionListView: View {
     var body: some View {
         List {
             ForEach(visible) { s in
-                NavigationLink(value: Route.session(id: s.id, title: s.title)) {
-                    SessionRow(session: s, summary: app.summary(s.id), waiting: !app.requests(for: s.id).isEmpty)
+                Group {
+                    if app.isRegular {
+                        Button {
+                            app.selectedSessionID = s.id
+                            app.detailPath = []
+                        } label: {
+                            SessionRow(session: s, summary: app.summary(s.id), waiting: !app.requests(for: s.id).isEmpty)
+                                .contentShape(.rect)
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(
+                            app.selectedSessionID == s.id
+                                ? RoundedRectangle(cornerRadius: 10).fill(current.tint.opacity(0.22)).padding(.horizontal, 6)
+                                : nil
+                        )
+                    } else {
+                        NavigationLink(value: Route.session(id: s.id, title: s.title)) {
+                            SessionRow(session: s, summary: app.summary(s.id), waiting: !app.requests(for: s.id).isEmpty)
+                        }
+                    }
                 }
                 .swipeActions {
                     if s.archived {
@@ -231,6 +258,8 @@ struct SessionListView: View {
                 }
             }
         }
+        .listStyle(.plain)
+        .paletteBackground(app.isRegular ? \.side : \.bg)
         .refreshable { await load() }
         .task { await load() }
         .onChange(of: app.summaries.count) { _, _ in Task { await load() } }
@@ -250,18 +279,27 @@ struct SessionListView: View {
                 NewSessionSheet(project: project) { created in
                     sheet = nil
                     sessions.insert(created, at: 0)
-                    app.path.append(.session(id: created.id, title: created.title))
+                    openCreated(created)
                 }
                 .presentationDetents([.medium, .large])
             case .newRoom:
                 NewRoomSheet(project: project) { room in
                     sheet = nil
                     sessions.insert(room, at: 0)
-                    app.path.append(.session(id: room.id, title: room.title))
+                    openCreated(room)
                 }
             case .workspaces:
                 NavigationStack { WorkspacesView(project: project) }
             }
+        }
+    }
+
+    private func openCreated(_ s: SessionInfo) {
+        if app.isRegular {
+            app.selectedSessionID = s.id
+            app.detailPath = []
+        } else {
+            app.path.append(.session(id: s.id, title: s.title))
         }
     }
 
@@ -309,14 +347,18 @@ struct SessionRow: View {
                     }
                 }
                 HStack(spacing: 6) {
-                    Text(session.paused_at != nil ? "Paused" : state.label)
+                    Text(session.paused_at != nil ? "Paused" : state.label).lineLimit(1).fixedSize()
                     if let n = summary?.subagents, n > 0 {
                         Text("· \(n) subagent\(n == 1 ? "" : "s")")
+                    }
+                    if state.isBusy, let r = summary?.output_per_s, r > 0 {
+                        Text("· \(Int(r)) tok/s").monospacedDigit()
                     }
                     if let date = HubEvent.parseDate(session.updated_at) {
                         Text("· \(date, format: .relative(presentation: .named))")
                     }
                 }
+                .lineLimit(1)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }

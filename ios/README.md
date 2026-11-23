@@ -30,9 +30,26 @@ browser and Apple push (SPEC 0.214).
   enrollment code (also from an `hqc-app://enroll?code=XXXX-XXXX` link). Workspaces: add a folder
   of a worker through a browser of its `allowed_roots`, or remove one.
 - **Notifications.** Apple push for permission requests, questions, final answers, room posts
-  and failed input, when the hub has an APNs key (RUNBOOK §1.10). "Allow once" and "Deny" on an
+  and failed input. A hub gets it with one line, `HQC_APNS_RELAY_URL=https://hqc.drewnja.xyz`,
+  the publisher's relay, or with its own key for a self-signed build (RUNBOOK §1.10). "Allow once" and "Deny" on an
   approval's notification answer it without opening the app; a tap opens the session. While a
   chat is on screen, its notices show no banner.
+
+## Layouts
+
+The app follows the space it has, not the device. With compact width (an iPhone, iPhone Duo's
+outer display, a narrow Split View) it has tabs: Projects, Requests, Settings and Search; on
+iPhone Duo's outer display the system lays the tab bar vertically along the side. With regular
+width (iPhone Duo's inner display, an iPad) it takes the web client's desktop layout: the project
+rail, the project's sessions and the chat side by side. When iPhone Duo is half folded, the column
+edge moves onto the fold (the active division `ReservedRegion`, iOS 27.1), so the list and the
+chat each own one half and nothing sits in the curve.
+
+The look is the web client's: its six palettes (warm, graphite and high contrast, dark and
+light), stored on the hub and the same on every device, optionally following the system's light
+or dark setting; the chat's rows, tool groups, thinking and Markdown as `client/src/ui/feed.ts`
+draws them, LaTeX with the bundled KaTeX (`HQC/Resources/KaTeX`, MIT), and the run ring around a
+working project's tile at the speed of its agents' output tokens.
 
 ## Signing in
 
@@ -41,8 +58,7 @@ Access runs with every identity provider, Google included, and with the browser'
 session. The hub hands back a one-time code, which the app exchanges with a verifier only it
 holds for the Access token (SPEC §6); the token stays in the app's Keychain and goes as the
 `CF_Authorization` cookie with every request and the WebSocket upgrade, with `Origin` set to
-the hub's origin (SPEC §20). "Sign in inside the app" keeps the older way, Access's page in a
-web view, for a hub without the native route. When Access lets the session expire, the next
+the hub's origin (SPEC §20). When Access lets the session expire, the next
 request comes back as a redirect and the app asks to sign in again. A hub without Access (dev
 mode on loopback) needs no sign-in.
 
@@ -62,8 +78,10 @@ xcodebuild -project HQC.xcodeproj -scheme HQC \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
-On a device, set your team under Signing & Capabilities, and a bundle id of yours if the default
-is taken; for push, the hub's `HQC_APNS_TOPIC` must be that bundle id. The push entitlement is
+The project signs with automatic signing for team `AEHMXBQ3VJ` and bundle id `xyz.drewnja.hqc`,
+the published app; Product → Archive in Xcode makes the build for TestFlight and the App Store.
+To build under your own team, change both under Signing & Capabilities, and send push with your
+own key (`HQC_APNS_TOPIC` = your bundle id, RUNBOOK §1.10). The push entitlement is
 in `HQC.entitlements`; the `hqc-app` link scheme and the photo library text in `HQC-Info.plist`.
 
 To try it without a hub, start the web client's mock (`cd client && npm ci && node

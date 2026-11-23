@@ -53,6 +53,7 @@ struct RequestsView: View {
             .animation(.spring, value: app.requests.map(\.id))
         }
         .navigationTitle("Requests")
+        .paletteBackground()
         .refreshable { await app.refresh() }
         .overlay {
             if app.requests.isEmpty {
@@ -99,6 +100,17 @@ struct SettingsView: View {
                     }
                 }
             }
+            Section("Appearance") {
+                Toggle("Match system light and dark", isOn: Bindable(app).followSystem)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 10)], spacing: 10) {
+                    ForEach(app.followSystem ? ThemeName.allCases.filter { !$0.isLight } : ThemeName.allCases) { t in
+                        ThemeSwatch(theme: t, selected: app.followSystem ? app.theme.family == t.family : app.theme == t) {
+                            app.setTheme(app.followSystem ? t.variant(light: app.theme.isLight) : t)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
             Section("Machines") {
                 NavigationLink {
                     WorkersView()
@@ -139,5 +151,37 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
+        .paletteBackground()
+    }
+}
+
+/// A palette's tile: its background, surface and text, as the web client's Appearance shows them.
+struct ThemeSwatch: View {
+    let theme: ThemeName
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        let p = Palette.of(theme)
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 6) {
+                RoundedRectangle(cornerRadius: 6).fill(p.surface).frame(height: 14)
+                    .overlay(alignment: .leading) {
+                        Capsule().fill(p.text).frame(width: 30, height: 4).padding(.leading, 6)
+                    }
+                Capsule().fill(p.muted).frame(width: 44, height: 4)
+                Text(theme.label + (theme.isLight ? " light" : ""))
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(p.text)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(p.bg, in: .rect(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(selected ? Color.accentColor : p.border, lineWidth: selected ? 2.5 : 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(theme.label + (theme.isLight ? " light" : " dark"))
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

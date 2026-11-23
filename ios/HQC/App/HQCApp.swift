@@ -18,7 +18,8 @@ struct HQCApp: App {
                     if phase == .active, app.phase == .ready { app.foreground() }
                 }
                 .onChange(of: app.phase) { _, phase in
-                    if phase == .ready { Task { await AppDelegate.requestPush() } }
+                    // Asked once, in onboarding; after that only registered again.
+                    if phase == .ready, app.onboarded { Task { await AppDelegate.registerIfAllowed() } }
                 }
                 .onOpenURL { url in app.handle(url: url) }
         }
@@ -32,56 +33,24 @@ struct RootView: View {
         Group {
             switch app.phase {
             case .setup:
-                SetupView()
+                OnboardingView(start: app.hubURL == nil && !app.onboarded ? .welcome : .hub)
             case .connecting:
-                ProgressView("Connecting…")
+                ProgressView()
+                    .controlSize(.large)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(BackdropGradient())
             case .signIn:
-                SignInView()
+                OnboardingView(start: .signIn)
             case .ready:
-                MainTabs()
+                if app.onboarded {
+                    AdaptiveRoot()
+                } else {
+                    OnboardingView(start: .notifications)
+                }
             }
         }
+        .themed()
         .animation(.smooth, value: app.phase)
     }
 }
 
-struct MainTabs: View {
-    @Environment(AppModel.self) private var app
-
-    var body: some View {
-        @Bindable var app = app
-        TabView(selection: $app.tab) {
-            Tab("Projects", systemImage: "square.grid.2x2", value: MainTab.projects) {
-                NavigationStack(path: $app.path) {
-                    ProjectsView()
-                        .navigationDestination(for: Route.self) { route in
-                            switch route {
-                            case .project(let p): SessionListView(project: p)
-                            case .session(let id, let title): ChatView(sessionID: id, title: title)
-                            }
-                        }
-                }
-            }
-            .badge(app.unreadCount)
-
-            Tab("Requests", systemImage: "hand.raised", value: MainTab.requests) {
-                NavigationStack { RequestsView() }
-            }
-            .badge(app.requests.count)
-
-            Tab("Settings", systemImage: "gearshape", value: MainTab.settings) {
-                NavigationStack { SettingsView() }
-            }
-
-            Tab(value: MainTab.search, role: .search) {
-                NavigationStack { SearchView() }
-            }
-        }
-        .tabBarMinimizeBehavior(.onScrollDown)
-        .sheet(item: $app.enrollCode) { c in
-            NavigationStack { EnrollView(initialCode: c.code) }
-        }
-    }
-}

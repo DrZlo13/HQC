@@ -4,7 +4,7 @@ import Security
 /// A generic-password item per account in the app's own Keychain, for the Cloudflare Access
 /// cookie that signs the app in to the hub.
 nonisolated enum Keychain {
-    private static let service = "io.github.drzlo13.hqc.ios"
+    private static let service = "xyz.drewnja.hqc"
 
     static func read(_ account: String) -> String? {
         let query: [String: Any] = [

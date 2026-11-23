@@ -53,15 +53,20 @@ struct ChatView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
+            .frame(maxWidth: 780)
+            .frame(maxWidth: .infinity)
             .scrollTargetLayout()
         }
-        .defaultScrollAnchor(.bottom)
+        // The newest message stays in view when the history arrives and while answers grow.
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .defaultScrollAnchor(.bottom, for: .sizeChanges)
+        .paletteBackground()
         .scrollDismissesKeyboard(.interactively)
         .overlay {
             if model.loading { ProgressView() }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 6) {
+            ComposerArea {
                 if !model.live.isEmpty {
                     LiveTasksBar(tasks: model.live) { t in Task { await model.stopTask(t) } }
                 }
@@ -243,6 +248,9 @@ struct PendingAttachment: Identifiable {
 /// send button that turns into Stop while the agent works.
 struct Composer: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.palette) private var palette
+    /// The height of the field on one line, and the size of the buttons beside it.
+    static let control: CGFloat = 36
     @Binding var text: String
     @Binding var attachments: [PendingAttachment]
     let busy: Bool
@@ -288,53 +296,56 @@ struct Composer: View {
                     .padding(.horizontal, 12)
                 }
             }
-            GlassEffectContainer(spacing: 10) {
-                HStack(alignment: .bottom, spacing: 10) {
+            GlassEffectContainer(spacing: 8) {
+                HStack(alignment: .bottom, spacing: 8) {
                     Menu {
                         Button("Photos", systemImage: "photo.on.rectangle") { pickingPhotos = true }
                         Button("Files", systemImage: "folder") { pickingFiles = true }
                     } label: {
                         Image(systemName: "plus")
-                            .font(.system(size: 17, weight: .semibold))
-                            .frame(width: 44, height: 44)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(palette.text)
+                            .frame(width: Self.control, height: Self.control)
+                            .glassEffect(.regular.interactive(), in: .circle)
                     }
-                    .buttonStyle(.glass)
-                    .buttonBorderShape(.circle)
                     .glassEffectID("attach", in: glass)
                     .accessibilityLabel("Attach")
 
                     TextField("Message", text: $text, axis: .vertical)
                         .lineLimit(1...8)
                         .focused($focused)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 12)
-                        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 22))
+                        .font(.body)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .frame(minHeight: Self.control)
+                        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: Self.control / 2))
                         .glassEffectID("field", in: glass)
 
                     if busy && empty && attachments.isEmpty {
                         Button(action: onStop) {
                             Image(systemName: "stop.fill")
-                                .font(.system(size: 17, weight: .bold))
-                                .frame(width: 44, height: 44)
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: Self.control, height: Self.control)
+                                .background(Color.red.gradient, in: .circle)
                         }
-                        .buttonStyle(.glass)
-                        .buttonBorderShape(.circle)
-                        .tint(.red)
+                        .buttonStyle(.plain)
                         .glassEffectID("action", in: glass)
                         .accessibilityLabel("Stop the agent")
                     } else {
                         Button(action: onSend) {
                             Group {
                                 if uploading {
-                                    ProgressView().tint(.white)
+                                    ProgressView().controlSize(.small).tint(.white)
                                 } else {
-                                    Image(systemName: "arrow.up").font(.system(size: 17, weight: .bold))
+                                    Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
                                 }
                             }
-                            .frame(width: 44, height: 44)
+                            .foregroundStyle(.white)
+                            .frame(width: Self.control, height: Self.control)
+                            .background(canSend ? Color.accentColor : palette.muted.opacity(0.35), in: .circle)
                         }
-                        .buttonStyle(.glassProminent)
-                        .buttonBorderShape(.circle)
+                        .buttonStyle(.plain)
                         .disabled(!canSend)
                         .glassEffectID("action", in: glass)
                         .accessibilityLabel("Send")
@@ -566,5 +577,26 @@ struct WorkingIndicator: View {
             Text("Working…").foregroundStyle(.secondary)
         }
         .font(.subheadline)
+    }
+}
+
+/// The input bar's ground: the chat's background fading in under the glass, so the feed does
+/// not read through the field.
+struct ComposerArea<Content: View>: View {
+    @Environment(\.palette) private var palette
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(spacing: 6) { content }
+            .frame(maxWidth: 780)
+            .frame(maxWidth: .infinity)
+            .padding(.top, 14)
+            .background {
+                LinearGradient(stops: [.init(color: palette.bg.opacity(0), location: 0),
+                                       .init(color: palette.bg.opacity(0.92), location: 0.35),
+                                       .init(color: palette.bg, location: 1)],
+                               startPoint: .top, endPoint: .bottom)
+                    .ignoresSafeArea()
+            }
     }
 }

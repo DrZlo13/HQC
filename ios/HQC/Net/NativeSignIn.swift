@@ -18,7 +18,7 @@ enum NativeSignIn {
             switch self {
             case .cancelled: "Sign-in was cancelled."
             case .badCallback: "The hub's answer to the sign-in did not match. Try again."
-            case .hubTooOld: "This hub does not support signing in through the browser yet; use “Sign in inside the app”."
+            case .hubTooOld: "This hub is older than the app: update it to sign in (SPEC 0.214)."
             }
         }
     }

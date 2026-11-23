@@ -39,6 +39,7 @@ struct SchedulesView: View {
             }
         }
         .navigationTitle("Schedules")
+        .paletteBackground()
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -189,6 +190,7 @@ struct SearchView: View {
             }
         }
         .navigationTitle("Search")
+        .paletteBackground()
         .searchable(text: $query, prompt: "Messages, commands, output")
         .onSubmit(of: .search) { Task { await search() } }
         .task(id: query) {

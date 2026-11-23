@@ -166,6 +166,8 @@ function setup(
     onState: () => () => {},
     subscribe: (_id: string, sub: SessionSubscriber) => {
       subscriber = sub;
+      // The hub has no backfill to send: the events a test sends are live ones.
+      sub.onSubscribed?.();
       return () => {};
     },
   } as unknown as HubSocket;
@@ -3639,8 +3641,9 @@ describe('an input that came while the agent writes (SPEC §6)', () => {
   async function writing(history: HqcEvent[]) {
     const { app, api } = setup('running', { history });
     let push!: (e: HqcEvent) => void;
-    (app.socket as unknown as { subscribe: unknown }).subscribe = (_id: string, s: { onEvent: (e: HqcEvent) => void }) => {
+    (app.socket as unknown as { subscribe: unknown }).subscribe = (_id: string, s: SessionSubscriber) => {
       push = s.onEvent;
+      s.onSubscribed?.();
       return () => {};
     };
     await mount(app);
@@ -3723,6 +3726,7 @@ describe('switching chats', () => {
     const subs: SessionSubscriber[] = [];
     const subscribe = vi.fn((_id: string, sub: SessionSubscriber) => {
       subs.push(sub);
+      sub.onSubscribed?.();
       return () => {};
     });
     Object.assign(app.socket, { subscribe });

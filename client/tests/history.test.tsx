@@ -8,7 +8,7 @@ import { act } from 'preact/test-utils';
 import { ApiError, eventPageOf, type Api, type EventPage } from '../src/api';
 import { AppState } from '../src/app';
 import { memoryHistoryCache, noHistoryCache, type HistoryCache } from '../src/historycache';
-import type { DeliveryChange, SessionInfo } from '../src/proto';
+import { parseEvent, type DeliveryChange, type SessionInfo } from '../src/proto';
 import { ChatSession } from '../src/session';
 import { HubSocket, type SessionSubscriber } from '../src/ws';
 import { Chat } from '../src/ui/Chat';
@@ -445,6 +445,140 @@ describe('a chat with a copy on the device', () => {
   });
 });
 
+describe('the events of a subscription before its `subscribed`', () => {
+  /** An open chat with a listener on its timeline, and the delta of an answer's text. */
+  async function opened() {
+    const { api } = hub(range(1, 10));
+    const { chat, subs } = session(api, noHistoryCache);
+    await chat.open();
+    await tick();
+    const drawn = vi.fn();
+    chat.timeline.onChange(drawn);
+    return { chat, subs, drawn };
+  }
+  const feed = (from: number, to: number, sub: SessionSubscriber) => {
+    for (let seq = from; seq <= to; seq++) sub.onEvent(parsed(seq), wire(seq));
+  };
+
+  it('are not drawn one by one: nothing before `subscribed`, once at it, then each one', async () => {
+    const { chat, subs, drawn } = await opened();
+    feed(11, 60, subs[0]);
+    expect(drawn).not.toHaveBeenCalled();
+    subs[0].onSubscribed!();
+    expect(drawn).toHaveBeenCalledTimes(1);
+    expect(seqs(chat)).toEqual(Array.from({ length: 60 }, (_, i) => i + 1));
+    drawn.mockClear();
+    feed(61, 62, subs[0]);
+    expect(drawn).toHaveBeenCalledTimes(2);
+    chat.close();
+  });
+
+  it('a backfill is drawn every 100 ms before `subscribed`', async () => {
+    const { chat, subs, drawn } = await opened();
+    feed(11, 20, subs[0]);
+    expect(drawn).not.toHaveBeenCalled();
+    await tick(150);
+    expect(drawn).toHaveBeenCalledTimes(1);
+    feed(21, 30, subs[0]);
+    await tick(150);
+    expect(drawn).toHaveBeenCalledTimes(2);
+    subs[0].onSubscribed!();
+    expect(drawn).toHaveBeenCalledTimes(2);
+    chat.close();
+  });
+
+  it('a socket reset starts a catch-up again: the events wait for `subscribed`, and one draw shows them', async () => {
+    const { chat, subs, drawn } = await opened();
+    subs[0].onSubscribed!();
+    subs[0].onReset();
+    drawn.mockClear();
+    feed(11, 60, subs[0]);
+    expect(drawn).not.toHaveBeenCalled();
+    subs[0].onSubscribed!();
+    expect(drawn).toHaveBeenCalledTimes(1);
+    chat.close();
+  });
+
+  it('a socket reset draws the events that waited for a draw', async () => {
+    const { chat, subs, drawn } = await opened();
+    feed(11, 13, subs[0]);
+    subs[0].onReset();
+    expect(drawn).toHaveBeenCalledTimes(1);
+    await tick(150);
+    expect(drawn).toHaveBeenCalledTimes(1);
+    chat.close();
+  });
+
+  it('closing the chat in the middle of a catch-up draws what waited, and no timer draws after it', async () => {
+    const { chat, subs, drawn } = await opened();
+    feed(11, 20, subs[0]);
+    chat.close();
+    expect(drawn).toHaveBeenCalledTimes(1);
+    await tick(150);
+    expect(drawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('a `subscribe` that was not sent is not counted: the first `subscribed` ends the catch-up', async () => {
+    const sockets: { readyState: number; onopen?: () => void; onmessage?: (m: { data: string }) => void }[] = [];
+    class FakeWs {
+      readyState = 0;
+      onopen?: () => void;
+      onmessage?: (m: { data: string }) => void;
+      constructor() {
+        sockets.push(this);
+      }
+      send() {}
+      close() {}
+    }
+    const socket = new HubSocket({ url: 'ws://x/api/ws', WebSocketImpl: FakeWs as never });
+    const onSubscribed = vi.fn();
+    socket.start();
+    // Not open yet: the frame is not sent, `onopen` sends it.
+    socket.subscribe(SID, { afterSeq: () => 0, onEvent() {}, onDelivery() {}, onInvalid() {}, onReset() {}, onSubscribed });
+    sockets[0].readyState = 1;
+    sockets[0].onopen!();
+    sockets[0].onmessage!({ data: JSON.stringify({ type: 'subscribed', session_id: SID, last_seq: 0 }) });
+    expect(onSubscribed).toHaveBeenCalledTimes(1);
+    socket.stop();
+  });
+
+  it('the `subscribed` of a subscription that was left does not end the catch-up of the next one', async () => {
+    const sockets: { onopen?: () => void; onmessage?: (m: { data: string }) => void }[] = [];
+    class FakeWs {
+      readyState = 1;
+      onopen?: () => void;
+      onmessage?: (m: { data: string }) => void;
+      constructor() {
+        sockets.push(this);
+      }
+      send() {}
+      close() {}
+    }
+    const socket = new HubSocket({ url: 'ws://x/api/ws', WebSocketImpl: FakeWs as never });
+    socket.start();
+    sockets[0].onopen!();
+    const { api } = hub(range(1, 10));
+    const chat = new ChatSession(api as unknown as Api, socket, SID, noHistoryCache);
+    await chat.open();
+    await tick();
+    chat.close();
+    await chat.open();
+    await tick();
+    const drawn = vi.fn();
+    chat.timeline.onChange(drawn);
+    const frame = (f: unknown) => sockets[0].onmessage!({ data: JSON.stringify(f) });
+    // The hub answers the first `subscribe` after its backfill: not the end of the second's.
+    frame({ type: 'subscribed', session_id: SID, last_seq: 10 });
+    for (let seq = 11; seq <= 60; seq++) frame({ type: 'event', event: wire(seq) });
+    expect(drawn).not.toHaveBeenCalled();
+    frame({ type: 'subscribed', session_id: SID, last_seq: 60 });
+    expect(drawn).toHaveBeenCalledTimes(1);
+    expect(seqs(chat)).toEqual(Array.from({ length: 60 }, (_, i) => i + 1));
+    chat.close();
+    socket.stop();
+  });
+});
+
 describe('what the device keeps', () => {
   it('a session deleted from this client is forgotten', async () => {
     const cache = memoryHistoryCache();
@@ -773,5 +907,25 @@ describe('the chat on screen', () => {
     await toTop();
     await act(async () => void (await tick(20)));
     expect(api.eventsBefore.mock.calls.length).toBeGreaterThan(before);
+  });
+
+  it('a render the timeline did not cause builds no feed again, nor one of the answer text being written', async () => {
+    const { app } = open([...range(1, 449), usage(450)]);
+    await mount(app);
+    const t = app.chat(SID).timeline;
+    // The feed is built by the time the spy is set: it counts only what comes after.
+    await until(() => !!root.querySelector('.feed-block'));
+    const items = vi.spyOn(t, 'items');
+    await act(async () => app.setRequests(app.requests));
+    await act(async () => app.setRequests(app.requests));
+    expect(items).not.toHaveBeenCalled();
+    const delta = (text: string) =>
+      parseEvent({ ...wire(0), seq: undefined, type: 'agent.delta', payload: { text } });
+    for (const text of ['one ', 'two ', 'three'])
+      await act(async () => t.apply(delta(text)));
+    expect(t.streaming).toBe('one two three');
+    expect(items).not.toHaveBeenCalled();
+    await act(async () => t.apply(parsed(451)));
+    expect(items).toHaveBeenCalled();
   });
 });

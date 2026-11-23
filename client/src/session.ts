@@ -14,6 +14,9 @@ const OLDER = 200;
 const PAGE = 1000;
 /** How long the events of the subscription wait before the device keeps them together. */
 const KEEP_AFTER_MS = 300;
+/** The longest the chat waits to draw the events of a subscription's backfill, which come in a
+ *  burst: one draw per frame would render a long chat once for each of them. */
+const CATCH_UP_DRAW_MS = 100;
 
 /** A file picked in the composer, with its preview. */
 export interface OutgoingFile {
@@ -46,6 +49,14 @@ export class ChatSession {
   private unkept: unknown[] = [];
   private resent: unknown[] = [];
   private keepTimer: ReturnType<typeof setTimeout> | undefined;
+  /** From the subscribe until the hub's `subscribed` (and again after a socket reset, which
+   *  subscribes with a backfill once more) the events are applied without drawing each. */
+  private catchingUp = false;
+  /** The draw that is due for the events applied quietly; set exactly while one is waiting.
+   *  The hub always ends the backfill with `subscribed` (after an `error` too), but a long one
+   *  shows as it arrives, not only at its end: a draw is due `CATCH_UP_DRAW_MS` after the first
+   *  event nothing has drawn. */
+  private drawTimer: ReturnType<typeof setTimeout> | undefined;
   /** The session is deleted (`forget`). */
   private forgotten = false;
   /** The newest page of history is in. */
@@ -176,12 +187,16 @@ export class ChatSession {
 
   private subscribe(): void {
     const t = this.timeline;
+    this.catchingUp = true;
     this.unsubscribe = this.socket.subscribe(this.id, {
       afterSeq: () => t.resumeSeq(),
       onEvent: (ev, raw) => {
         // The hub sends an old event again when it changes (a reply's delivery): not a new one.
         const fresh = ev.seq === undefined || ev.seq > t.lastSeq;
-        t.apply(ev);
+        if (this.catchingUp) {
+          t.applyQuiet(ev);
+          this.drawTimer ??= setTimeout(() => this.drawNow(), CATCH_UP_DRAW_MS);
+        } else t.apply(ev);
         this.keep(raw, fresh);
         this.onEvent?.(ev);
       },
@@ -197,8 +212,25 @@ export class ChatSession {
         t.addInvalid(raw, err);
         this.keep(raw, fresh);
       },
-      onReset: () => t.reset(),
+      onSubscribed: () => {
+        this.drawNow();
+        this.catchingUp = false;
+      },
+      onReset: () => {
+        // The events still waiting for a draw are drawn now: `reset` may have nothing to notify.
+        this.drawNow();
+        this.catchingUp = true;
+        t.reset();
+      },
     });
+  }
+
+  /** Draws the events applied quietly, if there are any. */
+  private drawNow(): void {
+    if (this.drawTimer === undefined) return;
+    clearTimeout(this.drawTimer);
+    this.drawTimer = undefined;
+    this.timeline.changed();
   }
 
   /** The device keeps an event of the subscription with the ones that come within
@@ -319,6 +351,7 @@ export class ChatSession {
     this.isOpen = false;
     this.unsubscribe?.();
     this.unsubscribe = null;
+    this.drawNow();
     this.keepNow();
     this.timeline.reset();
   }

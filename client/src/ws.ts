@@ -25,6 +25,9 @@ export interface SessionSubscriber {
   /** The socket dropped: transport-only state (agent.delta, subagents.live, schedules.live)
    *  is gone. */
   onReset(): void;
+  /** The hub has sent the history after `afterSeq` (frame `subscribed`, sent after the backfill,
+   *  the live text, `subagents.live` and `schedules.live`); the live stream follows. */
+  onSubscribed?(): void;
 }
 
 type WsCtor = new (url: string) => WebSocket;
@@ -42,6 +45,10 @@ export class HubSocket {
   private readonly summaryListeners = new Set<(s: SessionSummary[]) => void>();
   private readonly requestListeners = new Set<(r: OpenRequest[]) => void>();
   private readonly stateListeners = new Set<(s: ConnState) => void>();
+  /** Per session, the `subscribe` frames sent on this socket whose `subscribed` has not come:
+   *  the hub answers each, also one of a subscription that was left meanwhile, so an old
+   *  `subscribed` must not end the catch-up of the new one. */
+  private readonly unanswered = new Map<string, number>();
   private attempt = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = true;
@@ -61,6 +68,7 @@ export class HubSocket {
     this.timer = null;
     this.ws?.close();
     this.ws = null;
+    this.unanswered.clear();
     this.setState('closed');
   }
 
@@ -75,7 +83,7 @@ export class HubSocket {
 
   subscribe(sessionId: string, sub: SessionSubscriber): () => void {
     this.subs.set(sessionId, sub);
-    this.send({ type: 'subscribe', session_id: sessionId, after_seq: sub.afterSeq() });
+    this.sendSubscribe(sessionId, sub);
     return () => {
       if (this.subs.get(sessionId) !== sub) return;
       this.subs.delete(sessionId);
@@ -102,8 +110,15 @@ export class HubSocket {
     return () => this.stateListeners.delete(fn);
   }
 
-  private send(frame: ClientFrame): void {
-    if (this.ws?.readyState === 1) this.ws.send(JSON.stringify(frame));
+  private send(frame: ClientFrame): boolean {
+    if (this.ws?.readyState !== 1) return false;
+    this.ws.send(JSON.stringify(frame));
+    return true;
+  }
+
+  private sendSubscribe(id: string, sub: SessionSubscriber): void {
+    if (this.send({ type: 'subscribe', session_id: id, after_seq: sub.afterSeq() }))
+      this.unanswered.set(id, (this.unanswered.get(id) ?? 0) + 1);
   }
 
   private setState(s: ConnState): void {
@@ -117,14 +132,13 @@ export class HubSocket {
     this.setState('connecting');
     const ws = new Ctor(this.opts.url);
     this.ws = ws;
+    this.unanswered.clear();
     ws.onopen = () => {
       if (this.ws !== ws) return;
       this.attempt = 0;
       this.setState('open');
       if (this.summaryListeners.size) this.send({ type: 'subscribe_summary' });
-      for (const [id, sub] of this.subs) {
-        this.send({ type: 'subscribe', session_id: id, after_seq: sub.afterSeq() });
-      }
+      for (const [id, sub] of this.subs) this.sendSubscribe(id, sub);
     };
     ws.onmessage = (m) => {
       if (this.ws !== ws) return;
@@ -133,6 +147,7 @@ export class HubSocket {
     ws.onclose = () => {
       if (this.ws !== ws) return;
       this.ws = null;
+      this.unanswered.clear();
       for (const sub of this.subs.values()) sub.onReset();
       this.setState('closed');
       this.schedule();
@@ -189,7 +204,16 @@ export class HubSocket {
       case 'error':
         console.warn('hub ws error', frame.code, frame.message, frame.session_id ?? '');
         break;
-      // `subscribed`, `pong` and unknown frames need no action.
+      case 'subscribed': {
+        const left = (this.unanswered.get(frame.session_id) ?? 1) - 1;
+        if (left > 0) this.unanswered.set(frame.session_id, left);
+        else {
+          this.unanswered.delete(frame.session_id);
+          this.subs.get(frame.session_id)?.onSubscribed?.();
+        }
+        break;
+      }
+      // `pong` and unknown frames need no action.
     }
   }
 }

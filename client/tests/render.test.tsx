@@ -298,11 +298,31 @@ describe("the thinking being written (SPEC §6)", () => {
       const t = new Timeline();
       t.apply(ev("event.user.message", withSeq(1)));
       t.apply(thinking("Checking"));
+      // Read before the end, so that the cached items are what the end has to change.
+      expect(t.items().some((i) => i.kind === "event" && i.event.type === "agent.delta")).toBe(true);
       end(t);
       expect(t.thinking).toBeNull();
       expect(t.items().some((i) => i.kind === "event" && i.event.type === "agent.delta")).toBe(false);
     });
   }
+});
+
+describe("the items kept for a revision of the timeline", () => {
+  it("show an invalid event that came after they were read", () => {
+    const t = new Timeline();
+    t.apply(ev("event.user.message", withSeq(1)));
+    expect(t.items().some((i) => i.kind === "invalid")).toBe(false);
+    t.addInvalid({ seq: 2 }, "bad payload");
+    expect(t.items().some((i) => i.kind === "invalid")).toBe(true);
+  });
+
+  it("are empty after `clear`, also when they were read before", () => {
+    const t = new Timeline();
+    t.apply(ev("event.user.message", withSeq(1)));
+    expect(t.items()).toHaveLength(1);
+    t.clear();
+    expect(t.items()).toHaveLength(0);
+  });
 });
 
 describe("delivery after a dropped socket", () => {

@@ -1801,7 +1801,7 @@ impl Session {
                 }
                 hqc_proto::frame::check_vault_entry(entry).map_err(anyhow::Error::msg)?;
                 tracing::info!(session_id = %self.id, %entry, "reading a secret from Vaultwarden");
-                Some(crate::vault::read(rbw, entry).await?)
+                Some(crate::vault::read_for(rbw, entry, put.kind == SecretKind::SshKey).await?)
             }
         };
         if put.vault.is_none() && put.value.is_none() && put.kind != SecretKind::SshKeygen {

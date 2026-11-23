@@ -40,12 +40,25 @@ fn first_line(stderr: &[u8]) -> String {
 /// several are so named, the value is empty, not UTF-8 or over [`MAX_SECRET`]; an error carries
 /// only counts and the first line of `rbw`'s stderr, never its stdout. All the calls share
 /// [`READ_TIMEOUT`].
+#[cfg(test)]
 pub async fn read(rbw: &Path, entry: &str) -> anyhow::Result<String> {
-    read_within(rbw, entry, READ_TIMEOUT).await
+    read_within(rbw, entry, true, READ_TIMEOUT).await
 }
 
-async fn read_within(rbw: &Path, entry: &str, limit: Duration) -> anyhow::Result<String> {
-    tokio::time::timeout(limit, read_entry(rbw, entry))
+/// The entry's value. `as_ssh_key`: it is given as an ssh key, which goes into the agent's
+/// ssh-agent only; an entry of type SSH Key given as anything else is refused, since a plain
+/// secret becomes a file the agent reads, and its private half would be in reach of the model.
+pub async fn read_for(rbw: &Path, entry: &str, as_ssh_key: bool) -> anyhow::Result<String> {
+    read_within(rbw, entry, as_ssh_key, READ_TIMEOUT).await
+}
+
+async fn read_within(
+    rbw: &Path,
+    entry: &str,
+    as_ssh_key: bool,
+    limit: Duration,
+) -> anyhow::Result<String> {
+    tokio::time::timeout(limit, read_entry(rbw, entry, as_ssh_key))
         .await
         .map_err(|_| anyhow::anyhow!("rbw did not answer in time"))?
 }
@@ -57,7 +70,7 @@ fn rbw_cmd(rbw: &Path) -> Command {
     c
 }
 
-async fn read_entry(rbw: &Path, entry: &str) -> anyhow::Result<String> {
+async fn read_entry(rbw: &Path, entry: &str, as_ssh_key: bool) -> anyhow::Result<String> {
     let unlocked = rbw_cmd(rbw)
         .arg("unlocked")
         .stdout(Stdio::null())
@@ -102,6 +115,12 @@ async fn read_entry(rbw: &Path, entry: &str) -> anyhow::Result<String> {
             many.len()
         ),
     };
+    if kind == SSH_KEY && !as_ssh_key {
+        bail!(
+            "{entry} is an SSH key in Vaultwarden: ask for it as an ssh key, so that it goes into \
+             the agent's ssh-agent and not into a file the agent reads"
+        );
+    }
     let mut get = rbw_cmd(rbw);
     get.arg("get");
     if kind == SSH_KEY {
@@ -214,6 +233,12 @@ mod tests {
             r#"[ "$2" = --field ] && [ "$3" = private_key ] && [ "$4" = -- ] && [ "$5" = id-9 ] && printf 'PRIVATE\n' || printf 'PUBLIC\n'"#,
         );
         assert_eq!(read(&rbw, "pi-lab").await.unwrap(), "PRIVATE");
+        // As a plain secret it would be a file the agent reads: refused, nothing read.
+        let e = read_for(&rbw, "pi-lab", false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("is an SSH key"), "{e}");
     }
 
     #[tokio::test]
@@ -286,7 +311,7 @@ mod tests {
             r#"[ "$1" = unlocked ] && exec sleep 60; exit 1"#,
         );
         let start = std::time::Instant::now();
-        let e = read_within(&rbw, "x", Duration::from_millis(300))
+        let e = read_within(&rbw, "x", true, Duration::from_millis(300))
             .await
             .unwrap_err()
             .to_string();

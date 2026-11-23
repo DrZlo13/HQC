@@ -6766,7 +6766,9 @@ entry is the one whose name or id equals what the card says, exactly: `rbw get` 
 take an entry whose name merely contains it, or one with a matching site address, so the worker
 first finds the entry's id in `rbw list --fields id,name,type` (none, or several of that name,
 is refused) and reads by the id — the password (a note's text for a note), the private key of an
-entry of Bitwarden's type "SSH key" (`--field private_key`). `rbw unlocked`, the list and the
+entry of Bitwarden's type "SSH key" (`--field private_key`), and such an entry only for `kind:
+ssh_key` (into the agent's ssh-agent): as a plain `secret` it would be a file the agent reads, so it
+is refused, naming the entry, before anything is read. `rbw unlocked`, the list and the
 read take at most 15 s together. What the worker can read is what the account `rbw` is signed in
 with there can, and while `rbw` is unlocked there the commands of every agent on that machine,
 which run as the same user, can read it too without a card: the card decides what the worker

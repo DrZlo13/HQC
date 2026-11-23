@@ -61,6 +61,7 @@ struct EventTime: View {
 
 struct UserBubble: View {
     @Environment(\.palette) private var palette
+    @Environment(\.chatActions) private var actions
     let event: HubEvent
 
     var body: some View {
@@ -86,7 +87,16 @@ struct UserBubble: View {
             .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(palette.border.opacity(0.7)))
             .fixedSize(horizontal: false, vertical: true)
             .contextMenu {
+                if let quote = actions.quote, !event.text.isEmpty {
+                    Button("Quote", systemImage: "text.quote") { quote(Quoting.firstSentences(event.text)) }
+                }
                 Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = event.text }
+                if let fork = actions.fork, event.delivery == nil {
+                    Button("Fork from here", systemImage: "arrow.triangle.branch") { fork(event) }
+                }
+                if let add = actions.addQuick, !event.text.isEmpty {
+                    Button("Add to quick messages", systemImage: "bolt") { add(event.text) }
+                }
             }
         }
     }
@@ -136,7 +146,9 @@ struct PeerCard: View {
 
 struct AgentMessage: View {
     @Environment(\.palette) private var palette
+    @Environment(\.chatActions) private var actions
     let event: HubEvent
+    @State private var quoting = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -147,6 +159,17 @@ struct AgentMessage: View {
                     Text("interrupted").font(.caption2).foregroundStyle(palette.muted)
                 }
                 Spacer()
+                if let quote = actions.quote {
+                    Button {
+                        quote(Quoting.firstSentences(event.text))
+                        Feedback.play(.tap)
+                    } label: {
+                        Image(systemName: "text.quote").font(.caption).frame(width: 22, height: 22).contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(palette.muted)
+                    .accessibilityLabel("Quote")
+                }
                 CopyButton(text: event.text, label: "Copy answer")
                 ShareLink(item: event.text) {
                     Image(systemName: "square.and.arrow.up").font(.caption)
@@ -159,8 +182,15 @@ struct AgentMessage: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contextMenu {
+            if actions.quote != nil {
+                Button("Quote", systemImage: "text.quote") { actions.quote?(Quoting.firstSentences(event.text)) }
+                Button("Quote a part…", systemImage: "selection.pin.in.out") { quoting = true }
+            }
             Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = event.text }
             ShareLink("Share", item: event.text)
+        }
+        .sheet(isPresented: $quoting) {
+            QuoteSheet(text: event.text) { actions.quote?($0) }
         }
     }
 }
@@ -328,6 +358,7 @@ struct ToolGroup: View {
 /// One call: `$ cargo test → 1 test failed`, its time and status; it opens to the details.
 struct ToolCallRow: View {
     @Environment(\.palette) private var palette
+    @Environment(\.chatActions) private var actions
     let item: ToolCallItem
     @State private var open = false
 
@@ -343,6 +374,20 @@ struct ToolCallRow: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     if let ms = item.durationMs {
                         Text(ToolText.duration(ms)).font(.caption2.monospacedDigit()).foregroundStyle(palette.muted)
+                    }
+                    if item.result == nil, let id = item.call.callID, actions.foregroundCalls.contains(id),
+                       let background = actions.background {
+                        // A long command can go on in the background while the agent goes on.
+                        Button {
+                            background(id)
+                            Feedback.play(.tap)
+                        } label: {
+                            Label("Background", systemImage: "arrow.down.right.square")
+                                .font(.caption2.weight(.semibold))
+                                .labelStyle(.titleAndIcon)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
                     }
                     if item.result == nil {
                         ProgressView().controlSize(.mini)
@@ -501,9 +546,12 @@ struct NoteRow: View {
 /// on the web client's amber card.
 struct ApprovalCard: View {
     @Environment(\.palette) private var palette
+    @Environment(\.chatActions) private var actions
     let event: HubEvent
     let open: Bool
     let onAnswer: (ApprovalOption) async -> Void
+    /// Gives an `hqc_secret`'s secret; else the chat's own.
+    var giveSecret: ((String, SecretFields) async throws -> SecretGiven)?
     @State private var busy = false
 
     private var options: [ApprovalOption] { ApprovalOption.list(from: event.payload) }
@@ -512,6 +560,17 @@ struct ApprovalCard: View {
     }
 
     var body: some View {
+        if event.payload["tool"]?.string == "hqc_secret", event.payload["secret"]?["name"] != nil {
+            // The agent asks for a secret: a form, not Allow and Deny (SPEC 0.147).
+            SecretCard(event: event, open: open, onGive: giveSecret ?? actions.giveSecret) {
+                if let deny = options.first(where: { $0.isDeny }) { await onAnswer(deny) }
+            }
+        } else {
+            permission
+        }
+    }
+
+    private var permission: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: open ? "hand.raised.fill" : "checkmark.seal")

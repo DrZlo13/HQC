@@ -26,6 +26,10 @@ struct ChatView: View {
     @State private var unseen = false
     @State private var sent = 0
     @State private var followTask: Task<Void, Never>?
+    /// Bumped to put the cursor in the input (after a quote).
+    @State private var focusInput = 0
+    @State private var givingSecret = false
+    @State private var history: LiveTask?
     let title: String
 
     init(sessionID: String, title: String) {
@@ -102,6 +106,7 @@ struct ChatView: View {
             if new > old && !following { unseen = true }
         }
         .paletteBackground()
+        .environment(\.chatActions, actions)
         .scrollDismissesKeyboard(.interactively)
         // A tap in the feed puts the keyboard away (the inner display has no key for it).
         .simultaneousGesture(TapGesture().onEnded { hideKeyboard() })
@@ -114,8 +119,13 @@ struct ChatView: View {
                     JumpToLatest(unseen: unseen) { scrollToBottom() }
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
+                if let limits = model.worker?.limits {
+                    LimitBar(limits: limits, noticePercent: app.me?.limit_notice_percent ?? 70)
+                }
                 if !model.live.isEmpty {
-                    LiveTasksBar(tasks: model.live) { t in Task { await model.stopTask(t) } }
+                    LiveTasksBar(tasks: model.live,
+                                 onStop: { t in Task { await model.stopTask(t) } },
+                                 onOpen: { t in history = t })
                 }
                 if isPaused {
                     PausedBar { Task { await model.act("resume") } }
@@ -124,10 +134,20 @@ struct ChatView: View {
                     Composer(
                         text: $draft, attachments: $attachments, busy: model.state.isBusy,
                         commands: model.info?.commands ?? [],
+                        quickMessages: quickMessages,
+                        focusTrigger: focusInput,
+                        onSecret: model.worker?.session_secrets == true ? { givingSecret = true } : nil,
                         onSend: send, onStop: { Task { await model.stopAgent() } })
                 } else if model.state == .locked_vscode {
-                    InfoBar(text: "This session is open in VS Code. Close it there to continue here.",
-                            systemImage: "chevron.left.forwardslash.chevron.right")
+                    VStack(spacing: 8) {
+                        InfoBar(text: "This session is open in VS Code. Close it there, or take it over to continue here.",
+                                systemImage: "chevron.left.forwardslash.chevron.right")
+                        Button("Take over", systemImage: "arrow.uturn.down.circle") {
+                            Task { await model.takeover() }
+                        }
+                        .buttonStyle(.glassProminent)
+                    }
+                    .padding(.bottom, 8)
                 } else if model.info?.archived == true {
                     Button("Unarchive", systemImage: "tray.and.arrow.up") { Task { await model.act("unarchive") } }
                         .buttonStyle(.glassProminent)
@@ -171,12 +191,21 @@ struct ChatView: View {
                 }
             }
         }
+        .sheet(isPresented: $givingSecret) {
+            SecretSheet { f in
+                try await model.giveSecret(kind: f.kind, name: f.name, value: f.value,
+                                           passphrase: f.passphrase, remember: f.remember, requestID: nil)
+            }
+        }
+        .sheet(item: $history) { t in
+            SubagentHistorySheet(sessionID: model.sessionID, task: t)
+        }
         .sheet(item: $sheet) { s in
             switch s {
             case .schedules:
                 NavigationStack { SchedulesView(sessionID: model.sessionID) }
             case .model:
-                ModelSheet(current: model.info?.model ?? "") { m in
+                ModelSheet(current: model.info?.model ?? "", limits: model.worker?.limits) { m in
                     Task { await model.patch(["model": m.isEmpty ? NSNull() : m]) }
                 }
                 .presentationDetents([.medium])
@@ -290,6 +319,47 @@ struct ChatView: View {
         Task { await model.send(text, artifacts: ready) }
     }
 
+    /// The chat's actions for the feed's rows, as the web client's message buttons have them.
+    private var actions: ChatActions {
+        ChatActions(
+            quote: canType ? { text in
+                draft = Quoting.insert(text, into: draft)
+                focusInput += 1
+            } : nil,
+            fork: model.info?.isRoom == true || model.info?.system == true ? nil : { ev in
+                Task {
+                    if let s = await model.fork(before: ev.event_id) {
+                        Feedback.play(.success)
+                        app.open(sessionID: s.id, title: s.title)
+                    }
+                }
+            },
+            addQuick: project.map { p in { text in addQuick(text, to: p) } },
+            background: { id in Task { await model.background(callID: id) } },
+            foregroundCalls: model.foregroundCalls,
+            giveSecret: { requestID, f in
+                try await model.giveSecret(kind: f.kind, name: f.name, value: f.value,
+                                           passphrase: f.passphrase, remember: f.remember, requestID: requestID)
+            })
+    }
+
+    private var project: Project? { model.info.flatMap { app.project($0.project_id) } }
+    private var quickMessages: [String] { project?.quick_messages ?? [] }
+
+    /// Keeps a message among the project's quick messages (the whole list is replaced).
+    private func addQuick(_ text: String, to p: Project) {
+        let list = (p.quick_messages ?? []).filter { $0 != text } + [text]
+        Task {
+            do {
+                _ = try await app.client?.patchProject(p.id, ["quick_messages": list])
+                await app.refresh()
+                Feedback.play(.success)
+            } catch {
+                model.error = error.localizedDescription
+            }
+        }
+    }
+
     /// Grows with anything that lengthens the feed.
     private var feedVersion: Int {
         model.items.count &* 1_000_003 &+ model.streaming.count &+ model.thinking.count &* 7
@@ -355,6 +425,9 @@ struct Composer: View {
     @Binding var attachments: [PendingAttachment]
     let busy: Bool
     let commands: [String]
+    var quickMessages: [String] = []
+    var focusTrigger = 0
+    var onSecret: (() -> Void)?
     let onSend: () -> Void
     let onStop: () -> Void
     @FocusState private var focused: Bool
@@ -401,6 +474,19 @@ struct Composer: View {
                     Menu {
                         Button("Photos", systemImage: "photo.on.rectangle") { pickingPhotos = true }
                         Button("Files", systemImage: "folder") { pickingFiles = true }
+                        if let onSecret {
+                            Button("Secret…", systemImage: "key") { onSecret() }
+                        }
+                        if !quickMessages.isEmpty {
+                            Section("Quick messages") {
+                                ForEach(quickMessages, id: \.self) { q in
+                                    Button(q) {
+                                        text = text.isEmpty ? q : "\(text) \(q)"
+                                        focused = true
+                                    }
+                                }
+                            }
+                        }
                     } label: {
                         Image(systemName: "plus")
                             .font(.system(size: 15, weight: .semibold))
@@ -479,6 +565,7 @@ struct Composer: View {
         }
         .padding(.bottom, 8)
         .padding(.top, 4)
+        .onChange(of: focusTrigger) { _, _ in focused = true }
         .photosPicker(isPresented: $pickingPhotos, selection: $photoItems, maxSelectionCount: 10, matching: .images)
         .onChange(of: photoItems) { _, items in
             photoItems = []
@@ -554,6 +641,8 @@ struct Composer: View {
 struct LiveTasksBar: View {
     let tasks: [LiveTask]
     let onStop: (LiveTask) -> Void
+    /// Opens what a subagent has done.
+    var onOpen: ((LiveTask) -> Void)?
     @State private var expanded = false
 
     var body: some View {
@@ -579,6 +668,7 @@ struct LiveTasksBar: View {
             .buttonStyle(.plain)
             if expanded {
                 ForEach(tasks) { t in
+                    let opens = onOpen != nil && t.kind == "agent"
                     HStack(spacing: 10) {
                         Image(systemName: t.symbol).frame(width: 18).foregroundStyle(.secondary)
                         VStack(alignment: .leading, spacing: 1) {
@@ -586,6 +676,9 @@ struct LiveTasksBar: View {
                             Text(detail(t)).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                         }
                         Spacer()
+                        if opens {
+                            Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
+                        }
                         if t.stoppable {
                             Button("Stop") { onStop(t) }
                                 .font(.caption.weight(.semibold))
@@ -593,6 +686,8 @@ struct LiveTasksBar: View {
                                 .tint(.red)
                         }
                     }
+                    .contentShape(.rect)
+                    .onTapGesture { if opens { onOpen?(t) } }
                 }
             }
         }
@@ -632,6 +727,7 @@ struct PausedBar: View {
 struct ModelSheet: View {
     @Environment(\.dismiss) private var dismiss
     let current: String
+    var limits: WorkerLimits?
     let onPick: (String) -> Void
     @State private var custom = ""
 
@@ -658,6 +754,7 @@ struct ModelSheet: View {
                 } footer: {
                     Text("A running agent switches at its next start; Default is Claude Code's own model.")
                 }
+                if let limits { LimitsSection(limits: limits) }
                 Section("Another model") {
                     TextField("claude-opus-5-5", text: $custom)
                         .textInputAutocapitalization(.never)

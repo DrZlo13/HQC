@@ -27,11 +27,20 @@ struct RequestsView: View {
                         .buttonStyle(.plain)
 
                         if request.event.type == "approval.request" {
-                            ApprovalCard(event: request.event, open: true) { option in
+                            ApprovalCard(event: request.event, open: true, onAnswer: { option in
                                 do { try await app.answer(request, option: option) } catch {
                                     self.error = error.localizedDescription
                                 }
-                            }
+                            }, giveSecret: { requestID, f in
+                                // An agent's hqc_secret, given from the list as from its chat.
+                                guard let client = app.client else { throw HubError.signInRequired }
+                                let given = try await client.giveSecret(
+                                    sessionID: request.session_id, kind: f.kind, name: f.name, value: f.value,
+                                    passphrase: f.passphrase, remember: f.remember, requestID: requestID)
+                                app.requests.removeAll { $0.id == request.id }
+                                Feedback.play(.answered)
+                                return given
+                            })
                         } else {
                             ClarifyCard(event: request.event, open: true) { answers in
                                 do {

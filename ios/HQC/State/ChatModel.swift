@@ -47,6 +47,7 @@ final class ChatModel {
             self.error = error.localizedDescription
         }
         loading = false
+        Task { await loadWorker() }
         app.socket?.subscribe(sessionID, .init(
             afterSeq: { [weak self] in self?.lastSeq ?? 0 },
             onEvent: { [weak self] ev in self?.apply(ev) },
@@ -54,6 +55,56 @@ final class ChatModel {
             onReset: { [weak self] in self?.resetStream() }
         ))
         markRead()
+    }
+
+    // MARK: what the web client's chat also does
+
+    /// The worker the session runs on: its usage limits, and whether it takes secrets.
+    private(set) var worker: WorkerInfo?
+
+    func loadWorker() async {
+        guard let id = info?.worker_id, let client = app?.client else { return }
+        worker = try? await client.workers().first { $0.id == id }
+    }
+
+    /// The agent's tool calls running in the foreground, which can go to the background.
+    var foregroundCalls: Set<String> { Set(app?.summary(sessionID)?.foreground_calls ?? []) }
+
+    /// A new session whose conversation is this one's before the user's message `eventID`.
+    func fork(before eventID: String) async -> SessionInfo? {
+        do {
+            return try await app?.client?.fork(sessionID: sessionID, eventID: eventID)
+        } catch {
+            self.error = error.localizedDescription
+            return nil
+        }
+    }
+
+    /// Continue here what VS Code was driving.
+    func takeover() async {
+        do {
+            try await app?.client?.takeover(sessionID: sessionID)
+            info = try await app?.client?.session(sessionID)
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func background(callID: String) async {
+        do { try await app?.client?.background(sessionID: sessionID, callID: callID) } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    /// Gives the running agent a secret or an ssh key; `requestID` answers its `hqc_secret`.
+    func giveSecret(kind: String, name: String, value: String, passphrase: String?, remember: Bool,
+                    requestID: String?) async throws -> SecretGiven {
+        guard let client = app?.client else { throw HubError.signInRequired }
+        let given = try await client.giveSecret(sessionID: sessionID, kind: kind, name: name, value: value,
+                                                passphrase: passphrase, remember: remember, requestID: requestID)
+        if let requestID { app?.requests.removeAll { $0.session_id == sessionID && $0.request_id == requestID } }
+        Feedback.play(.answered)
+        return given
     }
 
     func stop() {
@@ -255,6 +306,11 @@ final class ChatModel {
     /// whether it is still open, hidden what a `retraction` took back.
     private func rebuild() {
         let events = bySeq.keys.sorted().compactMap { bySeq[$0] }
+        items = Self.fold(events, pending: pending.values.sorted(by: { $0.ts < $1.ts }))
+    }
+
+    /// The fold itself, also for a subagent's history, which is drawn as the agent's own steps.
+    static func fold(_ events: [HubEvent], pending: [HubEvent] = []) -> [FeedItem] {
         var hidden = Set<String>()
         var results: [String: HubEvent] = [:]
         var closed = Set<String>()
@@ -315,10 +371,10 @@ final class ChatModel {
                 break // usage, responses, cancels and types this build does not draw
             }
         }
-        for ev in pending.values.sorted(by: { $0.ts < $1.ts }) {
+        for ev in pending {
             out.append(.user(ev))
         }
-        items = out
+        return out
     }
 }
 

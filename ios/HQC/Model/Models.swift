@@ -58,6 +58,8 @@ nonisolated struct Me: Codable, Sendable {
     let email: String
     let display_name: String?
     let personal_project_id: String
+    /// The share of a usage window, in percent, from which the chat shows the limit bar.
+    let limit_notice_percent: Double?
     /// The web client's base palette (T49), the same on every device.
     let theme: String?
 }
@@ -79,6 +81,8 @@ nonisolated struct Project: Codable, Identifiable, Hashable, Sendable {
     let icon: ProjectIcon?
     let favorite_at: String?
     let archived_at: String?
+    /// Messages kept for sending again with one tap (the web client's quick messages).
+    let quick_messages: [String]?
 
     /// The project's color as the web client's `theme.ts` maps it.
     var tint: Color {
@@ -191,6 +195,9 @@ nonisolated struct SessionSummary: Codable, Hashable, Sendable {
     let last_read_seq: Int
     let subagents: Int?
     let output_per_s: Double?
+    /// The agent's tool calls running in the foreground now, which can be moved to the
+    /// background (SPEC §6).
+    let foreground_calls: [String]?
 }
 
 nonisolated struct Workspace: Codable, Identifiable, Hashable, Sendable {

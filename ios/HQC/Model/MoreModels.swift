@@ -60,6 +60,10 @@ nonisolated struct WorkerInfo: Codable, Identifiable, Hashable, Sendable {
     let status: String?
     let revoked_at: String?
     let last_seen: String?
+    /// The usage limits of the worker's Claude account as it last reported them.
+    let limits: WorkerLimits?
+    /// `session_secrets = true` in its worker.toml: it takes secrets for its owner's sessions.
+    let session_secrets: Bool?
 
     var isOnline: Bool { status == "online" }
     var isRevoked: Bool { status == "revoked" || revoked_at != nil }
@@ -172,4 +176,39 @@ nonisolated struct LiveTask: Identifiable, Hashable, Sendable {
         default: "person.crop.circle.badge.clock"
         }
     }
+}
+
+/// A usage window of a worker's Claude account: how much is used, in percent, and when it
+/// resets (Unix seconds).
+nonisolated struct LimitWindow: Codable, Hashable, Sendable {
+    let utilization: Double
+    let resets_at: Double
+    var resetsAt: Date { Date(timeIntervalSince1970: resets_at) }
+}
+
+nonisolated struct WorkerLimits: Codable, Hashable, Sendable {
+    /// The 5-hour window ("Current session" in Claude Code's /usage).
+    let five_hour: LimitWindow?
+    /// The 7-day window of all models.
+    let seven_day: LimitWindow?
+    /// The nearest limit's state: allowed, allowed_warning or rejected.
+    let status: String?
+    let rate_limit_type: String?
+    let resets_at: Double?
+}
+
+/// What a subagent has done, from its transcript on the worker.
+nonisolated struct SubagentHistory: Codable, Sendable {
+    let events: [HubEvent]
+    let truncated: Bool
+    let continues: Bool?
+}
+
+/// The hub's answer to a secret: what the agent was told, never the value.
+nonisolated struct SecretGiven: Codable, Sendable {
+    let note: String
+    let path: String?
+    let fingerprint: String?
+    let public_key: String?
+    let remembered: Bool?
 }

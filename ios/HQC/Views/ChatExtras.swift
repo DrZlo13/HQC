@@ -1,0 +1,503 @@
+import NaturalLanguage
+import SwiftUI
+import UIKit
+
+// What the web client's chat does beyond reading and sending (client/src/ui/cards.tsx,
+// selection.ts, secrets.tsx, limits.tsx, LiveSubagents.tsx): quote, fork, quick messages,
+// secrets, moving a call to the background, usage limits and a subagent's own steps.
+
+/// The chat's actions, for the feed's rows; absent where the chat cannot do them (no input,
+/// a room).
+struct ChatActions {
+    /// Puts text of the feed into the message being written as a quote.
+    var quote: ((String) -> Void)?
+    /// A new session from before this message of the user.
+    var fork: ((HubEvent) -> Void)?
+    /// Keeps the text as one of the project's quick messages.
+    var addQuick: ((String) -> Void)?
+    /// Moves a running foreground call to the background.
+    var background: ((String) -> Void)?
+    var foregroundCalls: Set<String> = []
+    /// Gives the secret an agent's `hqc_secret` asks for.
+    var giveSecret: ((_ requestID: String, SecretFields) async throws -> SecretGiven)?
+}
+
+private struct ChatActionsKey: EnvironmentKey {
+    static let defaultValue = ChatActions()
+}
+
+extension EnvironmentValues {
+    var chatActions: ChatActions {
+        get { self[ChatActionsKey.self] }
+        set { self[ChatActionsKey.self] = newValue }
+    }
+}
+
+// MARK: quotes
+
+enum Quoting {
+    /// The draft with `quote` after it as `> ` lines (a blank line between them when the draft
+    /// has text) and a blank line after, where the reply goes: the web client's `withQuote`.
+    static func insert(_ quote: String, into draft: String) -> String {
+        let lines = quote
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces).isEmpty ? ">" : "> \($0)" }
+            .joined(separator: "\n")
+        let head = draft.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+        return "\(head.isEmpty ? "" : "\(head)\n\n")\(lines)\n\n"
+    }
+
+    /// The first two sentences, with "…" when more follow: what Quote takes of a whole message,
+    /// as the web client's `firstSentences`.
+    static func firstSentences(_ text: String) -> String {
+        let tokenizer = NLTokenizer(unit: .sentence)
+        tokenizer.string = text
+        var ranges: [Range<String.Index>] = []
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { r, _ in
+            if !text[r].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { ranges.append(r) }
+            return ranges.count < 3
+        }
+        guard let first = ranges.first else { return text }
+        let last = ranges[min(1, ranges.count - 1)]
+        let head = text[first.lowerBound..<last.upperBound].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard ranges.count > 2 else { return head }
+        return head.last.map { ".!?…".contains($0) } == true ? "\(head) …" : "\(head)…"
+    }
+}
+
+/// The message as selectable text, to quote a part of it: the phone's way of the web client's
+/// "select, then Quote". Nothing selected quotes the whole message.
+struct QuoteSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.palette) private var palette
+    let text: String
+    let onQuote: (String) -> Void
+    @State private var selection = ""
+
+    var body: some View {
+        NavigationStack {
+            SelectableText(text: text, textColor: UIColor(palette.text), selection: $selection)
+                .padding(.horizontal, 12)
+                .paletteBackground()
+                .navigationTitle("Quote")
+                .navigationBarTitleDisplayMode(.inline)
+                .safeAreaInset(edge: .top) {
+                    Text("Select what to quote, or quote it all.")
+                        .font(.footnote)
+                        .foregroundStyle(palette.muted)
+                        .padding(.vertical, 6)
+                }
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel", systemImage: "xmark") { dismiss() }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button(selection.isEmpty ? "Quote all" : "Quote selection") {
+                            onQuote(selection.isEmpty ? text : selection)
+                            dismiss()
+                        }
+                        .buttonStyle(.glassProminent)
+                    }
+                }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+/// A read-only text view that reports its selection.
+private struct SelectableText: UIViewRepresentable {
+    let text: String
+    let textColor: UIColor
+    @Binding var selection: String
+
+    func makeUIView(context: Context) -> UITextView {
+        let v = UITextView()
+        v.isEditable = false
+        v.isSelectable = true
+        v.backgroundColor = .clear
+        v.font = .preferredFont(forTextStyle: .body)
+        v.adjustsFontForContentSizeCategory = true
+        v.textContainerInset = UIEdgeInsets(top: 12, left: 4, bottom: 24, right: 4)
+        v.delegate = context.coordinator
+        return v
+    }
+
+    func updateUIView(_ v: UITextView, context: Context) {
+        if v.text != text { v.text = text }
+        v.textColor = textColor
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(selection: $selection) }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        let selection: Binding<String>
+        init(selection: Binding<String>) { self.selection = selection }
+        func textViewDidChangeSelection(_ v: UITextView) {
+            guard let r = v.selectedTextRange, let s = v.text(in: r) else { return }
+            selection.wrappedValue = s
+        }
+    }
+}
+
+// MARK: secrets
+
+/// What a secret form sends; the value lives only in the form's state while it is open.
+struct SecretFields {
+    var kind = "secret"
+    var name = ""
+    var value = ""
+    var passphrase = ""
+    var remember = false
+}
+
+/// A secret or an ssh key for the running agent (SPEC 0.147): never in the draft, the feed or
+/// any storage; the agent is told only a note, the path or the fingerprint.
+struct SecretForm: View {
+    @Environment(\.palette) private var palette
+    /// The agent's `hqc_secret`: its name and kind are fixed.
+    var askedName: String?
+    var askedKind: String?
+    let giveLabel: String
+    let onGive: (SecretFields) async throws -> SecretGiven
+    var onCancel: (() -> Void)?
+    var cancelLabel = "Cancel"
+
+    @State private var fields = SecretFields()
+    @State private var busy = false
+    @State private var error: String?
+    @State private var given: SecretGiven?
+
+    private var kind: String { askedKind ?? fields.kind }
+    /// Letters, digits, `_`, `-` and `.`, not starting with `.` or `-`, 1 to 64 characters.
+    private var nameOK: Bool {
+        let n = askedName ?? fields.name
+        return n.range(of: "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$", options: .regularExpression) != nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let given {
+                Label(given.note, systemImage: "checkmark.seal.fill")
+                    .font(.footnote)
+                    .foregroundStyle(palette.online)
+            } else {
+                if askedKind == nil {
+                    Picker("Kind", selection: $fields.kind) {
+                        Text("Secret").tag("secret")
+                        Text("SSH key").tag("ssh_key")
+                    }
+                    .pickerStyle(.segmented)
+                }
+                if askedName == nil {
+                    field {
+                        TextField("Name, e.g. GITHUB_TOKEN", text: $fields.name)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.callout.monospaced())
+                    }
+                }
+                field {
+                    if kind == "ssh_key" {
+                        SecureField("Private key (paste)", text: $fields.value)
+                            .font(.callout.monospaced())
+                    } else {
+                        SecureField("Value", text: $fields.value)
+                            .font(.callout.monospaced())
+                    }
+                }
+                .textContentType(.password)
+                if kind == "ssh_key" {
+                    field { SecureField("Passphrase (optional)", text: $fields.passphrase) }
+                    Toggle("Remember for this folder", isOn: $fields.remember)
+                        .font(.footnote)
+                }
+                if let error {
+                    Text(error).font(.footnote).foregroundStyle(palette.danger)
+                }
+                HStack(spacing: 8) {
+                    if let onCancel {
+                        Button(cancelLabel, action: onCancel)
+                            .buttonStyle(.bordered)
+                            .tint(palette.danger)
+                    }
+                    Spacer()
+                    Button {
+                        give()
+                    } label: {
+                        if busy { ProgressView().controlSize(.small) } else { Text(giveLabel) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(busy || fields.value.isEmpty || !nameOK)
+                }
+            }
+        }
+    }
+
+    private func field<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        content()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(palette.text.opacity(0.06), in: .rect(cornerRadius: 10))
+    }
+
+    private func give() {
+        busy = true
+        error = nil
+        var f = fields
+        f.kind = kind
+        if let askedName { f.name = askedName }
+        Task {
+            do {
+                let g = try await onGive(f)
+                // The value is dropped the moment it is given.
+                fields = SecretFields()
+                withAnimation(.snappy) { given = g }
+            } catch {
+                self.error = error.localizedDescription
+            }
+            busy = false
+        }
+    }
+}
+
+/// The hub's card of an agent's `hqc_secret`: what it asks for and why, and the form.
+struct SecretCard: View {
+    @Environment(\.palette) private var palette
+    let event: HubEvent
+    let open: Bool
+    let onGive: ((String, SecretFields) async throws -> SecretGiven)?
+    let onDecline: () async -> Void
+
+    private var name: String { event.payload["secret"]?["name"]?.string ?? "secret" }
+    private var kind: String { event.payload["secret"]?["kind"]?.string ?? "secret" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: open ? "key.fill" : "checkmark.seal")
+                    .foregroundStyle(open ? palette.waiting : palette.muted)
+                Text(open ? "The agent asks for \(kind == "ssh_key" ? "an ssh key" : "a secret")"
+                          : "\(kind == "ssh_key" ? "ssh key" : "secret") \(name): answered")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                EventTime(event: event)
+            }
+            if open {
+                Text(name).font(.callout.monospaced()).foregroundStyle(palette.text)
+                if let why = event.payload["description"]?.string, !why.isEmpty {
+                    Text(why).font(.footnote).foregroundStyle(palette.text2)
+                }
+                if let onGive, let id = event.requestID {
+                    SecretForm(askedName: name, askedKind: kind, giveLabel: "Give",
+                               onGive: { try await onGive(id, $0) },
+                               onCancel: { Task { await onDecline() } }, cancelLabel: "Decline")
+                } else {
+                    HStack {
+                        Text("Open the session to give it.").font(.footnote).foregroundStyle(palette.muted)
+                        Spacer()
+                        Button("Decline") { Task { await onDecline() } }.buttonStyle(.bordered).tint(palette.danger)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(open ? palette.permissionBG : palette.surface.opacity(0.5), in: .rect(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(open ? palette.permissionBorder : palette.border.opacity(0.5)))
+        .opacity(open ? 1 : 0.75)
+    }
+}
+
+/// The composer's "Secret": a secret or an ssh key for the agent that runs now.
+struct SecretSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let onGive: (SecretFields) async throws -> SecretGiven
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("The value goes to the worker, never into the chat or the hub's history. The agent is told only where it is.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    SecretForm(giveLabel: "Give to the agent", onGive: onGive)
+                }
+                .padding(20)
+            }
+            .paletteBackground()
+            .navigationTitle("Secret")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done", systemImage: "xmark") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+// MARK: usage limits
+
+/// The 5-hour and 7-day windows of the session's worker account, as the worker last reported
+/// them: in the model sheet, as the web client puts them under the model pill's menu.
+struct LimitsSection: View {
+    let limits: WorkerLimits
+
+    var body: some View {
+        Section {
+            if let w = limits.five_hour { LimitRow(label: "Current session (5 h)", window: w) }
+            if let w = limits.seven_day { LimitRow(label: "This week (7 days)", window: w) }
+        } header: {
+            Text("Usage")
+        } footer: {
+            if limits.status == "rejected" {
+                Text("The account has hit a limit.")
+            }
+        }
+    }
+}
+
+struct LimitRow: View {
+    @Environment(\.palette) private var palette
+    let label: String
+    let window: LimitWindow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(label).font(.subheadline)
+                Spacer()
+                Text("\(Int(window.utilization.rounded())) %")
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(window.utilization >= 90 ? palette.danger : palette.text2)
+            }
+            ProgressView(value: min(window.utilization, 100), total: 100)
+                .tint(window.utilization >= 90 ? palette.danger : window.utilization >= 70 ? palette.waiting : .accentColor)
+            Text("Resets \(window.resetsAt, format: .relative(presentation: .named))")
+                .font(.caption)
+                .foregroundStyle(palette.muted)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+/// Above the input while a usage window is at the hub's share (70 % by default) or the account
+/// has hit a limit.
+struct LimitBar: View {
+    @Environment(\.palette) private var palette
+    let limits: WorkerLimits
+    let noticePercent: Double
+
+    private var worst: (String, LimitWindow)? {
+        [("5-hour", limits.five_hour), ("weekly", limits.seven_day)]
+            .compactMap { name, w in w.map { (name, $0) } }
+            .max { $0.1.utilization < $1.1.utilization }
+    }
+
+    var body: some View {
+        if limits.status == "rejected" || (worst?.1.utilization ?? 0) >= noticePercent, let (name, w) = worst {
+            HStack(spacing: 8) {
+                Image(systemName: limits.status == "rejected" ? "exclamationmark.octagon.fill" : "gauge.with.dots.needle.67percent")
+                    .foregroundStyle(limits.status == "rejected" ? palette.danger : palette.waiting)
+                Text(limits.status == "rejected"
+                     ? "Usage limit reached · resets \(w.resetsAt.formatted(.relative(presentation: .named)))"
+                     : "\(Int(w.utilization.rounded())) % of the \(name) limit used · resets \(w.resetsAt.formatted(.relative(presentation: .named)))")
+                    .font(.footnote)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .glassEffect(.regular.tint((limits.status == "rejected" ? Color.red : .orange).opacity(0.18)), in: .rect(cornerRadius: 18))
+            .padding(.horizontal, 12)
+        }
+    }
+}
+
+// MARK: a subagent's history
+
+/// What a subagent has done, from its transcript on the worker, drawn as the feed draws the
+/// agent's own steps; fetched again every few seconds while it is open.
+struct SubagentHistorySheet: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.palette) private var palette
+    let sessionID: String
+    let task: LiveTask
+    @State private var events: [HubEvent] = []
+    @State private var truncated = false
+    @State private var error: String?
+    @State private var loading = true
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    if truncated {
+                        Text("Earlier steps are left out.").font(.footnote).foregroundStyle(palette.muted)
+                    }
+                    ForEach(ChatModel.fold(events)) { item in
+                        HistoryRow(item: item)
+                    }
+                }
+                .padding(16)
+            }
+            .defaultScrollAnchor(.bottom)
+            .paletteBackground()
+            .overlay {
+                if loading && events.isEmpty {
+                    ChatSkeleton()
+                } else if let error, events.isEmpty {
+                    ContentUnavailableView("Not available", systemImage: "exclamationmark.triangle", description: Text(error))
+                }
+            }
+            .navigationTitle(task.description)
+            .navigationSubtitle(task.activity ?? "Subagent")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done", systemImage: "xmark") { dismiss() }
+                }
+            }
+            .task {
+                while !Task.isCancelled {
+                    await load()
+                    try? await Task.sleep(for: .seconds(3))
+                }
+            }
+        }
+    }
+
+    private func load() async {
+        guard let client = app.client else { return }
+        do {
+            let h = try await client.subagentHistory(sessionID: sessionID, taskID: task.id,
+                                                     after: events.last?.event_id)
+            if events.isEmpty || h.continues != true {
+                events = h.continues == true ? events + h.events : h.events
+            } else {
+                events += h.events
+            }
+            truncated = h.truncated
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+        loading = false
+    }
+}
+
+/// A history row: the feed's own rows, without the actions of a live chat.
+private struct HistoryRow: View {
+    let item: FeedItem
+    var body: some View {
+        switch item {
+        case .agent(let ev): AgentMessage(event: ev)
+        case .thinking(let ev): ThinkingView(text: ev.text, live: false)
+        case .tools(let calls): ToolGroup(calls: calls)
+        case .user(let ev), .peer(let ev): Text(ev.text).font(.callout).foregroundStyle(.secondary)
+        case .note(_, let text, let level): NoteRow(text: text, level: level)
+        default: EmptyView()
+        }
+    }
+}

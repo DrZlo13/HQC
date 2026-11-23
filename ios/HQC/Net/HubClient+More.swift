@@ -232,3 +232,55 @@ extension HubClient {
 extension UTType {
     var mime: String { preferredMIMEType ?? "application/octet-stream" }
 }
+
+// MARK: the rest of the web client's session actions
+
+extension HubClient {
+    /// A new session in the same project and folder whose conversation is this one's before the
+    /// user's message `eventID` (SPEC §6).
+    func fork(sessionID: String, eventID: String) async throws -> SessionInfo {
+        let data = try await send("POST", "/api/sessions/\(Self.enc(sessionID))/fork", body: ["event_id": eventID])
+        return try JSONDecoder().decode(SessionInfo.self, from: data)
+    }
+
+    /// Continue a session VS Code drove (SPEC §9.3); 409 within 30 s of its last write.
+    func takeover(sessionID: String) async throws {
+        _ = try await send("POST", "/api/sessions/\(Self.enc(sessionID))/takeover")
+    }
+
+    /// Moves the agent's running call `callID` (one of `foreground_calls`) to the background.
+    func background(sessionID: String, callID: String) async throws {
+        _ = try await send("POST", "/api/sessions/\(Self.enc(sessionID))/background", body: ["call_id": callID])
+    }
+
+    /// A secret or an ssh key for the session's running agent (SPEC 0.147); `requestID`
+    /// answers the agent's `hqc_secret`. The value is never kept by the app.
+    func giveSecret(sessionID: String, kind: String, name: String, value: String,
+                    passphrase: String? = nil, remember: Bool = false, requestID: String? = nil) async throws -> SecretGiven {
+        var body: [String: Any] = ["kind": kind, "name": name, "value": value]
+        if kind == "ssh_key" {
+            if let passphrase, !passphrase.isEmpty { body["passphrase"] = passphrase }
+            if remember { body["remember"] = true }
+        }
+        if let requestID { body["request_id"] = requestID }
+        let data = try await send("POST", "/api/sessions/\(Self.enc(sessionID))/secrets", body: body)
+        return try JSONDecoder().decode(SecretGiven.self, from: data)
+    }
+
+    /// What subagent `taskID` has done, read from its transcript on the worker.
+    func subagentHistory(sessionID: String, taskID: String, after: String? = nil) async throws -> SubagentHistory {
+        var path = "/api/sessions/\(Self.enc(sessionID))/subagents/\(Self.enc(taskID))/history"
+        if let after { path += "?after=\(Self.enc(after))" }
+        return try await get(path)
+    }
+
+    /// The session continues in folder `path` of its worker, in `project` or a new project
+    /// named after the folder.
+    func moveSession(_ id: String, path: String, projectID: String?, create: Bool = false) async throws -> SessionInfo {
+        var body: [String: Any] = ["path": path]
+        if let projectID { body["project"] = projectID }
+        if create { body["create"] = true }
+        let data = try await send("POST", "/api/sessions/\(Self.enc(id))/move", body: body)
+        return try JSONDecoder().decode(SessionInfo.self, from: data)
+    }
+}

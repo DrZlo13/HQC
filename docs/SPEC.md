@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.217, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.218, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -623,7 +623,8 @@ the client renders only them. The "source" column is the component that produces
 | `compaction_failed` | worker (adapter) | since 0.179: a compaction the runtime started failed; `text` is "Compaction failed: " and the runtime's error, "Compaction failed" without one (§8.1) |
 | `transcript_not_saved` | worker (adapter) | since 0.201: the CLI reported `system/session_writes_lost` with the session's transcript among what it could not write (`error_code` `ENOSPC`: "the disk is full", `EDQUOT`: "the disk quota is used up", another or no code: "a write to the worker's disk failed", the code named in the brackets when there is one, the fix "Check the worker's disk"); `text` "Transcript not saved: the disk is full (ENOSPC); resuming this session may miss part of its conversation. Free up space on the worker's disk", the quota's fix being "Free up space or raise the quota on the worker's disk"; the worker is not named, the chat header shows it. The client shows it as any other text line. The CLI sends the frame only when it exits with status 0 (§8.1, `close`), so a process that is killed reports nothing; a frame that lost only the global config is written to the worker's log, with no line (§8.1) |
 | `conversation_cleared` | worker (adapter) | since 0.162: `/clear` started a new conversation in the same agent process, with a new transcript (Claude Code: `conversation_reset`, §8.1); `text` "Conversation cleared"; the session goes on in the new transcript, and the agent no longer has what was before the line in its context |
-| `command_output` | worker (mirror) | since 0.162: what a slash command printed (`/context`, `/cost` and the like), from the transcript (Claude Code: `<local-command-stdout>` and `<local-command-stderr>`, §9.1); `text` is the output, at most 4096 bytes |
+| `command_output` | worker (mirror; since 0.218 adapter) | since 0.162: what a slash command printed (`/context`, `/cost` and the like), from the transcript (Claude Code: `<local-command-stdout>` and `<local-command-stderr>`, §9.1); since 0.218 also from the adapter, the CLI's `<synthetic>` reply with `local_command_source` (§8.1); `text` is the output, at most 4096 bytes |
+| `goal` | worker (adapter, mirror) | since 0.218: a record of the runtime's goal (Claude Code's `/goal`, §8.1); `goal` is `{condition, state, reason?, checks?, duration_ms?, tokens?}`, `state` one of `set`, `unmet` (a check found it not met yet; `reason` says why), `met`, `failed` (the check found it impossible), `cleared`; `checks`, `duration_ms` and `tokens` with `met` and `failed`: how many checks ran, how long and how many tokens it took since it was set or, after a `--resume`, since the CLI set it again; condition and reason at most 4096 bytes each; `text` as Claude Code's own UI says it: "Goal set: <condition>", "Goal not yet met… continuing", "Goal achieved", "Goal could not be achieved", "Goal cleared: <condition>". The client draws `met`, `unmet` and `failed` as lines, `set` and `cleared` as none (the command's own output says it), and while the last of them since the last `conversation_cleared` is `set` or `unmet`, the goal row above the input (§6) |
 | `runtime_notice` | worker (adapter) | since 0.179: a message of the runtime or of one of its hooks ("Stop hook says: …", a setting applied in part); `text` is the message as is (§8.1) |
 | `model_fallback` | worker (adapter) | since 0.179: the runtime went on with another model (unavailable, overloaded, or with the user's consent); `text` "<model> → <other model>" and the runtime's words after a colon (§8.1) |
 | `model_refusal_fallback` | worker (adapter) | since 0.179: the model refused and another model answered; `text` as for `model_fallback`; the refused answer is taken back by a `retraction` (§8.1) |
@@ -2746,6 +2747,16 @@ Since 0.189 the main agent's row stands first in the block ("Main agent: Working
 block shows also while that row does (a turn is on, input waits, or an approval is awaited that is
 not an open request of the feed), with no subagent, command or timer; in a room each agent at work
 has a row of its own, led by its name in place of "Main agent: ".
+Since 0.218 the session's goal (`system goal`, §4: the last of them since the last
+`conversation_cleared`, which ends the conversation the goal belonged to, is `set` or `unmet`) has a
+row before all others, shown also while the agent is idle: "Goal: " and the condition on one line,
+"N checks" after it while unmet checks came since it was set, a chevron that opens the whole
+condition and "Last check: " with the last unmet check's reason, and "Clear goal", only where the
+input is: it sends `/goal clear`, and while a turn runs (`running`, `waiting`, `queued`) it stops
+the turn first, since a slash command waits for the end of the turn and a turn chasing a goal goes
+on until the goal is met or hooks have blocked its end 9 times in a row (§8.1). There is no pause of
+the goal: the session's Pause stops it with the agent, and Resume goes on with it (the CLI sets it
+again on `--resume`).
 Since 0.181 a subagent's line (a row whose `kind` is `agent`, or none this client knows,
 whatever the feed holds: a chat loads only its latest events, and a subagent's subagent has no
 call there; a command's, a Monitor's, a wakeup's and a cron job's line is none) is, but for its
@@ -2877,7 +2888,8 @@ text it came during among them, before the first event of its own turn. The clie
 turns from the events in `seq` order: a turn runs from an input that does not wait, or from
 the agent's first event of work (any event of the agent but its `usage` and a `status` other
 than `running`, and
-`system context_compacted`, with which a `/compact` starts), to its end (the final
+`system context_compacted`, with which a `/compact` starts, and since 0.218 `system
+command_output`, with which a slash command's turn starts), to its end (the final
 `agent.message`, `status` `idle` or `error`, `system turn_lost`); a delivered input waited only
 if the first end after it is not its own (`in_reply_to`). Inputs waiting one behind another
 take the turns in `seq` order: the first delivered one starts at the agent's first event of
@@ -5131,6 +5143,36 @@ the whole turn. Before 0.162 the
 transcript was read only at the end of a turn, so a new session got its title when its first
 turn ended.
 
+Goal (since 0.218). Claude Code's own `/goal <condition>` (2.1.312, also in `-p` stream-json) adds a
+Stop hook to the conversation: at each end of a turn a model of the CLI checks the condition and,
+while it is not met, the agent goes on in the same turn; once hooks have blocked the end 9 times in
+a row (seen live on 2.1.312; `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`) the CLI ends the turn anyway, and
+the goal is checked again at the end of the next one. `/goal clear` (also `stop`, `off`, `reset`,
+`none`, `cancel`) removes it, `/goal` alone says what it is. Stop leaves the goal set; on `--resume`
+(an idle unload, a pause, a restart, a fork before the goal ended) the CLI sets it again from the
+transcript's last goal record. Seen live: a `/goal clear` typed while a turn runs waits for the end
+of that turn, as any slash command (§17.2), so a turn chasing a goal is stopped before it can be
+cleared. The goal's progress is never streamed (the SDK's `active_goal` comes only under
+`CLAUDE_CODE_REMOTE`): the CLI writes it to the transcript as `attachment` records of type
+`goal_status` — set `{met: false, sentinel: true, condition}`, each unmet check `{met: false,
+condition, reason}`, met `{met: true, condition, reason, iterations, durationMs, tokens}`, cleared
+`{met: true, sentinel: true, condition}`, impossible `{met: false, failed: true, …}`. The adapter
+reads them every 2 s of the process's life (with the token rate, below) and before each `result`
+line, by which the check of the turn's last text is written (seen live: so is every record of the
+turn) from the end of the transcript as it was when the process started (from its start for a
+transcript that appears later, the one after `/clear` too), skipping records written before the
+process started (a fork's copied history), and at a resume also the transcript's last one: each
+gives a stored `system goal` (§4) whose `event_id` is that of the record, so one read twice is one
+event. A record written after the text the adapter still holds (a check of the turn's last text is
+written after it, and the next stream-json line comes later) waits for that text and follows it, so
+a check stands under the text it judged. The mirror maps the same records to the same events for a
+transcript the worker's own process does not write (a VS Code tab, another machine); for its own
+process's records the adapter's events stand. The CLI's reply to a local slash command (`/goal`'s
+"Goal set: …", `/cost`, `/context`, "/config opens an interactive panel…"), a `<synthetic>`
+`assistant` text with `local_command_source`, which the CLI sets on that reply only (2.1.312), is
+`system command_output` with that text (at most 4096 bytes), not a `runtime` `agent.message`: it is
+the command's output, not an error.
+
 The worker runs `title.request` (T24) as a one-shot process — not through the session's adapter
 and not in its process: `claude -p --model claude-haiku-5-5 --max-turns 1 --no-session-persistence
 --strict-mcp-config --setting-sources "" --tools "" --system-prompt "<title prompt>"
@@ -7281,6 +7323,18 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
+### 0.217 → 0.218 (the agent's goal: a row above the input, its checks in the feed)
+§4, §6, §8.1: Claude Code's `/goal <condition>` already reached the CLI, which keeps the agent at
+work until a model of its own finds the condition met, but hqc showed nothing of it: the CLI streams
+none of the goal's progress and writes it only to the transcript. The adapter now reads those
+records and sends each as `system goal`, a check after the text it judged, and the mirror maps the
+same records for a session the worker's own process does not run; the client draws the checks as
+lines as Claude Code's own UI does ("Goal achieved (55s · 3 checks · 918 tokens)", "Goal not yet
+met… continuing", "Goal could not be achieved" with the reason) and, while the goal is set, a row
+first above the input with the condition, the number of unmet checks, the last one's reason, and
+"Clear goal", which stops a running turn before it sends `/goal clear`. The CLI's reply to a local
+slash command, which the adapter sent as a `runtime` message drawn in red as an error, is `system
+command_output`, as the mirror's already was.
 ### 0.216 → 0.217 (the card names the ask rule behind it)
 §8.1, §4: a card that a `permissions.ask` rule raised said nothing of why, also in Allow all,
 where such a rule still asks: Claude Code sends no `decision_reason` for a rule, only

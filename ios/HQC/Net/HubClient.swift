@@ -146,9 +146,12 @@ nonisolated final class HubClient: Sendable {
     }
 
     func createSession(
-        projectID: String, title: String?, workspaceID: String?, permissionMode: PermissionMode?
+        projectID: String, title: String?, workspaceID: String?, permissionMode: PermissionMode?,
+        model: String? = nil, providerID: String? = nil
     ) async throws -> SessionInfo {
         var body: [String: Any] = [:]
+        if let model, !model.isEmpty { body["model"] = model }
+        if let providerID { body["provider_id"] = providerID }
         if let title, !title.isEmpty { body["title"] = title }
         if let workspaceID { body["workspace_id"] = workspaceID }
         if let permissionMode { body["permission_mode"] = permissionMode.rawValue }

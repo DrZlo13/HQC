@@ -515,6 +515,10 @@ struct NewSessionSheet: View {
     @State private var workspaces: [Workspace] = []
     @State private var workspaceID: String?
     @State private var mode: PermissionMode?
+    /// A Claude model ("" for Claude Code's default) or a provider, as the web's model chip.
+    @State private var model = ""
+    @State private var providerID: String?
+    @State private var providers: [ModelProvider] = []
     @State private var busy = false
     @State private var error: String?
 
@@ -533,6 +537,27 @@ struct NewSessionSheet: View {
                         ForEach(PermissionMode.allCases) { Text($0.label).tag(Optional($0)) }
                     }
                 }
+                Section("Model") {
+                    Picker("Model", selection: Binding(
+                        get: { providerID.map { "provider:\($0)" } ?? model },
+                        set: { v in
+                            if v.hasPrefix("provider:") {
+                                providerID = String(v.dropFirst(9))
+                                model = ""
+                            } else {
+                                providerID = nil
+                                model = v
+                            }
+                        })) {
+                        Text("Default").tag("")
+                        Text("Opus").tag("opus")
+                        Text("Sonnet").tag("sonnet")
+                        Text("Haiku").tag("haiku")
+                        Text("Fable").tag("fable")
+                        ForEach(ModelSheet.versions, id: \.self) { Text($0).tag($0) }
+                        ForEach(providers) { p in Text(p.label.isEmpty ? p.name : p.label).tag("provider:\(p.id)") }
+                    }
+                }
                 if let error {
                     Section { Text(error).foregroundStyle(.red).font(.footnote) }
                 }
@@ -545,7 +570,10 @@ struct NewSessionSheet: View {
                         .disabled(busy || workspaces.isEmpty)
                 }
             }
-            .task { await loadWorkspaces() }
+            .task {
+                await loadWorkspaces()
+                providers = (try? await app.client?.providers()) ?? []
+            }
         }
     }
 
@@ -560,7 +588,8 @@ struct NewSessionSheet: View {
         defer { busy = false }
         do {
             let s = try await client.createSession(
-                projectID: project.id, title: title, workspaceID: workspaceID, permissionMode: mode)
+                projectID: project.id, title: title, workspaceID: workspaceID, permissionMode: mode,
+                model: model, providerID: providerID)
             onCreated(s)
         } catch {
             self.error = error.localizedDescription

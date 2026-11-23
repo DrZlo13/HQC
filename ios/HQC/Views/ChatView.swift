@@ -364,7 +364,8 @@ struct ChatView: View {
             giveSecret: { requestID, f in
                 try await model.giveSecret(kind: f.kind, name: f.name, value: f.value,
                                            passphrase: f.passphrase, remember: f.remember, requestID: requestID)
-            })
+            },
+            switchModel: model.info?.isRoom == true ? nil : { sheet = .model })
     }
 
     private var project: Project? { model.info.flatMap { app.project($0.project_id) } }

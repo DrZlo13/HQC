@@ -485,3 +485,71 @@ struct MoveSessionSheet: View {
         }
     }
 }
+
+// MARK: live sessions
+
+/// Every project's sessions that need the user, work or have unread messages, by state, each
+/// with its project's tile: the web client's "live sessions" view of its phone home.
+struct LiveSessionsList: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.palette) private var palette
+
+    private var groups: [(String, [SessionSummary])] {
+        let all = app.summaries.values.sorted { $0.last_seq > $1.last_seq }
+        let wait = all.filter { $0.state == .waiting || $0.state == .error }
+        let run = all.filter { ($0.state.isBusy || ($0.subagents ?? 0) > 0) && !wait.contains($0) }
+        let unread = all.filter { $0.unread > 0 && !wait.contains($0) && !run.contains($0) }
+        return [("Needs you", wait), ("Running", run), ("Unread", unread)].filter { !$0.1.isEmpty }
+    }
+
+    var body: some View {
+        List {
+            ForEach(groups, id: \.0) { name, items in
+                Section {
+                    ForEach(items, id: \.session_id) { s in
+                        Button {
+                            Feedback.play(.select)
+                            app.open(sessionID: s.session_id, title: s.title)
+                        } label: {
+                            HStack(spacing: 12) {
+                                if let p = app.project(s.project_id) { ProjectTile(project: p, size: 30) }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(s.title).font(.body).lineLimit(1)
+                                    HStack(spacing: 6) {
+                                        StateDot(state: s.state)
+                                        Text(s.state.label)
+                                        if let r = s.output_per_s, s.state.isBusy, r > 0 {
+                                            Text("· \(Int(r)) tokens/s").monospacedDigit()
+                                        }
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(palette.muted)
+                                }
+                                Spacer()
+                                if s.unread > 0 {
+                                    Text("\(s.unread)")
+                                        .font(.caption2.bold())
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 2)
+                                        .background(.tint, in: .capsule)
+                                        .foregroundStyle(.white)
+                                }
+                            }
+                            .contentShape(.rect)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    Text(name).foregroundStyle(name == "Needs you" ? .orange : .secondary)
+                }
+            }
+        }
+        .listStyle(.plain)
+        .overlay {
+            if groups.isEmpty {
+                ContentUnavailableView("All quiet", systemImage: "moon.zzz",
+                                       description: Text("No session needs you, works or has unread messages."))
+            }
+        }
+    }
+}

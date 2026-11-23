@@ -93,6 +93,10 @@ struct DesktopLayout: View {
                     SearchView(autofocus: true)
                 case .requests:
                     RequestsView()
+                case .live:
+                    LiveSessionsList()
+                        .navigationTitle("Live sessions")
+                        .paletteBackground(\.side)
                 case .sessions:
                     if let project = app.selectedProject {
                         SessionListView(project: project)
@@ -164,7 +168,7 @@ struct DesktopLayout: View {
 }
 
 enum SidebarPane: Hashable {
-    case sessions, search, requests
+    case sessions, search, requests, live
 }
 
 enum DesktopSheet: String, Identifiable {
@@ -188,6 +192,7 @@ struct ProjectRail: View {
             railButton("hand.raised", "Requests", badge: app.requests.count, active: pane == .requests) {
                 toggle(.requests)
             }
+            railButton("bolt.horizontal", "Live sessions", active: pane == .live) { toggle(.live) }
             Rectangle().fill(palette.border.opacity(0.6)).frame(width: 28, height: 0.5)
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 10) {

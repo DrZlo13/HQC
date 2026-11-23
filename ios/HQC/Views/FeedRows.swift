@@ -41,6 +41,8 @@ struct FeedRow: View {
             }
         case .note(_, let text, let level):
             NoteRow(text: text, level: level)
+        case .refusal(let ev, let answered):
+            RefusalRow(event: ev, answered: answered)
         }
     }
 }
@@ -118,6 +120,7 @@ struct UserBubble: View {
 /// A message from another session: the relay color, as the web client marks it.
 struct PeerCard: View {
     @Environment(\.palette) private var palette
+    @Environment(AppModel.self) private var app
     let event: HubEvent
 
     var body: some View {
@@ -128,9 +131,22 @@ struct PeerCard: View {
                 Text(event.payload["mode"]?.string == "ask" ? "Question from" : "From")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(palette.relayText)
-                Text(event.payload["from"]?.string ?? "another session")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(palette.text2)
+                // The other session's address opens it, as the web client's relay link does.
+                if let from = event.payload["from_session_id"]?.string {
+                    Button {
+                        app.open(sessionID: from)
+                    } label: {
+                        Text(app.summary(from)?.title ?? event.payload["from"]?.string ?? "another session")
+                            .font(.caption.monospaced())
+                            .underline()
+                            .foregroundStyle(palette.relayText)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Text(event.payload["from"]?.string ?? "another session")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(palette.text2)
+                }
                 Spacer()
                 EventTime(event: event)
             }
@@ -148,7 +164,9 @@ struct AgentMessage: View {
     @Environment(\.palette) private var palette
     @Environment(\.chatActions) private var actions
     let event: HubEvent
+    @Environment(\.openURL) private var openURL
     @State private var quoting = false
+    @State private var searching = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -188,9 +206,15 @@ struct AgentMessage: View {
             }
             Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = event.text }
             ShareLink("Share", item: event.text)
+            Button("Search in \(WebSearch.current.label)…", systemImage: "magnifyingglass") { searching = true }
         }
         .sheet(isPresented: $quoting) {
             QuoteSheet(text: event.text) { actions.quote?($0) }
+        }
+        .sheet(isPresented: $searching) {
+            QuoteSheet(text: event.text, action: .search) { q in
+                if let url = WebSearch.current.url(q) { openURL(url) }
+            }
         }
     }
 }
@@ -873,6 +897,26 @@ struct FlowLayout: Layout {
             v.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(s))
             x += s.width + spacing
             row = max(row, s.height)
+        }
+    }
+}
+
+/// The runtime's reply to a model refusal (SPEC 0.168): its line, and an offer to switch the
+/// session's model until the user has answered after it.
+struct RefusalRow: View {
+    @Environment(\.palette) private var palette
+    @Environment(\.chatActions) private var actions
+    let event: HubEvent
+    let answered: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            NoteRow(text: event.text, level: .warning)
+            if !answered, let switchModel = actions.switchModel {
+                Button("Switch model", systemImage: "cpu") { switchModel() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
         }
     }
 }

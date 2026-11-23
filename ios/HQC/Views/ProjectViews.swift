@@ -5,6 +5,8 @@ struct ProjectsView: View {
     @Environment(AppModel.self) private var app
     @State private var creating = false
     @State private var editMode: EditMode = .inactive
+    /// Every project's live sessions instead of the projects (the title's menu).
+    @AppStorage("homeShowsLive") private var showsLive = false
 
     private var sorted: [Project] { app.sortedProjects }
 
@@ -32,7 +34,18 @@ struct ProjectsView: View {
             }
             .onMove { app.moveProjects(from: $0, to: $1) }
         }
-        .navigationTitle("Projects")
+        .overlay {
+            if showsLive {
+                LiveSessionsList().paletteBackground()
+            }
+        }
+        .navigationTitle(showsLive ? "Live sessions" : "Projects")
+        .toolbarTitleMenu {
+            Picker("Show", selection: $showsLive) {
+                Label("Projects", systemImage: "square.grid.2x2").tag(false)
+                Label("Live sessions", systemImage: "bolt.horizontal").tag(true)
+            }
+        }
         .paletteBackground()
         .environment(\.editMode, $editMode)
         .toolbar {

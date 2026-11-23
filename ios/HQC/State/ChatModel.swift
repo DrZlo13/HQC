@@ -351,7 +351,12 @@ final class ChatModel {
             case "peer.message":
                 out.append(.peer(ev))
             case "agent.message":
-                if ev.payload["runtime"]?.bool == true {
+                if ev.payload["runtime"]?.bool == true, ev.payload["refusal"]?.bool == true {
+                    // Answered once a message of the user follows it.
+                    let at = events.firstIndex { $0.event_id == ev.event_id } ?? 0
+                    let answered = events[(at + 1)...].contains { $0.type == "user.message" }
+                    out.append(.refusal(ev, answered: answered))
+                } else if ev.payload["runtime"]?.bool == true {
                     out.append(.note(ev.event_id, ev.text, .warning))
                 } else if !ev.text.isEmpty {
                     out.append(.agent(ev))
@@ -412,13 +417,15 @@ enum FeedItem: Identifiable {
     case clarify(HubEvent, open: Bool)
     case attachment(HubEvent)
     case note(String, String, NoteLevel)
+    /// The runtime's reply to a model refusal, with the offer to switch models.
+    case refusal(HubEvent, answered: Bool)
 
     var id: String {
         switch self {
         case .user(let e), .peer(let e), .agent(let e), .thinking(let e), .attachment(let e), .usage(let e):
             e.event_id
         case .tools(let calls): calls.first?.call.event_id ?? "tools"
-        case .approval(let e, _), .clarify(let e, _): e.event_id
+        case .approval(let e, _), .clarify(let e, _), .refusal(let e, _): e.event_id
         case .note(let id, _, _): id
         }
     }

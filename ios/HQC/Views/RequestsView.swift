@@ -106,6 +106,7 @@ struct SettingsView: View {
     @Environment(\.openURL) private var openURL
     @AppStorage(Feedback.hapticsKey) private var haptics = true
     @AppStorage(Feedback.soundsKey) private var sounds = true
+    @AppStorage(WebSearch.key) private var webSearch = WebSearch.google.rawValue
 
     private var notificationState: String {
         if !app.pushEnabledOnHub { return "Off on the hub" }
@@ -166,6 +167,13 @@ struct SettingsView: View {
                 Text("Sound and haptics")
             } footer: {
                 Text("What agents do, felt and heard while a chat is open: tool calls, requests, questions, a finished answer. Sounds follow the ring/silent switch and mix with your music.")
+            }
+            Section {
+                Picker("Search the web in", selection: $webSearch) {
+                    ForEach(WebSearch.allCases) { Text($0.label).tag($0.rawValue) }
+                }
+            } footer: {
+                Text("For \"Search in …\" in a message's menu.")
             }
             Section("Projects") {
                 NavigationLink {

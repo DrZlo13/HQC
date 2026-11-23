@@ -20,6 +20,39 @@ struct ChatActions {
     var foregroundCalls: Set<String> = []
     /// Gives the secret an agent's `hqc_secret` asks for.
     var giveSecret: ((_ requestID: String, SecretFields) async throws -> SecretGiven)?
+    /// Opens the session's model sheet (the offer under a model's refusal).
+    var switchModel: (() -> Void)?
+}
+
+/// "Search in …" of a message (SPEC §6): the web search picked in Settings, kept on this device.
+enum WebSearch: String, CaseIterable, Identifiable {
+    case google, duckduckgo, bing, yandex
+    var id: String { rawValue }
+
+    static let key = "webSearch"
+    static var current: WebSearch {
+        UserDefaults.standard.string(forKey: key).flatMap(WebSearch.init(rawValue:)) ?? .google
+    }
+
+    var label: String {
+        switch self {
+        case .google: "Google"
+        case .duckduckgo: "DuckDuckGo"
+        case .bing: "Bing"
+        case .yandex: "Yandex"
+        }
+    }
+
+    func url(_ q: String) -> URL? {
+        var c: URLComponents
+        switch self {
+        case .google: c = URLComponents(string: "https://www.google.com/search")!; c.queryItems = [.init(name: "q", value: q)]
+        case .duckduckgo: c = URLComponents(string: "https://duckduckgo.com/")!; c.queryItems = [.init(name: "q", value: q)]
+        case .bing: c = URLComponents(string: "https://www.bing.com/search")!; c.queryItems = [.init(name: "q", value: q)]
+        case .yandex: c = URLComponents(string: "https://yandex.ru/search/")!; c.queryItems = [.init(name: "text", value: q)]
+        }
+        return c.url
+    }
 }
 
 private struct ChatActionsKey: EnvironmentKey {
@@ -68,21 +101,40 @@ enum Quoting {
 /// The message as selectable text, to quote a part of it: the phone's way of the web client's
 /// "select, then Quote". Nothing selected quotes the whole message.
 struct QuoteSheet: View {
+    enum Action { case quote, search }
+
     @Environment(\.dismiss) private var dismiss
     @Environment(\.palette) private var palette
     let text: String
+    var action: Action = .quote
     let onQuote: (String) -> Void
     @State private var selection = ""
+
+    init(text: String, action: Action = .quote, onQuote: @escaping (String) -> Void) {
+        self.text = text
+        self.action = action
+        self.onQuote = onQuote
+    }
+
+    private var title: String { action == .quote ? "Quote" : "Search in \(WebSearch.current.label)" }
+    private var buttonLabel: String {
+        switch (action, selection.isEmpty) {
+        case (.quote, true): "Quote all"
+        case (.quote, false): "Quote selection"
+        case (.search, true): "Search the first sentences"
+        case (.search, false): "Search selection"
+        }
+    }
 
     var body: some View {
         NavigationStack {
             SelectableText(text: text, textColor: UIColor(palette.text), selection: $selection)
                 .padding(.horizontal, 12)
                 .paletteBackground()
-                .navigationTitle("Quote")
+                .navigationTitle(title)
                 .navigationBarTitleDisplayMode(.inline)
                 .safeAreaInset(edge: .top) {
-                    Text("Select what to quote, or quote it all.")
+                    Text(action == .quote ? "Select what to quote, or quote it all." : "Select what to search for.")
                         .font(.footnote)
                         .foregroundStyle(palette.muted)
                         .padding(.vertical, 6)
@@ -92,8 +144,9 @@ struct QuoteSheet: View {
                         Button("Cancel", systemImage: "xmark") { dismiss() }
                     }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button(selection.isEmpty ? "Quote all" : "Quote selection") {
-                            onQuote(selection.isEmpty ? text : selection)
+                        Button(buttonLabel) {
+                            let whole = action == .quote ? text : Quoting.firstSentences(text)
+                            onQuote(selection.isEmpty ? whole : selection)
                             dismiss()
                         }
                         .buttonStyle(.glassProminent)

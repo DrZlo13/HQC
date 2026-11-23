@@ -6692,6 +6692,15 @@ the push body's `tag` (its SHA-256 in hex when longer than 64 bytes). APNs answe
 `BadDeviceToken`, `Unregistered` or `DeviceTokenNotForTopic` deletes the device, as a gone Web
 Push subscription is deleted.
 
+A hub without a key sends through another hub that has one (`HQC_APNS_RELAY_URL`, the
+published app's publisher at `https://hqc.drewnja.xyz`): `POST <relay>/worker/push/relay
+{token, sandbox, collapse_id, payload}` with the APNs payload above. The relay
+(`HQC_APNS_RELAY=1`, only with its own key) sends an alert notice only (an object with
+`aps.alert`, at most 4 KB) to a token in the APNs form, at most 120 a minute from one address,
+and answers `{result: "sent"}` or `{result: "gone"}` (the hub then deletes the device);
+`400 no_relay` from a hub that does not relay. A key and a relay URL together keep the hub
+from starting.
+
 Push body (JSON, `hqc_proto::api::PushMessage`, example `examples/wire/api.push.json`):
 `{session_id, type, title?, body?, tag?, payload?}`, where `type` is the event type and
 `payload` is the §4 event itself as stored. The hub sets `title` (the session title), `body`
@@ -7077,7 +7086,8 @@ send from a session in a lower mode (§7.1).
   proxy's sign-in, the hub verifying the provider's ID token, §6); `/worker/*` is outside
   Access, worker tokens only, rate limit on enroll;
   `/worker/native/token` (since 0.214, §6) is there too: it gives an Access token only for a
-  one-time code with its verifier, and shares the rate limit of enroll;
+  one-time code with its verifier, and shares the rate limit of enroll; so is
+  `/worker/push/relay` (§16), on a hub that relays, limited per address;
   `artifacts.<hub-domain>` is public, signed links with a TTL only; the publication domain
   (`HQC_PUBLISH_BASE`, since 0.209) is public too, published files only (§12).
 - The hub's dev mode (`HQC_DEV=1`, no Access) is allowed only on a loopback
@@ -7247,7 +7257,8 @@ without a hub each of these would have to be done peer-to-peer.
 through the system browser with a one-time code and a verifier, so identity providers that
 refuse an embedded login page (Google) work; `/api/push/apns` for the client's device token.
 §16: the notices of Web Push also go over APNs (`HQC_APNS_*`), with the approval's options so
-the app answers it from the notification. §20: `/worker/native/token` outside Access. §3: the
+the app answers it from the notification; a hub without a key sends through another hub's relay
+(`HQC_APNS_RELAY_URL`, `POST /worker/push/relay`, served with `HQC_APNS_RELAY=1`). §20: `/worker/native/token` outside Access. §3: the
 table `apns_devices` (hub migration `0055`). The iOS client also gains attachments (upload and
 preview), rooms, schedules, search, workers with enrollment and Claude Code's sign-in,
 workspaces with a folder browser, and the session controls of the web client (rename, model,

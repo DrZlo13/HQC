@@ -676,29 +676,40 @@ curl -s -o /dev/null -w '%{http_code}\n' https://hqc.example.com/worker/enroll
 
 In the browser, after the sign-in the client opens and Settings shows the signed-in address.
 
-### 1.10 The iOS app: sign-in and Apple push
+### 1.10 The iOS app: sign-in and notifications
 
-The native app (`ios/`, its README) needs nothing on the hub to sign in: it opens
-`/api/native/login` in the system browser, where Access signs the person in with any identity
-provider, and exchanges the one-time code at `/worker/native/token`, which the `hqc-worker`
-Bypass application of §1.6 already lets through (SPEC §6). Behind Traefik and oauth2-proxy
-(§1.9) the app signs in only to Access hubs.
+The app (`ios/`, its README) signs in on its own: it opens `/api/native/login` in the system
+browser, where Access signs the person in with any identity provider, and exchanges the one-time
+code at `/worker/native/token`, which the `hqc-worker` Bypass application of §1.6 already lets
+through (SPEC §6). Behind Traefik and oauth2-proxy (§1.9) the app signs in only to Access hubs.
 
-Apple push is optional and needs an Apple Developer account:
+**Notifications.** The published app gets Apple push through the relay of its publisher. Add one
+line to `hub.env` and restart the hub:
 
-1. developer.apple.com → Certificates, IDs & Profiles → **Keys** → "+": a key with **Apple Push
-   Notifications service (APNs)**. Download the `.p8` file (once only) and note the **Key ID**;
-   the **Team ID** is at the top right of the page.
-2. The app's bundle id is the topic: `io.github.drzlo13.hqc.ios`, or yours if you changed
-   `PRODUCT_BUNDLE_IDENTIFIER` to sign the app with your own team.
-3. Give the hub the key as a file it can read (in Docker, a read-only mount), and the rest in
-   `hub.env`:
+```sh
+HQC_APNS_RELAY_URL=https://hqc.drewnja.xyz
+```
+
+The hub then sends each notice for the app (the session's title, a short text, the request's
+options) to that relay, which passes it to Apple; nothing else leaves the hub. Without the line
+the app works the same, without notifications. Settings in the app says whether they are on.
+
+#### Your own APNs key (only if you build and sign the app yourself)
+
+A build of the app under your own Apple Developer team and bundle id needs push sent with your
+own key instead of the relay:
+
+1. developer.apple.com → Certificates, IDs & Profiles → **Keys** → "+", with **Apple Push
+   Notifications service (APNs)**. Download the `.p8` (once only); note the **Key ID** and your
+   **Team ID**.
+2. In `hub.env` (the key as a read-only file in the container):
 
    ```sh
    HQC_APNS_KEY_FILE=/run/secrets/apns.p8   # or HQC_APNS_KEY with the PEM, \n for line breaks
    HQC_APNS_KEY_ID=ABC123DEFG
    HQC_APNS_TEAM_ID=DEF456GHIJ
-   HQC_APNS_TOPIC=io.github.drzlo13.hqc.ios
+   HQC_APNS_TOPIC=<your bundle id>
+   # HQC_APNS_RELAY=1   # also relay other hubs' notices with this key (what hqc.drewnja.xyz does)
    ```
 
    ```yaml
@@ -707,13 +718,12 @@ Apple push is optional and needs an Apple Developer account:
      - ./apns.p8:/run/secrets/apns.p8:ro
    ```
 
-   All four or none: with some of them the hub does not start; with a key it cannot sign with,
-   it logs `HQC_APNS_*: Apple push disabled` and runs without Apple push.
-4. Restart the hub. In the app, Settings shows "Notifications: On" once iOS has handed it a
-   device token. A debug build from Xcode registers as `sandbox` and is sent through APNs'
-   sandbox host; a TestFlight or App Store build goes through the production host.
+   All four or none; with a key the hub cannot sign with, it logs `HQC_APNS_*: Apple push
+   disabled`. A key and `HQC_APNS_RELAY_URL` together keep the hub from starting.
 
-The hub needs outbound HTTPS (HTTP/2) to `api.push.apple.com` and `api.sandbox.push.apple.com`.
+A debug build from Xcode registers as `sandbox` and is sent through APNs' sandbox host; a
+TestFlight or App Store build through the production host. The hub that holds the key needs
+outbound HTTPS (HTTP/2) to `api.push.apple.com` and `api.sandbox.push.apple.com`.
 
 ## 2. Worker on macOS
 

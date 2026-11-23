@@ -12,6 +12,11 @@ pub struct Config {
     pub vapid: Option<VapidConfig>,
     /// Apple push to the native iOS client (SPEC §16): `HQC_APNS_*`, all or none.
     pub apns: Option<ApnsConfig>,
+    /// `HQC_APNS_RELAY_URL`: a hub that sends Apple push for this one (its
+    /// `/worker/push/relay`), for a hub without a key of its own (SPEC §16).
+    pub apns_relay_url: Option<String>,
+    /// `HQC_APNS_RELAY=1`: this hub, which has the key, relays other hubs' Apple push.
+    pub apns_relay_serve: bool,
     /// The built web client (`client/dist`) served on `/`; `None`: the hub serves only the APIs.
     pub client_dir: Option<PathBuf>,
     pub timing: Timing,
@@ -492,6 +497,28 @@ impl Config {
             ),
         };
 
+        let apns_relay_url = match var("HQC_APNS_RELAY_URL") {
+            Some(u) => {
+                let u = u.trim_end_matches('/').to_string();
+                let parsed = reqwest::Url::parse(&u)
+                    .map_err(|e| anyhow::anyhow!("HQC_APNS_RELAY_URL {u}: {e}"))?;
+                let loopback =
+                    matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+                if parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback) {
+                    bail!("HQC_APNS_RELAY_URL must be https:// (http:// only to a loopback host)");
+                }
+                if apns.is_some() {
+                    bail!("set HQC_APNS_KEY* or HQC_APNS_RELAY_URL, not both");
+                }
+                Some(u)
+            }
+            None => None,
+        };
+        let apns_relay_serve = var("HQC_APNS_RELAY").as_deref() == Some("1");
+        if apns_relay_serve && apns.is_none() {
+            bail!("HQC_APNS_RELAY=1 needs the APNs key (HQC_APNS_KEY*, HQC_APNS_KEY_ID, HQC_APNS_TEAM_ID, HQC_APNS_TOPIC)");
+        }
+
         let client_dir = var("HQC_CLIENT_DIR").map(PathBuf::from);
         if let Some(dir) = &client_dir {
             if !dir.join("index.html").is_file() {
@@ -535,6 +562,8 @@ impl Config {
             auth,
             vapid,
             apns,
+            apns_relay_url,
+            apns_relay_serve,
             client_dir,
             timing: Timing {
                 turn_watchdog: turn_watchdog_from(var("HQC_TURN_WATCHDOG_S").as_deref())?,

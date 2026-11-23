@@ -160,7 +160,7 @@ pub enum Notice {
 
 impl AppState {
     pub fn new(db: PgPool, config: Config, push: Arc<dyn PushSender>) -> Self {
-        let apns = match crate::apns::from_config(config.apns.as_ref()) {
+        let apns = match crate::apns::from_config(&config) {
             Ok(a) => a,
             Err(e) => {
                 tracing::error!(error = %e, "HQC_APNS_*: Apple push disabled");

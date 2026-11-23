@@ -293,6 +293,8 @@ impl TestHub {
             auth,
             vapid: None,
             apns: None,
+            apns_relay_url: None,
+            apns_relay_serve: false,
             client_dir: None,
             timing,
             limits,

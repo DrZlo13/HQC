@@ -186,6 +186,7 @@ pub fn router(app: AppState) -> Router {
         )
         .route("/api/native/login", get(native::login))
         .route("/worker/native/token", post(native::token))
+        .route("/worker/push/relay", post(apns::relay))
         .route(
             "/api/push/subscribe",
             post(api::push_subscribe).delete(api::push_unsubscribe),

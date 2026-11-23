@@ -194,3 +194,59 @@ async fn apns_device_gets_the_approval() {
     assert_eq!((s, v["enabled"].as_bool()), (200, Some(true)));
     hub.finish().await;
 }
+
+/// SPEC §16: a hub with the key and `HQC_APNS_RELAY=1` sends other hubs' notices; a hub with
+/// `HQC_APNS_RELAY_URL` sends through it, and hears when a device is gone.
+#[tokio::test]
+async fn apns_relay_sends_for_a_hub_without_a_key() {
+    let relay = TestHub::start_config(|c| c.apns_relay_serve = true).await;
+    let device = "cd".repeat(32);
+    let notice = json!({"aps": {"alert": {"title": "t", "body": "b"}}, "session_id": "s"});
+
+    // What a hub without a key sends, through `RelayClient`.
+    let client = hqc_hub::apns::RelayClient::new(&relay.base).unwrap();
+    use hqc_hub::apns::ApnsSender;
+    client
+        .send(
+            &device,
+            true,
+            "tag-1",
+            &serde_json::to_vec(&notice).unwrap(),
+        )
+        .await
+        .unwrap();
+    let sent = relay.apns.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, device);
+    assert!(sent[0].1);
+    assert_eq!(sent[0].2, "tag-1");
+    assert_eq!(sent[0].3["aps"]["alert"]["body"], "b");
+
+    // Only an alert notice, to a real token.
+    let (s, _) = relay
+        .post(
+            "/worker/push/relay",
+            json!({"token": device, "payload": {"x": 1}}),
+        )
+        .await;
+    assert_eq!(s, 400);
+    let (s, _) = relay
+        .post(
+            "/worker/push/relay",
+            json!({"token": "zz", "payload": notice}),
+        )
+        .await;
+    assert_eq!(s, 400);
+    relay.finish().await;
+
+    // A hub that does not relay says so.
+    let plain = TestHub::start().await;
+    let (s, v) = plain
+        .post(
+            "/worker/push/relay",
+            json!({"token": device, "payload": notice}),
+        )
+        .await;
+    assert_eq!((s, v["error"].as_str()), (400, Some("no_relay")));
+    plain.finish().await;
+}

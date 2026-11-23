@@ -225,11 +225,124 @@ pub fn payload(web: &Value) -> Vec<u8> {
     }
 }
 
-pub fn from_config(c: Option<&ApnsConfig>) -> anyhow::Result<Option<Arc<dyn ApnsSender>>> {
-    Ok(match c {
-        Some(c) => Some(Arc::new(ApnsClient::new(c)?)),
-        None => None,
+/// The hub's own key, else the relay it was given, else no Apple push.
+pub fn from_config(c: &crate::config::Config) -> anyhow::Result<Option<Arc<dyn ApnsSender>>> {
+    Ok(match (&c.apns, &c.apns_relay_url) {
+        (Some(k), _) => Some(Arc::new(ApnsClient::new(k)?)),
+        (None, Some(url)) => Some(Arc::new(RelayClient::new(url)?)),
+        (None, None) => None,
     })
+}
+
+/// Apple push through another hub's relay (`HQC_APNS_RELAY_URL`, SPEC §16): for a hub without
+/// an APNs key, so the published app gets notices from any hub.
+pub struct RelayClient {
+    url: String,
+    http: reqwest::Client,
+}
+
+impl RelayClient {
+    pub fn new(base: &str) -> anyhow::Result<Self> {
+        Ok(Self {
+            url: format!("{base}/worker/push/relay"),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
+        })
+    }
+}
+
+impl ApnsSender for RelayClient {
+    fn send<'a>(
+        &'a self,
+        device_token: &'a str,
+        sandbox: bool,
+        collapse_id: &'a str,
+        payload: &'a [u8],
+    ) -> BoxFuture<'a, Result<(), PushError>> {
+        Box::pin(async move {
+            let other = |e: &dyn std::fmt::Display| PushError::Other(e.to_string());
+            let payload: Value = serde_json::from_slice(payload).map_err(|e| other(&e))?;
+            let resp = self
+                .http
+                .post(&self.url)
+                .json(&json!({
+                    "token": device_token,
+                    "sandbox": sandbox,
+                    "collapse_id": collapse_id,
+                    "payload": payload,
+                }))
+                .send()
+                .await
+                .map_err(|e| other(&e))?;
+            let status = resp.status().as_u16();
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            match (status, body["result"].as_str()) {
+                (200, Some("sent")) => Ok(()),
+                (200, Some("gone")) => Err(PushError::Gone),
+                _ => Err(PushError::Other(format!("relay answered {status} {body}"))),
+            }
+        })
+    }
+}
+
+/// Relayed notices a client address may send per minute.
+pub const RELAY_PER_MIN: usize = 120;
+
+#[derive(Debug, serde::Deserialize)]
+pub struct RelayRequest {
+    pub token: String,
+    #[serde(default)]
+    pub sandbox: bool,
+    #[serde(default)]
+    pub collapse_id: String,
+    pub payload: Value,
+}
+
+/// `POST /worker/push/relay` (SPEC §16): another hub's notice, sent with this hub's APNs key.
+/// Only with `HQC_APNS_RELAY=1`; outside Access as every `/worker/*`, limited per address. It
+/// sends an alert only (an object with `aps.alert`), at most 4 KB, to a token in the form APNs
+/// gives; `{result: "gone"}` tells the other hub to forget the device.
+pub async fn relay(
+    axum::extract::State(app): axum::extract::State<crate::app::AppState>,
+    crate::security::ClientIp(ip): crate::security::ClientIp,
+    axum::Json(b): axum::Json<RelayRequest>,
+) -> crate::error::ApiResult<axum::Json<Value>> {
+    use crate::error::ApiError;
+    let Some(apns) = app.apns.clone().filter(|_| app.config.apns_relay_serve) else {
+        return Err(ApiError::Invalid(
+            "no_relay",
+            "this hub does not relay Apple push".into(),
+        ));
+    };
+    if !app.limiter.allow("apns_relay", &ip, RELAY_PER_MIN) {
+        return Err(ApiError::TooManyRequests);
+    }
+    let token = b.token.trim().to_ascii_lowercase();
+    if !valid_device_token(&token) {
+        return Err(ApiError::BadRequest(
+            "token must be an APNs device token in hex".into(),
+        ));
+    }
+    if !b.payload["aps"]["alert"].is_object() {
+        return Err(ApiError::BadRequest(
+            "payload must be an alert notice".into(),
+        ));
+    }
+    let bytes = serde_json::to_vec(&b.payload).unwrap_or_default();
+    if bytes.len() > MAX_PAYLOAD {
+        return Err(ApiError::BadRequest("payload over 4 KB".into()));
+    }
+    let collapse = collapse_id(&b.collapse_id);
+    match apns.send(&token, b.sandbox, &collapse, &bytes).await {
+        Ok(()) => Ok(axum::Json(json!({ "result": "sent" }))),
+        Err(PushError::Gone) => Ok(axum::Json(json!({ "result": "gone" }))),
+        Err(PushError::Other(e)) => {
+            tracing::warn!(error = %e, "APNs relay");
+            Err(ApiError::Internal(anyhow::anyhow!("APNs: {e}")))
+        }
+    }
 }
 
 #[cfg(test)]

@@ -431,6 +431,8 @@ struct Io {
     /// The transcript's uuid and the registry its records go to (SPEC §9.3).
     runtime: Mutex<Uuid>,
     own: Arc<OwnRecords>,
+    /// What has been read of the transcript for its goal records (SPEC 0.218).
+    goals: tokio::sync::Mutex<rate::GoalTail>,
 }
 
 impl Io {
@@ -1083,6 +1085,7 @@ impl ClaudeCodeAdapter {
                     fork: None,
                     compaction: None,
                     model: None,
+                    goal: None,
                 },
             );
             let _ = self.events.send(AdapterEvent::Event(ev)).await;
@@ -1103,6 +1106,7 @@ impl ClaudeCodeAdapter {
                     fork: None,
                     compaction: None,
                     model: None,
+                    goal: None,
                 },
             );
             let _ = self.events.send(AdapterEvent::Event(ev)).await;
@@ -1126,6 +1130,7 @@ impl ClaudeCodeAdapter {
                     fork: None,
                     compaction: None,
                     model: None,
+                    goal: None,
                 },
             );
             let _ = self.events.send(AdapterEvent::Event(ev)).await;
@@ -1133,12 +1138,16 @@ impl ClaudeCodeAdapter {
 
         // The CLI carries the session's cost and `modelUsage` over `--resume` from the
         // transcript's last `cost-state`; per-turn costs are counted from there (T27). It
-        // resurrects the session's cron jobs from it too (SPEC §8.1). The transcript is dropped
-        // after this.
+        // resurrects the session's cron jobs from it too (SPEC §8.1), and its last goal record
+        // is told, whatever the state: a goal set or ended while hqc did not run the session
+        // shows right, and the hub drops it when it has the record (SPEC 0.218). The transcript
+        // is dropped after this.
+        let mut goal = None;
         let cost_baseline = match transcript.as_ref().filter(|_| resume) {
             Some(p) => match tokio::fs::read_to_string(p).await {
                 Ok(t) => {
                     cron_jobs = resurrected_cron_jobs(&t, chrono::Utc::now().timestamp_millis());
+                    goal = hqc_claude_jsonl::last_goal_status(&t);
                     hqc_claude_jsonl::last_cost_state(&t)
                 }
                 Err(_) => None,
@@ -1156,6 +1165,7 @@ impl ClaudeCodeAdapter {
         let initialize = core.initialize();
         let resumed_live = core.resumed_live();
         let core = Arc::new(Mutex::new(core));
+        let goals = tokio::sync::Mutex::new(rate::GoalTail::start(transcript.clone()).await);
         let io = Arc::new(Io {
             session_id: self.session_id,
             stdin: tokio::sync::Mutex::new(Some(spawned.stdin)),
@@ -1165,9 +1175,14 @@ impl ClaudeCodeAdapter {
             title: Mutex::new(None),
             runtime: Mutex::new(uuid),
             own: self.opts.own_records.clone(),
+            goals,
         });
         // The first list of the process: the cron jobs it resurrected.
         let _ = io.run(resumed_live).await;
+        if let Some(g) = goal {
+            let ev = engine::goal_event(self.session_id, &g);
+            let _ = self.events.send(AdapterEvent::Event(ev)).await;
+        }
         let pid = spawned.pid;
         let live = Live::new(self.opts.own_records.clone(), uuid, pid);
         let killing = Arc::new(AtomicBool::new(false));
@@ -1507,6 +1522,13 @@ async fn wait_exit(rx: &mut watch::Receiver<Option<ExitInfo>>, d: Duration) -> b
         .is_ok_and(|r| r.is_ok())
 }
 
+/// A stream-json `result` line. Its `type` is not its first key (2.1.312), so a line is parsed,
+/// and only one holding a `"result"` string: a quote inside a text is escaped.
+fn is_result(line: &str) -> bool {
+    line.contains(r#""result""#)
+        && serde_json::from_str::<serde_json::Value>(line).is_ok_and(|v| v["type"] == "result")
+}
+
 /// Reads stdout until EOF (or shortly after the process exited), then reports the exit.
 #[allow(clippy::too_many_arguments)]
 async fn monitor(
@@ -1539,6 +1561,14 @@ async fn monitor(
                 Ok(_) => {
                     let line = String::from_utf8_lossy(&buf).into_owned();
                     buf.clear();
+                    // The goal records first: the check of the turn's last text is written
+                    // before the `result`, and goes behind that text (SPEC 0.218).
+                    if is_result(&line) {
+                        let goals = rate::read_goals(&core, &io).await;
+                        if let Err(e) = io.run(goals).await {
+                            tracing::warn!(session_id = %io.session_id, "{e:#}");
+                        }
+                    }
                     let (actions, seen, cleared) = {
                         let mut c = lock(&core);
                         let a = c.on_line(&line);

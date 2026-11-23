@@ -553,6 +553,13 @@ export function Chat({
   });
 
   const stop = () => act(() => chat.stop(), 'Not stopped');
+  // A goal is cleared by the slash command, which Claude Code takes between turns (SPEC 0.218):
+  // while a turn runs, it is stopped first. Stop leaves the goal set.
+  const clearGoal = () =>
+    act(async () => {
+      if (STOPPABLE.has(state)) await chat.stop();
+      chat.send('/goal clear', []);
+    }, 'Goal not cleared');
   const toBackground = (callId: string) => void act(() => chat.background(callId), 'Not moved to the background');
   const stopTask = (taskId: string) => act(() => chat.stopTask(taskId), 'Not stopped');
   // The rows first in the live block (§17.1): the main agent's, or a room's agents at work; only
@@ -647,6 +654,7 @@ export function Chat({
   const disabled = archived || locked;
   const sheet = sheetRequest && firstApproval?.type === 'approval.request' ? firstApproval : undefined;
   const inputShown = !system && !disabled && !sheet;
+  const goal = system ? null : t.goal();
   // From a new session's window at once; otherwise with the newest page in, so that an open
   // request keeps Enter and Esc for its card (they are a field's while it has the focus). A chat
   // kept in memory may not have the request that came while it was closed: the session's
@@ -952,12 +960,14 @@ export function Chat({
         )}
         {/* The list also holds the agent's background commands, which only background_tasks counts. */}
         {/* The wakeups and cron jobs of the agent and the session's schedules wait while it is idle. */}
-        {(lead.length > 0 ||
+        {(goal !== null ||
+          lead.length > 0 ||
           (info?.subagents ?? 0) > 0 ||
           (info?.background_tasks ?? 0) > 0 ||
           t.liveAgents.some((a) => a.kind === 'wakeup' || a.kind === 'cron') ||
           t.liveSchedules.length > 0) && (
           <LiveSubagents
+            goal={goal ? { ...goal, running: STOPPABLE.has(state), onClear: inputShown ? clearGoal : undefined } : undefined}
             lead={lead}
             agents={t.liveAgents}
             receivedAt={t.liveAgentsAt}

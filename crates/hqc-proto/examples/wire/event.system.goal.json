@@ -1,0 +1,20 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000132",
+  "seq": 45,
+  "ts": "2026-10-22T10:06:00Z",
+  "author": { "kind": "system" },
+  "type": "system",
+  "payload": {
+    "text": "Goal achieved",
+    "code": "goal",
+    "goal": {
+      "condition": "all tests in packages/api pass",
+      "state": "met",
+      "reason": "The last run of npm test in packages/api passed all 214 tests.",
+      "checks": 3,
+      "duration_ms": 54786,
+      "tokens": 918
+    }
+  }
+}

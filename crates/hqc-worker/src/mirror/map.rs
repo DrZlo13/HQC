@@ -34,6 +34,10 @@
 //!   output, none for an empty one; never a `user.message` with the tags;
 //! - `system` `local_command` (a slash command's output, 2.1.312) → `system command_output`
 //!   the same way;
+//! - an `attachment` `goal_status` (the session's goal set, checked, met, failed or cleared)
+//!   → `system goal`, the event the adapter sends for the same record ([`goal_event`]; SPEC
+//!   0.218). While the worker's own process runs the session the mirror does not emit it: the
+//!   adapter read the record from the transcript and reported it;
 //! - the summary record after a `system` `compact_boundary` → `system context_compacted` with
 //!   the summary ([`compaction`]), as from the adapter but without its `trigger` and token
 //!   counts.
@@ -46,15 +50,15 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use hqc_claude_jsonl::{Attachment, Message, Record};
+use hqc_claude_jsonl::{goal_of, Attachment, Message, Record};
 use hqc_proto::event::{Author, ClarifyAnswer, Delivery, Event, EventKind};
 use hqc_proto::frame::{MAX_SUBAGENT_HISTORY, MAX_SUBAGENT_HISTORY_BYTES};
 use uuid::Uuid;
 
 use crate::adapter::claude_code::engine::{
-    args_preview, parse_questions, preview, result_text, text, COMMAND_OUTPUT, CONTEXT_COMPACTED,
-    CONTEXT_COMPACTED_TEXT, ERROR_TEXT_LIMIT, NO_CONTENT, PREVIEW_LIMIT, REFUSAL, SYNTHETIC_MODEL,
-    TASK_NOTIFICATION, TURN_INTERRUPTED, TURN_INTERRUPTED_TEXT,
+    args_preview, goal_event, parse_questions, preview, result_text, text, COMMAND_OUTPUT,
+    CONTEXT_COMPACTED, CONTEXT_COMPACTED_TEXT, ERROR_TEXT_LIMIT, NO_CONTENT, PREVIEW_LIMIT,
+    REFUSAL, SYNTHETIC_MODEL, TASK_NOTIFICATION, TURN_INTERRUPTED, TURN_INTERRUPTED_TEXT,
 };
 
 /// `origin.kind` of the `user` record of a background task's notification (2.1.312), and
@@ -115,6 +119,7 @@ pub fn record_events(record: &Record, in_reply_to: Option<Uuid>) -> Vec<Event> {
     match record {
         Record::User(m) if m.is_main() => user(m),
         Record::Assistant(m) if m.is_main() => assistant(m, in_reply_to),
+        Record::Attachment(a) if goal_of(a).is_some() => goal(a).into_iter().collect(),
         Record::Attachment(a) => match (a.uuid, queued_notification(a)) {
             (Some(uuid), Some(blocks)) => {
                 vec![notification(
@@ -128,6 +133,19 @@ pub fn record_events(record: &Record, in_reply_to: Option<Uuid>) -> Vec<Event> {
         Record::System(s) => local_command(s),
         _ => vec![],
     }
+}
+
+/// A main-chain `attachment` `goal_status` record: the CLI wrote about the session's goal.
+pub fn is_goal_status(record: &Record) -> bool {
+    matches!(record, Record::Attachment(a) if goal_of(a).is_some())
+}
+
+/// `system goal` of a goal record, at the record's own time ([`goal_event`] otherwise).
+fn goal(a: &Attachment) -> Option<Event> {
+    let g = goal_of(a)?;
+    let mut e = goal_event(Uuid::nil(), &g);
+    e.ts = parse_ts(g.timestamp.as_deref());
+    Some(e)
 }
 
 /// A main-chain `system` `local_command` record: a slash command's output.
@@ -346,6 +364,7 @@ fn system_at(uuid: Uuid, ts: DateTime<Utc>, index: usize, code: &str, text: Stri
             fork: None,
             compaction: None,
             model: None,
+            goal: None,
         },
     )
 }
@@ -392,6 +411,7 @@ fn notification(uuid: Uuid, ts: DateTime<Utc>, blocks: &[serde_json::Value]) -> 
             fork: None,
             compaction: None,
             model: None,
+            goal: None,
         },
     )
 }
@@ -776,6 +796,7 @@ mod tests {
                 fork: None,
                 compaction: None,
                 model: None,
+                goal: None,
             }]
         );
         assert_eq!((&evs[0].author, evs[0].delivery), (&Author::System, None));
@@ -930,6 +951,7 @@ mod tests {
                 fork: None,
                 compaction: None,
                 model: None,
+                goal: None,
             }]
         );
     }
@@ -1216,6 +1238,7 @@ mod tests {
                 fork: None,
                 compaction: None,
                 model: None,
+                goal: None,
             }]
         );
         assert_eq!(evs[0].event_id, Event::id_from_claude_block(&uuid, 0));

@@ -2914,6 +2914,7 @@ impl Session {
                 fork: None,
                 compaction: None,
                 model: None,
+                goal: None,
             },
         );
         if let Err(e) = self.link.event(ev) {

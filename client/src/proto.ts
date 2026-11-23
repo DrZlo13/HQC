@@ -408,6 +408,22 @@ export interface SystemNote {
   model?: string;
   /** For `code: task_notification` (since 0.181): what the task spent, when the runtime says. */
   usage?: TaskUsage;
+  /** For `code: goal` (SPEC 0.218): the goal of the session and where its check stands. */
+  goal?: GoalNote;
+}
+/** Where a `/goal` stands (SPEC 0.218): set; checked and not met yet (the agent goes on); met;
+ *  given up (`failed`); cleared. */
+export const GOAL_STATES = ['set', 'unmet', 'met', 'failed', 'cleared'] as const;
+export type GoalState = (typeof GOAL_STATES)[number];
+export interface GoalNote {
+  condition: string;
+  state: GoalState | Unknown;
+  /** Why the check said "not met" or the goal failed, in the runtime's words. */
+  reason?: string;
+  /** How many checks it took, and what they spent, when the runtime says (met). */
+  checks?: number;
+  duration_ms?: number;
+  tokens?: number;
 }
 export interface TaskUsage {
   total_tokens: number;
@@ -713,6 +729,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     post_tokens: optNum(p, 'post_tokens'),
     model: optStr(p, 'model'),
     usage: present(p, 'usage') ? parseTaskUsage(obj(p.usage, 'usage')) : undefined,
+    goal: present(p, 'goal') ? parseGoal(obj(p.goal, 'goal')) : undefined,
   }),
   retraction: (p) => ({ event_ids: strArr(p, 'event_ids') }),
 };
@@ -746,6 +763,17 @@ function parseSubagent(p: Obj): RequestSubagent | undefined {
   if (!present(p, 'subagent')) return undefined;
   const s = obj(p.subagent, 'subagent');
   return { task_id: str(s, 'task_id'), description: str(s, 'description') };
+}
+
+function parseGoal(g: Obj): GoalNote {
+  return {
+    condition: str(g, 'condition'),
+    state: tolerantEnum(g, 'state', GOAL_STATES),
+    reason: optStr(g, 'reason'),
+    checks: optNum(g, 'checks'),
+    duration_ms: optNum(g, 'duration_ms'),
+    tokens: optNum(g, 'tokens'),
+  };
 }
 
 function parseTaskUsage(u: Obj): TaskUsage {

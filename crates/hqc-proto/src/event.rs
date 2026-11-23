@@ -655,6 +655,9 @@ pub enum EventKind {
         /// the hub makes the session's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// Only with [`GOAL`] (since SPEC 0.218): the goal and how it stands.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal: Option<GoalStatus>,
     },
     /// Events of the session the runtime took back (since SPEC 0.179; Claude Code: the
     /// answer of a model that refused, replaced by another model's): clients do not show
@@ -748,6 +751,30 @@ pub const SESSION_FORKED: &str = "session_forked";
 /// `system.code` of a model switch the runtime refused (SPEC §4, since 0.179). The payload
 /// carries `model`, the model the runtime kept, which the hub makes the session's.
 pub const MODEL_NOT_SWITCHED: &str = "model_not_switched";
+
+/// `system.code` of a change in the session's goal (`/goal`, SPEC §4, since 0.218). The payload
+/// carries [`GoalStatus`] as `goal`.
+pub const GOAL: &str = "goal";
+
+/// The goal of a session and how it stands (SPEC §4, since 0.218): the condition the runtime
+/// keeps the agent working until it holds, and the runtime's own check of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalStatus {
+    pub condition: String,
+    /// `set`, `unmet` (a check that did not pass), `met`, `failed` (the runtime judged the
+    /// condition impossible) or `cleared`.
+    pub state: String,
+    /// The runtime's reason of a check, when it gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// With `met` and `failed`: how many checks it took.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+}
 
 /// Extra payload of `system session_forked` (SPEC §4, §9.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1482,7 +1509,8 @@ mod tests {
                 usage: None,
                 fork: None,
                 compaction: None,
-                model: None
+                model: None,
+                goal: None
             }
         );
     }
@@ -1503,6 +1531,48 @@ mod tests {
         let plain: Event =
             serde_json::from_str(include_str!("../examples/wire/event.system.json")).unwrap();
         assert!(matches!(plain.kind, EventKind::System { model: None, .. }));
+    }
+
+    /// SPEC §4 (0.218): `system goal` carries the goal as a nested object, whose empty fields
+    /// are left out; other lines carry none.
+    #[test]
+    fn a_goal_line_carries_the_goal() {
+        let src = include_str!("../examples/wire/event.system.goal.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::System { code, goal, .. } = &e.kind else {
+            panic!("not system: {:?}", e.kind);
+        };
+        assert_eq!(code, GOAL);
+        assert_eq!(
+            goal,
+            &Some(GoalStatus {
+                condition: "all tests in packages/api pass".into(),
+                state: "met".into(),
+                reason: Some(
+                    "The last run of npm test in packages/api passed all 214 tests.".into()
+                ),
+                checks: Some(3),
+                duration_ms: Some(54786),
+                tokens: Some(918),
+            })
+        );
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let set = GoalStatus {
+            condition: "c".into(),
+            state: "set".into(),
+            reason: None,
+            checks: None,
+            duration_ms: None,
+            tokens: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&set).unwrap(),
+            serde_json::json!({"condition": "c", "state": "set"})
+        );
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.system.json")).unwrap();
+        assert!(matches!(plain.kind, EventKind::System { goal: None, .. }));
     }
 
     #[test]

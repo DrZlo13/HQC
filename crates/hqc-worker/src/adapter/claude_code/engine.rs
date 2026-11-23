@@ -17,7 +17,12 @@
 //!   last); non-empty `thinking` → `agent.thinking`;
 //! - `assistant` text with `model` `<synthetic>` (the CLI's own reply: an API error, "Credit
 //!   balance is too low") → `agent.message` with `runtime: true`, held and flushed as any;
-//!   with `stop_reason` `refusal` (its reply to a model refusal) also `refusal: true`;
+//!   with `stop_reason` `refusal` (its reply to a model refusal) also `refusal: true`; with
+//!   `local_command_source` (a slash command's output, which alone carries it) → `system
+//!   command_output` instead, after the held text is flushed (SPEC 0.218);
+//! - an `attachment` `goal_status` of the transcript (the CLI writes it nowhere else; the
+//!   meter reads it, [`Core::on_goal`]) → `system goal`, behind a text held when the record was
+//!   written after it (SPEC 0.218);
 //! - `assistant` text with `aborted: true` (an interrupt cut it off) → `agent.message` with
 //!   `interrupted: true`, held and flushed as any;
 //! - `system` `task_notification` (a background task ended) → `system task_notification`
@@ -179,12 +184,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
-use hqc_claude_jsonl::{model_usage_tokens, CostState, TokenSums};
+use hqc_claude_jsonl::{model_usage_tokens, CostState, GoalRecord, GoalState, TokenSums};
 use hqc_proto::event::{
     AnswerInput, ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
-    ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, GrantPlace, LiveKind,
-    LiveSubagent, OptionGrant, RequestSubagent, SessionState, TaskUsage, MODEL_NOT_SWITCHED,
-    OPTION_SERVER_ALWAYS, OPTION_SERVER_SESSION,
+    ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, GoalStatus, GrantPlace,
+    LiveKind, LiveSubagent, OptionGrant, RequestSubagent, SessionState, TaskUsage, GOAL,
+    MODEL_NOT_SWITCHED, OPTION_SERVER_ALWAYS, OPTION_SERVER_SESSION,
 };
 use hqc_proto::frame::{Activity, LeftoverCommand, PermissionMode, SessionInput, SlashCommand};
 use serde_json::{json, Value};
@@ -460,6 +465,13 @@ pub struct Core {
     /// The last assistant text: event id, text, whether the CLI wrote it itself, whether an
     /// interrupt cut it off, and whether it is the CLI's reply to a model refusal.
     held: Option<(Uuid, String, bool, bool, bool)>,
+    /// When [`Core::held`] was set, by this process's clock: a goal record of the transcript
+    /// written at or after it came after that text ([`Core::on_goal`]).
+    held_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Goal events ([`goal_event`]) whose record was written after the held text and read
+    /// before the next element brought it out: they go out behind it ([`Core::flush`]), so a
+    /// "Goal not yet met" line is not above the text the check judged (SPEC 0.218).
+    goals_behind: Vec<Event>,
     /// Event id of the `context_compacted` of a `compact_boundary`, and its `compact_metadata`,
     /// held for the summary that follows it ([`Core::release_compaction`]).
     compaction: Option<(Uuid, Option<ContextCompacted>)>,
@@ -664,6 +676,8 @@ impl Core {
             session_id,
             restricted,
             held: None,
+            held_at: None,
+            goals_behind: Vec::new(),
             compaction: None,
             activity: None,
             activity_at: None,
@@ -896,10 +910,12 @@ impl Core {
         // into a turn of hqc's leaves it ([`Core::inject_with_images`]): that turn's next line,
         // its `result`, ends it. Dropped here, it was lost when the input came between the
         // text and the `result` (SPEC §8.1).
+        let mut out = Vec::new();
         if !self.self_turn {
-            self.held = None;
+            out.extend(self.drop_held());
         }
-        vec![self.write(input, images, false)]
+        out.push(self.write(input, images, false));
+        out
     }
 
     /// An input that may join (a person's input or a `send`, SPEC §17.2) may go into the
@@ -1378,7 +1394,7 @@ impl Core {
                     out
                 }
                 Some("permission_denied") => {
-                    let mut out: Vec<Action> = self.flush(false).into_iter().collect();
+                    let mut out = self.flush(false);
                     out.extend(self.on_permission_denied(&v));
                     out
                 }
@@ -1665,6 +1681,7 @@ impl Core {
                 fork: None,
                 compaction: None,
                 model: kept.clone(),
+                goal: None,
             })];
             out.extend(kept.map(|m| Action::Emit(AdapterEvent::ModelKept(m))));
             return out;
@@ -1904,10 +1921,22 @@ impl Core {
                         continue;
                     }
                     out.extend(self.flush(false));
+                    // A slash command's output, not a reply of the CLI to the model's turn: a
+                    // line of its own, as the mirror draws it from the transcript (SPEC 0.218).
+                    if synthetic && v["local_command_source"].is_string() {
+                        out.push(self.emit_system_as(
+                            Some(id),
+                            COMMAND_OUTPUT,
+                            preview(t, PREVIEW_LIMIT),
+                            None,
+                        ));
+                        continue;
+                    }
                     if synthetic {
                         tracing::info!(session_id = %self.session_id, "runtime message");
                     }
                     self.held = Some((id, text(t), synthetic, aborted, refusal));
+                    self.held_at = Some(chrono::Utc::now());
                     // A saved text ends the live thinking too, on the hub and in clients.
                     (self.live_text, self.live_thinking) = (false, false);
                 }
@@ -2419,11 +2448,13 @@ impl Core {
         if ids.is_empty() {
             return vec![];
         }
+        let mut out = Vec::new();
         if self.held.as_ref().is_some_and(|(id, ..)| ids.contains(id)) {
-            self.held = None;
+            out.extend(self.drop_held());
         }
         tracing::info!(session_id = %self.session_id, events = ids.len(), "events retracted");
-        vec![self.emit_new(EventKind::Retraction { event_ids: ids })]
+        out.push(self.emit_new(EventKind::Retraction { event_ids: ids }));
+        out
     }
 
     /// A line for `system/init`'s MCP servers whose `status` is not `connected` nor `disabled`
@@ -2663,7 +2694,9 @@ impl Core {
         }
         self.turn_records.clear();
         self.retracted.clear();
-        let mut out: Vec<Action> = self.flush(true).into_iter().collect();
+        // The goal events behind the final text go after the turn's `usage` and end line, which
+        // the feed draws with the answer (SPEC 0.218).
+        let mut out: Vec<Action> = self.flush_text(true).into_iter().collect();
         // A request the CLI no longer waits for: after "No" to one of two parallel calls it
         // ends the turn and drops the other. Without the cancel the hub keeps its card open
         // (Claude requests do not expire), and an answer to it finds no open request here.
@@ -2761,6 +2794,7 @@ impl Core {
         if let Some((code, t)) = turn_end_line(v) {
             out.push(self.emit_system(code, t));
         }
+        out.extend(self.release_goals());
         out.push(self.emit_new(EventKind::Status {
             state: SessionState::Idle,
             // Why the turn ended early is the line above.
@@ -3238,6 +3272,7 @@ impl Core {
                 fork: None,
                 compaction: None,
                 model: None,
+                goal: None,
             },
         ))));
         if let Some(path) = v["output_file"].as_str().filter(|p| !p.is_empty()) {
@@ -3275,7 +3310,17 @@ impl Core {
 
     // ---- helpers -----------------------------------------------------------------------
 
-    fn flush(&mut self, r#final: bool) -> Option<Action> {
+    /// The held text, then the goal events that came after it ([`Core::on_goal`]); only
+    /// those when nothing is held.
+    fn flush(&mut self, r#final: bool) -> Vec<Action> {
+        let mut out: Vec<Action> = self.flush_text(r#final).into_iter().collect();
+        out.extend(self.release_goals());
+        out
+    }
+
+    /// The held text alone; the goal events behind it stay for [`Core::release_goals`].
+    fn flush_text(&mut self, r#final: bool) -> Option<Action> {
+        self.held_at = None;
         let (id, text, runtime, interrupted, refusal) = self.held.take()?;
         Some(self.emit(
             id,
@@ -3288,6 +3333,43 @@ impl Core {
                 refusal,
             },
         ))
+    }
+
+    /// The held text is dropped, not sent (an input written into the turn's end, a retraction):
+    /// the goal events behind it still go out, now.
+    fn drop_held(&mut self) -> Vec<Action> {
+        self.held = None;
+        self.held_at = None;
+        self.release_goals()
+    }
+
+    fn release_goals(&mut self) -> Vec<Action> {
+        std::mem::take(&mut self.goals_behind)
+            .into_iter()
+            .map(|e| Action::Emit(AdapterEvent::Event(e)))
+            .collect()
+    }
+
+    /// A goal record the CLI wrote into the transcript, read by the meter (SPEC 0.218). The
+    /// transcript is read on a clock of its own, stdout in order: a record may be read before
+    /// the next element of stdout brings out the text it judged, which is held. One written
+    /// at or after the moment that text was held (or without a readable time) follows it, so it
+    /// waits behind it; one written before it is sent now, which is before the text. The held
+    /// text is not flushed for it: the last one of a turn must reach `on_result` to be `final`.
+    pub fn on_goal(&mut self, g: &GoalRecord) -> Vec<Action> {
+        let event = goal_event(self.session_id, g);
+        let written_after_held = self.held.is_some()
+            && self.held_at.is_some_and(|at| {
+                g.timestamp
+                    .as_deref()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .is_none_or(|t| t >= at)
+            });
+        if written_after_held {
+            self.goals_behind.push(event);
+            return Vec::new();
+        }
+        vec![Action::Emit(AdapterEvent::Event(event))]
     }
 
     /// The held `context_compacted` ([`Core::compaction`]): its text is the summary's
@@ -3358,6 +3440,7 @@ impl Core {
                 fork: None,
                 compaction,
                 model: None,
+                goal: None,
             },
         );
         if let Some(id) = event_id {
@@ -3407,6 +3490,7 @@ impl Core {
                 fork: None,
                 compaction: None,
                 model: Some(kept.clone()),
+                goal: None,
             }),
             Action::Emit(AdapterEvent::ModelKept(kept)),
         ]
@@ -4069,6 +4153,46 @@ pub fn preview(s: &str, limit: usize) -> String {
         end -= 1;
     }
     s[..end].to_owned()
+}
+
+/// `system goal` for a goal record of the transcript (SPEC 0.218): its id follows the record's
+/// `uuid`, so the hub drops one it has. The text is Claude Code's own wording of the state; the
+/// condition and the reason are cut at [`PREVIEW_LIMIT`] bytes.
+pub fn goal_event(session_id: Uuid, g: &GoalRecord) -> Event {
+    let condition = preview(&g.condition, PREVIEW_LIMIT);
+    let t = match g.state {
+        GoalState::Set => format!("Goal set: {condition}"),
+        GoalState::Unmet => "Goal not yet met… continuing".into(),
+        GoalState::Met => "Goal achieved".into(),
+        GoalState::Failed => "Goal could not be achieved".into(),
+        GoalState::Cleared => format!("Goal cleared: {condition}"),
+    };
+    let mut e = new_event(
+        session_id,
+        Author::System,
+        EventKind::System {
+            text: t,
+            code: GOAL.into(),
+            call_id: None,
+            status: None,
+            task_id: None,
+            from_session_id: None,
+            usage: None,
+            fork: None,
+            compaction: None,
+            model: None,
+            goal: Some(GoalStatus {
+                condition,
+                state: g.state.as_str().into(),
+                reason: g.reason.as_deref().map(|r| preview(r, PREVIEW_LIMIT)),
+                checks: g.checks,
+                duration_ms: g.duration_ms,
+                tokens: g.tokens,
+            }),
+        },
+    );
+    e.event_id = Event::id_from_claude_record(&g.uuid);
+    e
 }
 
 /// Now, in epoch ms.

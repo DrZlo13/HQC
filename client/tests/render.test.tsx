@@ -678,6 +678,26 @@ describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
     expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e7", "e3", "e8", "e9", "e10"]);
   });
 
+  // SPEC 0.218: the adapter sends a slash command's output as `system command_output`, no
+  // longer as the agent's message, and a command typed during a turn still stands above it.
+  it("a slash command typed during a turn stands above its output", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 7.1, (e) => (e.payload.text = "/goal clear")),
+      result(4, "a"),
+      final(5, 1),
+      idle(6, 1),
+      ev("event.system", (e) => {
+        e.seq = 7;
+        e.payload = { code: "command_output", text: "Goal cleared: tests pass" };
+      }),
+      idle(8, 3),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e3", "e7", "e8"]);
+  });
+
   it("a turn lost right after it was taken ends the waiting input's own turn", () => {
     const t = new Timeline();
     t.applyAll([
@@ -4336,5 +4356,94 @@ describe("an answered request closes before its event", () => {
       b.click();
     });
     expect(approve).toHaveBeenCalledTimes(1);
+  });
+});
+
+// `/goal` (SPEC 0.218): the timeline's fold, the feed and the lines of the runtime's checks.
+describe("goal", () => {
+  const goalEvent = (seq: number, state: string, extra: Record<string, unknown> = {}, text = "x") =>
+    ev("event.system.goal", (e) => {
+      e.seq = seq;
+      e.event_id = `0199f3a2-7c10-7000-8000-0000000004${String(seq).padStart(2, "0")}`;
+      e.payload = { text, code: "goal", goal: { condition: "tests pass", state, ...extra } };
+    });
+  const cleared = (seq: number) =>
+    ev("event.system", (e) => {
+      e.seq = seq;
+      e.event_id = `0199f3a2-7c10-7000-8000-0000000004${String(seq).padStart(2, "0")}`;
+      e.payload = { text: "Conversation cleared", code: "conversation_cleared" };
+    });
+  const fold = (...evs: HqcEvent[]) => {
+    const t = new Timeline();
+    for (const e of evs) t.apply(e);
+    return t.goal();
+  };
+
+  it("folds the goal over its events: set, each check, the end", () => {
+    expect(fold()).toBeNull();
+    expect(fold(goalEvent(1, "set"))).toEqual({ condition: "tests pass", checks: 0 });
+    expect(
+      fold(goalEvent(1, "set"), goalEvent(2, "unmet", { reason: "1 test fails" }), goalEvent(3, "unmet", { reason: "2 tests fail" })),
+    ).toEqual({ condition: "tests pass", checks: 2, reason: "2 tests fail" });
+    // A check whose `set` is on a page not loaded still starts the goal.
+    expect(fold(goalEvent(2, "unmet", { reason: "r" }))).toEqual({ condition: "tests pass", checks: 1, reason: "r" });
+    for (const end of ["met", "failed", "cleared"]) {
+      expect(fold(goalEvent(1, "set"), goalEvent(2, "unmet"), goalEvent(3, end))).toBeNull();
+    }
+    // A new goal after the end starts from no checks and no reason.
+    expect(fold(goalEvent(1, "set"), goalEvent(2, "unmet", { reason: "r" }), goalEvent(3, "cleared"), goalEvent(4, "set"))).toEqual({
+      condition: "tests pass",
+      checks: 0,
+    });
+    // `/clear` starts a conversation that has no goal.
+    expect(fold(goalEvent(1, "set"), goalEvent(2, "unmet"), cleared(3))).toBeNull();
+    // A compaction writes the active goal's `set` again: its checks stay; another condition starts anew.
+    expect(fold(goalEvent(1, "set"), goalEvent(2, "unmet", { reason: "r" }), goalEvent(3, "set"))).toEqual({
+      condition: "tests pass",
+      checks: 1,
+      reason: "r",
+    });
+    expect(fold(goalEvent(1, "set"), goalEvent(2, "unmet", { reason: "r" }), goalEvent(3, "set", { condition: "lint is clean" }))).toEqual({
+      condition: "lint is clean",
+      checks: 0,
+    });
+  });
+
+  it("draws no block for a goal set or cleared and keeps a group of calls together past it", () => {
+    const call = (seq: number) =>
+      ev("event.tool.call", (e) => {
+        e.seq = seq;
+        e.payload.call_id = `c${seq}`;
+      });
+    const t = new Timeline();
+    for (const e of [call(1), goalEvent(2, "set"), call(3), goalEvent(4, "cleared")]) t.apply(e);
+    const blocks = buildFeed(t.items(), t);
+    expect(blocks.map((b) => b.kind)).toEqual(["tools"]);
+    expect((blocks[0] as any).rows).toHaveLength(2);
+    const shown = new Timeline();
+    shown.apply(goalEvent(1, "unmet"));
+    expect(buildFeed(shown.items(), shown)).toHaveLength(1);
+  });
+
+  it("draws a goal's end and each check that failed as the runtime's terminal does", () => {
+    const t = new Timeline();
+    t.apply(goalEvent(1, "met", { checks: 3, duration_ms: 55000, tokens: 918 }, "Goal achieved"));
+    t.apply(goalEvent(2, "unmet", {}, "Goal not yet met… continuing"));
+    t.apply(goalEvent(3, "failed", { reason: "The build is still red." }, "Goal could not be achieved"));
+    t.apply(goalEvent(4, "met", {}, "Goal achieved"));
+    show(t);
+    const lines = [...root.querySelectorAll(".line-system-goal")];
+    expect(lines).toHaveLength(4);
+    expect(lines[0].textContent).toBe("Goal achieved (55s · 3 checks · 918 tokens)");
+    expect(lines[0].classList.contains("line-goal-met")).toBe(true);
+    expect(lines[0].querySelector(".goal-note")).not.toBeNull();
+    expect(lines[1].textContent).toBe("Goal not yet met… continuing");
+    expect(lines[1].classList.contains("line-goal-unmet")).toBe(true);
+    expect(lines[2].classList.contains("line-warning")).toBe(true);
+    expect(lines[2].querySelector(".warn-icon")).not.toBeNull();
+    expect(lines[2].textContent).toBe("Goal could not be achieved" + "The build is still red.");
+    expect(lines[2].querySelector(".goal-reason")!.textContent).toBe("The build is still red.");
+    // What the runtime did not say is left out.
+    expect(lines[3].textContent).toBe("Goal achieved");
   });
 });

@@ -54,7 +54,9 @@ import {
   IconQuestion,
   IconQuote,
   IconReply,
+  IconRestore,
   IconSearch,
+  IconSend,
   IconShield,
   IconStop,
   IconWarn,
@@ -174,6 +176,13 @@ export interface ChatActions {
   /** The web search of the Search button of a message that holds a selection; without it the
    *  button is not shown. */
   webSearch?: WebSearch;
+  /** Takes the user's message that still waits for the agent back (SPEC 0.219): the bubble goes
+   *  and its text and files return to the input; says a refusal itself. Absent where the
+   *  session takes no input. */
+  withdraw?(event: EventOf<'user.message'>): Promise<void>;
+  /** Sends that message into the running turn at once (SPEC 0.219; Claude Code moves the call
+   *  the agent is in to the background); says a refusal itself. Absent unless a turn runs. */
+  sendNow?(event: EventOf<'user.message'>): Promise<void>;
 }
 
 export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActions }) {
@@ -969,9 +978,26 @@ function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'
   const root = useRef<HTMLDivElement>(null);
   // Where fork is: not on a message waiting for delivery or not delivered.
   const quick = event.author.kind === 'user' && event.payload.text && d !== 'pending' && d !== 'failed' ? actions.quickMessages : undefined;
-  const buttons = (event.payload.text || fork) && (
+  // The message the person typed that waits for the agent (`human`, SPEC 0.219: not a note of the
+  // hub's, a schedule's run or a message of another session): it can be taken back, or sent into
+  // the turn now, unless it is a slash command, which the runtime takes only between turns, never
+  // into a running one.
+  const waiting = event.author.kind === 'user' && d === 'pending' && event.payload.human === true;
+  const sendable = waiting && !event.payload.text.trim().startsWith('/');
+  const buttons = (event.payload.text || fork || waiting) && (
     <>
       {event.payload.text && <SelectionButtons root={root} text={event.payload.text} actions={actions} />}
+      {waiting && actions.withdraw && <WaitingButton event={event} label="Take back" title="Take back: the message returns to the input" run={actions.withdraw} icon={<IconRestore size={13} />} cls="btn-withdraw" />}
+      {sendable && actions.sendNow && (
+        <WaitingButton
+          event={event}
+          label="Send now"
+          title="Send now: the agent takes the message into its turn at once, a running command moves to the background; while the agent writes its answer, the answer stops and the message runs next"
+          run={actions.sendNow}
+          icon={<IconSend size={13} />}
+          cls="btn-send-now"
+        />
+      )}
       {quick && <QuickAddButton text={event.payload.text} quick={quick} />}
       {fork && (
         <button
@@ -1014,6 +1040,37 @@ function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'
         )}
       </Bubble>
     </div>
+  );
+}
+
+/** A button of a message that waits for the agent (Take back, Send now): one press at a time. */
+function WaitingButton({
+  event,
+  label,
+  title,
+  run,
+  icon,
+  cls,
+}: {
+  event: EventOf<'user.message'>;
+  label: string;
+  title: string;
+  run: (event: EventOf<'user.message'>) => Promise<void>;
+  icon: ComponentChildren;
+  cls: string;
+}) {
+  const action = useAction();
+  return (
+    <button
+      type="button"
+      class={`btn-copy btn-copy-idle ${cls}`}
+      disabled={action.busy}
+      aria-label={label}
+      title={title}
+      onClick={() => action.run(() => run(event))}
+    >
+      {icon}
+    </button>
   );
 }
 

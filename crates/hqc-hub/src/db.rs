@@ -2225,6 +2225,7 @@ pub async fn first_text(db: &PgPool, id: Uuid, kind: &str) -> sqlx::Result<Optio
          WHERE session_id = $1 AND type = $2
            AND ($2 <> 'agent.message' OR payload->>'final' = 'true')
            AND coalesce(payload->>'text', '') <> ''
+           AND delivery IS DISTINCT FROM 'withdrawn'
          ORDER BY seq LIMIT 1",
     )
     .bind(id)
@@ -3009,19 +3010,32 @@ pub async fn events_by_ids(db: &PgPool, ids: &[Uuid]) -> sqlx::Result<Vec<EventR
     .await
 }
 
+/// Whether a read of a session's events returns the inputs the owner took back (`delivery`
+/// `withdrawn`, SPEC 0.219). A client gets them: a device that missed the `delivery` frame
+/// learns from the event itself that the message is gone, and its timeline hides it. What an
+/// agent or a search reads leaves them out: they never reached the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Withdrawn {
+    Included,
+    Excluded,
+}
+
 /// Events with `seq > after_seq`, oldest first.
 pub async fn events_after(
     db: &PgPool,
     session_id: Uuid,
     after_seq: i64,
     limit: i64,
+    withdrawn: Withdrawn,
 ) -> sqlx::Result<Vec<EventRow>> {
     sqlx::query_as(&format!(
-        "SELECT {EVENT_COLS} FROM events WHERE session_id = $1 AND seq > $2 ORDER BY seq LIMIT $3"
+        "SELECT {EVENT_COLS} FROM events WHERE session_id = $1 AND seq > $2
+           AND ($4 OR delivery IS DISTINCT FROM 'withdrawn') ORDER BY seq LIMIT $3"
     ))
     .bind(session_id)
     .bind(after_seq)
     .bind(limit)
+    .bind(withdrawn == Withdrawn::Included)
     .fetch_all(db)
     .await
 }
@@ -3032,13 +3046,16 @@ pub async fn events_before(
     session_id: Uuid,
     before_seq: i64,
     limit: i64,
+    withdrawn: Withdrawn,
 ) -> sqlx::Result<Vec<EventRow>> {
     let mut v: Vec<EventRow> = sqlx::query_as(&format!(
-        "SELECT {EVENT_COLS} FROM events WHERE session_id = $1 AND seq < $2 ORDER BY seq DESC LIMIT $3"
+        "SELECT {EVENT_COLS} FROM events WHERE session_id = $1 AND seq < $2
+           AND ($4 OR delivery IS DISTINCT FROM 'withdrawn') ORDER BY seq DESC LIMIT $3"
     ))
     .bind(session_id)
     .bind(before_seq)
     .bind(limit)
+    .bind(withdrawn == Withdrawn::Included)
     .fetch_all(db)
     .await?;
     v.reverse();
@@ -3104,6 +3121,41 @@ pub async fn move_inputs(
     .bind(to)
     .fetch_all(db)
     .await
+}
+
+/// The owner took the input back before the agent took it (SPEC 0.219): `withdrawn`, which a
+/// read for an agent or a search leaves out ([`Withdrawn`]); `None` if it was not pending.
+/// `unhanded_only`: only an input the hub never handed to a worker (`handed_at` null): one
+/// handed may be held by a worker, which has to say it let go of it first.
+pub async fn mark_input_withdrawn(
+    db: &PgPool,
+    event_id: Uuid,
+    unhanded_only: bool,
+) -> sqlx::Result<Option<EventRow>> {
+    sqlx::query_as(&format!(
+        "UPDATE events SET delivery = 'withdrawn'
+         WHERE event_id = $1 AND delivery = 'pending' AND (NOT $2 OR handed_at IS NULL)
+         RETURNING {EVENT_COLS}"
+    ))
+    .bind(event_id)
+    .bind(unhanded_only)
+    .fetch_optional(db)
+    .await
+}
+
+/// The hub is about to hand the pending input to a worker (SPEC 0.219): marks the first time
+/// and says whether it may go. `false`: it is not pending any more (the owner took it back), so
+/// it must not be sent. Marked before the frame goes, so a withdrawal on the hub alone, which
+/// needs `handed_at` null, can never take back an input a worker may hold.
+pub async fn mark_input_handed(db: &PgPool, event_id: Uuid) -> sqlx::Result<bool> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "UPDATE events SET handed_at = COALESCE(handed_at, now())
+         WHERE event_id = $1 AND delivery = 'pending' RETURNING event_id",
+    )
+    .bind(event_id)
+    .fetch_optional(db)
+    .await?
+    .is_some())
 }
 
 pub async fn mark_input_failed(db: &PgPool, event_id: Uuid) -> sqlx::Result<Option<EventRow>> {
@@ -3558,6 +3610,7 @@ pub async fn first_after_inputs_during_text(
     sqlx::query_as(&format!(
         r#"SELECT {EVENT_COLS} FROM events
          WHERE session_id = $1 AND seq > $2
+           AND delivery IS DISTINCT FROM 'withdrawn'
            AND NOT (type IN ('user.message', 'peer.message')
                     AND payload @> '{{"during_text": true}}')
          ORDER BY seq LIMIT 1"#
@@ -3595,7 +3648,8 @@ pub async fn turn_marks(db: &PgPool, id: Uuid) -> sqlx::Result<Vec<TurnMark>> {
                   payload ->> 'in_reply_to' AS in_reply_to,
                   COALESCE(payload @> '{"joined": true}', false) AS joined,
                   delivery, delivered_at
-           FROM events WHERE session_id = $1 ORDER BY seq"#,
+           FROM events WHERE session_id = $1 AND delivery IS DISTINCT FROM 'withdrawn'
+           ORDER BY seq"#,
     )
     .bind(id)
     .fetch_all(db)
@@ -3624,6 +3678,7 @@ pub async fn copy_events(
          SELECT gen_random_uuid(), $2, row_number() OVER (ORDER BY seq), ts, author, type,
                 payload, COALESCE(origin_id, event_id), COALESCE(origin_runtime, $5)
          FROM events e WHERE session_id = $1 AND type = ANY($4)
+           AND delivery IS DISTINCT FROM 'withdrawn'
            AND (seq < $3 OR (seq > $3 AND seq < $6
                              AND type NOT IN ('user.message', 'peer.message')))
            AND NOT EXISTS (SELECT 1 FROM events r WHERE r.session_id = $1

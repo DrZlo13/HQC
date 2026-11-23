@@ -5,7 +5,8 @@
 //! is recorded and survived). Every stdin line, command and signal is recorded; a
 //! `control_request` `initialize` is no prompt or answer, like the real CLI's handshake, and is
 //! recorded apart ([`ScriptedClaude::initialize`]). It answers no `interrupt` unless
-//! [`ScriptedClaude::answering_interrupts`], and exits at the end of its stdin only if
+//! [`ScriptedClaude::answering_interrupts`], no `cancel_async_message` unless
+//! [`ScriptedClaude::answering_cancels`], and exits at the end of its stdin only if
 //! [`ScriptedClaude::exiting_on_eof`].
 
 use std::io;
@@ -26,12 +27,21 @@ struct State {
     signals: Vec<Sig>,
 }
 
+/// What the scripted CLI answers on its own: an `interrupt` (`interrupts`), a
+/// `cancel_async_message` with `cancelled` set to the value (`cancels`).
+#[derive(Clone, Copy, Default)]
+struct Answers {
+    interrupts: bool,
+    cancels: Option<bool>,
+}
+
 /// Reads stdin up to the next line that is not an `initialize` request and records what it
-/// read, answering an `interrupt` on `out` if `answer` is set; `None` at EOF.
+/// read, answering an `interrupt` or a `cancel_async_message` on `out` as `answer` says; `None`
+/// at EOF.
 async fn next_line(
     rd: &mut BufReader<tokio::io::DuplexStream>,
     out: &mut tokio::io::DuplexStream,
-    answer: bool,
+    answer: Answers,
     state: &Mutex<State>,
 ) -> Option<()> {
     loop {
@@ -51,12 +61,22 @@ async fn next_line(
             }
             s.stdin.push(v.clone());
         }
-        if answer && v["type"] == "control_request" && v["request"]["subtype"] == "interrupt" {
-            let reply = serde_json::json!({
-                "type": "control_response",
-                "response": {"subtype": "success", "request_id": v["request_id"]},
-            });
-            out.write_all(format!("{reply}\n").as_bytes()).await.ok()?;
+        if v["type"] == "control_request" {
+            let reply = match (v["request"]["subtype"].as_str(), answer.cancels) {
+                (Some("interrupt"), _) if answer.interrupts => Some(serde_json::json!({
+                    "type": "control_response",
+                    "response": {"subtype": "success", "request_id": v["request_id"]},
+                })),
+                (Some("cancel_async_message"), Some(cancelled)) => Some(serde_json::json!({
+                    "type": "control_response",
+                    "response": {"subtype": "success", "request_id": v["request_id"],
+                        "response": {"cancelled": cancelled}},
+                })),
+                _ => None,
+            };
+            if let Some(reply) = reply {
+                out.write_all(format!("{reply}\n").as_bytes()).await.ok()?;
+            }
         }
         return Some(());
     }
@@ -68,8 +88,9 @@ pub struct ScriptedClaude {
     state: Arc<Mutex<State>>,
     /// Signals the process survives, like a CLI stuck in a tool call that ignores SIGINT.
     ignored: Arc<Vec<Sig>>,
-    /// Answers each `interrupt` with a `control_response`, as the real CLI does.
-    answers_interrupts: bool,
+    /// Answers each `interrupt` with a `control_response`, as the real CLI does, and each
+    /// `cancel_async_message` as [`ScriptedClaude::answering_cancels`] says.
+    answers: Answers,
     /// At the end of its stdin: these lines, then exit with status 0, as the real CLI does
     /// when it is idle (`None`: it stays until signalled).
     exits_on_eof: Option<Arc<Vec<String>>>,
@@ -88,14 +109,20 @@ impl ScriptedClaude {
             ),
             state: Arc::default(),
             ignored: Arc::default(),
-            answers_interrupts: false,
+            answers: Answers::default(),
             exits_on_eof: None,
         }
     }
 
     /// The same, answering each `interrupt`.
     pub fn answering_interrupts(mut self) -> Self {
-        self.answers_interrupts = true;
+        self.answers.interrupts = true;
+        self
+    }
+
+    /// The same, answering each `cancel_async_message` with `cancelled`.
+    pub fn answering_cancels(mut self, cancelled: bool) -> Self {
+        self.answers.cancels = Some(cancelled);
         self
     }
 
@@ -151,7 +178,7 @@ impl Spawner for ScriptedClaude {
         let state = self.state.clone();
         let mut stop = sig_rx.clone();
         let (eof_tx, eof_rx) = watch::channel(false);
-        let answer = self.answers_interrupts;
+        let answer = self.answers;
         let trailer = self.exits_on_eof.clone();
         tokio::spawn(async move {
             let mut rd = BufReader::new(script_in);

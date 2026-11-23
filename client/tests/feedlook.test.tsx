@@ -456,6 +456,58 @@ describe('the message buttons', () => {
     }
   });
 
+  it('take back and send now where the user\'s message waits for the agent, before fork and the others', () => {
+    const withdraw = vi.fn(async () => {});
+    const sendNow = vi.fn(async () => {});
+    const labels = () => [...root.querySelectorAll('.msg-user .msg-buttons button')].map((b) => b.getAttribute('aria-label'));
+    const pending = (patch: (e: any) => void = () => {}) =>
+      user(1, 'go', (e) => {
+        e.delivery = 'pending';
+        e.payload.human = true;
+        patch(e);
+      });
+    show([pending()], { withdraw, sendNow, fork: vi.fn() });
+    expect(labels()).toEqual(['Copy', 'Take back', 'Send now']);
+    root.querySelector<HTMLButtonElement>('.msg-user .btn-withdraw')!.click();
+    expect(withdraw).toHaveBeenCalledWith(expect.objectContaining({ event_id: id(1) }));
+    root.querySelector<HTMLButtonElement>('.msg-user .btn-send-now')!.click();
+    expect(sendNow).toHaveBeenCalledWith(expect.objectContaining({ event_id: id(1) }));
+    // Send now is offered only while a turn runs.
+    show([pending()], { withdraw });
+    expect(labels()).toEqual(['Copy', 'Take back']);
+    // Not on a message the agent took, one that failed, one the user did not type (a schedule's
+    // run, a note of the hub's own: none of them has `human`).
+    for (const patch of [
+      (e: any) => (e.delivery = 'delivered'),
+      (e: any) => (e.delivery = 'failed'),
+      (e: any) => delete e.payload.human,
+      (e: any) => (e.payload.schedule_id = id(99)) && delete e.payload.human,
+      (e: any) => (e.payload.resume = true) && delete e.payload.human,
+    ]) {
+      show([pending(patch)], { withdraw, sendNow });
+      expect(labels()).toEqual(['Copy']);
+    }
+    // A slash command is taken back, but not sent now: the runtime runs it by itself.
+    show([user(1, '  /compact now', (e) => ((e.delivery = 'pending'), (e.payload.human = true)))], { withdraw, sendNow });
+    expect(labels()).toEqual(['Copy', 'Take back']);
+    // No input to put it back into: no button.
+    show([pending()], {});
+    expect(labels()).toEqual(['Copy']);
+  });
+
+  it('a message withdrawn is no part of the feed, however it came', () => {
+    const { timeline, draw } = show([user(1, 'go', (e) => (e.delivery = 'pending')), user(2, 'next')]);
+    expect(root.querySelectorAll('.msg-user')).toHaveLength(2);
+    timeline.applyDelivery({ session_id: 's1', event_id: id(1), seq: 1, delivery: 'withdrawn' });
+    draw();
+    expect([...root.querySelectorAll('.msg-user .msg-text')].map((t) => t.textContent)).toEqual(['next']);
+    // The hub's copy of the event (a reload) with the delivery it has now.
+    const fresh = new Timeline();
+    fresh.apply(user(1, 'go', (e) => (e.delivery = 'withdrawn')));
+    fresh.apply(user(2, 'next'));
+    expect(fresh.events().map((e) => e.seq)).toEqual([2]);
+  });
+
   it("keep the phone size: the smaller buttons are a computer's only", () => {
     // No rule makes them smaller than the 24 px `.btn-copy-idle` outside `.chat:not(.chat-phone)`.
     expect(rule('.btn-copy-idle')).toMatch(/width: 24px;/);

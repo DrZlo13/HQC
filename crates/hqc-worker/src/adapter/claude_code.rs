@@ -1361,6 +1361,49 @@ impl Adapter for ClaudeCodeAdapter {
         Ok(true)
     }
 
+    async fn inject_now_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<bool> {
+        let images = image_blocks(files).await;
+        let p = self.running()?;
+        let Some(actions) = lock(&p.core).inject_now_with_images(input, images) else {
+            return Ok(false);
+        };
+        p.io.own.sent(p.io.runtime(), &input.text);
+        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude during the turn, priority now");
+        p.io.run(actions).await?;
+        Ok(true)
+    }
+
+    async fn withdraw_input(&mut self, event_id: Uuid) -> anyhow::Result<bool> {
+        let Ok(p) = self.running() else {
+            return Ok(false);
+        };
+        let Some((req, request_id)) = lock(&p.core).withdraw(event_id) else {
+            return Ok(false);
+        };
+        tracing::info!(session_id = %self.session_id, %event_id, "asking claude to drop a message it has not taken");
+        p.io.run(vec![req]).await?;
+        // The CLI answers at once; one that does not is hung (as for `interrupt`).
+        let deadline = tokio::time::Instant::now() + self.opts.interrupt_answer;
+        let mut exited = p.exited.clone();
+        loop {
+            if let Some(cancelled) = lock(&p.core).withdraw_answer(&request_id) {
+                return Ok(cancelled);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                lock(&p.core).withdraw_unanswered(&request_id);
+                anyhow::bail!("claude did not answer cancel_async_message");
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(INTERRUPT_POLL) => {}
+                _ = exited.wait_for(Option::is_some) => anyhow::bail!("claude exited"),
+            }
+        }
+    }
+
     async fn stop(&mut self) -> anyhow::Result<()> {
         let Ok(p) = self.running() else {
             return Ok(());

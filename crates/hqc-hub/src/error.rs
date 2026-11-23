@@ -37,6 +37,10 @@ pub enum ApiError {
     /// The worker did not answer a request in time.
     #[error("the worker did not answer in time")]
     WorkerTimeout,
+    /// `502`: the worker answered a request with an `error` of its own, whose code and message
+    /// the owner gets as they are (`session.withdraw`, `session.input_now`, SPEC 0.219).
+    #[error("{1}")]
+    WorkerError(String, String),
     #[error("too many requests")]
     TooManyRequests,
     /// `429` with its own code (`worker_busy`, SPEC §20).
@@ -60,24 +64,27 @@ impl From<sqlx::Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, code) = match &self {
-            ApiError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
-            ApiError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
-            ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
-            ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
-            ApiError::Invalid(code, _) => (StatusCode::BAD_REQUEST, *code),
-            ApiError::Unprocessable(code, _) => (StatusCode::UNPROCESSABLE_ENTITY, *code),
+        let (status, code): (_, std::borrow::Cow<'static, str>) = match &self {
+            ApiError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized".into()),
+            ApiError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden".into()),
+            ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found".into()),
+            ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request".into()),
+            ApiError::Invalid(code, _) => (StatusCode::BAD_REQUEST, (*code).into()),
+            ApiError::Unprocessable(code, _) => (StatusCode::UNPROCESSABLE_ENTITY, (*code).into()),
             ApiError::Conflict(code, _) | ApiError::ConflictWith(code, _, _) => {
-                (StatusCode::CONFLICT, *code)
+                (StatusCode::CONFLICT, (*code).into())
             }
-            ApiError::WorkerTimeout => (StatusCode::GATEWAY_TIMEOUT, "worker_timeout"),
-            ApiError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),
-            ApiError::Limited(code, _) => (StatusCode::TOO_MANY_REQUESTS, *code),
-            ApiError::TooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
-            ApiError::Busy => (StatusCode::SERVICE_UNAVAILABLE, "busy"),
+            ApiError::WorkerTimeout => (StatusCode::GATEWAY_TIMEOUT, "worker_timeout".into()),
+            ApiError::TooManyRequests => {
+                (StatusCode::TOO_MANY_REQUESTS, "too_many_requests".into())
+            }
+            ApiError::Limited(code, _) => (StatusCode::TOO_MANY_REQUESTS, (*code).into()),
+            ApiError::TooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "too_large".into()),
+            ApiError::Busy => (StatusCode::SERVICE_UNAVAILABLE, "busy".into()),
+            ApiError::WorkerError(code, _) => (StatusCode::BAD_GATEWAY, code.clone().into()),
             ApiError::Internal(e) => {
                 tracing::error!(error = %e, "internal error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal".into())
             }
         };
         let message = match &self {
@@ -88,7 +95,7 @@ impl IntoResponse for ApiError {
         if let ApiError::ConflictWith(_, _, extra) = self {
             body = extra;
         }
-        body.insert("error".into(), code.into());
+        body.insert("error".into(), code.as_ref().into());
         body.insert("message".into(), message.into());
         (status, Json(serde_json::Value::Object(body))).into_response()
     }

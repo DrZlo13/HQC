@@ -988,6 +988,57 @@ async fn max_sessions_limits_running_agents() {
     w.stop().await;
 }
 
+// SPEC 0.219: a session that waits for a slot for one input, which the owner takes back, waits
+// no more: a slot that frees up later starts no agent for it.
+#[tokio::test]
+async fn a_withdrawn_last_input_ends_the_wait_for_a_slot() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut config = env.config(&hub.url());
+    config.max_sessions = 1;
+    let w = start_worker_with(&env, config, &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+
+    let first = Uuid::now_v7();
+    start_session(&mut c, &env, first).await;
+    let second = Uuid::now_v7();
+    start_session(&mut c, &env, second).await;
+    let eid = Uuid::now_v7();
+    c.frame("session.input", input(second, eid, "hi")).await;
+    // It has met the full slots: the feed says it waits.
+    loop {
+        let f = c.expect("event").await;
+        let ev = &f["payload"]["event"];
+        c.ack_event(&f, 1).await;
+        if ev["type"] == "system" && ev["payload"]["code"] == "waiting_for_slot" {
+            break;
+        }
+    }
+    c.frame("session.withdraw", input_ref("w-1", second, eid))
+        .await;
+    assert_eq!(
+        c.expect("result").await["payload"],
+        json!({"request_id": "w-1", "withdrawn": true})
+    );
+    // The first stops: nobody waits for its slot.
+    let id = c.frame("session.kill", json!({"session_id": first})).await;
+    loop {
+        let f = c.expect("ack").await;
+        if f["id"] == id.as_str() {
+            break;
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !adapters.calls().contains(&FakeCall::Start(second)),
+        "an agent was started for nothing: {:?}",
+        adapters.calls()
+    );
+    w.stop().await;
+}
+
 // A failed spawn is `agent_start_failed`, retryable, for the start and for queued inputs.
 #[tokio::test]
 async fn failed_start_is_retryable() {
@@ -3106,6 +3157,308 @@ async fn input_during_a_turn_goes_into_it() {
             &input_call(sid, d)
         ]
     );
+    w.stop().await;
+}
+
+fn withdraw_call(sid: Uuid, eid: Uuid) -> FakeCall {
+    FakeCall::Withdraw {
+        session_id: sid,
+        event_id: eid,
+    }
+}
+
+fn inject_now_call(sid: Uuid, eid: Uuid) -> FakeCall {
+    FakeCall::InjectNow {
+        session_id: sid,
+        event_id: eid,
+    }
+}
+
+/// `session.withdraw` / `session.input_now` of input `eid`, with the request id `r`.
+fn input_ref(r: &str, sid: Uuid, eid: Uuid) -> Value {
+    json!({"request_id": r, "session_id": sid, "event_id": eid})
+}
+
+// SPEC 0.219: an input the worker only queues (the runtime takes none during a turn) is taken
+// back by leaving the queue: `withdrawn: true`, no ack and no error for it, never handed to the
+// runtime; an input it does not know (a session it does not run) is as good as gone.
+#[tokio::test]
+async fn a_queued_input_is_withdrawn_from_the_queue() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let (a, b, d) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    turn_of(&mut c, &env, &adapters, sid, a).await;
+
+    c.frame("session.input", input(sid, b, "B")).await;
+    c.frame("session.withdraw", input_ref("w-1", sid, b)).await;
+    assert_eq!(
+        c.expect("result").await["payload"],
+        json!({"request_id": "w-1", "withdrawn": true})
+    );
+    adapters.end_turn(sid).await;
+    c.frame("session.input", input(sid, d, "D")).await;
+    let calls = adapters
+        .wait_for("D as a turn", has_call(input_call(sid, d)))
+        .await;
+    assert!(!calls.contains(&input_call(sid, b)), "{calls:?}");
+    assert!(!calls.contains(&withdraw_call(sid, b)), "{calls:?}");
+    assert!(c.maybe("error", Duration::from_millis(200)).await.is_none());
+
+    let stranger = Uuid::now_v7();
+    c.frame("session.withdraw", input_ref("w-2", stranger, b))
+        .await;
+    assert_eq!(
+        c.expect("result").await["payload"],
+        json!({"request_id": "w-2", "withdrawn": true})
+    );
+    w.stop().await;
+}
+
+// SPEC 0.219: after a `session.kill` (a pause) the worker's queue is empty and the hub's books of
+// what it handed are cleared; asked about an input it handed before, the worker holds nothing and
+// says `true`, so the hub can withdraw the message on the connection that stays.
+#[tokio::test]
+async fn an_input_of_a_killed_session_is_held_by_no_one() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+    turn_of(&mut c, &env, &adapters, sid, a).await;
+    c.frame("session.input", input(sid, b, "B")).await;
+    let kill = c.frame("session.kill", json!({"session_id": sid})).await;
+    ack_of(&mut c, &kill).await;
+
+    c.frame("session.withdraw", input_ref("w-1", sid, b)).await;
+    assert_eq!(
+        c.expect("result").await["payload"],
+        json!({"request_id": "w-1", "withdrawn": true})
+    );
+    // An input of this session it never had is as good as gone.
+    c.frame("session.withdraw", input_ref("w-2", sid, Uuid::now_v7()))
+        .await;
+    assert_eq!(
+        c.expect("result").await["payload"],
+        json!({"request_id": "w-2", "withdrawn": true})
+    );
+    w.stop().await;
+}
+
+// SPEC 0.219: an input written into the running turn is taken back by the runtime's word: `true`
+// takes it out of the worker's books (the end of the turn drops nothing, no ack comes for it),
+// `false` means the runtime has taken it, and its acceptance is acked as before.
+#[tokio::test]
+async fn an_input_in_the_runtime_is_withdrawn_by_its_word() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let (a, b, e, d) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+    turn_of(&mut c, &env, &adapters, sid, a).await;
+
+    c.frame("session.input", input(sid, b, "B")).await;
+    adapters
+        .wait_for("B into the turn", has_call(inject_call(sid, b)))
+        .await;
+    c.frame("session.withdraw", input_ref("w-1", sid, b)).await;
+    assert_eq!(
+        c.expect("result").await["payload"],
+        json!({"request_id": "w-1", "withdrawn": true})
+    );
+    adapters
+        .wait_for("B asked back", has_call(withdraw_call(sid, b)))
+        .await;
+
+    // The runtime took E before the cancel reached it.
+    adapters.set_withdraw_refused(true);
+    let fe = c.frame("session.input", input(sid, e, "E")).await;
+    adapters
+        .wait_for("E into the turn", has_call(inject_call(sid, e)))
+        .await;
+    c.frame("session.withdraw", input_ref("w-2", sid, e)).await;
+    assert_eq!(
+        c.expect("result").await["payload"],
+        json!({"request_id": "w-2", "withdrawn": false})
+    );
+    adapters.accept_input(sid, e).await;
+    assert_eq!(
+        ack_of(&mut c, &fe).await["payload"],
+        json!({"event_id": e, "joined": true})
+    );
+
+    // The turn ends: B, out of the books, is neither handed again nor failed nor acked.
+    adapters.end_turn(sid).await;
+    c.frame("session.input", input(sid, d, "D")).await;
+    let calls = adapters
+        .wait_for("D as a turn", has_call(input_call(sid, d)))
+        .await;
+    let written: Vec<&FakeCall> = calls
+        .iter()
+        .filter(|c| matches!(c, FakeCall::Input { .. } | FakeCall::Inject { .. }))
+        .collect();
+    assert_eq!(
+        written,
+        [
+            &input_call(sid, a),
+            &inject_call(sid, b),
+            &inject_call(sid, e),
+            &input_call(sid, d)
+        ]
+    );
+    assert!(c.maybe("error", Duration::from_millis(200)).await.is_none());
+    w.stop().await;
+}
+
+// SPEC 0.219: Send now of an input the worker still queues writes it into the running turn with
+// priority now (once the runtime takes input, as after a permission card closes); of one the
+// runtime holds it takes it out of the runtime's queue and writes it again with priority now;
+// one the runtime has taken is `sent_now: false`; where nothing takes it now (the runtime takes no
+// input) it is `error not_now`.
+#[tokio::test]
+async fn send_now_writes_the_input_into_the_turn_with_priority_now() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let (a, b, f, g) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+    turn_of(&mut c, &env, &adapters, sid, a).await;
+
+    // The runtime takes no input now: B waits in the queue, and nothing takes it now.
+    let fb = c.frame("session.input", input(sid, b, "B")).await;
+    c.frame("session.input_now", input_ref("n-1", sid, b)).await;
+    assert_eq!(c.expect("error").await["payload"]["code"], "not_now");
+    // The turn's own input, accepted already: nothing to move.
+    c.frame("session.input_now", input_ref("n-2", sid, a)).await;
+    assert_eq!(
+        c.expect("result").await["payload"],
+        json!({"request_id": "n-2", "sent_now": false})
+    );
+
+    // The runtime takes input: B goes into the turn with priority now.
+    adapters.set_injectable(true);
+    c.frame("session.input_now", input_ref("n-3", sid, b)).await;
+    assert_eq!(
+        c.expect("result").await["payload"],
+        json!({"request_id": "n-3", "sent_now": true})
+    );
+    adapters
+        .wait_for("B now", has_call(inject_now_call(sid, b)))
+        .await;
+    adapters.accept_input(sid, b).await;
+    assert_eq!(
+        ack_of(&mut c, &fb).await["payload"],
+        json!({"event_id": b, "joined": true})
+    );
+
+    // F written into the turn and held by the runtime: taken back out of its queue and written
+    // again with priority now.
+    let ff = c.frame("session.input", input(sid, f, "F")).await;
+    adapters
+        .wait_for("F into the turn", has_call(inject_call(sid, f)))
+        .await;
+    c.frame("session.input_now", input_ref("n-4", sid, f)).await;
+    assert_eq!(
+        c.expect("result").await["payload"],
+        json!({"request_id": "n-4", "sent_now": true})
+    );
+    let calls = adapters
+        .wait_for("F now", has_call(inject_now_call(sid, f)))
+        .await;
+    let at = |call: FakeCall| calls.iter().position(|c| *c == call).unwrap();
+    assert!(at(inject_call(sid, f)) < at(withdraw_call(sid, f)));
+    assert!(at(withdraw_call(sid, f)) < at(inject_now_call(sid, f)));
+    adapters.accept_input(sid, f).await;
+    assert_eq!(
+        ack_of(&mut c, &ff).await["payload"],
+        json!({"event_id": f, "joined": true})
+    );
+
+    // G was taken by the runtime before the cancel reached it: not written again.
+    c.frame("session.input", input(sid, g, "G")).await;
+    adapters
+        .wait_for("G into the turn", has_call(inject_call(sid, g)))
+        .await;
+    adapters.set_withdraw_refused(true);
+    c.frame("session.input_now", input_ref("n-5", sid, g)).await;
+    assert_eq!(
+        c.expect("result").await["payload"],
+        json!({"request_id": "n-5", "sent_now": false})
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!adapters.calls().contains(&inject_now_call(sid, g)));
+
+    // No agent runs the session: nothing takes it now.
+    c.frame("session.input_now", input_ref("n-6", Uuid::now_v7(), b))
+        .await;
+    assert_eq!(c.expect("error").await["payload"]["code"], "not_now");
+    w.stop().await;
+}
+
+// SPEC 0.219: what is no person's plain message (a slash command, a message of another session)
+// waits for the end of the turn however Send now is asked: `error not_now`, and it stays queued.
+#[tokio::test]
+async fn send_now_leaves_a_slash_command_and_a_sessions_message_queued() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let (a, d, e) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    turn_of(&mut c, &env, &adapters, sid, a).await;
+
+    c.frame("session.input", input(sid, d, "/name x")).await;
+    c.frame("session.input", {
+        let mut v = input(sid, e, "from a session");
+        v["peer"] = json!({"from": "hqc/y", "mode": "send"});
+        v
+    })
+    .await;
+    for (r, eid) in [("n-1", d), ("n-2", e)] {
+        c.frame("session.input_now", input_ref(r, sid, eid)).await;
+        assert_eq!(c.expect("error").await["payload"]["code"], "not_now");
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !adapters
+            .calls()
+            .iter()
+            .any(|c| matches!(c, FakeCall::InjectNow { .. } | FakeCall::Withdraw { .. })),
+        "{:?}",
+        adapters.calls()
+    );
+    // They run after the turn, as before.
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("the slash command as a turn", has_call(input_call(sid, d)))
+        .await;
     w.stop().await;
 }
 

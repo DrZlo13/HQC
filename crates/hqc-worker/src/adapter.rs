@@ -216,6 +216,25 @@ pub trait Adapter: Send {
         let _ = (input, files);
         anyhow::bail!("this runtime cannot take input during a turn")
     }
+    /// [`Adapter::inject_with`] for input that must not wait for the call the agent is in
+    /// (SPEC 0.219; Claude Code: `priority: "now"`, which moves the running Bash, MCP call or
+    /// subagent to the background and takes the line into the same turn at once).
+    async fn inject_now_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<bool> {
+        let _ = (input, files);
+        anyhow::bail!("this runtime cannot take input during a turn at once")
+    }
+    /// Takes input `event_id`, written to the runtime and not taken yet, back (SPEC 0.219;
+    /// Claude Code: `cancel_async_message`): `Ok(true)` the runtime dropped it, never to see
+    /// it, and sends no [`AdapterEvent::InputAccepted`] for it; `Ok(false)` it has taken it, or
+    /// does not hold it.
+    async fn withdraw_input(&mut self, event_id: Uuid) -> anyhow::Result<bool> {
+        let _ = event_id;
+        anyhow::bail!("this runtime cannot take input back")
+    }
     /// Abort the current turn; the process stays.
     async fn stop(&mut self) -> anyhow::Result<()>;
     /// Terminate the process. Returns when it is gone.

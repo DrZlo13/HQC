@@ -161,6 +161,7 @@ async fn live_repo_settings_ignored() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -303,6 +304,7 @@ async fn live_environment_ssh() {
                     peer: None,
                     permission_cap: None,
                     schedule_id: None,
+                    human: false,
                 })
                 .await
                 .unwrap();
@@ -532,6 +534,7 @@ async fn live_environment_ssh_keys() {
                     peer: None,
                     permission_cap: None,
                     schedule_id: None,
+                    human: false,
                 })
                 .await
                 .unwrap();
@@ -677,6 +680,7 @@ async fn live_folder_rules() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -791,6 +795,7 @@ async fn live_permission_mode_switch() {
                 peer: None,
                 permission_cap: None,
                 schedule_id: None,
+                human: false,
             })
             .await
             .unwrap();
@@ -940,6 +945,7 @@ async fn live_bash_turn_with_approval() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -1182,6 +1188,7 @@ async fn live_permission_policy() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -1316,6 +1323,7 @@ async fn live_ai_title() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -1498,6 +1506,7 @@ async fn live_input_joins_turn() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     };
     let first = Uuid::now_v7();
     adapter
@@ -1648,6 +1657,7 @@ async fn live_move_resumes_in_the_new_folder() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);

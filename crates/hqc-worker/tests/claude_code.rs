@@ -150,6 +150,8 @@ async fn hub_runs_a_claude_code_turn_with_an_approval() {
         let u: Uuid = v["uuid"].as_str().unwrap().parse().unwrap();
         assert_eq!(u.get_version_num(), 4, "{v}");
         v.as_object_mut().unwrap().remove("uuid");
+        // A person's `origin` is checked in the adapter's own tests (SPEC 0.219).
+        v.as_object_mut().unwrap().remove("origin");
     }
     let want: Vec<Value> = stdin
         .lines()

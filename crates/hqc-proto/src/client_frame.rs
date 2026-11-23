@@ -175,6 +175,10 @@ mod tests {
             include_str!("../examples/wire/client.delivery.joined.json"),
         ),
         (
+            "delivery",
+            include_str!("../examples/wire/client.delivery.withdrawn.json"),
+        ),
+        (
             "summary",
             include_str!("../examples/wire/client.summary.json"),
         ),

@@ -108,10 +108,11 @@ use std::path::{Path, PathBuf};
 use hqc_proto::event::{ArtifactKind, EventKind, LiveKind, PeerMode};
 use hqc_proto::frame::{
     error_code, worker_approval, Ack, ClaudeAuthResult, ClaudeLoginDoneResult, ClaudeLoginResult,
-    Envelope, HeldBy, HubFrame, LockedBy, PermissionMode, ProcessState, RequestResult, ResultBody,
-    Runtime, SecretOutcome, SecretPut, SecretPutResult, SessionInput, SessionStart, StartMode,
-    SubagentHistoryResult, SubagentLeftovers, TitleRequest, TitleResult, WireError,
-    WorkerApprovalRequest, WorkerFrame, WorkspaceKeyDeleteResult, WorkspaceKeysResult,
+    Envelope, HeldBy, HubFrame, InputNowResult, InputWithdrawnResult, LockedBy, PermissionMode,
+    ProcessState, RequestResult, ResultBody, Runtime, SecretOutcome, SecretPut, SecretPutResult,
+    SessionInput, SessionStart, StartMode, SubagentHistoryResult, SubagentLeftovers, TitleRequest,
+    TitleResult, WireError, WorkerApprovalRequest, WorkerFrame, WorkspaceKeyDeleteResult,
+    WorkspaceKeysResult,
 };
 
 /// Why `secret.put` and the workspace keys are refused on a worker without them (SPEC 0.147).
@@ -180,6 +181,11 @@ pub fn wire_error(code: &str, message: impl Into<String>, retryable: bool) -> Wo
         retryable,
         details: None,
     })
+}
+
+/// `error {not_now}`: the runtime cannot take the input into the running turn now (SPEC 0.219).
+fn not_now(why: &str) -> WorkerFrame {
+    wire_error(error_code::NOT_NOW, why, false)
 }
 
 fn ack(event_id: Option<Uuid>) -> WorkerFrame {
@@ -284,6 +290,19 @@ enum Cmd {
         task_id: String,
         after: Option<Uuid>,
         before: Option<Uuid>,
+    },
+    /// `session.withdraw`: the owner takes input `event_id` back (SPEC 0.219).
+    Withdraw {
+        id: String,
+        request_id: String,
+        event_id: Uuid,
+    },
+    /// `session.input_now`: the owner sends input `event_id` into the running turn at once
+    /// (SPEC 0.219).
+    InputNow {
+        id: String,
+        request_id: String,
+        event_id: Uuid,
     },
     Kill {
         id: String,
@@ -566,6 +585,44 @@ impl Supervisor {
                         task_id: r.task_id,
                         after: r.after,
                         before: r.before,
+                    },
+                )
+            }
+            HubFrame::SessionWithdraw(r) => {
+                if !self.sessions.contains_key(&r.session_id) {
+                    // This worker holds no input of a session it does not know: nothing will
+                    // reach its agent.
+                    self.link.reply(
+                        &id,
+                        WorkerFrame::Result(RequestResult {
+                            request_id: r.request_id,
+                            body: ResultBody::InputWithdrawn(InputWithdrawnResult {
+                                withdrawn: true,
+                            }),
+                        }),
+                    );
+                    return;
+                }
+                (
+                    r.session_id,
+                    Cmd::Withdraw {
+                        id,
+                        request_id: r.request_id,
+                        event_id: r.event_id,
+                    },
+                )
+            }
+            HubFrame::SessionInputNow(r) => {
+                if !self.sessions.contains_key(&r.session_id) {
+                    self.link.reply(&id, not_now("no agent runs this session"));
+                    return;
+                }
+                (
+                    r.session_id,
+                    Cmd::InputNow {
+                        id,
+                        request_id: r.request_id,
+                        event_id: r.event_id,
                     },
                 )
             }
@@ -1134,6 +1191,8 @@ fn id_of(c: &Cmd) -> String {
         | Cmd::Background { id, .. }
         | Cmd::StopTask { id, .. }
         | Cmd::SubagentHistory { id, .. }
+        | Cmd::Withdraw { id, .. }
+        | Cmd::InputNow { id, .. }
         | Cmd::Kill { id }
         | Cmd::PermissionMode { id, .. }
         | Cmd::Model { id, .. }
@@ -1199,6 +1258,15 @@ fn subagent_history(
         truncated: at.is_none() && (truncated || cut),
         continues: at.is_some(),
     }
+}
+
+/// What [`Session::write_into_turn`] did with an input.
+enum Injected {
+    Written,
+    /// The turn ended meanwhile: nothing written, the input is given back.
+    Waits(Box<Queued>),
+    /// The attachments or the write failed: the hub has the error.
+    Failed,
 }
 
 struct Queued {
@@ -1521,6 +1589,50 @@ impl Session {
                     );
                 });
             }
+            Cmd::Withdraw {
+                id,
+                request_id,
+                event_id,
+            } => match self.withdraw(event_id).await {
+                Ok(withdrawn) => self.link.reply(
+                    &id,
+                    WorkerFrame::Result(RequestResult {
+                        request_id,
+                        body: ResultBody::InputWithdrawn(InputWithdrawnResult { withdrawn }),
+                    }),
+                ),
+                Err(e) => {
+                    tracing::warn!(session_id = %self.id, %event_id, "withdraw failed: {e:#}");
+                    self.link.reply(
+                        &id,
+                        wire_error(error_code::INTERNAL, format!("{e:#}"), false),
+                    );
+                }
+            },
+            Cmd::InputNow {
+                id,
+                request_id,
+                event_id,
+            } => match self.input_now(event_id).await {
+                Ok(Some(sent_now)) => self.link.reply(
+                    &id,
+                    WorkerFrame::Result(RequestResult {
+                        request_id,
+                        body: ResultBody::InputNow(InputNowResult { sent_now }),
+                    }),
+                ),
+                Ok(None) => self.link.reply(
+                    &id,
+                    not_now("no turn takes input now, or the agent waits for an answer"),
+                ),
+                Err(e) => {
+                    tracing::warn!(session_id = %self.id, %event_id, "input_now failed: {e:#}");
+                    self.link.reply(
+                        &id,
+                        wire_error(error_code::INTERNAL, format!("{e:#}"), false),
+                    );
+                }
+            },
             Cmd::Kill { id } => {
                 // Queued inputs stay `pending` in the hub and come again after `hello`.
                 self.queue.clear();
@@ -2180,30 +2292,169 @@ impl Session {
         let Some(q) = self.queue.remove(i) else {
             return false;
         };
-        let Some((input, files)) = self.prepared(&q).await else {
-            return true;
-        };
-        match self.adapter.inject_with(&input, &files).await {
-            Ok(true) => {
-                tracing::info!(session_id = %self.id, event_id = %q.input.event_id, "input written into the running turn");
-                self.injected.push(q);
-                true
-            }
+        match self.write_into_turn(q, false).await {
+            Injected::Written | Injected::Failed => true,
             // The turn ended meanwhile: the input goes once its end is handled, from its
             // own place.
-            Ok(false) => {
-                self.queue.insert(i.min(self.queue.len()), q);
+            Injected::Waits(q) => {
+                self.queue.insert(i.min(self.queue.len()), *q);
                 false
             }
+        }
+    }
+
+    /// Writes input `q`, out of every list, into the running turn; `now` with priority now,
+    /// as the runtime moves the call the agent is in to the background for it (SPEC 0.219).
+    async fn write_into_turn(&mut self, q: Queued, now: bool) -> Injected {
+        let Some((input, files)) = self.prepared(&q).await else {
+            return Injected::Failed;
+        };
+        let written = if now {
+            self.adapter.inject_now_with(&input, &files).await
+        } else {
+            self.adapter.inject_with(&input, &files).await
+        };
+        match written {
+            Ok(true) => {
+                tracing::info!(session_id = %self.id, event_id = %q.input.event_id, now, "input written into the running turn");
+                self.injected.push(q);
+                Injected::Written
+            }
+            Ok(false) => Injected::Waits(Box::new(q)),
             Err(e) => {
                 tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, "input failed: {e:#}");
                 self.reply_input(
                     &q.frame_id,
                     wire_error(error_code::INTERNAL, format!("{e:#}"), true),
                 );
-                true
+                Injected::Failed
             }
         }
+    }
+
+    /// `session.withdraw` (SPEC 0.219): the owner takes input `event_id` back. `true`: the
+    /// agent will never see it and it is out of this session's books, with no `ack` and no
+    /// error to the hub. One that waits here (the queue, the wait for a mode switch, the wait
+    /// for a slot) just leaves, and a session that waited for a slot for it alone leaves the line;
+    /// one written to the runtime goes by its own word
+    /// ([`Adapter::withdraw_input`]), and is out only if the runtime had not taken it;
+    /// one taken already, `false`. Nothing here holds an input the hub believes in flight
+    /// after a worker restart: gone, `true`. The turn a withdrawn input kept running ends by
+    /// the adapter's [`AdapterEvent::TurnEnded`], which also goes on with the queue.
+    async fn withdraw(&mut self, event_id: Uuid) -> anyhow::Result<bool> {
+        if let Some(i) = self.queue.iter().position(|q| q.input.event_id == event_id) {
+            self.queue.remove(i);
+            // The input a session waited for a slot for may have been the last one.
+            if self.queue.is_empty() && self.state == ProcessState::Stopped {
+                self.waiting_slot = false;
+            }
+            return Ok(true);
+        }
+        if self
+            .lowering
+            .as_ref()
+            .is_some_and(|l| l.q.input.event_id == event_id)
+        {
+            self.lowering = None;
+            self.pump().await;
+            return Ok(true);
+        }
+        if self.delivered.iter().any(|(e, _)| *e == event_id) {
+            return Ok(false);
+        }
+        if let Some(i) = self
+            .injected
+            .iter()
+            .position(|q| q.input.event_id == event_id)
+        {
+            if !self.adapter.withdraw_input(event_id).await? {
+                return Ok(false);
+            }
+            self.injected.remove(i);
+            return Ok(true);
+        }
+        if self
+            .turn
+            .as_ref()
+            .is_some_and(|t| t.input.event_id == event_id)
+        {
+            if self.turn.as_ref().is_some_and(|t| t.accepted)
+                || !self.adapter.withdraw_input(event_id).await?
+            {
+                return Ok(false);
+            }
+            self.turn = None;
+        }
+        Ok(true)
+    }
+
+    /// `session.input_now` (SPEC 0.219): the owner sends input `event_id`, which has not
+    /// reached the agent, into the running turn at once. `Some(true)`: written with priority
+    /// now; `Some(false)`: nothing to do, the agent took it already or the turn ended
+    /// meanwhile (the input waits as before); `None`: the turn cannot take input now (none
+    /// runs, the runtime asks for an answer, a move waits, the turn answers an `hqc_ask`), or
+    /// the input is no person's plain message (a slash command, a capped one, one of another
+    /// session), or this input is the turn's own, which the runtime starts by itself. An input
+    /// the runtime holds back is taken out of its queue first ([`Session::withdraw`]) and
+    /// written again as it was, with a new `uuid` of the runtime's.
+    async fn input_now(&mut self, event_id: Uuid) -> anyhow::Result<Option<bool>> {
+        let may = |i: &SessionInput| {
+            i.peer.is_none()
+                && i.schedule_id.is_none()
+                && !i.text.trim_start().starts_with('/')
+                && !capped(i)
+        };
+        let turn_takes = self.turn.is_some()
+            && self.moving.is_none()
+            && !self.turn.as_ref().is_some_and(|t| {
+                t.input
+                    .peer
+                    .as_ref()
+                    .is_some_and(|p| p.mode != PeerMode::Send)
+            })
+            && self.adapter.can_inject();
+        if let Some(i) = self.queue.iter().position(|q| q.input.event_id == event_id) {
+            if !turn_takes || !may(&self.queue[i].input) {
+                return Ok(None);
+            }
+            let Some(q) = self.queue.remove(i) else {
+                return Ok(None);
+            };
+            return Ok(match self.write_into_turn(q, true).await {
+                Injected::Written => Some(true),
+                Injected::Failed => Some(false),
+                Injected::Waits(q) => {
+                    self.queue.insert(i.min(self.queue.len()), *q);
+                    None
+                }
+            });
+        }
+        if self.delivered.iter().any(|(e, _)| *e == event_id) {
+            return Ok(Some(false));
+        }
+        let Some(i) = self
+            .injected
+            .iter()
+            .position(|q| q.input.event_id == event_id)
+        else {
+            return Ok(None);
+        };
+        if !turn_takes || !may(&self.injected[i].input) {
+            return Ok(None);
+        }
+        if !self.adapter.withdraw_input(event_id).await? {
+            return Ok(Some(false));
+        }
+        let q = self.injected.remove(i);
+        Ok(match self.write_into_turn(q, true).await {
+            Injected::Written => Some(true),
+            Injected::Failed => Some(false),
+            // The turn ended while the message was out: it runs next, from the head.
+            Injected::Waits(q) => {
+                self.queue.push_front(*q);
+                Some(false)
+            }
+        })
     }
 
     /// Gives input `q` (`input` as the runtime gets it) to the adapter: its turn begins.

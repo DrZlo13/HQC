@@ -240,6 +240,19 @@ export class ChatSession {
     return this.api.background(this.id, callId);
   }
 
+  /** Takes the message back: the hub drops it and the timeline stops showing it at once. */
+  async withdraw(event: { event_id: string; seq?: number }): Promise<void> {
+    await this.api.withdrawInput(this.id, event.event_id);
+    if (event.seq !== undefined)
+      this.timeline.applyDelivery({ session_id: this.id, event_id: event.event_id, seq: event.seq, delivery: 'withdrawn' });
+  }
+
+  /** Sends the waiting message into the running turn at once; whether the agent had not taken
+   *  it yet. */
+  sendNow(eventId: string): Promise<boolean> {
+    return this.api.inputNow(this.id, eventId);
+  }
+
   stopTask(taskId: string): Promise<void> {
     return this.api.stopTask(this.id, taskId);
   }

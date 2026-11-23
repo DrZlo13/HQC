@@ -5,7 +5,7 @@ import type { AppState } from '../app';
 import { ArtifactStore, formatSize, type LinkCache } from '../artifacts';
 import { HEIC_NAME, dataUrl, heicToJpeg } from '../heic';
 import { onBack } from '../nav';
-import { PERMISSION_MODES, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState, type SlashCommand } from '../proto';
+import { PERMISSION_MODES, type EventOf, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState, type SlashCommand } from '../proto';
 import type { OutgoingFile } from '../session';
 import { duringText, type Timeline } from '../timeline';
 import { ModelName, isTypedModel, type ModelChoice, modelMenuItems } from './agentSettings';
@@ -210,6 +210,33 @@ export function Chat({
     return () => document.removeEventListener('visibilitychange', mark);
   }, [chat, t.lastSeq]);
 
+  // A message taken back (SPEC 0.219) returns to the input: its text after what is typed there
+  // (the draft when the input is not shown, under a request's sheet), its files read again from
+  // the hub. Sending waits while they are read.
+  const putBack = (e: EventOf<'user.message'>) => {
+    const text = e.payload.text;
+    if (text) {
+      if (insertText.current) insertText.current(text);
+      else app.setDraft(sessionId, withText(app.draft(sessionId), text));
+    }
+    const ids = e.payload.artifact_ids;
+    if (!ids.length) return;
+    setReading((n) => n + ids.length);
+    void (async () => {
+      let lost = 0;
+      for (const id of ids) {
+        try {
+          const [meta, blob] = await Promise.all([artifacts.meta(id), artifacts.blob(id)]);
+          const f = await toOutgoing(new File([blob], meta.name, { type: meta.mime }));
+          setFiles((cur) => [...cur, f]);
+        } catch {
+          lost++;
+        }
+        setReading((n) => n - 1);
+      }
+      if (lost) setNotice(`${lost} attached file${lost > 1 ? 's' : ''} could not be put back in the input`);
+    })();
+  };
   const open = t.openRequests();
   const firstApproval = open.find((r) => r.type === 'approval.request');
   const sheetRequest = phone && !requestsOnly ? firstApproval?.payload.request_id : undefined;
@@ -279,6 +306,44 @@ export function Chat({
         ? (text) => insertQuote.current?.(text)
         : undefined,
     webSearch: app.webSearch,
+    // Where the input is (as `send`; a room's messages are not queued for an agent of the room's own).
+    withdraw:
+      !system && !room && !info?.archived && state !== 'locked_vscode'
+        ? async (e) => {
+            try {
+              await chat.withdraw(e);
+            } catch (err) {
+              // Taken back already (another device, or an earlier try whose answer was lost):
+              // its text comes back as on success.
+              if (err instanceof ApiError && err.code === 'withdrawn') {
+                putBack(e);
+                return;
+              }
+              setNotice(
+                err instanceof ApiError && err.code === 'already_taken'
+                  ? 'The agent already took this message'
+                  : `Not taken back: ${(err as Error).message}`,
+              );
+              return;
+            }
+            putBack(e);
+          }
+        : undefined,
+    // Only while a turn runs: with none there is nothing to take the message into.
+    sendNow:
+      !system && !room && !info?.archived && state !== 'locked_vscode' && answeredState === 'running'
+        ? async (e) => {
+            try {
+              if (!(await chat.sendNow(e.event_id))) setNotice('Not sent now: the agent took it already, or it goes next');
+            } catch (err) {
+              setNotice(
+                err instanceof ApiError && err.code === 'not_now'
+                  ? 'The agent cannot take this message into its turn now'
+                  : `Not sent now: ${(err as Error).message}`,
+              );
+            }
+          }
+        : undefined,
     // As the composer's list: not in the service session, which has no composer.
     quickMessages: project && !system
       ? {
@@ -521,6 +586,7 @@ export function Chat({
   const section = useRef<HTMLElement>(null);
   const selection = useChatSelection(section);
   const insertQuote = useRef<((text: string) => void) | null>(null);
+  const insertText = useRef<((text: string) => void) | null>(null);
   // The jump to a search hit: the event is there once `lastSeq` reaches it and the older
   // history (`olderFrom`) is loaded down to it. The block that holds it is the one that starts
   // at it, else the last one that starts at or before it (a hidden event's neighbour; an answer
@@ -1009,6 +1075,7 @@ export function Chat({
             onDraft={(text) => app.setDraft(sessionId, text)}
             autoFocus={focusInput}
             insertQuote={insertQuote}
+            insertText={insertText}
             phone={phone}
             commands={info?.commands}
             commandInfo={info?.command_info}
@@ -1083,6 +1150,12 @@ export function withQuote(draft: string, quote: string): string {
     .join('\n');
   const head = draft.trimEnd();
   return `${head ? `${head}\n\n` : ''}${lines}\n\n`;
+}
+
+/** The draft with `text` after it, a blank line between them when the draft has text. */
+export function withText(draft: string, text: string): string {
+  const head = draft.trimEnd();
+  return head ? `${head}\n\n${text}` : text;
 }
 
 /** The `tool.call` an approval card shows (feed.ts), for the sheet. */
@@ -1628,6 +1701,7 @@ export function Composer({
   onFiles = () => {},
   onRemove = () => {},
   insertQuote,
+  insertText,
   initial = '',
   onDraft,
   autoFocus = false,
@@ -1650,6 +1724,9 @@ export function Composer({
   /** Set here to a function that puts a quote of the feed into the message (`withQuote`),
    *  focused, the caret at its end. */
   insertQuote?: { current: ((text: string) => void) | null };
+  /** Set here to a function that adds a text to the message (`withText`), focused, the caret at
+   *  its end: a message the user took back. */
+  insertText?: { current: ((text: string) => void) | null };
   /** The text not sent last time (a draft), and where every change of it goes. */
   initial?: string;
   onDraft?: (text: string) => void;
@@ -1696,6 +1773,17 @@ export function Composer({
       insertQuote.current = null;
     };
   }, [insertQuote]);
+  useEffect(() => {
+    if (!insertText) return;
+    insertText.current = (t) => {
+      caretToEnd.current = true;
+      setText((cur) => withText(cur, t));
+      area.current?.focus();
+    };
+    return () => {
+      insertText.current = null;
+    };
+  }, [insertText]);
   const picker = useRef<HTMLInputElement>(null);
   const [secretOpen, setSecretOpen] = useState(false);
   const addNote = (note: string) => {

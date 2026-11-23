@@ -147,6 +147,9 @@ describe('examples/wire', () => {
     // Into the turn already running (SPEC §17.2): the frame says so, and so does the message.
     const j = parseServerFrame(load('client.delivery.joined.json'));
     expect(j).toMatchObject({ type: 'delivery', seq: 44, delivery: 'delivered', joined: true });
+    // The owner took the message back (SPEC 0.219).
+    const w = parseServerFrame(load('client.delivery.withdrawn.json'));
+    expect(w).toMatchObject({ type: 'delivery', seq: 50, delivery: 'withdrawn' });
     const m = parseEvent(load('event.user.message.joined.json'));
     expect(m.type === 'user.message' && m.payload.joined).toBe(true);
     const plain = parseEvent(load('event.user.message.json'));

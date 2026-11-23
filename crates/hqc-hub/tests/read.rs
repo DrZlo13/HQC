@@ -198,6 +198,49 @@ fn seqs(r: &Value) -> Vec<i64> {
         .collect()
 }
 
+/// SPEC 0.219: a message the owner took back never reached the agent, and `hqc_read` leaves it
+/// out, in the pages and in what it says of more events before and after (the feed pages of a
+/// client return it as withdrawn).
+#[tokio::test]
+async fn hqc_read_leaves_out_a_withdrawn_input() {
+    let mut rig = Rig::start().await;
+    let db = rig.hub.app.db.clone();
+    let s = session(&db, rig.owner, rig.project, "notes", "Notes").await;
+    let events: [(&str, &str, Option<&str>); 4] = [
+        ("user.message", "Taken back, first", Some("withdrawn")),
+        ("agent.message", "kept", None),
+        ("user.message", "Taken back, last", Some("withdrawn")),
+        ("user.message", "Pending", Some("pending")),
+    ];
+    for (n, (kind, text, delivery)) in events.into_iter().enumerate() {
+        let e = NewEvent {
+            event_id: Uuid::now_v7(),
+            session_id: s,
+            ts: t(n as i64),
+            author: json!({"kind": "system"}),
+            kind: kind.into(),
+            payload: json!({"text": text, "final": true}),
+            chain: None,
+            client_op_id: None,
+            delivery: delivery.map(str::to_string),
+            delivered_at: None,
+        };
+        db::insert_event(&db, &e).await.unwrap();
+    }
+    let r = rig.read(json!({"session": "personal/notes"})).await;
+    assert_eq!(texts(&r), ["kept", "Pending"], "{r}");
+    // Nothing earlier than the first one shown, but a withdrawn one.
+    assert!(r["result"].get("earlier").is_none(), "{r}");
+    let r = rig
+        .read(json!({"session": "personal/notes", "after_seq": 2}))
+        .await;
+    assert_eq!(texts(&r), ["Pending"], "{r}");
+    // The client's page of the same session has all four.
+    let (st, v) = rig.hub.get(&format!("/api/sessions/{s}/events")).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["events"].as_array().unwrap().len(), 4, "{v}");
+}
+
 #[tokio::test]
 async fn the_last_events_and_the_pages_around_them() {
     let mut rig = Rig::start().await;

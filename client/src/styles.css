@@ -7292,7 +7292,9 @@ button.ps-look {
 }
 
 /* A fork under way (SPEC §6): its button waits, dimmed and without the hover. */
-.btn-copy.btn-fork:disabled {
+.btn-copy.btn-fork:disabled,
+.btn-copy.btn-withdraw:disabled,
+.btn-copy.btn-send-now:disabled {
   opacity: 0.5;
   background: transparent;
   color: var(--muted);

@@ -58,6 +58,9 @@ pub enum Delivery {
     Pending,
     Delivered,
     Failed,
+    /// The owner took the message back before the agent took it (SPEC 0.219): it is delivered
+    /// to nobody and shown by no client.
+    Withdrawn,
 }
 
 /// Session state as computed by the hub (SPEC §17.1), also used in `status` events.

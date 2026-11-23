@@ -594,6 +594,9 @@ async fn sends_wait_in_the_buffer_for_the_next_input() {
     let p = &input["payload"];
     assert_eq!(p["text"], "go on");
     assert!(p.get("peer").is_none());
+    // The owner typed "go on", but the messages of another session in front of it are none of
+    // theirs: the input is no `human` one (SPEC 0.219).
+    assert!(p.get("human").is_none(), "{p}");
     let prefix = p["peer_prefix"].as_array().unwrap();
     let texts: Vec<&str> = prefix.iter().map(|x| x["text"].as_str().unwrap()).collect();
     assert_eq!(texts, ["note 1", "note 2", "note 3"]);

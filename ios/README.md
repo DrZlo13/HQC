@@ -37,6 +37,19 @@ browser and Apple push (SPEC 0.214).
   approval's notification answer it without opening the app; a tap opens the session. While a
   chat is on screen, its notices show no banner.
 
+## Sound and haptics
+
+Agents are felt and heard while their chat is open: a glassy click per tool call (a few a second
+at most), a low pair when one fails, a knock for a permission request, a rising three notes for
+a question, a chime when the turn ends and a falling pair when it fails; a request in another
+session knocks too. Sending, answering, copying and moving around tick. The launch splash pulses
+the icon with a felt heartbeat while the app connects, then blooms open; onboarding builds
+itself line by line, each line a tap and a note up the scale. Every cue's haptic taps and tones
+come from one list of notes (`HQC/App/Feedback.swift`), so they land together; the tones are
+synthesized, soft and short, go through the `.ambient` session (they mix with music and follow
+the silent switch) and replace the system sound of a notification while the app is open.
+Settings has a toggle for each and plays every cue on demand.
+
 ## Layouts
 
 The app follows the space it has, not the device. With compact width (an iPhone, iPhone Duo's

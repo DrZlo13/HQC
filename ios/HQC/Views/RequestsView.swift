@@ -37,6 +37,7 @@ struct RequestsView: View {
                                 do {
                                     try await app.client?.clarify(
                                         sessionID: request.session_id, requestID: request.request_id, answers: answers)
+                                    Feedback.play(.answered)
                                     app.requests.removeAll { $0.id == request.id }
                                 } catch {
                                     self.error = error.localizedDescription
@@ -94,6 +95,8 @@ private struct RequestHeaderLink<Label: View>: View {
 struct SettingsView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.openURL) private var openURL
+    @AppStorage(Feedback.hapticsKey) private var haptics = true
+    @AppStorage(Feedback.soundsKey) private var sounds = true
 
     private var notificationState: String {
         if !app.pushEnabledOnHub { return "Off on the hub" }
@@ -125,6 +128,33 @@ struct SettingsView: View {
                 }
                 .padding(.vertical, 4)
             }
+            Section {
+                Toggle(isOn: $haptics) {
+                    Label("Haptics", systemImage: "iphone.radiowaves.left.and.right")
+                }
+                .onChange(of: haptics) { _, on in if on { Feedback.play(.done) } }
+                Toggle(isOn: $sounds) {
+                    Label("Sounds", systemImage: "speaker.wave.2")
+                }
+                .onChange(of: sounds) { _, on in if on { Feedback.play(.done) } }
+                if haptics || sounds {
+                    Menu {
+                        Button("Message sent") { Feedback.play(.send) }
+                        Button("Tool call") { Feedback.play(.tool) }
+                        Button("Tool failed") { Feedback.play(.toolFailed) }
+                        Button("Permission request") { Feedback.play(.approval) }
+                        Button("Question") { Feedback.play(.question) }
+                        Button("Answer finished") { Feedback.play(.done) }
+                        Button("Turn failed") { Feedback.play(.error) }
+                    } label: {
+                        Label("Try them", systemImage: "play.circle")
+                    }
+                }
+            } header: {
+                Text("Sound and haptics")
+            } footer: {
+                Text("What agents do, felt and heard while a chat is open: tool calls, requests, questions, a finished answer. Sounds follow the ring/silent switch and mix with your music.")
+            }
             Section("Machines") {
                 NavigationLink {
                     WorkersView()
@@ -146,7 +176,7 @@ struct SettingsView: View {
                 }
             } footer: {
                 if !app.pushEnabledOnHub {
-                    Text("The hub sends no Apple push yet: set HQC_APNS_KEY_FILE, HQC_APNS_KEY_ID, HQC_APNS_TEAM_ID and HQC_APNS_TOPIC on it (RUNBOOK §1.10).")
+                    Text("The hub sends no Apple push yet: add HQC_APNS_RELAY_URL=https://hqc.drewnja.xyz to its settings and restart it (RUNBOOK §1.10).")
                 }
             }
             Section {

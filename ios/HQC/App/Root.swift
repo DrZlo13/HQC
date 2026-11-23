@@ -56,6 +56,7 @@ struct MainTabs: View {
             }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
+        .onChange(of: app.tab) { _, _ in Feedback.play(.select) }
     }
 }
 
@@ -181,6 +182,7 @@ struct ProjectRail: View {
                     ForEach(app.sortedProjects) { p in
                         let selected = pane == .sessions && p.id == app.selectedProjectID
                         Button {
+                            if !selected { Feedback.play(.select) }
                             app.selectedProjectID = p.id
                             pane = .sessions
                         } label: {
@@ -217,6 +219,7 @@ struct ProjectRail: View {
 
     /// A second tap on Search or Requests goes back to the project's sessions.
     private func toggle(_ p: SidebarPane) {
+        Feedback.play(.select)
         pane = pane == p ? .sessions : p
     }
 

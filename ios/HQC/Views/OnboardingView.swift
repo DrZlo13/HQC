@@ -12,6 +12,9 @@ struct OnboardingView: View {
     @State private var step: Step
     @State private var address = ""
     @State private var busy = false
+    /// How many of the welcome screen's parts are in: logo, title, three features, button.
+    @State private var revealed = 0
+    @State private var bell = 0
     @FocusState private var focused: Bool
 
     init(start: Step) {
@@ -44,13 +47,21 @@ struct OnboardingView: View {
             .padding(.horizontal, 28)
         }
         .animation(.snappy(duration: 0.4), value: step)
-        .onChange(of: app.phase) { _, phase in
+        .onChange(of: step) { old, new in
+            Feedback.play(new.rawValue > old.rawValue ? .step : .tap)
+        }
+        .onChange(of: app.phase) { old, phase in
             busy = false
             switch phase {
             case .signIn: step = .signIn
-            case .ready: step = .notifications
+            case .ready:
+                if old != .ready { Feedback.play(.success) }
+                step = .notifications
             default: break
             }
+        }
+        .onChange(of: app.lastError) { _, e in
+            if e != nil { Feedback.play(.error) }
         }
     }
 
@@ -75,6 +86,9 @@ struct OnboardingView: View {
                 .frame(width: 96, height: 96)
                 .clipShape(.rect(cornerRadius: 22))
                 .shadow(color: .black.opacity(0.2), radius: 18, y: 8)
+                .scaleEffect(revealed >= 1 ? 1 : 0.4)
+                .rotationEffect(.degrees(revealed >= 1 ? 0 : -12))
+                .opacity(revealed >= 1 ? 1 : 0)
             VStack(spacing: 10) {
                 Text("HQC").font(.largeTitle.weight(.bold))
                 Text("Your coding agents, on every machine, in your pocket.")
@@ -82,30 +96,46 @@ struct OnboardingView: View {
                     .foregroundStyle(palette.text2)
                     .multilineTextAlignment(.center)
             }
+            .appear(revealed >= 2)
             VStack(alignment: .leading, spacing: 18) {
                 feature("desktopcomputer", "Every machine, one place",
-                        "Sessions on your Macs and servers, live, with what each agent is doing.")
+                        "Sessions on your Macs and servers, live, with what each agent is doing.", shown: revealed >= 3)
                 feature("hand.raised", "Answer from anywhere",
-                        "Allow a command or answer a question right from the notification.")
+                        "Allow a command or answer a question right from the notification.", shown: revealed >= 4)
                 feature("person.3", "Agents that work together",
-                        "Rooms, schedules and sessions that talk to each other.")
+                        "Rooms, schedules and sessions that talk to each other.", shown: revealed >= 5)
             }
             .padding(.vertical, 8)
             primary("Get started") { step = .hub }
+                .appear(revealed >= 6)
+        }
+        .task(id: app.splashDone) { await revealWelcome() }
+    }
+
+    /// The welcome screen builds itself part by part, a tick and a rising note with each.
+    private func revealWelcome() async {
+        guard app.splashDone, revealed == 0 else { return }
+        for i in 1...6 {
+            try? await Task.sleep(for: .milliseconds(i == 1 ? 120 : i == 6 ? 260 : 170))
+            guard !Task.isCancelled else { return }
+            withAnimation(.spring(duration: 0.55, bounce: i == 1 ? 0.45 : 0.25)) { revealed = i }
+            Feedback.play(.reveal(i - 1))
         }
     }
 
-    private func feature(_ icon: String, _ title: String, _ text: String) -> some View {
+    private func feature(_ icon: String, _ title: String, _ text: String, shown: Bool) -> some View {
         HStack(alignment: .top, spacing: 14) {
             Image(systemName: icon)
                 .font(.title3)
                 .foregroundStyle(.tint)
                 .frame(width: 32)
+                .symbolEffect(.bounce, value: shown)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.headline)
                 Text(text).font(.subheadline).foregroundStyle(palette.text2)
             }
         }
+        .appear(shown, from: .leading)
     }
 
     private var hub: some View {
@@ -168,7 +198,14 @@ struct OnboardingView: View {
     private var notifications: some View {
         VStack(spacing: 26) {
             header("bell.badge", "Know when an agent needs you",
-                   "Permission requests, questions and finished answers, with Allow and Deny right in the notification.")
+                   "Permission requests, questions and finished answers, with Allow and Deny right in the notification.",
+                   wiggle: bell)
+                .task {
+                    // The bell rings twice, with the approval knock, to show what a notice feels like.
+                    try? await Task.sleep(for: .milliseconds(450))
+                    bell += 1
+                    Feedback.play(.approval)
+                }
             primary("Turn on notifications") {
                 Task {
                     await AppDelegate.requestPush()
@@ -182,11 +219,13 @@ struct OnboardingView: View {
 
     // MARK: parts
 
-    private func header(_ icon: String, _ title: String, _ text: String) -> some View {
+    private func header(_ icon: String, _ title: String, _ text: String, wiggle: Int = 0) -> some View {
         VStack(spacing: 14) {
             Image(systemName: icon)
                 .font(.system(size: 44, weight: .semibold))
                 .foregroundStyle(.tint)
+                .symbolEffect(.bounce.up, options: .nonRepeating, value: step)
+                .symbolEffect(.wiggle, options: .repeat(2), value: wiggle)
             Text(title).font(.title.weight(.bold)).multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
             Text(text)
@@ -197,7 +236,10 @@ struct OnboardingView: View {
     }
 
     private func primary(_ title: String, disabled: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        Button {
+            Feedback.play(.tap)
+            action()
+        } label: {
             Text(title)
                 .font(.headline)
                 .frame(maxWidth: .infinity)
@@ -232,5 +274,15 @@ struct BackdropGradient: View {
         )
         .ignoresSafeArea()
         .background(palette.bg.ignoresSafeArea())
+    }
+}
+
+private extension View {
+    /// Fades and slides a part in when `shown` turns true.
+    func appear(_ shown: Bool, from edge: Edge = .bottom) -> some View {
+        self
+            .opacity(shown ? 1 : 0)
+            .offset(x: shown || edge != .leading ? 0 : -24, y: shown || edge != .bottom ? 0 : 18)
+            .blur(radius: shown ? 0 : 4)
     }
 }

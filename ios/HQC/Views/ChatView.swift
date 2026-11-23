@@ -175,9 +175,16 @@ struct ChatView: View {
                 }
             }
         }
-        .sensoryFeedback(.impact(weight: .light), trigger: sent)
-        // A soft tap when the agent finishes its turn while the chat is open.
-        .sensoryFeedback(.success, trigger: model.state.isBusy) { was, now in was && !now }
+        .onChange(of: sent) { _, _ in Feedback.play(.send) }
+        // The turn's end while the chat is open: a chime when it finished, a low pair when it failed.
+        .onChange(of: model.state) { old, new in
+            guard old != .unknown else { return }
+            if new == .error && old != .error {
+                Feedback.play(.error)
+            } else if old.isBusy && new == .idle {
+                Feedback.play(.done)
+            }
+        }
     }
 
     private var subtitle: String {
@@ -658,7 +665,7 @@ struct JumpToLatest: View {
                 }
         }
         .buttonStyle(.plain)
-        .sensoryFeedback(.impact(weight: .light), trigger: unseen) { _, new in new }
+        .simultaneousGesture(TapGesture().onEnded { Feedback.play(.select) })
         .accessibilityLabel(unseen ? "New messages, scroll to the latest" : "Scroll to the latest message")
         .padding(.bottom, 2)
     }

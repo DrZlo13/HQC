@@ -31,6 +31,10 @@ final class AppModel {
     /// Regular width (the desktop layout): the selected project and session, and what was
     /// pushed over the chat (a room's agent).
     var isRegular = false
+    /// The launch splash has opened onto the app; onboarding starts its animation then.
+    var splashDone = false
+    /// Request ids seen so far; nil until the first list arrives.
+    private var knownRequests: Set<String>?
     var selectedProjectID: String?
     var selectedSessionID: String?
     var detailPath: [Route] = []
@@ -121,6 +125,7 @@ final class AppModel {
         me = nil
         projects = []
         requests = []
+        knownRequests = nil
         summaries = [:]
         phase = .signIn
     }
@@ -158,7 +163,7 @@ final class AppModel {
             guard let self else { return }
             for s in list { self.summaries[s.session_id] = s }
         }
-        socket.onRequests = { [weak self] list in self?.requests = list }
+        socket.onRequests = { [weak self] list in self?.receive(requests: list) }
         socket.onSignInRequired = { [weak self] in self?.signOut() }
         self.socket = socket
         socket.start()
@@ -265,9 +270,26 @@ final class AppModel {
     }
 
     /// Answers a request and drops it from the list at once; the next `requests` frame confirms.
+    /// The open requests from the socket. A new one for a session not on screen knocks or asks
+    /// in the app too (the chat on screen cues its own); the first list after connecting is
+    /// what was already waiting, and stays quiet.
+    func receive(requests list: [OpenRequest]) {
+        if let known = knownRequests {
+            let fresh = list.filter { !known.contains($0.id) && $0.session_id != watching }
+            if fresh.contains(where: { $0.event.type == "approval.request" }) {
+                Feedback.play(.approval)
+            } else if !fresh.isEmpty {
+                Feedback.play(.question)
+            }
+        }
+        knownRequests = Set(list.map(\.id))
+        requests = list
+    }
+
     func answer(_ request: OpenRequest, option: ApprovalOption) async throws {
         guard let client else { return }
         try await client.approve(sessionID: request.session_id, requestID: request.request_id, optionID: option.id)
+        Feedback.play(.answered)
         requests.removeAll { $0.id == request.id }
     }
 

@@ -160,6 +160,7 @@ struct SessionListView: View {
                 Group {
                     if app.isRegular {
                         Button {
+                            if app.selectedSessionID != s.id { Feedback.play(.select) }
                             app.selectedSessionID = s.id
                             app.detailPath = []
                         } label: {

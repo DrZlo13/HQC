@@ -175,6 +175,7 @@ struct CopyButton: View {
     var body: some View {
         Button {
             UIPasteboard.general.string = text
+            Feedback.play(.copy)
             withAnimation(.snappy) { copied = true }
             Task {
                 try? await Task.sleep(for: .seconds(1.5))
@@ -189,7 +190,7 @@ struct CopyButton: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(copied ? palette.text : palette.muted)
-        .sensoryFeedback(.success, trigger: copied) { _, new in new }
+
         .accessibilityLabel(copied ? "Copied" : label)
     }
 }

@@ -149,6 +149,7 @@ final class ChatModel {
     func approve(requestID: String, option: ApprovalOption) async {
         do {
             try await app?.client?.approve(sessionID: sessionID, requestID: requestID, optionID: option.id)
+            Feedback.play(.answered)
             app?.requests.removeAll { $0.session_id == sessionID && $0.request_id == requestID }
         } catch {
             self.error = error.localizedDescription
@@ -158,6 +159,7 @@ final class ChatModel {
     func clarify(requestID: String, answers: [String: Any]) async {
         do {
             try await app?.client?.clarify(sessionID: sessionID, requestID: requestID, answers: answers)
+            Feedback.play(.answered)
             app?.requests.removeAll { $0.session_id == sessionID && $0.request_id == requestID }
         } catch {
             self.error = error.localizedDescription
@@ -215,7 +217,23 @@ final class ChatModel {
         }
         if again {
             rebuild()
-            if fresh { markRead() }
+            if fresh {
+                markRead()
+                cue(for: ev)
+            }
+        }
+    }
+
+    /// What the agent just did, felt and heard while this chat is open. The finished turn and
+    /// a failure come from the session's state (ChatView); the user's own message from Send.
+    private func cue(for ev: HubEvent) {
+        switch ev.type {
+        case "tool.call": Feedback.play(.tool)
+        case "tool.result" where ev.payload["error"]?.bool == true: Feedback.play(.toolFailed)
+        case "approval.request": Feedback.play(.approval)
+        case "clarify.request": Feedback.play(.question)
+        case "peer.message": Feedback.play(.peer)
+        default: break
         }
     }
 

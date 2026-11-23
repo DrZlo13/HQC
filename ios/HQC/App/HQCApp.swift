@@ -28,8 +28,25 @@ struct HQCApp: App {
 
 struct RootView: View {
     @Environment(AppModel.self) private var app
+    /// The splash covers the launch until the hub answered (or the app knows it needs setup).
+    @State private var splash = true
 
     var body: some View {
+        ZStack {
+            content
+            if splash {
+                SplashView(ready: app.phase != .connecting) {
+                    splash = false
+                    app.splashDone = true
+                }
+                .transition(.identity)
+                .zIndex(1)
+            }
+        }
+        .themed()
+    }
+
+    private var content: some View {
         Group {
             switch app.phase {
             case .setup:
@@ -49,7 +66,6 @@ struct RootView: View {
                 }
             }
         }
-        .themed()
         .animation(.smooth, value: app.phase)
     }
 }

@@ -361,6 +361,7 @@ struct CodeBlockView: View {
                 Spacer()
                 Button {
                     UIPasteboard.general.string = code
+                    Feedback.play(.copy)
                     copied = true
                     Task {
                         try? await Task.sleep(for: .seconds(1.5))

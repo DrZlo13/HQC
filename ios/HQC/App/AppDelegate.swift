@@ -61,7 +61,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         let session = info["session_id"] as? String
         let watching = await MainActor.run { Self.model?.watching }
         if let session, session == watching { return [] }
-        return [.banner, .sound, .list]
+        // With the app's own sounds on, its cue (played as the request arrives) is the sound.
+        let ownSounds = UserDefaults.standard.bool(forKey: Feedback.soundsKey)
+        return ownSounds ? [.banner, .list] : [.banner, .sound, .list]
     }
 
     func userNotificationCenter(

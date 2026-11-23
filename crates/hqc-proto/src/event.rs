@@ -612,6 +612,20 @@ pub enum EventKind {
         session_cost_usd: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// Tokens the main agent's context holds after this turn's last API response (Claude
+        /// Code: input, cache reads, cache writes and output of that response, or the size a
+        /// compaction reported); since SPEC 0.222. Only on a turn's `usage` with tokens.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_tokens: Option<u64>,
+        /// Tokens the context may hold before the runtime compacts it by itself (Claude Code:
+        /// `contextWindow` less the output reserve and a margin); since SPEC 0.222.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_limit: Option<u64>,
+        /// Seconds the runtime's prompt cache of the session has left when the turn ends,
+        /// counted from the request (Claude Code: 3600 or 300, as the cache writes were made,
+        /// less the seconds since the last response started); since SPEC 0.222.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_ttl_s: Option<u64>,
     },
     #[serde(rename = "status")]
     Status {

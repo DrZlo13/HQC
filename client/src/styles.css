@@ -2691,7 +2691,10 @@ select.input {
   min-width: 5em;
 }
 
-.chat-cost {
+/* Neither gives way in the one-line row, and the countdown's digits do not move it. */
+.chat-cost,
+.chat-context {
+  flex: none;
   font-variant-numeric: tabular-nums;
 }
 

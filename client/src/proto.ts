@@ -392,6 +392,12 @@ export interface Usage {
   /** The runtime's running total of the whole session after this turn (T27). */
   session_cost_usd?: number;
   model?: string;
+  /** Tokens the main agent's context holds after this turn (SPEC §4, 0.222). */
+  context_tokens?: number;
+  /** Tokens it may hold before the runtime compacts it by itself. */
+  context_limit?: number;
+  /** Seconds the runtime's prompt cache of the session lives after the turn. */
+  cache_ttl_s?: number;
 }
 export interface Status {
   state: SessionState;
@@ -725,6 +731,9 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     cost_usd: optNum(p, 'cost_usd'),
     session_cost_usd: optNum(p, 'session_cost_usd'),
     model: optStr(p, 'model'),
+    context_tokens: optNum(p, 'context_tokens'),
+    context_limit: optNum(p, 'context_limit'),
+    cache_ttl_s: optNum(p, 'cache_ttl_s'),
   }),
   status: (p) => ({
     state: tolerantEnum(p, 'state', SESSION_STATES),

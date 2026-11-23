@@ -14,7 +14,7 @@ import { LimitBar, Limits } from './limits';
 import { ActivityLine, FeedBlocks, activityShown, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
 import { peerMessages } from './relay';
 import { buildFeed } from './feed';
-import { useSubscription } from './hooks';
+import { useNow, useSubscription } from './hooks';
 import { ContextMenu, type MenuEntry } from './ContextMenu';
 import { ComposerSecret } from './secrets';
 import {
@@ -34,7 +34,7 @@ import {
   IconSend,
   IconStop,
 } from './icons';
-import { MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatCost, homePath, modeConfirm, modelName, shownModel } from './labels';
+import { MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatCost, formatTime, formatTimer, formatTokens, homePath, modeConfirm, modelName, shownModel } from './labels';
 import { LiveSubagents } from './LiveSubagents';
 import { Loading } from './Loading';
 import { CopyButton } from './Markdown';
@@ -747,6 +747,12 @@ export function Chat({
   // as in the list, with its agents' state (and Stop stops them all).
   const shown = info?.room_mode ? app.shown(info).state : info && atWorkAfterTurn(info) ? 'running' : answeredState;
   const pill = <StatePill state={shown} timeline={t} where={locked ? `In ${holder}${worker ? ` on ${worker}` : ''}` : undefined} pausing={!!info && pausingAfterTurn(info)} />;
+  // How full the main agent's context is against the auto-compaction (SPEC §6): not in a room,
+  // which has none of its own, nor while VS Code holds the session, whose turns the worker does
+  // not report, so that the numbers would stand still. The cache part only while the agent is
+  // not working and on the runtime's own endpoint, which is the one that has this cache.
+  const context = room || locked ? undefined : t.contextUse();
+  const cached = !info?.provider && shown !== 'running';
   const agents = agentsLabel(info?.subagents);
   const conn = app.offline && <span class="conn-lost">offline</span>;
   // In the meta row on a computer; on a phone after the pills, on their line.
@@ -819,6 +825,7 @@ export function Chat({
           {agents}
         </span>
       )}
+      {phone && context && <ContextMeta key={String(cached)} context={context} cached={cached} phone />}
       {!phone && pills}
       {system && <span class="chat-system-note">the worker's service session</span>}
       {!phone && spawned}
@@ -864,6 +871,7 @@ export function Chat({
               </span>
             </>
           )}
+          {context && <ContextMeta key={String(cached)} context={context} cached={cached} phone={false} />}
         </>
       )}
     </div>
@@ -1214,6 +1222,34 @@ export function withText(draft: string, text: string): string {
 function approvalCall(items: ReturnType<Timeline['items']>, t: Timeline, requestId: string) {
   const b = buildFeed(items, t).find((x) => x.kind === 'approval' && x.event.payload.request_id === requestId);
   return b?.kind === 'approval' ? b.call : undefined;
+}
+
+/** The context and cache item of the header's meta row. It keeps its own clock: the countdown
+ *  ticks only while there is time left, and a tick re-renders this item and not the chat. The
+ *  caller keys it by `cached`, so that a clock that was off starts from the present. */
+function ContextMeta({ context, cached, phone }: { context: { tokens: number; limit?: number; cacheEnd?: number }; cached: boolean; phone: boolean }) {
+  // A cache end the date cannot hold (a worker's absurd TTL) is left out.
+  const end = cached && context.cacheEnd !== undefined && Number.isFinite(new Date(context.cacheEnd).getTime()) ? context.cacheEnd : undefined;
+  const now = useNow(1000, end !== undefined && end > Date.now());
+  const percent = context.limit ? Math.round((context.tokens / context.limit) * 100) : undefined;
+  const parts: string[] = [];
+  if (percent !== undefined) parts.push(phone ? `${percent}%` : `${percent}% context`);
+  if (end !== undefined) parts.push(end > now ? `cache ${formatTimer(end - now)}` : 'cache expired');
+  if (parts.length === 0) return null;
+  const title = [
+    context.limit && `${formatTokens(context.tokens)} of ${formatTokens(context.limit)} tokens before auto-compaction`,
+    end !== undefined && `Claude's cache of this session ends at ${formatTime(new Date(end).toISOString())}; a message after that reads the whole context again`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+  return (
+    <>
+      {!phone && <span class="sep">/</span>}
+      <span class="chat-context" title={title}>
+        {parts.join(' · ')}
+      </span>
+    </>
+  );
 }
 
 /** The state in the header: a pill, pulsing while the session works (a turn, or a background

@@ -26,6 +26,7 @@ import {
 } from '../src/proto';
 import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, modelName, shownModel } from '../src/ui/labels';
 import { limitNotice } from '../src/ui/limits';
+import { Timeline } from '../src/timeline';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
 import { Chat, withQuote } from '../src/ui/Chat';
 import { firstSentences } from '../src/ui/selection';
@@ -89,6 +90,7 @@ function setup(
     model?: string;
     paused_at?: string;
     room_mode?: RoomMode;
+    provider?: SessionInfo['provider'];
   } = {},
 ) {
   const history = opts.history ?? HISTORY;
@@ -186,6 +188,7 @@ function setup(
     updated_at: '2026-10-24T19:47:00Z',
     system: false,
     held_by: opts.held_by,
+    provider: opts.provider,
     commands: opts.commands,
     spawned_by: opts.spawned_by,
     permission_mode: opts.permission_mode,
@@ -2667,6 +2670,145 @@ describe('cost (T27)', () => {
     const { app } = setup('idle', { commands: [] });
     await mount(app);
     expect($('.chat-cost')!.textContent).toBe('$0.07 this session');
+  });
+});
+
+describe('context and cache in the header (SPEC 0.222)', () => {
+  const T0 = Date.parse('2026-11-20T12:00:00Z');
+  const usage = (seq: number, at: number, fields: Record<string, number>) =>
+    ev('event.usage', seq, (e) => {
+      e.ts = new Date(at).toISOString();
+      e.payload = { input_tokens: 2, output_tokens: 5, cost_usd: 0.05, ...fields };
+    });
+  const FULL = { context_tokens: 329_000, context_limit: 967_000, cache_ttl_s: 3600 };
+  // The cache ends an hour after the turn: 40 minutes from "now", 20 minutes after it.
+  const history = (extra: HqcEvent[] = []) => [HISTORY[0], HISTORY[1], usage(3, T0 - 20 * 60_000, FULL), ...extra];
+  const withClock = async (run: () => Promise<void>) => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(T0);
+    try {
+      await run();
+    } finally {
+      vi.useRealTimers();
+    }
+  };
+  // Mounted, with the effects that start the clock run (preact runs them after a frame).
+  const show = async (app: AppState, phone = false) => {
+    await mount(app, phone);
+    await act(async () => void (await new Promise((r) => setTimeout(r, 150))));
+  };
+  const row = () => $('.chat-meta .chat-context');
+  const endsAt = new Date(T0 + 40 * 60_000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+
+  it('shows how full the context is and the cache countdown after the cost; the countdown ticks and ends', async () => {
+    await withClock(async () => {
+      const { app } = setup('idle', { history: history(), commands: [] });
+      await show(app);
+      expect([...$('.chat-meta')!.children].map((c) => c.classList[0]).slice(-3)).toEqual(['chat-cost', 'sep', 'chat-context']);
+      expect(row()!.textContent).toBe('34% context · cache 40:00');
+      expect(row()!.getAttribute('title')).toBe(
+        `329k of 967k tokens before auto-compaction\nClaude's cache of this session ends at ${endsAt}; a message after that reads the whole context again`,
+      );
+      await act(async () => void vi.advanceTimersByTime(1000));
+      expect(row()!.textContent).toBe('34% context · cache 39:59');
+      // A tick re-renders the item and not the chat: the chat does not read the timeline again.
+      const reads = vi.spyOn(Timeline.prototype, 'contextUse');
+      await act(async () => void vi.advanceTimersByTime(3000));
+      expect(row()!.textContent).toBe('34% context · cache 39:56');
+      expect(reads).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      reads.mockRestore();
+      vi.setSystemTime(T0 + 40 * 60_000);
+      await act(async () => void vi.advanceTimersByTime(1000));
+      expect(row()!.textContent).toBe('34% context · cache expired');
+      // Nothing ticks any more once it is over.
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
+  it('shows neither part while VS Code holds the session: its turns are not reported', async () => {
+    await withClock(async () => {
+      const { app } = setup('locked_vscode', { history: history(), commands: [], held_by: { entrypoint: 'claude-vscode', status: 'idle' } });
+      await show(app);
+      expect(row()).toBeNull();
+    });
+  });
+
+  it('leaves out a cache end the date cannot hold, and keeps the chat', async () => {
+    await withClock(async () => {
+      const bad = [HISTORY[0], usage(3, T0 - 60_000, { ...FULL, cache_ttl_s: 1e300 })];
+      const { app } = setup('idle', { history: bad, commands: [] });
+      await show(app);
+      expect(row()!.textContent).toBe('34% context');
+      expect(row()!.getAttribute('title')).toBe('329k of 967k tokens before auto-compaction');
+    });
+  });
+
+  it('keeps the earlier context through a later usage that gives none (the total only)', async () => {
+    await withClock(async () => {
+      const totalOnly = ev('event.usage', 4, (e) => {
+        e.ts = new Date(T0 - 5 * 60_000).toISOString();
+        e.payload = { input_tokens: 0, output_tokens: 0, session_cost_usd: 1.5 };
+      });
+      const { app } = setup('idle', { history: history([totalOnly]), commands: [] });
+      await show(app);
+      expect(row()!.textContent).toBe('34% context · cache 40:00');
+    });
+  });
+
+  it('is more than 100 % over the limit, and has no cache part without a TTL', async () => {
+    await withClock(async () => {
+      const h = [HISTORY[0], usage(3, T0 - 60_000, { context_tokens: 1_000_000, context_limit: 967_000 })];
+      const { app } = setup('idle', { history: h, commands: [] });
+      await show(app);
+      expect(row()!.textContent).toBe('103% context');
+      expect(row()!.getAttribute('title')).toBe('1M of 967k tokens before auto-compaction');
+    });
+  });
+
+  it('hides the cache part while the agent works: the context stays', async () => {
+    await withClock(async () => {
+      const { app } = setup('running', { history: history(), commands: [] });
+      await show(app);
+      expect(row()!.textContent).toBe('34% context');
+      expect(row()!.getAttribute('title')).toBe('329k of 967k tokens before auto-compaction');
+    });
+  });
+
+  it('on a phone is short and stands next to the state', async () => {
+    await withClock(async () => {
+      const { app } = setup('idle', { history: history(), commands: [] });
+      await show(app, true);
+      expect(row()!.textContent).toBe('34% · cache 40:00');
+      expect([...$('.chat-meta')!.children].map((c) => c.classList[0])).toEqual(['state', 'chat-context']);
+    });
+  });
+
+  it('has no cache part for a session on a provider, and nothing in a room', async () => {
+    await withClock(async () => {
+      const { app } = setup('idle', { history: history(), commands: [], provider: { id: 'pr1', label: 'Proxy' } });
+      await show(app);
+      expect(row()!.textContent).toBe('34% context');
+    });
+    await withClock(async () => {
+      const { app } = setup('idle', { history: history(), commands: [], room_mode: 'council' });
+      await show(app);
+      expect(row()).toBeNull();
+    });
+  });
+
+  it('forgets the context after /clear, and takes the last usage that gives one', async () => {
+    await withClock(async () => {
+      const cleared = ev('event.system', 4, (e) => (e.payload = { text: 'Conversation cleared', code: 'conversation_cleared' }));
+      const { app } = setup('idle', { history: history([cleared]), commands: [] });
+      await show(app);
+      expect(row()).toBeNull();
+      const later = usage(5, T0 - 10 * 60_000, { context_tokens: 500_000, context_limit: 1_000_000 });
+      const { app: next } = setup('idle', { history: history([cleared, later]), commands: [] });
+      render(null, root);
+      await show(next);
+      expect(row()!.textContent).toBe('50% context');
+    });
   });
 });
 

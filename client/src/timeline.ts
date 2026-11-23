@@ -500,6 +500,29 @@ export class Timeline {
     return goal;
   }
 
+  /** The main agent's context as of the last `usage` that gives its size (SPEC §4, 0.222): its
+   *  tokens, the limit the runtime compacts at, and when the prompt cache of the session ends
+   *  (the `usage`'s time plus the seconds its cache had left then, `cache_ttl_s`; ms). A
+   *  `/clear` after it empties it: the conversation is a new one. */
+  contextUse(): { tokens: number; limit?: number; cacheEnd?: number } | undefined {
+    let found: { tokens: number; limit?: number; cacheEnd?: number } | undefined;
+    for (const e of this.events()) {
+      if (e.type === "system" && e.payload.code === "conversation_cleared") {
+        found = undefined;
+        continue;
+      }
+      if (e.type !== "usage" || e.payload.context_tokens === undefined) continue;
+      const ttl = e.payload.cache_ttl_s;
+      const at = Date.parse(e.ts);
+      found = {
+        tokens: e.payload.context_tokens,
+        limit: e.payload.context_limit,
+        cacheEnd: ttl !== undefined && !Number.isNaN(at) ? at + ttl * 1000 : undefined,
+      };
+    }
+    return found;
+  }
+
   /** The call of a result: results whose call is in the timeline are shown with it. */
   callFor(callId: string): EventOf<"tool.call"> | undefined {
     return this.calls.get(callId);

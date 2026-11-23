@@ -37,7 +37,7 @@ import {
   type Block,
   type ToolRow,
 } from './feed';
-import { useAction, useIsPhone, useNow } from './hooks';
+import { useAction, useIsPhone, useNow, useRunUp } from './hooks';
 import {
   IconAgent,
   IconArrowIn,
@@ -401,6 +401,8 @@ export function ActivityLine({
 }) {
   const call = state === 'running' ? timeline.runningCall() : undefined;
   const t = useNow(1000, !!call, now);
+  // The thinking estimate comes every couple of seconds; it runs up between them (SPEC §17.1).
+  const thinking = useRunUp(state === 'running' && activity?.kind === 'thinking' ? activity.estimated_tokens : undefined, now);
   if (!activityShown(state, timeline)) return null;
   const who = name ? <span class="live-agents-kind">{name} · </span> : undefined;
   const lead = who ?? <span class="live-agents-kind">Main agent: </span>;
@@ -438,8 +440,9 @@ export function ActivityLine({
         );
     }
   } else {
+    const shown = activity?.kind === 'thinking' && thinking !== undefined ? { ...activity, estimated_tokens: thinking } : activity;
     const label =
-      state === 'running' ? (activity ? activityLabel(activity) : 'Working') : state === 'queued' ? 'Input queued' : 'Waiting for approval';
+      state === 'running' ? (shown ? activityLabel(shown) : 'Working') : state === 'queued' ? 'Input queued' : 'Waiting for approval';
     body = (
       <>
         {lead}

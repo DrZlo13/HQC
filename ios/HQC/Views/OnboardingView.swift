@@ -1,3 +1,4 @@
+import QuartzCore
 import SwiftUI
 import UserNotifications
 
@@ -6,6 +7,7 @@ import UserNotifications
 struct OnboardingView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.palette) private var palette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     enum Step: Int, CaseIterable { case welcome, hub, signIn, notifications }
 
@@ -16,18 +18,39 @@ struct OnboardingView: View {
     @State private var revealed = 0
     @State private var bell = 0
     @FocusState private var focused: Bool
+    /// False on a first launch while the app boots: the deck shows the launch moment itself
+    /// (as SwiftBooking's deck does), the logo centred at launch size on the launch colour,
+    /// breathing. Flipped inside an animation, the logo flies up into the welcome screen.
+    let isRevealed: Bool
+    /// The breathing of the launch state, on its own scale so its repeating animation cannot
+    /// fight the flight.
+    @State private var pulse: CGFloat = 1
+    @State private var pulseStart: CFTimeInterval?
+    /// Where the welcome logo sits, and the whole screen, in window coordinates: the launch
+    /// state offsets the logo from its slot to the screen's centre, where the OS put it.
+    @State private var logoSlot: CGRect = .zero
+    @State private var screen: CGRect = .zero
 
-    init(start: Step) {
+    init(start: Step, revealed: Bool = true) {
         _step = State(initialValue: start)
+        isRevealed = revealed
+    }
+
+    private var launchOffset: CGSize {
+        CGSize(width: screen.midX - logoSlot.midX, height: screen.midY - logoSlot.midY)
     }
 
     var body: some View {
         ZStack {
             BackdropGradient()
+            // The OS launch screen's colour, fading into the gradient as the deck arrives.
+            Color("LaunchBackground").ignoresSafeArea()
+                .opacity(isRevealed ? 0 : 1)
             VStack(spacing: 0) {
                 if step != .welcome {
                     progress
                         .padding(.top, 12)
+                        .opacity(isRevealed ? 1 : 0)
                 }
                 Spacer(minLength: 20)
                 Group {
@@ -45,6 +68,36 @@ struct OnboardingView: View {
                 Spacer(minLength: 20)
             }
             .padding(.horizontal, 28)
+
+            // The launch logo, exactly where and as large as the OS launch screen draws it, until
+            // the reveal; then the welcome logo, starting from this very spot, flies up.
+            if !isRevealed {
+                Image("LaunchLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: SplashLogo.size, height: SplashLogo.size)
+                    .scaleEffect(pulse)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .ignoresSafeArea()
+                    .transition(.identity)
+                    .accessibilityHidden(true)
+            }
+        }
+        .background {
+            Color.clear.ignoresSafeArea()
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { screen = $0 }
+        }
+        .breathingHaptic(isActive: !isRevealed, pulseStart: pulseStart)
+        .onAppear {
+            guard !isRevealed, !reduceMotion else { return }
+            pulseStart = CACurrentMediaTime()
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { pulse = 1.05 }
+        }
+        .onChange(of: isRevealed) { _, revealed in
+            guard revealed else { return }
+            SplashHaptics.shared.playResolved()
+            Feedback.play(.arrive, haptic: false)
+            withAnimation(.easeOut(duration: 0.25)) { pulse = 1 }
         }
         .animation(.snappy(duration: 0.4), value: step)
         .onChange(of: step) { old, new in
@@ -80,15 +133,26 @@ struct OnboardingView: View {
 
     private var welcome: some View {
         VStack(spacing: 30) {
-            Image("Logo")
-                .resizable()
-                .scaledToFit()
+            // The slot is measured untransformed; the logo in it starts, at the reveal, where
+            // the launch logo is (the screen's centre, launch size) and flies into the slot.
+            Color.clear
                 .frame(width: 96, height: 96)
-                .clipShape(.rect(cornerRadius: 22))
-                .shadow(color: .black.opacity(0.2), radius: 18, y: 8)
-                .scaleEffect(revealed >= 1 ? 1 : 0.4)
-                .rotationEffect(.degrees(revealed >= 1 ? 0 : -12))
-                .opacity(revealed >= 1 ? 1 : 0)
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { logoSlot = $0 }
+                .overlay {
+                    Image("Logo")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 96, height: 96)
+                        .clipShape(.rect(cornerRadius: 22))
+                        // Appears in the same frame the launch logo goes, without a fade, so
+                        // the two read as one.
+                        .opacity(isRevealed ? 1 : 0)
+                        .animation(nil, value: isRevealed)
+                        .shadow(color: .black.opacity(isRevealed ? 0.2 : 0), radius: 18, y: 8)
+                        .scaleEffect(pulse)
+                        .scaleEffect(isRevealed ? 1 : SplashLogo.size / 96)
+                        .offset(isRevealed ? .zero : launchOffset)
+                }
             VStack(spacing: 10) {
                 Text("HQC").font(.largeTitle.weight(.bold))
                 Text("Your coding agents, on every machine, in your pocket.")
@@ -109,14 +173,16 @@ struct OnboardingView: View {
             primary("Get started") { step = .hub }
                 .appear(revealed >= 6)
         }
-        .task(id: app.splashDone) { await revealWelcome() }
+        .task(id: isRevealed) { await revealWelcome() }
     }
 
-    /// The welcome screen builds itself part by part, a tick and a rising note with each.
+    /// Once the logo is on its way, the welcome screen builds itself part by part, a tick and
+    /// a rising note with each.
     private func revealWelcome() async {
-        guard app.splashDone, revealed == 0 else { return }
-        for i in 1...6 {
-            try? await Task.sleep(for: .milliseconds(i == 1 ? 120 : i == 6 ? 260 : 170))
+        guard isRevealed, revealed == 0 else { return }
+        revealed = 1
+        for i in 2...6 {
+            try? await Task.sleep(for: .milliseconds(i == 2 ? 260 : i == 6 ? 260 : 170))
             guard !Task.isCancelled else { return }
             withAnimation(.spring(duration: 0.55, bounce: i == 1 ? 0.45 : 0.25)) { revealed = i }
             Feedback.play(.reveal(i - 1))
@@ -210,10 +276,10 @@ struct OnboardingView: View {
             primary("Turn on notifications") {
                 Task {
                     await AppDelegate.requestPush()
-                    app.finishOnboarding()
+                    withAnimation(.spring(response: 0.75, dampingFraction: 0.98)) { app.finishOnboarding() }
                 }
             }
-            Button("Not now") { app.finishOnboarding() }
+            Button("Not now") { withAnimation(.spring(response: 0.75, dampingFraction: 0.98)) { app.finishOnboarding() } }
                 .font(.subheadline)
         }
     }

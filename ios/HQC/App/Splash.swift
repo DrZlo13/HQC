@@ -1,38 +1,64 @@
+import QuartzCore
 import SwiftUI
 
-/// The launch: the icon breathes in, then the whole splash pushes through the viewer
-/// (`pushThrough`, applied by `RootView`) while the app rises to full size beneath it. It
-/// never waits for the hub: the app opens at once and shows skeletons until data arrives.
+/// The launch on a set-up app (ported from SwiftBooking's `SplashScreen`). Its first frame is
+/// the system launch screen (`UILaunchScreen`: `LaunchLogo` centred on `LaunchBackground`), so
+/// the hand-over from the OS-drawn screen is invisible. The logo breathes, felt as a swell in
+/// step with it, while the app loads underneath; when `isFinishing` flips, it shrinks and fades
+/// in one motion with a resolving beat and the arrival chime, and `onVanished` unmounts it.
+///
+/// A first launch never shows this: the welcome deck draws the same moment itself and flies the
+/// logo up into place (`OnboardingView`).
 struct SplashView: View {
-    @Environment(\.palette) private var palette
-    let onFinish: () -> Void
+    var isFinishing: Bool
+    var onVanished: () -> Void
 
-    @State private var shown = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var scale: CGFloat = 1
+    @State private var opacity: Double = 1
+    /// When the pulse started, so the haptic swell can join it in phase.
+    @State private var pulseStart: CFTimeInterval?
 
     var body: some View {
         ZStack {
-            palette.bg.ignoresSafeArea()
-            Image("Logo")
+            Color("LaunchBackground").ignoresSafeArea()
+            Image("LaunchLogo")
                 .resizable()
                 .scaledToFit()
-                .frame(width: 112, height: 112)
-                .clipShape(.rect(cornerRadius: 26, style: .continuous))
-                .overlay {
-                    // A hairline, so the dark icon still has an edge on a dark palette.
-                    RoundedRectangle(cornerRadius: 26, style: .continuous)
-                        .strokeBorder(palette.text.opacity(0.12), lineWidth: 1)
-                }
-                .shadow(color: .black.opacity(shown ? 0.22 : 0), radius: 22, y: 10)
-                .scaleEffect(shown ? 1 : 0.9)
-                .opacity(shown ? 1 : 0)
+                .frame(width: SplashLogo.size, height: SplashLogo.size)
+                .scaleEffect(scale)
         }
-        .task {
-            // Breathe in, a beat at full size, then go.
-            withAnimation(.easeOut(duration: 0.38)) { shown = true }
-            try? await Task.sleep(for: .milliseconds(520))
-            Feedback.play(.arrive)
-            onFinish()
+        .opacity(opacity)
+        .breathingHaptic(isActive: !isFinishing, pulseStart: pulseStart)
+        .onAppear(perform: startPulsing)
+        .onChange(of: isFinishing, initial: true) { _, finishing in
+            if finishing { vanish() }
         }
         .accessibilityHidden(true)
     }
+
+    private func startPulsing() {
+        guard !reduceMotion else { return }
+        pulseStart = CACurrentMediaTime()
+        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+            scale = 1.05
+        }
+    }
+
+    private func vanish() {
+        SplashHaptics.shared.playResolved()
+        Feedback.play(.arrive, haptic: false)
+        withAnimation(.easeInOut(duration: 0.5), completionCriteria: .logicallyComplete) {
+            scale = 0.3
+            opacity = 0
+        } completion: {
+            onVanished()
+        }
+    }
+}
+
+/// The launch logo's size, the same as `LaunchLogo`'s point size, shared with the welcome deck
+/// so its launch state lines up with the OS launch screen to the pixel.
+nonisolated enum SplashLogo {
+    static let size: CGFloat = 112
 }

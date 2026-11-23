@@ -42,9 +42,11 @@ browser and Apple push (SPEC 0.215).
 Agents are felt and heard while their chat is open: a glassy click per tool call (a few a second
 at most), a low pair when one fails, a knock for a permission request, a rising three notes for
 a question, a chime when the turn ends and a falling pair when it fails; a request in another
-session knocks too. Sending, answering, copying and moving around tick. The launch splash breathes
-the icon in, then pushes through the viewer (scaling up, blurring out) while the app rises
-beneath it, under a second; a set-up app opens its main screen at once, with skeletons and a
+session knocks too. Sending, answering, copying and moving around tick. The launch follows SwiftBooking's:
+the system launch screen (the logo on `LaunchBackground`) hands over to a splash drawn the same,
+the logo breathes with a felt swell (`SplashHaptics`) and then shrinks and fades onto the app; on
+a first launch the welcome screen draws that moment itself and flies the logo up into place, and
+finishing onboarding pushes it through the viewer while the app rises beneath it. A set-up app opens its main screen at once, with skeletons and a
 "Connecting…" bubble until the hub answers, and retries while the hub is away; onboarding builds
 itself line by line, each line a tap and a note up the scale. Every cue's haptic taps and tones
 come from one list of notes (`HQC/App/Feedback.swift`), so they land together; the tones are

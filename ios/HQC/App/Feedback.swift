@@ -3,7 +3,7 @@ import CoreHaptics
 import SwiftUI
 
 /// What the app answers with a tap and, where it fits, a tone: UI moments and what agents do.
-enum Cue: Hashable {
+nonisolated enum Cue: Hashable, Sendable {
     /// A light tick for a control.
     case tap
     /// A selection moved (a rail tile, a tab, a pane).
@@ -41,6 +41,11 @@ enum Cue: Hashable {
 /// Plays cues: Core Haptics patterns and soft synthesized tones made from one list of notes, so
 /// every tap lands on its note. Tones go through the `.ambient` audio session: they mix with
 /// music, stay quiet under the ring/silent switch and never take the audio focus.
+///
+/// This facade only decides (settings, bursts); the engines run on `FeedbackEngine`'s own
+/// queue. `CHHapticEngine`'s start and the audio session block their thread until the system
+/// answers, with no bound, and a cue can be played during launch: on the main thread that
+/// could hold the first frame with the watchdog running.
 @MainActor
 final class Feedback {
     static let shared = Feedback()
@@ -48,45 +53,59 @@ final class Feedback {
     nonisolated static let hapticsKey = "feedback.haptics"
     nonisolated static let soundsKey = "feedback.sounds"
 
-    static func play(_ cue: Cue) { shared.play(cue) }
+    /// - Parameter haptic: false plays only the tone, for a moment that brings its own
+    ///   haptic pattern (the splash).
+    static func play(_ cue: Cue, haptic: Bool = true) { shared.play(cue, haptic: haptic) }
 
-    private var hapticsOn: Bool { UserDefaults.standard.bool(forKey: Self.hapticsKey) }
-    private var soundsOn: Bool { UserDefaults.standard.bool(forKey: Self.soundsKey) }
-
-    private var haptics: CHHapticEngine?
-    private let supportsHaptics = CHHapticEngine.capabilitiesForHardware().supportsHaptics
-    private var audio: AVAudioEngine?
-    private var players: [AVAudioPlayerNode] = []
-    private var nextPlayer = 0
-    private var buffers: [Cue: AVAudioPCMBuffer] = [:]
     private var lastPlayed: [Cue: Date] = [:]
-    private let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1)!
 
     private init() {
         UserDefaults.standard.register(defaults: [Self.hapticsKey: true, Self.soundsKey: true])
     }
 
-    func play(_ cue: Cue) {
-        let spec = Self.spec(cue)
+    func play(_ cue: Cue, haptic: Bool = true) {
         // Bursts (a run of tool calls) give one cue, not a drum roll.
         let now = Date()
-        if let last = lastPlayed[cue], now.timeIntervalSince(last) < spec.minInterval { return }
+        if let last = lastPlayed[cue], now.timeIntervalSince(last) < Self.spec(cue).minInterval { return }
         lastPlayed[cue] = now
+        let defaults = UserDefaults.standard
+        FeedbackEngine.shared.play(cue,
+                                   sound: defaults.bool(forKey: Self.soundsKey),
+                                   haptic: haptic && defaults.bool(forKey: Self.hapticsKey))
+    }
+}
 
+/// The engines behind `Feedback`, owned by one serial queue and touched nowhere else.
+nonisolated final class FeedbackEngine: @unchecked Sendable {
+    static let shared = FeedbackEngine()
+
+    private let queue = DispatchQueue(label: "xyz.drewnja.hqc.feedback", qos: .userInitiated)
+    private let supportsHaptics = CHHapticEngine.capabilitiesForHardware().supportsHaptics
+    private var haptics: CHHapticEngine?
+    private var audio: AVAudioEngine?
+    private var players: [AVAudioPlayerNode] = []
+    private var nextPlayer = 0
+    private var buffers: [Cue: AVAudioPCMBuffer] = [:]
+    private let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1)!
+
+    func play(_ cue: Cue, sound: Bool, haptic: Bool) {
+        guard sound || haptic else { return }
+        queue.async { self.perform(cue, sound: sound, haptic: haptic) }
+    }
+
+    private func perform(_ cue: Cue, sound: Bool, haptic: Bool) {
+        let spec = Feedback.spec(cue)
         var latency: TimeInterval = 0
-        if soundsOn, !spec.notes.isEmpty, playSound(cue, spec) {
+        if sound, !spec.notes.isEmpty, playSound(cue, spec) {
             latency = AVAudioSession.sharedInstance().outputLatency
         }
-        if hapticsOn { playHaptic(spec, delay: latency) }
+        if haptic { playHaptic(spec, delay: latency) }
     }
 
     // MARK: haptics
 
     private func playHaptic(_ spec: CueSpec, delay: TimeInterval) {
-        guard supportsHaptics else {
-            UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.7)
-            return
-        }
+        guard supportsHaptics else { return }
         do {
             let engine = try hapticEngine()
             let pattern = try CHHapticPattern(events: spec.hapticEvents, parameters: [])
@@ -102,8 +121,15 @@ final class Feedback {
         let engine = try CHHapticEngine()
         engine.playsHapticsOnly = true
         engine.isAutoShutdownEnabled = true
-        engine.resetHandler = { [weak engine] in try? engine?.start() }
-        engine.stoppedHandler = { _ in }
+        // Both handlers come on an arbitrary thread: back to the queue before touching state.
+        engine.resetHandler = {
+            let me = FeedbackEngine.shared
+            me.queue.async { try? me.haptics?.start() }
+        }
+        engine.stoppedHandler = { _ in
+            let me = FeedbackEngine.shared
+            me.queue.async { me.haptics = nil }
+        }
         try engine.start()
         haptics = engine
         return engine
@@ -113,7 +139,7 @@ final class Feedback {
 
     private func playSound(_ cue: Cue, _ spec: CueSpec) -> Bool {
         do {
-            let (engine, _) = try audioEngine()
+            let engine = try audioEngine()
             if !engine.isRunning { try engine.start() }
             let buffer = buffers[cue] ?? render(spec)
             buffers[cue] = buffer
@@ -129,8 +155,8 @@ final class Feedback {
         }
     }
 
-    private func audioEngine() throws -> (AVAudioEngine, [AVAudioPlayerNode]) {
-        if let audio { return (audio, players) }
+    private func audioEngine() throws -> AVAudioEngine {
+        if let audio { return audio }
         try AVAudioSession.sharedInstance().setCategory(.ambient, options: [.mixWithOthers])
         try AVAudioSession.sharedInstance().setActive(true)
         let engine = AVAudioEngine()
@@ -146,7 +172,7 @@ final class Feedback {
         try engine.start()
         audio = engine
         players = nodes
-        return (engine, nodes)
+        return engine
     }
 
     /// A soft mallet tone per note: a sine with a quieter octave that fades first, a 4 ms attack
@@ -189,14 +215,14 @@ final class Feedback {
 
 /// A note of a cue: its start, pitch, how long it rings and how strong it is (0…1). The
 /// haptic tap at the same moment takes its strength from `gain` and its sharpness from pitch.
-struct Note {
+nonisolated struct Note {
     var at: TimeInterval
     var freq: Double
     var length: TimeInterval
     var gain: Double
 }
 
-struct CueSpec {
+nonisolated struct CueSpec {
     var notes: [Note]
     /// Taps without a note (ticks), and swells.
     var extraHaptics: [CHHapticEvent] = []
@@ -224,21 +250,21 @@ struct CueSpec {
 }
 
 /// Pitches of A major's pentatonic scale and a few below, so cues sound like one family.
-private enum Pitch {
+nonisolated private enum Pitch {
     static let a3 = 220.0, d4 = 293.66, e4 = 329.63, f4 = 349.23
     static let a4 = 440.0, cs5 = 554.37, d5 = 587.33, e5 = 659.25, fs5 = 739.99
     static let a5 = 880.0, b5 = 987.77, cs6 = 1108.73, e6 = 1318.51
     static let scale = [a4, cs5, e5, fs5, a5, b5, cs6, e6]
 }
 
-private func tick(_ at: TimeInterval, intensity: Float, sharpness: Float) -> CHHapticEvent {
+nonisolated private func tick(_ at: TimeInterval, intensity: Float, sharpness: Float) -> CHHapticEvent {
     CHHapticEvent(eventType: .hapticTransient,
                   parameters: [CHHapticEventParameter(parameterID: .hapticIntensity, value: intensity),
                                CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpness)],
                   relativeTime: at)
 }
 
-private func swell(_ at: TimeInterval, _ duration: TimeInterval, intensity: Float, sharpness: Float) -> CHHapticEvent {
+nonisolated private func swell(_ at: TimeInterval, _ duration: TimeInterval, intensity: Float, sharpness: Float) -> CHHapticEvent {
     CHHapticEvent(eventType: .hapticContinuous,
                   parameters: [CHHapticEventParameter(parameterID: .hapticIntensity, value: intensity),
                                CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpness),
@@ -249,7 +275,7 @@ private func swell(_ at: TimeInterval, _ duration: TimeInterval, intensity: Floa
 }
 
 extension Feedback {
-    static func spec(_ cue: Cue) -> CueSpec {
+    nonisolated static func spec(_ cue: Cue) -> CueSpec {
         switch cue {
         case .tap:
             return CueSpec(notes: [], extraHaptics: [tick(0, intensity: 0.45, sharpness: 0.6)])

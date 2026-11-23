@@ -719,6 +719,87 @@ async fn approval_answer_and_expiry() {
     hub.finish().await;
 }
 
+/// An answer names its request by the id alone (SPEC §10.1): a worker's `approval.request` or
+/// `clarify.request` whose id an open request of another kind of the session holds (a move or
+/// a publication the owner is asked about) is not stored and opens nothing, and no request is
+/// opened with the id of the worker's open one. A repeat of the same request is as before.
+#[tokio::test]
+async fn a_request_id_held_by_another_kind_opens_no_request() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("ids").await;
+    ack_start(&mut w, &sid).await;
+    let id = Uuid::parse_str(&sid).unwrap();
+    let card = json!({"options": [
+        {"id": "once", "label": "Allow", "canonical": "once"},
+        {"id": "deny", "label": "Deny", "canonical": "deny"}]});
+    let open = |request_id: &'static str| {
+        let (db, card) = (hub.app.db.clone(), card.clone());
+        async move {
+            hqc_hub::db::open_request(&db, "move", id, request_id, &card, None, None)
+                .await
+                .unwrap()
+        }
+    };
+    assert!(open("x1").await);
+
+    let ack = w
+        .event(agent_event(
+            &sid,
+            "approval.request",
+            approval_payload("x1", "2099-01-01T00:00:00Z"),
+        ))
+        .await;
+    assert!(ack["seq"].is_null(), "{ack}");
+    let q = json!({"request_id": "x1", "questions": [{"id": "q1", "text": "Which?", "options": ["A", "B"]}]});
+    let ack = w.event(agent_event(&sid, "clarify.request", q)).await;
+    assert!(ack["seq"].is_null(), "{ack}");
+    assert!(!hub
+        .events(&sid)
+        .await
+        .iter()
+        .any(|e| e["payload"]["request_id"] == "x1"));
+    let kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT kind FROM pending_requests WHERE session_id = $1 AND request_id = 'x1'",
+    )
+    .bind(id)
+    .fetch_all(&hub.app.db)
+    .await
+    .unwrap();
+    assert_eq!(kinds, ["move"]);
+
+    // The worker's open request keeps its id from another kind.
+    let ev = agent_event(
+        &sid,
+        "approval.request",
+        approval_payload("y1", "2099-01-01T00:00:00Z"),
+    );
+    let first = w.event(ev.clone()).await["seq"].as_u64().unwrap();
+    assert!(!open("y1").await);
+    // The same event again, and another card of the same request, as before.
+    assert_eq!(w.event(ev).await["seq"].as_u64(), Some(first));
+    let again = w
+        .event(agent_event(
+            &sid,
+            "approval.request",
+            approval_payload("y1", "2099-01-01T00:00:00Z"),
+        ))
+        .await;
+    assert!(again["seq"].as_u64().unwrap() > first, "{again}");
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/y1"),
+            json!({"option_id": "allow"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{r}");
+    let f = w.expect("approval.response").await;
+    assert_eq!(f["payload"]["request_id"], "y1");
+    w.reply(&f["id"], "ack", json!({})).await;
+    hub.finish().await;
+}
+
 /// Clarify: answer by id; after Stop an open one is the worker's to close, no empty answer goes
 /// to it, and the worker's `clarify.cancel` closes it.
 #[tokio::test]

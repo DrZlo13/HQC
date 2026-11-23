@@ -13,9 +13,5 @@
 			</array>
 		</dict>
 	</array>
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Attach photos to a message for your agent.</string>
 </dict>
 </plist>

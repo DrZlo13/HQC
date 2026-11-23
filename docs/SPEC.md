@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.225, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.226, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -3568,7 +3568,9 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   is walked with its names sorted, every entry's canonical path must stay inside the folder and
   `allowed_roots` (a link pointing out is `invalid_args` naming it; a link to a folder up the
   tree is skipped), an entry named `.git` or `.hqc` in any case (a folder or a file) is never
-  packed, at any depth inside the folder (the published path itself is not checked), and the hub
+  packed, at any depth inside the folder (the published path itself is not checked), nor (since
+  0.226) an entry whose canonical path has such a component below the folder (a link `repo ->
+  .git` or `cfg -> .git/config`), and the hub
   refuses an archive with such a component in a name, only regular files and
   folders, at most 10 000 files of at most 500 MiB together, each path at most 512 bytes (the
   hub's limits, §20); a folder without `index.html` is `invalid_args`. One file becomes the
@@ -3586,15 +3588,21 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   session's feed (§10.1), `author {kind: system}`, `tool: hqc_publish`, the description "The
   agent asks to publish <path> at a public link: anyone who has the link can open it, without
   signing in to hqc, until you unpublish it or delete this session." and on the next lines the
-  number of files and their size unpacked, then the files in three groups, each in the
-  archive's order: every file whose last component looks like a secret, wherever it is, also
-  inside a hidden folder (case-insensitively: starting with `.env`, `credentials`, `id_rsa`,
-  `id_dsa`, `id_ecdsa` or `id_ed25519`, or ending with `.pem`, `.key`, `.p12` or `.pfx`); every
-  other hidden file (a name starting with `.`) and every hidden folder as one line `<folder>/ (N
-  files)`, a secret in it counted there too; the first 50 of the other files; and "and N more"
-  for the files on no line (`event.approval.request.publish.json`). What matters most comes
-  first, also where the card is cut to a few lines (the macOS app's notification, which keeps
-  this order). Options `once` ("Publish") / `deny` ("Deny"). A session has at most one such
+  number of files and their size unpacked, then the files in three groups: every file whose
+  last component looks like a secret, wherever it is, also inside a hidden folder
+  (case-insensitively, since 0.226 the globs `.env*`, `credentials*`, `id_rsa*`, `id_dsa*`,
+  `id_ecdsa*`, `id_ed25519*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.ppk`, `*.jks`,
+  `*.keystore`, `*.kdbx`, `*.gpg`, `.netrc`, `.npmrc`, `.git-credentials`, `secrets.*`,
+  `service-account*.json`), at most 20, the first file of each glob in the archive's order, then
+  the second of each, and so on; every other hidden file (a name starting with `.`, or a file
+  inside a folder whose name starts with `.`) by its full path, at most 20, the same way round
+  the hidden folders (a hidden file outside them a group of its own); the first 50 of the other
+  files in the archive's order; and "and N more" for the files on no line
+  (`event.approval.request.publish.json`). Before 0.226 the secrets had no cap and kept the
+  archive's order, and a hidden folder was one line `<folder>/ (N files)`. What matters most
+  comes first, also where the card is cut to a few lines (the macOS app's notification, which
+  keeps this order): a hundred `*.key` cannot push an `id_rsa` off them, nor a big hidden folder
+  the files of another. Options `once` ("Publish") / `deny` ("Deny"). A session has at most one such
   request open: while that of another call waits, the call is `unavailable` ("a publication already waits for the user's
   answer"). The call is deferred as that of `hqc_move`: `ack` now, the `mcp.result` a frame of
   its own later, kept in the request until the worker acknowledges it; the runtime's tool
@@ -7595,7 +7603,7 @@ sent now until that worker is connected (§6).
   | `files` of `hqc_send`/`hqc_ask` (§7, since 0.46) | at most 32; each path by the rules of `hqc_attach` (above), on the sender's worker | `error invalid_args` / `not_found` from the worker, no call is sent |
   | `artifact_ids` of `hqc_send`/`hqc_ask` on the hub | at most 32, each an artifact of the owner linked to the calling session | `error invalid_args` / `not_found`, nothing is stored |
   | files of an `hqc_ask` reply (§7.1) | at most 32, artifacts of the target's owner only; downloaded by the asking worker with the limits of an input (100 MB each, 500 MB per reply) | the rest left out (warn in the hub's log) / that file reported with an `error` |
-  | `hqc_publish` packing on the worker (§7, since 0.209) | at most 10 000 files, 500 MiB together, paths up to 512 bytes, only regular files and folders (entries named `.git` or `.hqc` are left out), every entry inside the folder and `allowed_roots` after resolving symlinks; the zip up to 100 MB | `error invalid_args`, nothing is uploaded |
+  | `hqc_publish` packing on the worker (§7, since 0.209) | at most 10 000 files, 500 MiB together, paths up to 512 bytes, only regular files and folders (entries named `.git` or `.hqc` are left out, and since 0.226 a link into one), every entry inside the folder and `allowed_roots` after resolving symlinks; the zip up to 100 MB | `error invalid_args`, nothing is uploaded |
   | `hqc_publish` archive on the hub (`hqc_proto::mcp::MAX_SITE_*`) | the file ends with its end record (no comment, not zip64) right after its central directory, whose records the hub walks itself before the zip reader opens it (and the reader must open that directory): at most 10 000, names up to 512 bytes, no extra field, no comment, stored or deflated; 500 MiB unpacked by the sizes the entries declare; names relative, without an empty, `.` or `..` component, a control character or a bidirectional control, each once (the records walked against the names the reader keeps); not encrypted, no links; `index.html` at the top or a single file; `path` 1–4096 bytes, showable | `error invalid_args`, no card |
   | open `hqc_publish` requests per session | 1 | `error unavailable` |
   | a published entry served (§12) | no more than the size its archive declares | the rest is not sent |
@@ -7664,6 +7672,18 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.225 → 0.226 (the publication card: secrets capped, hidden files named, no link into `.git`)
+§7, §20: the owner's card of an `hqc_publish` listed every name that looks like a secret in the
+archive's order with no cap, so a hundred `a0001.key` pushed an `id_rsa` far down the card and off
+the few lines of the macOS app's notification; it showed a hidden folder as one line with its
+count, so `.kube/config`, `.aws/config` or `.docker/config.json` went unnamed. The secrets now
+come at most 20, the first file of each glob, then the second of each, and so on; every hidden file
+is named by its full path, at most 20, the same way round the hidden folders; the rest is counted
+in "and N more". More names look like a secret: `*.ppk`, `*.jks`, `*.keystore`, `*.kdbx`,
+`*.gpg`, `.netrc`, `.npmrc`, `.git-credentials`, `secrets.*`, `service-account*.json`. The
+worker packed a link inside the folder that resolves into `.git` (`repo -> .git`) as `repo/…`;
+an entry whose canonical path has a `.git` or `.hqc` component below the folder is now left out.
 
 ### 0.224 → 0.225 (a request's id is its session's alone while it is open)
 §3 PendingRequest: an answer names its request by the id alone, and the hub looked it up across

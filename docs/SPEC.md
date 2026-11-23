@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.224, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.225, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -516,6 +516,17 @@ Open requests that survive a hub restart: `kind`
 `request_id`, `payload`, `expires_at`, `from_session_id`, `from_event_id`, `worker_id`
 (for ask and mcp_call: whom to give the result to), `result` (filled in when the answer has
 been received but not yet delivered to the worker).
+
+A row is one per `(session_id, kind, request_id)`, and since 0.225 an open row's `request_id` is
+the session's alone: the hub opens no request whose `request_id` an open request of another
+kind of the session has. An answer (`POST /api/sessions/{id}/requests/{request_id}`, §6) names
+its request by the id alone, so a worker's card under the id of a publication or a move the
+owner is asked about would have the owner's Allow land on that one. A worker's `approval.request`
+or `clarify.request` opens its row before the event is stored; one refused this way is not
+stored (`ack` without `seq`, §5.2) and shows no card. A request of the hub's own refused this
+way (a publication, a move, a secret, a follow) shows no card either, and its call waits as for a
+repeat; an `ask` refused this way gets no reply. A repeat of a request of the same kind is as
+before.
 
 An `ask` (since 0.35, T32) is a row of the **asking** session: `session_id` — the asking
 session, `request_id` — the `mcp.call`'s, `worker_id` — the asking session's worker,
@@ -7652,6 +7663,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.224 → 0.225 (a request's id is its session's alone while it is open)
+§3 PendingRequest: an answer names its request by the id alone, and the hub looked it up across
+kinds; a worker could open an `approval` with the `request_id` of a publication or a move waiting
+for the owner, and the owner's Allow on that card could land on the publication instead, as the
+owner's own `once` with the `allowed_by` mark. The hub now opens no request whose `request_id` an
+open request of another kind of the same session has (the check and the insert under one lock),
+and a worker's `approval.request` and `clarify.request` open their row before they are stored,
+so one refused is not stored and shows no card. A repeat of the same request after a reconnect is
+stored as before. The clients and the macOS app are unchanged.
 
 ### 0.223 → 0.224 (no whole-server answer for an ambiguous name; only an offered option)
 §8.1, §10.1: the card of an MCP tool offered "all tools of this server" for any tool name, and

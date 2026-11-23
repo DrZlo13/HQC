@@ -341,8 +341,20 @@ fn check_name(name: &str, dir: bool) -> Result<(), String> {
             name.escape_debug()
         ));
     }
+    // The worker never packs them (SPEC §7); an archive that has them did not come from its
+    // packing, and the card would show such a folder as one line.
+    if body
+        .split('/')
+        .any(|c| NEVER_PUBLISHED.iter().any(|n| n.eq_ignore_ascii_case(c)))
+    {
+        return Err(format!("{name:?} is in a `.git` or `.hqc` folder"));
+    }
     Ok(())
 }
+
+/// Folders and files that are never published, in any case (`.GIT` on a case-insensitive
+/// volume is the repository too).
+const NEVER_PUBLISHED: [&str; 2] = [".git", ".hqc"];
 
 /// What the link of an archive with these files opens: `None` for a folder with `index.html`,
 /// the name of the one file of an archive of a file; otherwise the archive is refused.
@@ -979,6 +991,29 @@ async fn open_entry(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_and_hqc_folders_are_refused_in_any_case() {
+        for bad in [
+            ".git/config",
+            "a/.git/HEAD",
+            ".GIT/config",
+            "x/.Hqc/out.png",
+            ".git",
+            ".hqc/",
+        ] {
+            assert!(super::check_name(bad, bad.ends_with('/')).is_err(), "{bad}");
+        }
+        for ok in [
+            "index.html",
+            ".gitignore",
+            "a/.github/x.yml",
+            "git/x",
+            ".hqcx",
+        ] {
+            assert!(super::check_name(ok, false).is_ok(), "{ok}");
+        }
+    }
+
     use super::*;
     use std::io::Write;
 

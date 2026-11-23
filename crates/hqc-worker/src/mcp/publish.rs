@@ -191,7 +191,8 @@ impl Walk<'_> {
         // Sorted, so that what the walk meets first does not depend on the file system.
         names.sort();
         for name in names {
-            if NEVER_PACKED.contains(&name.as_str()) {
+            // Case-blind: on a case-insensitive volume `.GIT` is the repository too.
+            if NEVER_PACKED.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
                 continue;
             }
             let rel = format!("{prefix}{name}");

@@ -470,9 +470,10 @@ pub fn allowed(app: &AppState, p: PendingRow) {
 }
 
 /// On hub start, before it serves anything (SPEC §3 PendingRequest, §7): the moves the owner
-/// allowed whose result the previous process did not store — it stopped while it carried them
-/// out — are kept by their session's worker until that worker says `hello` ([`after_hello`]).
-/// Only these: no move this process carries out is among them.
+/// allowed (the request carries the owner's mark, [`db::close_allowed`]) whose result the
+/// previous process did not store — it stopped while it carried them out — are kept by their
+/// session's worker until that worker says `hello` ([`after_hello`]). Only these: no move this
+/// process carries out is among them.
 pub async fn left_on_start(app: &AppState) {
     let rows = match db::allowed_without_result(&app.db, KIND).await {
         Ok(rows) => rows,

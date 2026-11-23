@@ -3246,6 +3246,23 @@ pub async fn close_request(db: &PgPool, id: Uuid, result: Option<&Value>) -> sql
     Ok(r.rows_affected() > 0)
 }
 
+/// Close an open `move` or `publish` request the owner allowed, without a result, and mark it
+/// with the owner (`allowed_by` in its payload); `false` if someone closed it first. The mark
+/// is what [`allowed_without_result`] looks for.
+pub async fn close_allowed(db: &PgPool, id: Uuid, by: Uuid) -> sqlx::Result<bool> {
+    let r = sqlx::query(
+        "UPDATE pending_requests
+         SET closed_at = now(), payload = payload || jsonb_build_object('allowed_by', $2::text),
+             updated_at = now()
+         WHERE id = $1 AND closed_at IS NULL",
+    )
+    .bind(id)
+    .bind(by)
+    .execute(db)
+    .await?;
+    Ok(r.rows_affected() > 0)
+}
+
 /// The result of a request closed without one, once it is known (an allowed `hqc_move`,
 /// SPEC §7).
 pub async fn set_request_result(db: &PgPool, id: Uuid, result: &Value) -> sqlx::Result<()> {
@@ -3261,19 +3278,18 @@ pub async fn set_request_result(db: &PgPool, id: Uuid, result: &Value) -> sqlx::
 }
 
 /// Requests of `kind` (`move`, `publish`) closed without a result that the owner allowed: the
-/// session's feed has its `approval.response` with `once` (SPEC §7). A request a cancellation
-/// closed without a frame (`mcp.cancel`, a worker restart) has none.
+/// request itself carries the mark [`close_allowed`] puts on it (SPEC §7). The feed is not
+/// consulted: a worker's own approval may reuse the request id of the call, and an
+/// `approval.response` in the feed, the hub's own `auto` among them, proves nothing about this
+/// request. A request a cancellation closed without a frame (`mcp.cancel`, a worker restart)
+/// has no mark.
 pub async fn allowed_without_result(db: &PgPool, kind: &str) -> sqlx::Result<Vec<PendingRow>> {
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests p
-         WHERE p.kind = $2 AND p.closed_at IS NOT NULL AND p.result IS NULL
-           AND EXISTS (SELECT 1 FROM events e
-                       WHERE e.session_id = p.session_id AND e.type = 'approval.response'
-                         AND e.payload ->> 'request_id' = p.request_id
-                         AND e.payload ->> 'option_id' = $1)
+         WHERE p.kind = $1 AND p.closed_at IS NOT NULL AND p.result IS NULL
+           AND p.payload ? 'allowed_by'
          ORDER BY p.closed_at"
     ))
-    .bind(hqc_proto::frame::worker_approval::ONCE)
     .bind(kind)
     .fetch_all(db)
     .await

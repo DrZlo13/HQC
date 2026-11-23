@@ -1,4 +1,4 @@
-//! The native iOS client's hub side (SPEC 0.215): its sign-in through the system browser and
+//! The native iOS client's hub side (SPEC 0.217): its sign-in through the system browser and
 //! Apple push next to Web Push.
 
 mod common;

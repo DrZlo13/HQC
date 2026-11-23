@@ -308,16 +308,14 @@ enum NotificationScript {
           // included (the client publishes on a click on a button, as the card's Allow is),
           // carries the options of the card's Allow and Deny buttons.
           // A publication's text (the hub's publish.rs card()) for the card's few lines: its
-          // fixed sentence gives way to the path, and the hidden files and folders (a part of the
-          // name starting with `.`) come before the rest, so they are on the card first. Text of
-          // another form stays as it is.
+          // fixed sentence gives way to the path; the files stay in the hub's order, which puts
+          // the names that look like a secret first and the hidden files and folders next, so
+          // they are on the card first. Text of another form stays as it is.
           const publication = (d) => {
             const lines = d.split('\\n');
             const head = /^The agent asks to publish (.*) at a public link:/.exec(lines[0]);
             if (!head || lines.length < 2) return d;
-            const files = lines.slice(2);
-            const hidden = (l) => l.split('/').some((c) => c.startsWith('.'));
-            return [head[1], lines[1], ...files.filter(hidden), ...files.filter((l) => !hidden(l))].join('\\n');
+            return [head[1], ...lines.slice(1)].join('\\n');
           };
 
           // The arguments of a call, as the client's callArgs() (client/src/ui/feed.ts):

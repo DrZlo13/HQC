@@ -3015,6 +3015,59 @@ fn approval_carries_the_reason_and_the_tools_name() {
     );
 }
 
+/// SPEC 0.217: for a call an ask rule caught, Claude Code sends no `decision_reason`, only
+/// `decision_reason_type: "rule"` and the rule's source (2.1.329, also in `bypassPermissions`),
+/// so the card says that an ask rule for the tool asks and where it lives; `matched_ask_rule`
+/// names the rule itself; a `decision_reason` of the CLI still wins.
+#[test]
+fn an_ask_rule_names_itself_on_the_card() {
+    let fx = fixture!("permission-allow");
+    let mut core = Core::new(Uuid::now_v7(), false);
+    // The request as 2.1.329 sent it for an `Artifact` call under the ask rule `Artifact`.
+    let p = approval_wire(&core.on_line(&patched(&fx, "r1", |r| {
+        r["decision_reason_type"] = json!("rule");
+        r["decision_reason_rule_source"] = json!("userSettings");
+        r["suppress_always_allow_rule"] = json!(true);
+    })));
+    let tool = p["tool"].as_str().unwrap().to_owned();
+    assert_eq!(
+        p["reason"],
+        json!(format!(
+            "An ask rule for {tool} in user settings (~/.claude/settings.json) requires approval for this call"
+        ))
+    );
+    let p = approval_wire(&core.on_line(&patched(&fx, "r2", |r| {
+        r["decision_reason_type"] = json!("rule");
+        r["decision_reason_rule_source"] = json!("projectSettings");
+        r["matched_ask_rule"] = json!({"source": "localSettings", "tool_name": "Bash",
+            "rule_content": "git push:*"});
+    })));
+    assert_eq!(
+        p["reason"],
+        json!("The ask rule Bash(git push:*) in project local settings (.claude/settings.local.json) requires approval for this call")
+    );
+    // A tool's own ask with the rule beside it (`subcommandResults`, `mode`), a rule on the
+    // whole tool.
+    let p = approval_wire(&core.on_line(&patched(&fx, "r5", |r| {
+        r["decision_reason_type"] = json!("subcommandResults");
+        r["matched_ask_rule"] = json!({"source": "userSettings", "tool_name": "Bash"});
+    })));
+    assert_eq!(
+        p["reason"],
+        json!("The ask rule Bash in user settings (~/.claude/settings.json) requires approval for this call")
+    );
+    let p = approval_wire(&core.on_line(&patched(&fx, "r3", |r| {
+        r["decision_reason_type"] = json!("rule");
+        r["decision_reason"] = json!("A hook asks");
+    })));
+    assert_eq!(p["reason"], json!("A hook asks"));
+    let p = approval_wire(&core.on_line(&patched(&fx, "r4", |r| {
+        r["decision_reason_type"] = json!("mode");
+        r["decision_reason_rule_source"] = json!("userSettings");
+    })));
+    assert!(p.get("reason").is_none(), "{p}");
+}
+
 /// `approval.cancel` / `clarify.cancel` events of `actions`: kind, request id, reason.
 fn cancels(actions: &[Action]) -> Vec<(&'static str, String, CancelReason)> {
     actions

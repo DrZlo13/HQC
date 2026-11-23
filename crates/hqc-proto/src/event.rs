@@ -499,7 +499,8 @@ pub enum EventKind {
         /// the owner for a secret.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secret: Option<SecretAsk>,
-        /// Why the runtime asks (Claude Code: `decision_reason`, since SPEC 0.180).
+        /// Why the runtime asks (Claude Code: `decision_reason`, since SPEC 0.180; since 0.217,
+        /// for a call an ask rule caught, the adapter's own text naming the rule and its source).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         /// The runtime's name of the tool (Claude Code: `display_name`, since SPEC 0.180).

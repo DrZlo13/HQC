@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.219, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.220, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2982,11 +2982,37 @@ one and is taken with it; if each of them was still pending when it was delivere
 joined the turn running then and stands at its own `seq`. The hub follows this order where it
 cuts by `seq`: a fork before such an input (above) and the files of a reply to a question
 (§7.1). On open
-the chat loads the newest 100 events (`before_seq`), shows them and subscribes, then loads the
-older history behind them, newest first; it renders the last 60 blocks of the feed and 60 more
-each time the user scrolls to the top, and while the feed is shorter than its window (which
-cannot be scrolled); "Requests only" of a worker's service session, on or off, starts it again at
-the last 60 blocks of the new view. Since 0.114 the client keeps the 12 most recently used
+the chat loads the newest 100 events (`before_seq`), shows them and subscribes. Since 0.220 it
+loads the older history only where it is needed, newest first: a page of 200 events when the user
+scrolls to the top of what is loaded, while the feed is shorter than its window, and by itself
+while the header's cost has no `usage` within the last 1000 events (not in a room or a worker's
+service session, which may have none); pages of 1000 down to a search hit (§15) and down to the
+event of an open request older than what is loaded (its card comes from that event). An automatic
+load that failed is not repeated until the user scrolls, a load succeeds or the chat opens again.
+Before 0.220 it loaded the whole older history behind the newest page. It renders the last 60
+blocks of the feed and 60 more each time the user scrolls to the top, and while the feed is shorter
+than its window (which cannot be scrolled); "Requests only" of a worker's service session, on or
+off, starts it again at the last 60 blocks of the new view. Since 0.220 the client keeps on the
+device what it received of a session's history (IndexedDB `hqc-history-<user id>`: the events as
+the hub sent them and, per session, the one range of `seq` it holds whole; a session's `seq` have
+no gaps): a chat opens on the newest 100 events of the copy, then takes the hub's newest page, and
+an older page the copy holds is read from it. A newest page that does not continue the copy (the
+hub is more than a page ahead, holds fewer events, or holds another event at a `seq` both have)
+drops the copy, and the chat shows the hub's page. The copy is the user's: a chat opened before
+`/api/me` answers waits for it. A session the hub answers `404` for is forgotten; one deleted from
+this client, a room's agents with their room and the sessions of a deleted project are forgotten
+with the attachments their copies refer to (`artifact_ids`, `artifact_id`, as the hub's cleanup
+counts them, §12). A failure of the browser's storage leaves the chat as it is without the copy. An
+older page the copy holds with an input still `pending` in it is taken from the hub: the input may
+have been delivered or taken back (§17.2) since, and the subscribe does not send it again. A
+take-back waits for the hub's newest page of a chat shown from its copy, and writes `withdrawn`
+into the copy itself as well. The header's cost adds the last `session_cost_usd` before a `system
+conversation_cleared` (§4) only once that line is loaded.
+The goal's row (above) comes from the loaded history too: the search for the header's `usage`
+loads back to the end of the last finished turn, so a goal set or checked since shows; one whose
+last `set` or `unmet` is older (its turn was stopped, or the search went 1000 events back without
+a `usage`) shows once that part is loaded.
+Since 0.114 the client keeps the 12 most recently used
 chats in memory with what they have loaded (an open one is never dropped): one of them opens
 again at once, with no wait for its newest page, and subscribes after its last `seq`, so the hub
 sends what came while it was closed (a half-written answer and the live subagents are dropped
@@ -6303,12 +6329,12 @@ s>&sig=<base64url HMAC-SHA256 of "{id}.{exp}">`, TTL 10 minutes. Base:
 outside Cloudflare Access); if unset, the link is relative, on the hub's domain (behind Access).
 Key: `HQC_ARTIFACT_KEY`, or a random one per start. `GET /artifacts/{id}` without a signature
 or with a wrong one gives `403`, an expired one `410`; on `403`/`410` the client requests the
-link again (for `<img>`, once, on `onerror`). Only the artifact's owner gets a link (`404` for
-everyone else); the link itself is the access right, no cookies needed. Since 0.114 the chats of
-a page share one cache of links by artifact id, each used until 30 s before it expires: a chat
-opened again has its images' addresses in its first render, and the browser shows them from its
-cache instead of loading them anew; the cache is emptied whenever the client's socket to the hub
-opens, as a hub restarted without `HQC_ARTIFACT_KEY` signs with a new key.
+link again, once. Only the artifact's owner gets a link (`404` for everyone else); the link
+itself is the access right, no cookies needed. Since 0.114 the chats of a page share one cache of
+links by artifact id, each used until 30 s before it expires; the cache is emptied whenever the
+client's socket to the hub opens, as a hub restarted without `HQC_ARTIFACT_KEY` signs with a new
+key. Since 0.220 the client fetches an image by its link as it does a diff, and keeps the bytes
+on the device (the client paragraph below).
 
 Response headers (both via the link and to the worker): `Content-Security-Policy: sandbox;
 default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'none'`,
@@ -6354,14 +6380,23 @@ what is already uploaded. The worker puts them into `.hqc/inbox/` and substitute
 of `user.message` and `attachment` events render the same way: image — inline, diff — a code
 block with added and removed lines highlighted (up to 512 KB, larger as a card), html — an
 iframe from the artifacts domain or an "Open" link, text and file — a card with the name,
-size and "Open" (except file) and "Download" buttons. In a chat a click on an image and
+size and "Open" (except file) and "Download" buttons. Since 0.220 an image is shown as a `data:`
+URL of its bytes (the client's CSP has no `blob:`, §20), loaded when it comes within about a
+screen of the feed's window (in the viewer at once), and the client keeps on the device (IndexedDB
+`hqc-artifacts-<user id>`) the records of artifacts (not a `site`'s: its link goes when it is
+unpublished) and the bytes it downloads to show: images, diffs, a Markdown text in the viewer. An
+artifact's bytes never change (the hub keeps one row per owner, sha256 and name), so they are not
+downloaded again, whatever link the next view gets; its record may take another kind (§3), and an
+event naming another kind makes the client ask the hub again, as before. A file's "Download" and a
+text opened in a new tab are not kept; a failure of the browser's storage leaves the client
+downloading as before. In a chat a click on an image and
 "Open" of a Markdown text (a text named `.md` or `.markdown`, or typed `text/markdown`) show it
 in a viewer over the chat: the image fitted to the window, the Markdown rendered as the agent's
 messages; the viewer has "Download" and closes on its cross, Escape or a click outside it, and
 while it is open no key reaches the chat (a request card's Enter and Escape). Since 0.124 an
 image named `.heic` or `.heif` that the browser does not show (one sent before 0.124 or as it
-is, one an agent attached) is decoded the same way when its `<img>` fails with the renewed link
-too (a first failure may be an expired link, and Safari shows HEIC itself), and shown in the feed
+is, one an agent attached) is decoded the same way when its `<img>` fails (Safari shows HEIC
+itself), and shown in the feed
 and in the viewer as a JPEG `data:` URL, decoded once while the chat is open. Other text opens
 in a new tab. Since 0.128 a Markdown file of kind file has "Open" in a chat too, up to 2 MB;
 elsewhere a file has only "Download" (a new tab would download it). An `attachment` event
@@ -6864,7 +6899,7 @@ it finds commands, their output and word forms and puts the best match first:
   (`#/search?q=…&kind=…&project=…&time=…&order=newest&fuzzy=1`, replaced, not pushed), so
   Back from an opened hit brings the same search back; the Compact look puts all the filters on
   one row. A hit opens `#/s/<session>?seq=<seq>`:
-  the chat loads its history as always (the newest page, then the older ones, §6) and, once the
+  the chat loads its newest page and then the older pages down to the hit (§6) and, once the
   event is there, renders the feed from the block that holds it if it did not and scrolls the block that holds it (the last block starting at or before `seq`) to the middle
   and marks it.
 
@@ -7075,8 +7110,9 @@ not yet taken. Take back (`POST .../inputs/{event_id}/withdraw`, §6) removes it
 waits, or has the CLI drop the line (§8.1), and then no one ever sees it: it is `delivery:
 withdrawn`, never acked, never failed, never copied into a fork, and the client puts its text
 after what is typed in the input (a blank line between them) and its files back among the input's
-files, read from the hub again; a refusal, because the agent took the message first, is `409
-already_taken` and says so, and the bubble stays. A message that was handed to a worker is asked
+files, read from the device when it holds them (§6), else from the hub, and not kept on the
+device; a refusal, because the agent took the message first, is `409 already_taken` and says so,
+and the bubble stays. A message that was handed to a worker is asked
 about at its connection whatever the session's start state (a paused session's worker holds
 nothing: `true`); with no worker connected it is `409 worker_offline`; while the question is open
 the message is `withdrawing`, handed to nobody and refused a second take-back (`409 withdrawing`);
@@ -7457,6 +7493,22 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.219 → 0.220 (history and attachments kept on the device, the older history on demand)
+§6, §12, §15, §17.2: each open of a chat downloaded its newest page and then the whole older
+history again, and each view of an image after its link had expired (10 minutes) downloaded the
+image again; on a slow link a long chat took long to open. The client now keeps on the device
+(IndexedDB, a database per user) what it received of each session's history, the records of
+attachments and the bytes it downloads to show them; a chat opens on its copy, takes the hub's
+newest page to check and extend it, and drops the copy when that page does not continue it. The
+older history loads a page at a time when the user scrolls to its top, down to a search hit, and
+by itself only for the header's cost (a `usage` within the last 1000 events) and the cards of
+open requests. An image in the feed is a `data:` URL of its kept bytes, loaded when it comes near
+the window; its `<img>` no longer renews a link. A `/clear` older than the loaded history adds the
+cost before it to the header only once its line is loaded, and a goal whose last event is older
+than the loaded history shows its row only then too. A take-back (0.219) in a chat shown from its
+copy waits for that page, which would show the message waiting again, and writes `withdrawn` into
+the copy itself; the files it puts back into the input are not kept on the device.
 
 ### 0.218 → 0.219 (take a waiting message back, or send it now)
 §3 Event, §5.3, §6, §8.1, §17.2: a message of the owner's that waits for the agent shows two buttons,

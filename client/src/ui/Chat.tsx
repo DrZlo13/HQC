@@ -2141,7 +2141,8 @@ function firstShown(blocks: ReturnType<typeof buildFeed>, from: number): number 
 /** Index of the first of the last blocks that are inputs come while the text being written now
  *  was (`during_text`, stored after the last event that ended a text or a thinking), inputs
  *  waiting for a turn of their own (`queued`, still `pending`) or messages not stored yet, and
- *  the thinking being written above them. */
+ *  the thinking being written above them. An input the agent took after some of its work
+ *  (`joined_after`) is not among them: it stands where the agent took it, before the text began. */
 function underText(blocks: ReturnType<typeof buildFeed>, t: Timeline): number {
   const evs = t.events();
   let ended = 0;

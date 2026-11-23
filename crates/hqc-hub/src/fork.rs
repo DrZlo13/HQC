@@ -6,7 +6,9 @@
 //!   `user.message` of a person in it (`404` otherwise).
 //! - The cut is the source's last `agent.message` before the message, or, for one that waited
 //!   for a turn of its own, the last of the turns it waited through ([`waited_place`]), for
-//!   another one with `during_text`, the answer the client shows above it (SPEC §6):
+//!   one the agent took after some of its work (`joined_after`) the last `agent.message` after
+//!   the message and not past `joined_after`, another one with `during_text`, the answer the
+//!   client shows above it (SPEC §6):
 //!   `session.start.fork` names the source transcript and those events, newest first, and the
 //!   worker forks the conversation at the record of the first one it finds (SPEC §5.3, §8.1).
 //!   With none (the message was the first), the new session starts with no conversation and no
@@ -78,16 +80,27 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
         .ok_or(ApiError::NotFound)?;
     let runtime = s.runtime_session_id.clone().unwrap_or(s.id.to_string());
     // A message that waited for a turn of its own stands after the turns it waited through
-    // (SPEC §6): the fork keeps their events, not the inputs among them. The client shows the
-    // answer whose text was being written when a message that did not wait came above it: the
-    // fork keeps that answer. Only inputs like the message lie between them. The fork also keeps
-    // the events after the message and before `until` that are no input.
-    let until = match waited_place(&db::turn_marks(&app.db, s.id).await?, at.seq) {
-        Some(p) => Some(p),
-        None if at.payload["during_text"] == true => {
-            answer_above(app, s, &at).await?.map(|a| a.seq + 1)
+    // (SPEC §6): the fork keeps their events, not the inputs among them. A message the agent
+    // took after some of its work (`joined_after`) stands behind the last event of that work:
+    // the fork keeps up to the last of the agent's messages in it. The client shows the answer
+    // whose text was being written when a message that did not join came above it: the fork
+    // keeps that answer. Only inputs like the message lie between them. The fork also keeps the
+    // events after the message and before `until` that are no input.
+    let waited = waited_place(&db::turn_marks(&app.db, s.id).await?, at.seq);
+    let until = match at.payload["joined_after"].as_i64().filter(|&a| a > at.seq) {
+        Some(a) => {
+            let taken = db::last_agent_message_between(&app.db, s.id, at.seq, a)
+                .await?
+                .map(|m| m + 1);
+            taken.max(waited)
         }
-        None => None,
+        None => match waited {
+            Some(p) => Some(p),
+            None if at.payload["during_text"] == true => {
+                answer_above(app, s, &at).await?.map(|a| a.seq + 1)
+            }
+            None => None,
+        },
     };
     // The records the cut may be at, in the transcript of the newest: a fork's own turns are in
     // its transcript, its copied history in the one it was first written in (a fork that never

@@ -658,6 +658,106 @@ describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
     expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e7", "e8", "e3", "e4", "e9", "e10", "e11", "e12"]);
   });
 
+  it("an input the agent took after its calls stands where it took it (`joined_after`)", () => {
+    // The text and the calls came before the agent saw the second message: it stands after the
+    // last of them (the hub's `joined_after`), not at its own `seq` above the whole turn.
+    const think = (seq: number) => ev("event.agent.thinking", (e) => ((e.seq = seq), (e.ts = at(seq))));
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      input(2, 5, (e) => ((e.payload.joined = true), (e.payload.during_text = true), (e.payload.joined_after = 8))),
+      think(3),
+      agentText(4, "Looking.", false),
+      call(5, "a", "Bash", { command: "ls" }),
+      call(6, "b", "Read", { file_path: "a.rs" }),
+      result(7, "a"),
+      result(8, "b"),
+      think(9),
+      call(10, "c", "Bash", { command: "pwd" }),
+      result(11, "c"),
+      final(12, 1),
+      idle(13, 1),
+    ]);
+    expect(order(t)).toEqual(["e1", "e3", "e4", "e5", "e6", "e7", "e8", "e2", "e9", "e10", "e11", "e12", "e13"]);
+  });
+
+  it("inputs taken behind the same event keep their seq order", () => {
+    const t = new Timeline();
+    const joinedAfter = (n: number) => (e: any) => ((e.payload.joined = true), (e.payload.joined_after = n));
+    t.applyAll([
+      input(1, 1.2),
+      input(2, 5, joinedAfter(5)),
+      input(3, 5.5, joinedAfter(5)),
+      call(4, "a", "Bash", { command: "ls" }),
+      result(5, "a"),
+      call(6, "b", "Bash", { command: "pwd" }),
+      result(7, "b"),
+    ]);
+    expect(order(t)).toEqual(["e1", "e4", "e5", "e2", "e3", "e6", "e7"]);
+  });
+
+  it("a joined input behind a waiting one goes after its anchor inside the waiting one's turn", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      ev("event.agent.thinking", (e) => ((e.seq = 2), (e.ts = at(2)))),
+      input(3, 6.1),
+      input(4, 7.1, (e) => ((e.payload.joined = true), (e.payload.joined_after = 7))),
+      final(5, 1),
+      idle(6, 1),
+      ev("event.agent.thinking", (e) => ((e.seq = 7), (e.ts = at(7)))),
+      final(8, 3),
+      idle(9, 3),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e3", "e7", "e4", "e8", "e9"]);
+  });
+
+  it("a delivery frame with joined_after moves a live message, and it is kept when the hub copy comes again", () => {
+    const t = new Timeline();
+    t.applyAll([input(1, 1.2), input(2), call(3, "a", "Bash", { command: "ls" }), result(4, "a"), agentText(5, "Next", false)]);
+    expect(order(t)).toEqual(["e1", "e3", "e4", "e5", "e2"]);
+    t.applyDelivery({
+      session_id: "s",
+      event_id: id(2),
+      seq: 2,
+      delivery: "delivered",
+      delivered_at: at(6),
+      joined: true,
+      joined_after: 4,
+    });
+    expect(order(t)).toEqual(["e1", "e3", "e4", "e2", "e5"]);
+    // The copy a reload brings carries it the same way.
+    const fresh = new Timeline();
+    fresh.applyAll([input(1, 1.2), input(2), call(3, "a", "Bash", { command: "ls" }), result(4, "a"), agentText(5, "Next", false)]);
+    fresh.refresh([input(2, 6, (e) => ((e.payload.joined = true), (e.payload.joined_after = 4)))]);
+    expect(order(fresh)).toEqual(["e1", "e3", "e4", "e2", "e5"]);
+  });
+
+  it("a text goes above an input that came while it was written past one the agent took later", () => {
+    // e2 came while "Looking." was written; e3 the agent took after it. The text goes above both,
+    // and e3 stays behind its place.
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      input(2, 5, (e) => (e.payload.during_text = true)),
+      input(3, 5.5, (e) => ((e.payload.joined = true), (e.payload.during_text = true), (e.payload.joined_after = 4))),
+      agentText(4, "Looking.", false),
+    ]);
+    expect(order(t)).toEqual(["e1", "e4", "e2", "e3"]);
+  });
+
+  it("the thinking being written stands under an input the agent took before it began", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      input(2, 5, (e) => ((e.payload.joined = true), (e.payload.during_text = true), (e.payload.joined_after = 4))),
+      call(3, "a", "Bash", { command: "ls" }),
+      result(4, "a"),
+    ]);
+    t.apply(ev("event.agent.delta", (e) => (e.payload = { text: "Checking", thinking: true })));
+    expect(order(t)).toEqual(["e1", "e3", "e4", "e2", "t1"]);
+  });
+
   it("a /compact typed during a turn stands above the compaction it started", () => {
     const t = new Timeline();
     t.applyAll([

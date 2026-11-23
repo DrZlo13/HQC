@@ -67,6 +67,10 @@ describe.each(histories)('HistoryCache, %s', (_name, make) => {
     await c.patch(SID, { session_id: SID, event_id: 'e2', seq: 2, delivery: 'delivered', delivered_at: 'now', joined: true });
     const [e] = (await c.read(SID, 2, 2)) as { delivery: string; delivered_at: string; payload: { joined: boolean; text: string } }[];
     expect([e.delivery, e.delivered_at, e.payload.joined, e.payload.text]).toEqual(['delivered', 'now', true, 't2']);
+    // Where the agent took it (SPEC 0.221) is kept too: the copy reopens the chat with it there.
+    await c.patch(SID, { session_id: SID, event_id: 'e1', seq: 1, delivery: 'delivered', delivered_at: 'now', joined: true, joined_after: 3 });
+    const [one] = (await c.read(SID, 1, 1)) as { payload: { joined: boolean; joined_after: number } }[];
+    expect([one.payload.joined, one.payload.joined_after]).toEqual([true, 3]);
     await c.patch(SID, { session_id: SID, event_id: 'other', seq: 2, delivery: 'failed' });
     await c.patch(SID, { session_id: SID, event_id: 'e9', seq: 9, delivery: 'failed' });
     expect(((await c.read(SID, 2, 2)) as { delivery: string }[])[0].delivery).toBe('delivered');

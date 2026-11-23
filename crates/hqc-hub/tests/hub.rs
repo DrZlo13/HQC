@@ -3135,6 +3135,99 @@ async fn a_joined_ack_is_kept_on_the_message_and_sent_to_the_chat() {
     hub.finish().await;
 }
 
+/// SPEC §6: a joined ack gives the message `payload.joined_after`, the last event of the agent
+/// stored before it, not an input typed meanwhile; it comes in the `delivery` frame, and a
+/// message with no event of the agent after it has none.
+#[tokio::test]
+async fn a_joined_ack_keeps_the_last_event_of_the_agent_before_it() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("joined place").await;
+    ack_start(&mut w, &sid).await;
+    let mut c = FakeClient::connect(&hub).await;
+    c.subscribe(&sid, 0).await;
+    let post = |text: &'static str| {
+        let hub = &hub;
+        let sid = &sid;
+        async move {
+            let (s, r) = hub
+                .post(&format!("/api/sessions/{sid}/input"), json!({"text": text}))
+                .await;
+            assert_eq!(s, 201, "{r}");
+            r["event"].clone()
+        }
+    };
+    let a = post("A").await;
+    let si = w.expect("session.input").await;
+    w.reply(&si["id"], "ack", json!({"event_id": a["event_id"]}))
+        .await;
+    c.until("delivery").await;
+
+    // B is sent while the agent works; the agent makes a text, a call and its result, a person
+    // types C, and only then does the worker ack B as joined.
+    let b = post("B").await;
+    let si_b = w.expect("session.input").await;
+    assert_eq!(si_b["payload"]["event_id"], b["event_id"]);
+    w.event(agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "Looking.", "final": false}),
+    ))
+    .await;
+    w.event(agent_event(
+        &sid,
+        "tool.call",
+        json!({"call_id": "toolu_01", "tool": "Bash", "args_preview": "ls"}),
+    ))
+    .await;
+    let result = w
+        .event(agent_event(
+            &sid,
+            "tool.result",
+            json!({"call_id": "toolu_01", "result_preview": "x", "error": false}),
+        ))
+        .await;
+    let cc = post("C").await;
+    assert!(cc["seq"].as_i64() > result["seq"].as_i64());
+    w.reply(
+        &si_b["id"],
+        "ack",
+        json!({"event_id": b["event_id"], "joined": true}),
+    )
+    .await;
+    let d = c.until("delivery").await;
+    assert_eq!(d["event_id"], b["event_id"], "{d}");
+    assert_eq!(d["joined"], true, "{d}");
+    assert_eq!(d["joined_after"], result["seq"], "{d}");
+    let events = hub.events(&sid).await;
+    let payload =
+        |id: &Value| events.iter().find(|e| e["event_id"] == *id).unwrap()["payload"].clone();
+    assert_eq!(payload(&b["event_id"])["joined_after"], result["seq"]);
+
+    // C waits behind B's ack; joined with no event of the agent after it: no `joined_after`.
+    let si_c = w.expect("session.input").await;
+    assert_eq!(si_c["payload"]["event_id"], cc["event_id"]);
+    w.reply(
+        &si_c["id"],
+        "ack",
+        json!({"event_id": cc["event_id"], "joined": true}),
+    )
+    .await;
+    let d = c.until("delivery").await;
+    assert_eq!(d["event_id"], cc["event_id"], "{d}");
+    assert_eq!(d["joined"], true, "{d}");
+    assert!(d.get("joined_after").is_none(), "{d}");
+    let events = hub.events(&sid).await;
+    let c_payload = events
+        .iter()
+        .find(|e| e["event_id"] == cc["event_id"])
+        .unwrap()["payload"]
+        .clone();
+    assert!(c_payload.get("joined_after").is_none(), "{c_payload}");
+    hub.finish().await;
+}
+
 /// SPEC §5.4, §6: `session.state.subagents` is kept on the session, in the session object and
 /// its summary; a report without it is 0 (absent), and so is every session of a restarted
 /// worker.

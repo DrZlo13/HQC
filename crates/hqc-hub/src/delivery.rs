@@ -423,6 +423,7 @@ pub fn notify_delivery(app: &AppState, row: &EventRow) {
         delivery: row.delivery.clone().unwrap_or_default(),
         delivered_at: row.delivered_at,
         joined: is_joined(row),
+        joined_after: row.payload.get("joined_after").and_then(Value::as_i64),
     });
 }
 
@@ -441,6 +442,7 @@ pub fn delivery_frame(n: &Notice) -> Option<ServerFrame> {
             delivery,
             delivered_at,
             joined,
+            joined_after,
         } => Some(ServerFrame::Delivery {
             session_id: *session_id,
             event_id: *event_id,
@@ -448,6 +450,7 @@ pub fn delivery_frame(n: &Notice) -> Option<ServerFrame> {
             delivery: serde_json::from_value(Value::String(delivery.clone())).ok()?,
             delivered_at: *delivered_at,
             joined: *joined,
+            joined_after: *joined_after,
         }),
         _ => None,
     }

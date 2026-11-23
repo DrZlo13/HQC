@@ -134,6 +134,10 @@ export interface UserMessage {
   /** The user typed it in the input route (SPEC 0.219): the only kind of message that can be
    *  taken back or sent now; the hub's own notes and a schedule's runs do not have it. */
   human?: boolean;
+  /** Since SPEC 0.221, with `joined`: the `seq` of the last event that is no input, stored before
+   *  the hub took the runtime's ack: where the agent took the message (SPEC §6). Absent on a message
+   *  joined before. */
+  joined_after?: number;
 }
 export interface AgentDelta {
   text: string;
@@ -375,6 +379,8 @@ export interface PeerMessage {
   during_text?: boolean;
   /** As `UserMessage.joined`: set on a `send` and on a room's input (SPEC §17.2). */
   joined?: boolean;
+  /** As `UserMessage.joined_after`. */
+  joined_after?: number;
 }
 export interface Usage {
   input_tokens: number;
@@ -579,6 +585,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     during_text: optBool(p, 'during_text'),
     joined: optBool(p, 'joined'),
     human: optBool(p, 'human'),
+    joined_after: optNum(p, 'joined_after'),
   }),
   'agent.delta': (p) => ({ text: str(p, 'text'), reset: optBool(p, 'reset'), thinking: optBool(p, 'thinking') }),
   'subagents.live': (p) => ({
@@ -708,6 +715,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     artifact_ids: present(p, 'artifact_ids') ? strArr(p, 'artifact_ids') : [],
     during_text: optBool(p, 'during_text'),
     joined: optBool(p, 'joined'),
+    joined_after: optNum(p, 'joined_after'),
   }),
   usage: (p) => ({
     input_tokens: num(p, 'input_tokens'),
@@ -1310,6 +1318,8 @@ export interface DeliveryChange {
   delivered_at?: string;
   /** The input went into the turn already running (SPEC §17.2): `payload.joined` with it. */
   joined?: boolean;
+  /** With `joined`: `payload.joined_after` (SPEC §6). */
+  joined_after?: number;
 }
 
 export type ServerFrame =
@@ -1365,6 +1375,7 @@ export function parseDelivery(v: unknown): DeliveryChange {
     delivery: strictEnum(d, 'delivery', DELIVERIES),
     delivered_at: optStr(d, 'delivered_at'),
     joined: optBool(d, 'joined'),
+    joined_after: optNum(d, 'joined_after'),
   };
 }
 

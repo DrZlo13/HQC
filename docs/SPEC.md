@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.231, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.232, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -631,6 +631,8 @@ the client renders only them. The "source" column is the component that produces
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.161 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`), `call_id?`, `status?`, `task_id?` (since 0.135, only on `task_notification`), `usage?{total_tokens, tool_uses, duration_ms}` (since 0.181, only on `task_notification`), `from_session_id?` (since 0.172, only on `room_passed`: the agent that passed), `trigger?`, `pre_tokens?`, `post_tokens?` (since 0.179, only on `context_compacted`), `model?` (since 0.179, only on `model_not_switched`) | hub or worker; codes below |
 | `retraction` | `event_ids[]` | adapter (since 0.179): events of the session the runtime took back — Claude Code's answer of a model that refused, replaced by another model's answer (§8.1). The hub keeps of `event_ids` only the session's own `agent.message`, `agent.thinking`, `tool.call` and `tool.result` of the agent, at most 1024, and stores it with those; nothing is deleted: clients do not show the events it names, also ones loaded after it, nor the retraction itself; search (§15) still finds them |
+| `side.question` | `text`, `during_text?` (set by the hub as on a `user.message`: the agent's text or thinking was being written when it was asked; absent when false; §6) | hub only (since 0.232): a side question the owner asked the session's agent with `POST /api/sessions/{id}/side_question` (§6, §17.5), authored by the owner, stored and sent to clients like any event; it has no `delivery`, and the agent is given neither it nor its answer as input. The feed shows it with its answer as one block |
+| `side.answer` | `question` (the `event_id` of its `side.question`), `text?`, `error?` | adapter (since 0.232): the runtime's answer to that question, stored when it comes, authored by the session's agent; exactly one of `text` (the answer, as Markdown) and `error` (why there is none) is set. A question has one answer: the hub stores a worker's `side.answer` only when `question` is a `side.question` of the same session that has no answer yet (an answer sent again after a lost `ack` gets its `seq`), and acknowledges any other without a `seq`, as it does an event for a session that is not the worker's; a client shows the answer with the lowest `seq`. It stands outside the agent's turn: it opens none and closes none (§17.5) |
 
 `system` codes (the list is open; the client shows an unknown code as text):
 
@@ -1092,6 +1094,10 @@ MCP calls (worker → hub → worker):
   their browser: the worker runs Claude Code with `--chrome` only if its `worker.toml` has
   `browser = true` and the session is its owner's and not restricted, and otherwise starts the
   agent with `--no-chrome` and writes `system browser_refused` (§4, §8.1, §14); absent — off;
+  `no_wait` (since 0.232) — `true` on the start the hub sends for a side question (§17.5): with
+  no free slot (`max_sessions`) the worker acks it and does not put the session in line for one
+  nor write `system waiting_for_slot`, keeps the start's settings for the agent's next start, and
+  the side question that follows is answered with an error; absent — false;
   `allow_rules` (since 0.52, T48) — hqc's allow rules of the
   session's workspace (§3 Workspace), absent when none; the worker keeps the latest list per
   canonical workspace, shared by its sessions there, and drops a rule that is not valid hqc
@@ -1218,6 +1224,17 @@ MCP calls (worker → hub → worker):
   turn now (none runs, a request waits for an answer, a move waits, the turn answers an `hqc_ask`),
   the input is no person's plain message (a slash command, a capped one, one of another session,
   a run of a schedule), or it is the turn's own input.
+- `session.side_question` {session_id, event_id, question, history?[{question, response}]} →
+  `ack` (since 0.232; examples `hub.session.side_question*.json`) — ask the agent a side
+  question (§17.5; Claude Code: the `side_question` control request, §8.1). `event_id` is the
+  `event_id` of the hub's `side.question`, which the worker's `side.answer` names; `history`
+  the session's earlier side questions that got an answer, oldest first (absent when none). An
+  agent whose process does not run is started first, resuming its transcript, with no input
+  and no turn; with no free slot (the start of a side question carries `no_wait`, below), or the
+  session held by VS Code, the question is not asked and the worker answers it with a
+  `side.answer {error}` at once. The `ack` comes after the
+  question is written to the runtime, and the answer, or why there is none, comes as
+  `side.answer` (§5.4).
 - `session.subagent_history` {request_id, session_id, task_id, after?, before?} → `result
   {request_id, events[], truncated, continues?}` (since 0.181) — what subagent `task_id` of
   `subagents.live` (§4) has done, for the history the client opens under its line (§6) and, since
@@ -2022,6 +2039,17 @@ the rest is marked "later"):
   connection holds the message (the worker is offline, the session paused or not started, the
   message handed in an earlier connection); a worker's other `error` is `502` as for `/withdraw`,
   and the other refusals are those of `/withdraw`
+- `POST /api/sessions/{id}/side_question` {text} → `201 {event}` (since 0.232; `write` level;
+  `api.side_question.request.json`, `api.side_question.json`): stores `side.question` (§4) and
+  sends the worker `session.side_question` (§5.3) with the session's `history` of side
+  questions, after sending `session.start` (with `no_wait`) when the session's agent is not
+  started on this connection, so that a side question works for an unloaded agent (§17.5). `400` for a text
+  that is empty or only blank; `409 room` (a room has no agent of its own), `409 archived`,
+  `409 locked_vscode` (as `/input`), `409 paused` (a paused agent is not started), `409
+  not_askable` (a runtime other than Claude Code), `409 worker_offline`, `409 system_session`;
+  the hub also stores `side.answer {error}` at once when the worker goes away between its check
+  and the send. A text with U+0000 is stored and sent with it replaced, as any text. The client sends it for a composer text `/btw
+  <question>` or `/side <question>` (§6 client layout).
 - `POST /api/sessions/{id}/tasks/{task_id}/stop` → `{sent}` (since 0.161; `write` level, as
   `/stop`): `session.stop_task` to the worker (§5.3), `sent: false` when the worker is not
   connected; nothing comes back of what the runtime did, the task's row leaves
@@ -3038,8 +3066,9 @@ is stored: the `agent.message` goes above the inputs with `during_text` right be
 order, never above the input it answers (`in_reply_to`) and, since 0.161, never above one that
 waited for a turn of its own and stands after the turns it waited through (below); a final one
 takes along its `usage` and, since 0.161, the `system turn_interrupted` or `turn_ended_early`
-line after it. The client takes this from the hub's `payload.during_text`, never guesses it
-from times. Since 0.208 the same holds for the thinking: the hub marks an input stored while the
+line after it. Since 0.232 a `side.question` (§17.5) with `during_text` is one of these inputs
+for this order, though it is no input: the answer goes above it too. The client takes this from
+the hub's `payload.during_text`, never guesses it from times. Since 0.208 the same holds for the thinking: the hub marks an input stored while the
 session's thinking is being written with `during_text` too; the thinking being written stands
 above the inputs with `during_text` at the end of the feed, but one that waited for a turn of
 its own and was delivered (below), and above the inputs that still wait for one (`pending`); the
@@ -3467,7 +3496,8 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   `seq > N`; both together are `invalid_args`. A page is at most 100 events and 64 KiB of
   serialized `events`; over the budget the events at the far end of the page are left out (the
   oldest, for `after_seq` the newest), but one event is always returned, however large. The result
-  is `{address, title, events (oldest first), last_seq, earlier?, later?}`: `earlier` (the `seq` of
+  is `{address, title, events (oldest first), last_seq, earlier?, later?}` (since 0.232 without
+  `side.question` and `side.answer`, §17.5): `earlier` (the `seq` of
   the first event returned, to pass as `before_seq`) only when older events exist, `later` (the
   last one's, to pass as `after_seq`) only when newer ones do. No side effects: no read cursor
   moves, nothing is written. An agent of a room cannot read its room or another agent of it
@@ -5095,7 +5125,8 @@ naming that response's frames, which the CLI dropped; "Remove them on receipt") 
 it brings none. `model_refusal_fallback` is then `system model_refusal_fallback`
 "<original> → <fallback>: <content>", and the turn's `usage` names the fallback model unless its
 `scope` is `local` (a subagent's, a side question's or a background fork's answer came from it;
-`session` or none: the session's model is swapped). These lines are not held for the turn's
+`session` or none: the session's model is swapped). Since 0.232 a `local` one retracts
+nothing either: the uuids it names are not records of the conversation. These lines are not held for the turn's
 text: one that comes while a text is held stands above it. `system/init`, which comes before
 every turn: its `mcp_servers` whose `status` is neither `connected` nor `disabled` (turned off
 by the user) → `system mcp_not_connected` "MCP servers not connected: <name> (<status>), …"
@@ -5468,6 +5499,18 @@ turn did not end in an error (by the 2.1.325 binary; after a Stop it exits with 
 does not come), so the worker closes a quiet process's stdin instead of sending SIGTERM (§17.3).
 With `transcript` among `lost` the adapter writes `system transcript_not_saved` (§4); with
 `global_config` alone the worker's log gets a warning and the chat nothing.
+
+A side question (since 0.232, §17.5) is `control_request {subtype: "side_question", question,
+history?[{question, response}]}` with `request_id` `hqc-side-<event_id>` (2.1.312, checked
+live). The CLI answers `system/control_request_progress` `started` (no event), then
+`control_response` `success` `{response, synthetic}` in 2.4 to 3.5 s: while idle, during a
+running turn (the answer was about what the agent was doing; the turn went on untouched) and in
+a process started with `--resume` that has run no turn. No `system/init`, `stream_event` or
+`result` comes with it and the transcript has no record of it. By the CLI's code (not checked
+live): `response` may be `null`, `synthetic: true` marks a notice of the CLI's own, there may be
+a `refusal_fallback`, `interrupt` does not cancel it, and an `error` `control_response` says
+"Session is shutting down", "Side question cancelled" or "side_question timed out: the host did
+not answer in time" (660 s). The adapter turns the answer into `side.answer` (§4).
 
 Stopping one task (since 0.161, the VS Code tab's stop of a background task, which
 `perTaskStopAffordance` declares): the adapter marks every row of `subagents.live`
@@ -7492,7 +7535,8 @@ sent now until that worker is connected (§6).
   last listed (`due_in_ms` of its `kind: cron` row, §4; a job whose next fire is not known holds
   nothing), so an unload no longer kills a job that has yet to fire. While such a job waits, the process
   holds its slot of `max_sessions`: a new session waits for a slot (`waiting_for_slot`), as it
-  does beside any running agent.
+  does beside any running agent. Since 0.232 an agent is not idle while
+  a side question is unanswered (§17.5).
 - Since 0.201 the worker ends a process with nothing running by closing the CLI's stdin: a CLI
   with nothing to do exits on it, with status 0, and then reports what it could not write
   (`system/session_writes_lost`, `system transcript_not_saved`, §4); SIGTERM was sent before and
@@ -7608,6 +7652,56 @@ sent now until that worker is connected (§6).
   records as in §13.2 (archived sessions lose `workspace_id` and `worker_id`, the history stays),
   then the worker's record. Files on the machine are left alone.
 
+### 17.5 Side questions
+
+A side question (since 0.232; the backlog's "a side question to a running session": T3 Code and
+Orca ask it in a copy beside the session) is answered by the session's own agent without a turn
+and without a trace in its context: the runtime reads the conversation, answers, and the agent
+is not asked, does not see the question or the answer, and does not work on it.
+
+- The owner types `/btw <question>` or `/side <question>` in the chat's composer; the client
+  sends it to `POST /api/sessions/{id}/side_question` (§6) instead of the input. A text with
+  files, `/btw` alone or any other command name goes as a message as before.
+- The hub stores `side.question` (§4) and sends the worker `session.side_question` (§5.3),
+  after `session.start` (with `no_wait`, §5.3) when the agent is not started on the connection:
+  with all `max_sessions` slots busy the session is not put in line, the feed has no
+  `waiting_for_slot` line, the question is answered with the error "All the agent slots of this
+  worker are in use" and no agent starts later with nobody to answer; the settings of that start
+  are kept for the agent's next start, as those of any start. Refused, with nothing stored: a
+  room, an archived or paused session, one VS Code holds, a session of a runtime other than
+  Claude Code, a worker that is offline. `history` of the frame is the earlier side questions of
+  the session whose answer (the first stored, by `seq`) is a `text`, not an error one, after the
+  owner's last `user.message`, the last 10, oldest first.
+- The worker starts the agent's process when none runs, as for an input (resuming; no input is
+  written), asks the runtime (§8.1) and stores the answer as `side.answer {question, text}`.
+  The runtime's notice of its own (`synthetic: true`) and its errors go as `error`, a `null`
+  answer as the error "No answer", a question that could not be asked as the reason. A process
+  that ends with a question unanswered (a kill, a crash, a pause) answers it with the error
+  "The agent's process ended before the answer". The idle timeout (§17.3) does not unload the
+  agent while a side question is unanswered. A
+  hub stores an `error` the worker answers `session.side_question` with as the question's
+  `side.answer {error}`. The hub keeps the questions sent through a connection that have no
+  answer yet, and when that connection closes, however it closes (the socket drops, or a new
+  `hello` of the worker replaces it), it stores "The worker went offline before the answer" for
+  each of them; an answer the worker sends later from its outbox is dropped (§4), and nothing
+  resends the question.
+- The runtime's API cost for the question is added to the process's running total, so the next
+  turn of the same process shows it in its cost (`usage.cost_usd`) and in `session_tokens`
+  (0.229); a process that ends before a turn does not show it. The question has no line of its
+  own. Claude Code asks it on the conversation's prompt cache, which the read renews; the
+  header's cache time (§6) counts from the last turn's `usage` and does not see that.
+- The feed shows the question and its answer as one muted block "Side question", the answer as
+  Markdown, "Answering…" until it comes, the error text when there is none; it is neither a
+  message of the owner nor of the agent. A fork (§6) does not copy side events, and the hub's
+  reckoning of a turn's order (§6, `agent_work`) does not count them as the agent's work.
+  The events list of the client returns them as stored; `hqc_read` (§7) leaves them out, also
+  in the calling session's own feed, as the agent sees neither the question nor its answer; the
+  search index (§15) takes none.
+- Order (§6): a question asked while the agent's text or thinking is being written has
+  `during_text` and stands under that text, in the order it came, as an input does: with a
+  message M, a question Q and the final answer A stored after them, the feed shows A, M, Q. A
+  fork before such a message looks for the answer above it past side events.
+
 ## 18. Stack
 
 - Hub: Rust, axum, tokio, sqlx, Postgres. Artifacts: disk or S3.
@@ -7711,7 +7805,7 @@ sent now until that worker is connected (§6).
   | … mirror sessions per workspace | 2000 in total | the event is dropped, `ack` without `seq`, warn in the hub's log |
   | … `runtime_session_id` | lowercase uuid with hyphens | same |
   | … `cwd` | up to 4096 bytes and inside the workspace path | same |
-  | a worker event of type `user.message`, `approval.response`, `clarify.response`, `peer.message`, (since 0.169) `schedules.live` (§4: only the hub writes them) | forbidden in any session | `error invalid_frame` |
+  | a worker event of type `user.message`, `approval.response`, `clarify.response`, `peer.message`, (since 0.169) `schedules.live`, (since 0.232) `side.question` (§4: only the hub writes them) | forbidden in any session | `error invalid_frame` |
   | a worker event in its service session (§10.2) | only `system` with `code: worker_log` | `error invalid_frame` |
   | `session.state.foreground_calls` (§5.4, since 0.125) | 64 unique ids of 1–128 bytes without whitespace or control characters | the rest of the list is dropped |
   | a worker event in an archived session (§17.4) | only one that ends a turn: the final `agent.message`, `status idle`/`error` | `ack` without `seq` |
@@ -7830,6 +7924,24 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.231 → 0.232 (a side question to a session's agent)
+§4: the events `side.question` (the hub's, the owner's) and `side.answer` (the adapter's); §5.3:
+`session.side_question`; §6: `POST /api/sessions/{id}/side_question`; §8.1: the `side_question`
+control request, which Claude Code answers outside the conversation, without a turn and without a
+trace in the agent's context; §17.5: behaviour. `/btw <question>` or `/side <question>` in the
+composer asks it, the question and the answer stand as one muted block in the feed, and it
+works for an unloaded agent, which the hub starts first, with `session.start.no_wait`: with all
+slots busy the session does not queue, the start's settings are kept for the next start, and
+the question gets an error. A question the worker answers with an `error` frame, or whose
+connection closes before the answer (it drops or a new `hello` replaces it), gets that error as
+its `side.answer`. The hub stores only one `side.answer` per question, of a question of the same
+session. A question during the agent's text stands under it like a message (`during_text`). A
+refused question comes back into the composer. `hqc_read` leaves side events out. Its API cost
+is added to the process's running total, so the next turn of the same process shows it, in its
+cost and in `session_tokens`. The question reads the conversation's prompt cache and so renews
+it, which the header's cache time does not see.
+A `model_refusal_fallback` of `scope` `local` no longer retracts events of the conversation.
 
 ### 0.230 → 0.231 (the owner's Stop sends what waited without a turn)
 §4, §5.2, §5.3, §6, §7.1, §8.1, §17.2: a Stop used to leave the messages that waited to chance: the

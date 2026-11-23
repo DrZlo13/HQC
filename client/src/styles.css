@@ -4948,6 +4948,36 @@ a.relay-peer {
 .live-agents-lead-waiting .live-agents-lead {
   color: var(--waiting);
 }
+/* The agent's task list opened under its row (LiveSubagents): a mark and the words of each task,
+   done ones dimmed, the one in progress in the accent colour. */
+.live-agents-tasks {
+  max-height: 30dvh;
+  overflow-y: auto;
+  margin: 2px 0 4px 18px;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+  color: var(--text2);
+}
+.live-agents-tasks li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.live-agents-mark {
+  flex: none;
+}
+.live-agents-task-completed {
+  color: var(--muted);
+}
+.live-agents-task-in_progress {
+  color: var(--accent-text);
+}
 /* "Run in background": the stop button's size, in the accent colour. */
 .live-agents-background {
   color: var(--accent-text);

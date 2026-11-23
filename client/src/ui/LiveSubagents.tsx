@@ -1,20 +1,23 @@
-// The subagents, the background commands and the timers of the session (`subagents.live` and
-// `schedules.live`, SPEC §6), pinned above the input while the feed scrolls: one line each,
-// led by "Subagent:", "Command:" (when the worker says which), "Monitor:", "Wakeup:", "Cron:" or
-// "Scheduled:". A subagent has its task and what it does now (that it retries a request to the
-// model API, while it does, or that it waits for permission), then its tokens, tool calls and
-// run time, which ticks here between the lists the hub sends (a phone leaves out the word
-// "tokens" and the tool calls); a command or a watcher has only its description and run time.
-// A timer, a wakeup or a cron job of the agent and a message scheduled by the hub, has
-// "in 12m 34s" instead, counting down to "due"; a scheduled message opens the schedules of the
-// chat. The main agent's row ("Main agent:", `lead`) stands first, while a turn is on or input
-// waits. A `stoppable` line ends with a stop button. A subagent's line opens what it has done
-// under it, drawn as the feed draws the agent's own steps. The session's goal (`/goal`, SPEC
-// 0.218) is the block's first row: the condition, the checks so far, and what it expands to.
+// The goal, the agent's task list, the subagents, the background commands and the timers of the
+// session (`system goal`, `tasks`, `subagents.live` and `schedules.live`, SPEC §6), pinned above
+// the input while the feed scrolls: one line each, led by "Subagent:", "Command:" (when the worker
+// says which), "Monitor:", "Wakeup:", "Cron:" or "Scheduled:". A subagent has its task and what it
+// does now (that it retries a request to the model API, while it does, or that it waits for
+// permission), then its tokens, tool calls and run time, which ticks here between the lists the
+// hub sends (a phone leaves out the word "tokens" and the tool calls); a command or a watcher has
+// only its description and run time. A timer, a wakeup or a cron job of the agent and a message
+// scheduled by the hub, has "in 12m 34s" instead, counting down to "due"; a scheduled message
+// opens the schedules of the chat. The session's goal (`/goal`, SPEC 0.218) is the block's first
+// row: the condition, the checks so far, and what it expands to. The task list is the next row,
+// "Tasks: 3 of 7 completed" with what the agent does on its task in progress, while a task is not
+// done; it opens the list with a mark for each task. The main agent's row ("Main agent:", `lead`)
+// stands after them, while a turn is on or input waits. A `stoppable` line ends with a stop
+// button. A subagent's line opens what it has done under it, drawn as the feed draws the agent's
+// own steps.
 
 import type { ComponentChildren } from 'preact';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
-import type { LiveKind, LiveSchedule, LiveSubagent, SubagentHistory } from '../proto';
+import type { AgentTask, LiveKind, LiveSchedule, LiveSubagent, SubagentHistory } from '../proto';
 import { Timeline, type Item } from '../timeline';
 import { FeedBlocks, type ChatActions } from './cards';
 import { buildFeed } from './feed';
@@ -73,6 +76,50 @@ export interface GoalBanner {
   onClear?: () => Promise<void>;
 }
 
+/** A task the agent has not finished: the task list shows a row only while there is one. */
+export function hasOpenTasks(tasks: readonly AgentTask[]): boolean {
+  return tasks.some((t) => t.status !== 'completed');
+}
+
+const TASK_MARK: Record<string, string> = { completed: '✓', in_progress: '◐' };
+
+/** The row of the task list, `Tasks: 3 of 7 completed · Fixing the parser`, and the list it
+ *  opens: a mark and the words of each task, the active form for the one in progress; `open` is
+ *  kept by the block, which then does not cut the list. */
+function TasksRow({ tasks, open, onToggle }: { tasks: readonly AgentTask[]; open: boolean; onToggle: () => void }) {
+  const doing = tasks.find((t) => t.status === 'in_progress');
+  const done = tasks.filter((t) => t.status === 'completed').length;
+  return (
+    <li>
+      <div class="live-agents-row">
+        <button type="button" class="live-agents-opens" aria-expanded={open} onClick={onToggle}>
+          <span class="pulse-dot live-agents-dot live-agents-dot-still" aria-hidden="true" />
+          <span class="live-agents-what">
+            <span class="live-agents-kind">Tasks: </span>
+            <span class="live-agents-task">{`${done} of ${tasks.length} completed`}</span>
+            {doing && ` · ${doing.active_form ?? doing.subject}`}
+          </span>
+          <span class="live-agents-stats" aria-hidden="true">
+            {open ? '▾' : '▸'}
+          </span>
+        </button>
+      </div>
+      {open && (
+        <ul class="live-agents-tasks" aria-label="The agent's tasks">
+          {tasks.map((t, i) => (
+            <li key={i} class={`live-agents-task-${t.status}`} title={t.status.replace('_', ' ')}>
+              <span class="live-agents-mark" aria-hidden="true">
+                {TASK_MARK[t.status] ?? '○'}
+              </span>
+              <span>{t.status === 'in_progress' ? (t.active_form ?? t.subject) : t.subject}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
 /** `goal`: the row that stands before all the others and alone makes the block show.
  *  `agents`: the latest list, which came at `receivedAt` (`Date.now()`); `schedules`: the
  *  latest `schedules.live`, which came at `schedulesAt`; `onSchedules` opens the schedules;
@@ -83,9 +130,11 @@ export interface GoalBanner {
  *  Monitor's) gets a stop button, which calls `onStop` with its `task_id` and stays disabled
  *  until that settles; the row goes when the task ends. `lead`: the rows that stand before them
  *  (the main agent's, cards.tsx `ActivityLine`), each one drawn; the block shows with only
- *  those. */
+ *  those. `tasks`: the agent's task list (`Timeline.tasks`), a row after the goal's while a task
+ *  is not done. */
 export function LiveSubagents({
   goal,
+  tasks = [],
   lead,
   agents,
   receivedAt,
@@ -98,6 +147,7 @@ export function LiveSubagents({
   onStop,
 }: {
   goal?: GoalBanner;
+  tasks?: AgentTask[];
   lead?: ComponentChildren[];
   agents: LiveSubagent[];
   receivedAt: number;
@@ -121,12 +171,19 @@ export function LiveSubagents({
   ];
   const [stopping, setStopping] = useState<ReadonlySet<string>>(new Set());
   const [open, setOpen] = useState<string | null>(null);
+  const [tasksOpen, setTasksOpen] = useState(false);
   const shown = open !== null && history && rows.some((r) => r.key === open && r.history) ? open : null;
   // The subagent ended: its history goes with its line, and does not open again by itself.
   useEffect(() => {
     if (open !== null && shown === null) setOpen(null);
   }, [open, shown]);
-  if (!rows.length && !lead?.length && !goal) return null;
+  const tasksShown = hasOpenTasks(tasks);
+  // The row went away (every task done): a list that comes later does not open by itself.
+  useEffect(() => {
+    if (!tasksShown && tasksOpen) setTasksOpen(false);
+  }, [tasksShown, tasksOpen]);
+  const listOpen = shown !== null || (tasksShown && tasksOpen);
+  if (!rows.length && !lead?.length && !goal && !tasksShown) return null;
   const stop = (id: string) => {
     setStopping((s) => new Set(s).add(id));
     void onStop!(id).finally(() =>
@@ -139,8 +196,9 @@ export function LiveSubagents({
   };
   return (
     <section class="live-agents" aria-label="What the agent, its subagents and commands do now, and timers">
-      <ul class={shown ? 'live-agents-list live-agents-list-open' : 'live-agents-list'}>
+      <ul class={listOpen ? 'live-agents-list live-agents-list-open' : 'live-agents-list'}>
         {goal && <GoalRow goal={goal} />}
+        {tasksShown && <TasksRow tasks={tasks} open={tasksOpen} onToggle={() => setTasksOpen((o) => !o)} />}
         {lead}
         {rows.map((r) => {
           const line = (

@@ -159,6 +159,9 @@
 //! - the result of the main agent's `ScheduleWakeup` call → [`AdapterEvent::Wakeup`] with its
 //!   `scheduledFor`, none for 0; a `command_lifecycle` `started` with `wakeup_source:
 //!   loop_wakeup` and that `scheduled_for` → [`AdapterEvent::Wakeup`] with none;
+//! - the result of the main agent's `TodoWrite`, `TaskCreate`, `TaskUpdate` or `TaskList` call
+//!   (none of a subagent's, none of a failed call) → `tasks` with the whole list when it
+//!   changed ([`apply_task_result`]); `conversation_reset` empties it;
 //! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint`, the hqc
 //!   rules suggested for the call and the subagent whose `agent_id` it names) /
 //!   `clarify.request` (with that subagent too), an immediate allow by a `session`
@@ -194,10 +197,10 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail};
 use hqc_claude_jsonl::{model_usage_tokens, CostState, GoalRecord, GoalState, TokenSums};
 use hqc_proto::event::{
-    AnswerInput, ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
-    ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, GoalStatus, GrantPlace,
-    LiveKind, LiveSubagent, OptionGrant, RequestSubagent, SessionState, TaskUsage, GOAL,
-    MODEL_NOT_SWITCHED, OPTION_SERVER_ALWAYS, OPTION_SERVER_SESSION,
+    AgentTask, AnswerInput, ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason,
+    ClarifyAction, ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, GoalStatus,
+    GrantPlace, LiveKind, LiveSubagent, OptionGrant, RequestSubagent, SessionState, TaskStatus,
+    TaskUsage, GOAL, MODEL_NOT_SWITCHED, OPTION_SERVER_ALWAYS, OPTION_SERVER_SESSION,
 };
 use hqc_proto::frame::{Activity, LeftoverCommand, PermissionMode, SessionInput, SlashCommand};
 use serde_json::{json, Value};
@@ -289,6 +292,10 @@ pub const CONVERSATION_CLEARED_TEXT: &str = "Conversation cleared";
 pub const COMMAND_OUTPUT: &str = "command_output";
 /// At most this many bytes of a slash command's description and argument hint are reported.
 pub const COMMAND_TEXT_LIMIT: usize = 200;
+/// At most this many bytes of a task's subject and active form, and at most this many tasks, are
+/// kept: the `tasks` event stays far under the hub's WebSocket frame limit (SPEC §4).
+pub const TASK_TEXT_LIMIT: usize = 512;
+pub const TASKS_LIMIT: usize = 200;
 /// At most this many slash commands are reported, and none whose name is longer than
 /// [`COMMAND_NAME_LIMIT`] characters: what the hub keeps (SPEC §5.4).
 pub const COMMANDS_LIMIT: usize = 500;
@@ -453,6 +460,14 @@ impl LiveAgent {
     }
 }
 
+/// A task of the agent's task list ([`Core::task_list`]).
+#[derive(Debug, Clone)]
+pub struct TaskEntry {
+    /// The runtime's id of the task; `TodoWrite` gives none.
+    id: Option<String>,
+    task: AgentTask,
+}
+
 /// A job of the agent's `CronCreate`, shown as a row ([`Core::cron_jobs`]).
 #[derive(Debug)]
 pub struct CronJob {
@@ -545,6 +560,12 @@ pub struct Core {
     /// The main agent's cron jobs, in the order they were created, sent after
     /// [`Core::wakeup_row`].
     cron_jobs: Vec<CronJob>,
+    /// The main agent's `TodoWrite`, `TaskCreate`, `TaskUpdate` and `TaskList` calls until their
+    /// result: call id → (tool, input).
+    todo_calls: HashMap<String, (String, Value)>,
+    /// The main agent's task list as the `tasks` event last sent says it
+    /// ([`Core::tasks_changed`]).
+    task_list: Vec<TaskEntry>,
     /// [`Core::live`] got a subagent or a title since it was last reported.
     live_changed: bool,
     /// A `background_tasks_changed` lowered [`Core::running_subagents`] below the count last
@@ -730,6 +751,8 @@ impl Core {
             cron_creates: HashMap::new(),
             cron_deletes: HashSet::new(),
             cron_jobs: Vec::new(),
+            todo_calls: HashMap::new(),
+            task_list: Vec::new(),
             live_changed: false,
             recount: false,
             background: Vec::new(),
@@ -1426,6 +1449,12 @@ impl Core {
                     Some("CronDelete") if !sub => {
                         self.cron_deletes.insert(id.to_owned());
                     }
+                    Some(tool @ ("TodoWrite" | "TaskCreate" | "TaskUpdate" | "TaskList"))
+                        if !sub =>
+                    {
+                        self.todo_calls
+                            .insert(id.to_owned(), (tool.to_owned(), b["input"].clone()));
+                    }
                     _ => {}
                 }
             }
@@ -1471,9 +1500,12 @@ impl Core {
                 self.clearing = true;
                 self.fresh = true;
                 self.cost_base = None;
-                // The new conversation holds nothing of the old one's context.
+                // The new conversation holds nothing of the old one's context or task list.
                 (self.context, self.response_started) = (None, None);
-                vec![self.emit_system(CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT.into())]
+                self.todo_calls.clear();
+                let mut out = self.tasks_changed(|list| list.clear());
+                out.push(self.emit_system(CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT.into()));
+                out
             }
             "system" => match v["subtype"].as_str() {
                 Some("init") => {
@@ -2815,6 +2847,26 @@ impl Core {
         vec![self.live_list()]
     }
 
+    /// `apply` to the task list; a `tasks` event with the whole list when it changed.
+    fn tasks_changed(&mut self, apply: impl FnOnce(&mut Vec<TaskEntry>)) -> Vec<Action> {
+        let shown = |list: &[TaskEntry]| list.iter().map(|e| e.task.clone()).collect::<Vec<_>>();
+        let before = shown(&self.task_list);
+        apply(&mut self.task_list);
+        let items = shown(&self.task_list);
+        if items == before {
+            return vec![];
+        }
+        vec![self.emit_new(EventKind::Tasks { items })]
+    }
+
+    /// The task list the CLI has after resuming the session's transcript
+    /// ([`resurrected_tasks`]); a fork starts with none. No event, the hub has the latest stored
+    /// one.
+    pub fn with_resumed_tasks(mut self, tasks: Vec<TaskEntry>) -> Self {
+        self.task_list = tasks;
+        self
+    }
+
     fn on_user(&mut self, v: &Value) -> Vec<Action> {
         // The message that asks the model again after a response whose tool call the CLI could
         // not parse names that response's records, which the CLI dropped from the conversation
@@ -2863,6 +2915,11 @@ impl Core {
             }
             if self.cron_deletes.remove(call) && !error {
                 out.extend(self.cron_deleted(result));
+            }
+            if let Some((tool, input)) = self.todo_calls.remove(call).filter(|_| !error) {
+                out.extend(self.tasks_changed(|list| {
+                    apply_task_result(list, &tool, &input, &whole, single, result)
+                }));
             }
             let kind = EventKind::ToolResult {
                 call_id: block["tool_use_id"].as_str().unwrap_or("").into(),
@@ -4524,6 +4581,220 @@ pub fn goal_event(session_id: Uuid, g: &GoalRecord) -> Event {
 /// Now, in epoch ms.
 fn epoch_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// A task call of the main agent, `tool` with `input`, whose result did not fail, applied to the
+/// task list `list`: the result block's `text`, the record's `tool_use_result` (`toolUseResult`
+/// in a transcript) `result`, which is this call's only when the record holds one result
+/// (`single`). `TodoWrite` replaces the list, as the CLI keeps it (every task done: none);
+/// `TaskCreate` adds the task under the id and subject its text names after the CLI corrected the
+/// call (`Task #<id> created successfully: <subject>`; else the result's `task.id` when `single`
+/// and the input's subject, `title` or `name`), with the `activeForm` or `active_form` of the
+/// input (in a `task` wrapper too); `TaskUpdate` changes (its `status`, `subject`,
+/// `activeForm` or `active_form`) or, with `deleted`, removes the task whose id its text names
+/// (`Updated task #<id> …`; a task it did not find has the error or `Task #<id> not found`);
+/// `TaskList` replaces the list, a known task keeping its `active_form`, only from a `single`
+/// result with a `tasks` array. A task with a status other than `pending`, `in_progress` and
+/// `completed` is left out. Texts are cut at [`TASK_TEXT_LIMIT`] bytes and the list at
+/// [`TASKS_LIMIT`] tasks. The live process and the replay of a transcript
+/// ([`resurrected_tasks`]) both go through here.
+fn apply_task_result(
+    list: &mut Vec<TaskEntry>,
+    tool: &str,
+    input: &Value,
+    text: &str,
+    single: bool,
+    result: &Value,
+) {
+    let status = |v: &Value| match v.as_str()? {
+        "pending" => Some(TaskStatus::Pending),
+        "in_progress" => Some(TaskStatus::InProgress),
+        "completed" => Some(TaskStatus::Completed),
+        _ => None,
+    };
+    let owned = |v: &Value| v.as_str().map(|s| preview(s, TASK_TEXT_LIMIT));
+    // The fields of a call's input as the CLI corrects it before it runs (2.1.312). A
+    // `TaskCreate` input with neither `subject` nor `description` at the top takes the fields of
+    // an object in `task` (a string there is its description, which the result text covers),
+    // and `title` or `name` stand for `subject`, `active_form` for `activeForm`. A `TaskUpdate`
+    // input takes only `active_form` for `activeForm` (and `id`, `task_id` for `taskId`).
+    let unwrapped;
+    let fields = match &input["task"] {
+        Value::Object(inner)
+            if tool == "TaskCreate"
+                && input.get("subject").is_none()
+                && input.get("description").is_none() =>
+        {
+            let mut all = input.clone();
+            if let Some(o) = all.as_object_mut() {
+                o.remove("task");
+                o.extend(inner.clone());
+            }
+            unwrapped = all;
+            &unwrapped
+        }
+        _ => input,
+    };
+    let first = |keys: &[&str]| keys.iter().find_map(|k| owned(&fields[*k]));
+    let active_form = || first(&["activeForm", "active_form"]);
+    // What follows `prefix` in the text, up to the first white space.
+    let id_after = |prefix: &str, then: &str| {
+        let rest = text.strip_prefix(prefix)?;
+        let (id, tail) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        (!id.is_empty() && tail.starts_with(then)).then(|| id.to_owned())
+    };
+    match tool {
+        "TodoWrite" => {
+            let todos: Vec<TaskEntry> = input["todos"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| {
+                    Some(TaskEntry {
+                        id: None,
+                        task: AgentTask {
+                            subject: owned(&t["content"])?,
+                            status: status(&t["status"])?,
+                            active_form: owned(&t["activeForm"]),
+                        },
+                    })
+                })
+                .collect();
+            let done = todos.iter().all(|t| t.task.status == TaskStatus::Completed);
+            *list = if done { vec![] } else { todos };
+        }
+        "TaskCreate" => {
+            let named = id_after("Task #", "created successfully");
+            let subject = text
+                .split_once("created successfully:")
+                .map(|(_, s)| preview(s.trim(), TASK_TEXT_LIMIT))
+                .filter(|s| !s.is_empty())
+                .or_else(|| first(&["subject", "title", "name"]));
+            let (Some(id), Some(subject)) = (
+                named.or_else(|| single.then(|| owned(&result["task"]["id"])).flatten()),
+                subject,
+            ) else {
+                return;
+            };
+            list.retain(|e| e.id.as_deref() != Some(id.as_str()));
+            list.push(TaskEntry {
+                id: Some(id),
+                task: AgentTask {
+                    subject,
+                    status: TaskStatus::Pending,
+                    active_form: active_form(),
+                },
+            });
+        }
+        "TaskUpdate" => {
+            let Some(id) = id_after("Updated task #", "") else {
+                return;
+            };
+            if fields["status"] == "deleted" {
+                list.retain(|e| e.id.as_deref() != Some(id.as_str()));
+            } else if let Some(e) = list
+                .iter_mut()
+                .find(|e| e.id.as_deref() == Some(id.as_str()))
+            {
+                if let Some(s) = status(&fields["status"]) {
+                    e.task.status = s;
+                }
+                if let Some(s) = owned(&fields["subject"]) {
+                    e.task.subject = s;
+                }
+                if let Some(s) = active_form() {
+                    e.task.active_form = Some(s);
+                }
+            }
+        }
+        _ => {
+            // A result of another call (a `TaskGet`'s) in a record of several must not reset
+            // the list; no `tasks` array changes nothing.
+            let (true, Some(tasks)) = (single, result["tasks"].as_array()) else {
+                return;
+            };
+            let listed: Vec<TaskEntry> = tasks
+                .iter()
+                .filter_map(|t| {
+                    let id = owned(&t["id"])?;
+                    let active_form = list
+                        .iter()
+                        .find(|k| k.id.as_deref() == Some(id.as_str()))
+                        .and_then(|k| k.task.active_form.clone());
+                    Some(TaskEntry {
+                        id: Some(id),
+                        task: AgentTask {
+                            subject: owned(&t["subject"])?,
+                            status: status(&t["status"])?,
+                            active_form,
+                        },
+                    })
+                })
+                .collect();
+            *list = listed;
+        }
+    }
+    list.truncate(TASKS_LIMIT);
+}
+
+/// The task list the CLI has after resuming the session's `transcript` (a fork starts with none;
+/// a copy's resume passes only what follows its cut, SPEC §8.1): the main
+/// agent's (not a sidechain's) `TodoWrite`, `TaskCreate`, `TaskUpdate` and `TaskList` calls
+/// whose results did not fail, applied in order by [`apply_task_result`]. Only the lines that can
+/// matter are parsed, as for [`resurrected_cron_jobs`].
+pub fn resurrected_tasks(transcript: &str) -> Vec<TaskEntry> {
+    const TOOLS: [&str; 4] = ["TodoWrite", "TaskCreate", "TaskUpdate", "TaskList"];
+    let mut calls: HashMap<String, (String, Value)> = HashMap::new();
+    let mut list = Vec::new();
+    for line in transcript.lines() {
+        let is_call = TOOLS.iter().any(|t| line.contains(&format!("\"{t}\"")));
+        let is_result =
+            line.contains("\"tool_result\"") && calls.keys().any(|id| line.contains(id.as_str()));
+        if !is_call && !is_result {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v["isSidechain"] == true {
+            continue;
+        }
+        match v["type"].as_str() {
+            Some("assistant") => {
+                for b in blocks(&v).iter().filter(|b| b["type"] == "tool_use") {
+                    if let (Some(tool), Some(id)) = (
+                        b["name"].as_str().filter(|n| TOOLS.contains(n)),
+                        b["id"].as_str(),
+                    ) {
+                        calls.insert(id.to_owned(), (tool.to_owned(), b["input"].clone()));
+                    }
+                }
+            }
+            Some("user") => {
+                let results = blocks(&v)
+                    .iter()
+                    .filter(|b| b["type"] == "tool_result")
+                    .count();
+                for b in blocks(&v).iter().filter(|b| b["type"] == "tool_result") {
+                    let call = b["tool_use_id"].as_str().and_then(|id| calls.remove(id));
+                    if let Some((tool, input)) = call.filter(|_| b["is_error"] != true) {
+                        let text = result_text(&b["content"]);
+                        let one = results == 1;
+                        apply_task_result(
+                            &mut list,
+                            &tool,
+                            &input,
+                            &text,
+                            one,
+                            &v["toolUseResult"],
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    list
 }
 
 /// The cron jobs the CLI resurrects from the session's `transcript` when it resumes it or

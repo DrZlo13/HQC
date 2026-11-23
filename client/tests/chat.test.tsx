@@ -1675,6 +1675,117 @@ describe('header', () => {
   });
 });
 
+// The agent's task list: a row above the input while a task is not done, after the goal's (SPEC
+// §6, since 0.223), from the stored `tasks` events, which are never feed items.
+describe("the agent's task list", () => {
+  // Mounted, and subscribed: the subscription of an earlier test is not this chat's.
+  const open = async (app: AppState, phone = false) => {
+    subscriber = undefined;
+    await mount(app, phone);
+    await act(async () => {
+      for (let i = 0; i < 100 && !subscriber; i++) await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(subscriber).toBeDefined();
+  };
+  const tasks = (seq: number, items: unknown[]) => ev('event.tasks', seq, (e) => (e.payload.items = items));
+  const item = (subject: string, status: string, active_form?: string) => ({ subject, status, active_form });
+  const first = () => $('.live-agents-list > li')!;
+  const text = () => first().querySelector('.live-agents-opens')!.textContent;
+  const marks = () => [...root.querySelectorAll('.live-agents-tasks > li')].map((li) => li.textContent);
+
+  it('is the first row without a goal, "Tasks: 3 of 7 completed" and what the task in progress is doing, and opens with a mark per task', async () => {
+    const { app } = setup('running', { subagents: 1 });
+    await open(app);
+    // The main agent's row and the subagents' come after it.
+    await act(async () =>
+      subscriber!.onEvent(
+        ev('event.subagents.live', 0, (e) => {
+          delete e.seq;
+        }),
+      ),
+    );
+    expect($('.live-agents-list')!.textContent).not.toContain('Tasks:');
+    await act(async () => subscriber!.onEvent(tasks(8, [
+      item('Read the test', 'completed', 'Reading the test'),
+      item('Fix the parser', 'in_progress', 'Fixing the parser'),
+      item('Run the suite', 'pending'),
+    ])));
+    expect(text()).toBe('Tasks: 1 of 3 completed · Fixing the parser▸');
+    expect($('.live-agents-list')!.children.length).toBeGreaterThan(1);
+    // Never a feed item.
+    expect(root.textContent).not.toContain('Run the suite');
+    expect(marks()).toEqual([]);
+    await act(async () => $('.live-agents-opens')!.click());
+    expect(text()).toBe('Tasks: 1 of 3 completed · Fixing the parser▾');
+    expect(marks()).toEqual(['✓Read the test', '◐Fixing the parser', '○Run the suite']);
+    expect($('.live-agents-tasks > li')!.classList.contains('live-agents-task-completed')).toBe(true);
+    await act(async () => $('.live-agents-opens')!.click());
+    expect(marks()).toEqual([]);
+  });
+
+  it('is on a phone too, and without a task in progress says only the count', async () => {
+    const { app } = setup('idle', {});
+    await open(app, true);
+    await act(async () => subscriber!.onEvent(tasks(8, [item('Read', 'completed'), item('Fix', 'pending')])));
+    expect(text()).toBe('Tasks: 1 of 2 completed▸');
+  });
+
+  it('is gone when the list is empty or every task is done', async () => {
+    const { app } = setup('idle', {});
+    await open(app);
+    await act(async () => subscriber!.onEvent(tasks(8, [item('Read', 'completed'), item('Fix', 'pending')])));
+    expect($('.live-agents')).not.toBeNull();
+    await act(async () => subscriber!.onEvent(tasks(9, [item('Read', 'completed'), item('Fix', 'completed')])));
+    expect($('.live-agents')).toBeNull();
+    await act(async () => subscriber!.onEvent(tasks(10, [item('Again', 'pending')])));
+    expect($('.live-agents')).not.toBeNull();
+    await act(async () => subscriber!.onEvent(tasks(11, [])));
+    expect($('.live-agents')).toBeNull();
+  });
+
+  it('does not open by itself: a list that comes after the row went away is closed', async () => {
+    const { app } = setup('idle', { subagents: 1 });
+    await open(app);
+    await act(async () => subscriber!.onEvent(tasks(8, [item('Read', 'pending')])));
+    await act(async () => $('.live-agents-opens')!.click());
+    expect($('.live-agents-tasks')).not.toBeNull();
+    await act(async () => subscriber!.onEvent(tasks(9, [item('Read', 'completed')])));
+    // The component stays mounted (a subagent works), so it keeps its state.
+    expect(root.textContent).not.toContain('Tasks:');
+    await act(async () => subscriber!.onEvent(tasks(10, [item('Again', 'pending')])));
+    expect($('.live-agents-tasks')).toBeNull();
+    expect(text()).toBe('Tasks: 0 of 1 completed▸');
+  });
+
+  it('is the list of the latest event, also when the hub sends it after newer history, and an older one never replaces a newer', async () => {
+    const { app } = setup('idle', {});
+    await open(app);
+    // The newest page ends at seq 7; the hub sends the list stored before it.
+    await act(async () => subscriber!.onEvent(tasks(3, [item('Old list', 'pending')])));
+    expect(text()).toBe('Tasks: 0 of 1 completed▸');
+    await act(async () => subscriber!.onEvent(tasks(9, [item('New list', 'pending'), item('More', 'pending')])));
+    expect(text()).toBe('Tasks: 0 of 2 completed▸');
+    await act(async () => subscriber!.onEvent(tasks(4, [item('Older still', 'pending')])));
+    expect(text()).toBe('Tasks: 0 of 2 completed▸');
+    // No gap, no feed item: the history is as it was.
+    expect(root.textContent).not.toContain('Old list');
+    expect(root.querySelectorAll('.feed-block[data-seq="3"]')).toHaveLength(0);
+  });
+
+  it('is kept apart from the stored history: no event, `lastSeq` not moved back, one it did not know of moves it on', () => {
+    const t = new Timeline();
+    t.apply(ev('event.agent.message', 7));
+    t.apply(tasks(3, [item('Old list', 'pending')]));
+    expect(t.tasks.map((x) => x.subject)).toEqual(['Old list']);
+    expect(t.events().map((e) => e.seq)).toEqual([7]);
+    expect(t.lastSeq).toBe(7);
+    t.apply(tasks(8, []));
+    expect(t.tasks).toEqual([]);
+    expect(t.events().map((e) => e.seq)).toEqual([7]);
+    expect(t.lastSeq).toBe(8);
+  });
+});
+
 // The subagents running now, one line each, pinned above the input (SPEC §6, since 0.101).
 describe('live subagents', () => {
   const live = (patch: (e: any) => void = () => {}) =>
@@ -4209,6 +4320,29 @@ describe('goal banner', () => {
     expect(rows[1].textContent).toContain('Main agent:');
     await act(async () => subscriber!.onEvent(goalEv(4, 'met', { checks: 3 })));
     expect($('.live-goal')).toBeNull();
+  });
+
+  it('stands in the order goal, tasks, main agent', async () => {
+    const { app } = withGoal('running');
+    // Mounted, and subscribed: the subscription of an earlier test is not this chat's.
+    subscriber = undefined;
+    await mount(app);
+    await act(async () => {
+      for (let i = 0; i < 100 && !subscriber; i++) await new Promise((r) => setTimeout(r, 20));
+    });
+    await act(async () =>
+      subscriber!.onEvent(
+        ev('event.tasks', 8, (e) => {
+          e.payload.items = [
+            { subject: 'Fix the parser', status: 'in_progress', active_form: 'Fixing the parser' },
+          ];
+        }),
+      ),
+    );
+    const rows = [...root.querySelectorAll('.live-agents-list > li')];
+    expect(rows[0].classList.contains('live-goal')).toBe(true);
+    expect(rows[1].textContent).toContain('Tasks: 0 of 1 completed');
+    expect(rows[2].textContent).toContain('Main agent:');
   });
 
   it('has no checks word before the first check, and no goal row in a service session', async () => {

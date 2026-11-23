@@ -4,6 +4,7 @@
 // Pure logic, no DOM and no network.
 
 import type {
+  AgentTask,
   ApprovalResponse,
   ClarifyResponse,
   DeliveryChange,
@@ -101,6 +102,11 @@ export class Timeline {
    *  `due_in_ms` were counted then. */
   liveSchedules: LiveSchedule[] = [];
   liveSchedulesAt = 0;
+  /** The agent's task list: the items of the stored `tasks` event with the highest `seq`, which
+   *  is never a feed item (SPEC §6). The hub sends the latest one on subscribe also when the
+   *  loaded history is newer than it, so an old `seq` is no gap. */
+  tasks: AgentTask[] = [];
+  private tasksSeq = 0;
   /** The thinking being written: the first `agent.delta` with `thinking` since the last
    *  `agent.thinking`, `agent.message` or `reset`, with the text of all of them (SPEC §6). */
   thinking: EventOf<"agent.delta"> | null = null;
@@ -160,6 +166,14 @@ export class Timeline {
     }
     // Clients see only stored events (SPEC §5.2); anything else without seq is dropped.
     if (ev.seq === undefined) return;
+    if (ev.type === "tasks") {
+      if (advance) this.lastSeq = Math.max(this.lastSeq, ev.seq);
+      if (ev.seq > this.tasksSeq) {
+        this.tasksSeq = ev.seq;
+        this.tasks = ev.payload.items;
+      }
+      return;
+    }
     // Events are append-only: a seq seen before (REST page and subscribe backlog overlap,
     // the POST /input reply and its echo) is the same event. Only an input's `delivery`
     // changes (and with it a message's `payload.joined`), normally by a `delivery` frame
@@ -573,6 +587,8 @@ export class Timeline {
     this.retracted.clear();
     this.requests.clear();
     this.keys.clear();
+    this.tasks = [];
+    this.tasksSeq = 0;
     this.sorted = null;
     this.lastSeq = 0;
     this.olderFrom = 0;

@@ -750,6 +750,12 @@ claude_bin = "/Users/me/.local/bin/claude"
 # but an agent can hand work to any local Claude session that accepts them, past hqc (SPEC §8.1).
 # allow_subagent_messages = false
 
+# Give agents Claude Code's task list tools (TaskCreate, TaskUpdate, TaskList, TaskGet), which
+# CLI 2.1.312 gives the 5.x models only with CLAUDE_CODE_ENABLE_TODO_TOOLS=1: the worker sets it
+# for every agent it starts. The client then shows the list as "Tasks: 3 of 7 completed" above the
+# input, after the goal's row and before the main agent's (SPEC §6, §14). Default false.
+# task_tools = false
+
 # The [workspace] block is gone (since T14): workspaces are hub objects added in the client
 # (project → Workspaces → "Add a workspace"). The worker ignores the old iteration 1 block and
 # logs a warning about it on start; remove it from the file.
@@ -989,6 +995,14 @@ The agent opens its own tab group in your profile, signed in as you; drag a tab 
 give it that tab. It can read, navigate, click and type there under the session's mode, never
 upload files. Watch the tab group: a page can carry instructions, and a click there is yours.
 Every other session runs with `--no-chrome`.
+
+**The task list** (SPEC §14, since 0.223). With `task_tools = true` at the top of `worker.toml`
+(then restart the worker) the agents of that worker get Claude Code's task tools, and the chat
+shows the list they keep as a "Tasks: 3 of 7 completed" row above the input, which opens to the
+whole list; in the block above the input the goal's row (`/goal`) stands first, then the task
+list, then the main agent's row. Off (the default): the 5.x models of Claude Code have none of
+these tools, so their sessions show no row; the older models in the CLI's list (Opus 4.7 and
+4.6, Sonnet 4.6, Haiku 4.5) have the tools without the flag and their list shows.
 
 `show_in_vscode` (default `true`): the worker starts Claude Code with
 `CLAUDE_CODE_ENTRYPOINT=claude-vscode`; otherwise the CLI writes the transcript with

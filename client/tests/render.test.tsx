@@ -128,7 +128,7 @@ const agentText = (seq: number, text: string, final: boolean) =>
 describe("every example event renders", () => {
   // Transport only: the stream text, the subagents and the schedules above the input
   // (chat.test.tsx), and the token rate, which reaches the client as the session's
-  // `output_per_s`; a retraction is stored but not drawn.
+  // `output_per_s`; a retraction and the agent's task list are stored but not drawn.
   const names = readdirSync(WIRE)
     .filter(
       (f) =>
@@ -139,6 +139,7 @@ describe("every example event renders", () => {
         f !== "event.subagents.live.retry.json" &&
         f !== "event.retraction.json" &&
         f !== "event.tokens.rate.json" &&
+        f !== "event.tasks.json" &&
         f !== "event.schedules.live.json",
     )
     .map((f) => f.replace(/\.json$/, ""));

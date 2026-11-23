@@ -35,7 +35,7 @@ import {
   IconStop,
 } from './icons';
 import { MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatCost, formatTime, formatTimer, formatTokens, homePath, modeConfirm, modelName, shownModel } from './labels';
-import { LiveSubagents } from './LiveSubagents';
+import { hasOpenTasks, LiveSubagents } from './LiveSubagents';
 import { Loading } from './Loading';
 import { CopyButton } from './Markdown';
 import { SelectionContext, useChatSelection } from './selection';
@@ -1086,14 +1086,17 @@ export function Chat({
         )}
         {/* The list also holds the agent's background commands, which only background_tasks counts. */}
         {/* The wakeups and cron jobs of the agent and the session's schedules wait while it is idle. */}
+        {/* The task list while a task is not done. */}
         {(goal !== null ||
           lead.length > 0 ||
+          hasOpenTasks(t.tasks) ||
           (info?.subagents ?? 0) > 0 ||
           (info?.background_tasks ?? 0) > 0 ||
           t.liveAgents.some((a) => a.kind === 'wakeup' || a.kind === 'cron') ||
           t.liveSchedules.length > 0) && (
           <LiveSubagents
             goal={goal ? { ...goal, running: STOPPABLE.has(state), onClear: inputShown ? clearGoal : undefined } : undefined}
+            tasks={t.tasks}
             lead={lead}
             agents={t.liveAgents}
             receivedAt={t.liveAgentsAt}

@@ -4,14 +4,9 @@ import SwiftUI
 struct ProjectsView: View {
     @Environment(AppModel.self) private var app
     @State private var creating = false
+    @State private var editMode: EditMode = .inactive
 
-    private var sorted: [Project] {
-        app.projects.sorted { a, b in
-            if a.is_personal != b.is_personal { return a.is_personal }
-            if (a.favorite_at != nil) != (b.favorite_at != nil) { return a.favorite_at != nil }
-            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
-        }
-    }
+    private var sorted: [Project] { app.sortedProjects }
 
     var body: some View {
         List {
@@ -35,12 +30,26 @@ struct ProjectsView: View {
                     .tint(.yellow)
                 }
             }
+            .onMove { app.moveProjects(from: $0, to: $1) }
         }
         .navigationTitle("Projects")
         .paletteBackground()
+        .environment(\.editMode, $editMode)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button("New project", systemImage: "plus") { creating = true }
+                Menu {
+                    Button("New project", systemImage: "plus") { creating = true }
+                    Button(editMode.isEditing ? "Done reordering" : "Reorder projects", systemImage: "line.3.horizontal") {
+                        withAnimation { editMode = editMode.isEditing ? .inactive : .active }
+                    }
+                    NavigationLink {
+                        ArchivedProjectsView()
+                    } label: {
+                        Label("Archived projects", systemImage: "archivebox")
+                    }
+                } label: {
+                    Label("Projects", systemImage: "plus")
+                }
             }
         }
         .refreshable { await app.refresh() }
@@ -70,6 +79,12 @@ struct ProjectTile: View {
             .foregroundStyle(.white)
             .frame(width: size, height: size)
             .background(project.tint.gradient, in: .rect(cornerRadius: size * 0.28))
+            .overlay {
+                if project.icon?.kind == "image", let url = project.icon?.url {
+                    ProjectIconImage(url: url)
+                        .clipShape(.rect(cornerRadius: size * 0.28))
+                }
+            }
     }
 }
 
@@ -143,21 +158,164 @@ struct SessionListView: View {
     @State private var showArchived = false
     @State private var renaming = false
     @State private var newName = ""
+    /// The list's order, kept on the hub per project (the web client's State, Recent, Custom).
+    @State private var mode: SessionListMode = .state
+    @State private var placed: [String] = []
+    @State private var editMode: EditMode = .inactive
 
     private var current: Project { app.project(project.id) ?? project }
 
     private var visible: [SessionInfo] {
-        sessions
-            .filter { $0.archived == showArchived && $0.room_id == nil }
-            .sorted { a, b in
-                if (a.favorite_at != nil) != (b.favorite_at != nil) { return a.favorite_at != nil }
-                return a.updated_at > b.updated_at
-            }
+        sessions.filter { $0.archived == showArchived && $0.room_id == nil }
+    }
+
+    private var groups: [SessionGroup] {
+        if showArchived {
+            return [SessionGroup(id: "archived", label: nil,
+                                 items: visible.sorted { ($0.archived_at ?? "") > ($1.archived_at ?? "") })]
+        }
+        return SessionGrouping.groups(visible, mode: mode, placed: placed) { app.summary($0) }
     }
 
     var body: some View {
         List {
-            ForEach(visible) { s in
+            ForEach(groups) { g in
+                Section {
+                    ForEach(g.items) { s in row(s) }
+                        .onMove(perform: mode == .custom && !showArchived ? { from, to in reorder(g.items, from, to) } : nil)
+                } header: {
+                    if let label = g.label {
+                        Text(label)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(g.id == "wait" ? .orange : .secondary)
+                    }
+                }
+            }
+        }
+        .navigationTitle(showArchived ? "Archived" : current.displayName)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("New session", systemImage: "square.and.pencil") { sheet = .newSession }
+                    Button("New room", systemImage: "person.3") { sheet = .newRoom }
+                    Divider()
+                    if !showArchived {
+                        Picker(selection: Binding(get: { mode }, set: { setMode($0) })) {
+                            ForEach(SessionListMode.allCases) { m in Text(m.label).tag(m) }
+                        } label: {
+                            Label("Order: \(mode.label)", systemImage: "arrow.up.arrow.down")
+                        }
+                        .pickerStyle(.menu)
+                        if mode == .custom {
+                            Button(editMode.isEditing ? "Done reordering" : "Reorder…", systemImage: "line.3.horizontal") {
+                                withAnimation { editMode = editMode.isEditing ? .inactive : .active }
+                            }
+                        }
+                    }
+                    Button("Project settings…", systemImage: "slider.horizontal.3") { sheet = .settings }
+                    Button("Workspaces", systemImage: "folder") { sheet = .workspaces }
+                    Toggle(isOn: $showArchived) { Label("Show archived", systemImage: "archivebox") }
+                    Button(current.favorite_at == nil ? "Add to favorites" : "Remove from favorites",
+                           systemImage: current.favorite_at == nil ? "star" : "star.slash") {
+                        Task {
+                            try? await app.client?.setProjectFavorite(project.id, current.favorite_at == nil)
+                            await app.refresh()
+                        }
+                    }
+                    if !project.is_personal {
+                        Button("Rename", systemImage: "pencil") {
+                            newName = current.name
+                            renaming = true
+                        }
+                        Button("Archive project", systemImage: "archivebox", role: .destructive) {
+                            Task {
+                                try? await app.client?.archiveProject(project.id)
+                                await app.refresh()
+                                dismiss()
+                            }
+                        }
+                    }
+                } label: {
+                    Label("New", systemImage: "plus")
+                }
+            }
+        }
+        .overlay {
+            if loading && sessions.isEmpty {
+                SkeletonList(rows: 5, icon: 10)
+            } else if visible.isEmpty {
+                ContentUnavailableView {
+                    Label(showArchived ? "Nothing archived" : "No sessions", systemImage: "bubble.left.and.bubble.right")
+                } description: {
+                    Text(error ?? (showArchived ? "" : "Start one and talk to an agent on your machine."))
+                } actions: {
+                    if !showArchived {
+                        Button("New session") { sheet = .newSession }.buttonStyle(.glassProminent)
+                    }
+                }
+            }
+        }
+        .listStyle(.plain)
+        .paletteBackground(app.isRegular ? \.side : \.bg)
+        .environment(\.editMode, $editMode)
+        .refreshable { await load() }
+        .task {
+            await load()
+            if let o = try? await app.client?.sessionOrder(projectID: project.id) {
+                mode = SessionListMode(rawValue: o.mode) ?? .state
+                placed = o.session_ids
+            }
+        }
+        .onChange(of: app.summaries.count) { _, _ in Task { await load() } }
+        .alert("Rename project", isPresented: $renaming) {
+            TextField("Name", text: $newName)
+            Button("Rename") {
+                Task {
+                    _ = try? await app.client?.patchProject(project.id, ["name": newName])
+                    await app.refresh()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .sheet(item: $sheet) { s in
+            switch s {
+            case .newSession:
+                NewSessionSheet(project: project) { created in
+                    sheet = nil
+                    sessions.insert(created, at: 0)
+                    openCreated(created)
+                }
+                .presentationDetents([.medium, .large])
+            case .newRoom:
+                NewRoomSheet(project: project) { room in
+                    sheet = nil
+                    sessions.insert(room, at: 0)
+                    openCreated(room)
+                }
+            case .workspaces:
+                NavigationStack { WorkspacesView(project: project) }
+            case .settings:
+                ProjectSettingsSheet(project: current)
+            }
+        }
+    }
+
+    /// Saves the Custom order after a drag.
+    private func reorder(_ items: [SessionInfo], _ from: IndexSet, _ to: Int) {
+        var ids = items.map(\.id)
+        ids.move(fromOffsets: from, toOffset: to)
+        placed = ids
+        Feedback.play(.select)
+        Task { _ = try? await app.client?.putSessionOrder(projectID: project.id, ids: ids) }
+    }
+
+    fileprivate func setMode(_ m: SessionListMode) {
+        mode = m
+        Feedback.play(.select)
+        Task { _ = try? await app.client?.putSessionOrder(projectID: project.id, mode: m.rawValue) }
+    }
+
+    @ViewBuilder fileprivate func row(_ s: SessionInfo) -> some View {
                 Group {
                     if app.isRegular {
                         Button {
@@ -209,91 +367,6 @@ struct SessionListView: View {
                     }
                     .tint(.yellow)
                 }
-            }
-        }
-        .navigationTitle(showArchived ? "Archived" : current.displayName)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Button("New session", systemImage: "square.and.pencil") { sheet = .newSession }
-                    Button("New room", systemImage: "person.3") { sheet = .newRoom }
-                    Divider()
-                    Button("Workspaces", systemImage: "folder") { sheet = .workspaces }
-                    Toggle(isOn: $showArchived) { Label("Show archived", systemImage: "archivebox") }
-                    Button(current.favorite_at == nil ? "Add to favorites" : "Remove from favorites",
-                           systemImage: current.favorite_at == nil ? "star" : "star.slash") {
-                        Task {
-                            try? await app.client?.setProjectFavorite(project.id, current.favorite_at == nil)
-                            await app.refresh()
-                        }
-                    }
-                    if !project.is_personal {
-                        Button("Rename", systemImage: "pencil") {
-                            newName = current.name
-                            renaming = true
-                        }
-                        Button("Archive project", systemImage: "archivebox", role: .destructive) {
-                            Task {
-                                try? await app.client?.archiveProject(project.id)
-                                await app.refresh()
-                                dismiss()
-                            }
-                        }
-                    }
-                } label: {
-                    Label("New", systemImage: "plus")
-                }
-            }
-        }
-        .overlay {
-            if loading && sessions.isEmpty {
-                SkeletonList(rows: 5, icon: 10)
-            } else if visible.isEmpty {
-                ContentUnavailableView {
-                    Label(showArchived ? "Nothing archived" : "No sessions", systemImage: "bubble.left.and.bubble.right")
-                } description: {
-                    Text(error ?? (showArchived ? "" : "Start one and talk to an agent on your machine."))
-                } actions: {
-                    if !showArchived {
-                        Button("New session") { sheet = .newSession }.buttonStyle(.glassProminent)
-                    }
-                }
-            }
-        }
-        .listStyle(.plain)
-        .paletteBackground(app.isRegular ? \.side : \.bg)
-        .refreshable { await load() }
-        .task { await load() }
-        .onChange(of: app.summaries.count) { _, _ in Task { await load() } }
-        .alert("Rename project", isPresented: $renaming) {
-            TextField("Name", text: $newName)
-            Button("Rename") {
-                Task {
-                    _ = try? await app.client?.patchProject(project.id, ["name": newName])
-                    await app.refresh()
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        }
-        .sheet(item: $sheet) { s in
-            switch s {
-            case .newSession:
-                NewSessionSheet(project: project) { created in
-                    sheet = nil
-                    sessions.insert(created, at: 0)
-                    openCreated(created)
-                }
-                .presentationDetents([.medium, .large])
-            case .newRoom:
-                NewRoomSheet(project: project) { room in
-                    sheet = nil
-                    sessions.insert(room, at: 0)
-                    openCreated(room)
-                }
-            case .workspaces:
-                NavigationStack { WorkspacesView(project: project) }
-            }
-        }
     }
 
     private func openCreated(_ s: SessionInfo) {
@@ -318,7 +391,7 @@ struct SessionListView: View {
 }
 
 enum ProjectSheet: String, Identifiable {
-    case newSession, newRoom, workspaces
+    case newSession, newRoom, workspaces, settings
     var id: String { rawValue }
 }
 

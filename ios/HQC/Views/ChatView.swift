@@ -30,6 +30,7 @@ struct ChatView: View {
     @State private var focusInput = 0
     @State private var givingSecret = false
     @State private var history: LiveTask?
+    @State private var moving = false
     let title: String
 
     init(sessionID: String, title: String) {
@@ -197,6 +198,11 @@ struct ChatView: View {
                                            passphrase: f.passphrase, remember: f.remember, requestID: nil)
             }
         }
+        .sheet(isPresented: $moving) {
+            if let info = model.info {
+                MoveSessionSheet(session: info) { moved in app.open(sessionID: moved.id, title: moved.title) }
+            }
+        }
         .sheet(item: $history) { t in
             SubagentHistorySheet(sessionID: model.sessionID, task: t)
         }
@@ -285,6 +291,9 @@ struct ChatView: View {
                     Button("Rename", systemImage: "pencil") {
                         newTitle = summaryTitle
                         renaming = true
+                    }
+                    if model.info?.isRoom != true {
+                        Button("Move to…", systemImage: "folder.badge.gearshape") { moving = true }
                     }
                     let fav = model.info?.favorite_at != nil
                     Button(fav ? "Remove from favorites" : "Add to favorites",

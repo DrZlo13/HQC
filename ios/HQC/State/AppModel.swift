@@ -247,12 +247,30 @@ final class AppModel {
     var selectedProject: Project? { selectedProjectID.flatMap { project($0) } }
 
     /// The personal project first, then favorites, then by name, as the web client's bar.
-    var sortedProjects: [Project] {
-        projects.sorted { a, b in
-            if a.is_personal != b.is_personal { return a.is_personal }
-            if (a.favorite_at != nil) != (b.favorite_at != nil) { return a.favorite_at != nil }
-            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+    /// The project bar's order: the user's own, as the hub keeps it (SPEC 0.64), the same on
+    /// every device.
+    var sortedProjects: [Project] { projects }
+
+    /// Moves projects in the bar and saves the order on the hub.
+    func moveProjects(from source: IndexSet, to destination: Int) {
+        var list = projects
+        list.move(fromOffsets: source, toOffset: destination)
+        projects = list
+        Feedback.play(.select)
+        guard let client else { return }
+        Task {
+            if let saved = try? await client.putProjectOrder(list.map(\.id)) {
+                projects = saved.filter { $0.archived_at == nil }
+            }
         }
+    }
+
+    /// Moves a project one place up or down the bar.
+    func moveProject(_ id: String, by delta: Int) {
+        guard let i = projects.firstIndex(where: { $0.id == id }) else { return }
+        let j = i + delta
+        guard j >= 0, j < projects.count else { return }
+        moveProjects(from: [i], to: delta > 0 ? j + 1 : j)
     }
 
     func unread(project: String) -> Int {

@@ -212,3 +212,9 @@ nonisolated struct SecretGiven: Codable, Sendable {
     let public_key: String?
     let remembered: Bool?
 }
+
+/// How a project's session list is ordered: by state, by recency, or the user's own.
+nonisolated struct SessionOrder: Codable, Sendable {
+    let mode: String
+    let session_ids: [String]
+}

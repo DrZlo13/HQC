@@ -179,6 +179,7 @@ struct ProjectRail: View {
     @Environment(\.palette) private var palette
     @Binding var sheet: DesktopSheet?
     @Binding var pane: SidebarPane
+    @State private var settingsFor: Project?
 
     var body: some View {
         VStack(spacing: 10) {
@@ -220,6 +221,26 @@ struct ProjectRail: View {
                         }
                         .accessibilityLabel(p.displayName)
                         .accessibilityAddTraits(selected ? .isSelected : [])
+                        .contextMenu {
+                            Button("Project settings…", systemImage: "slider.horizontal.3") { settingsFor = p }
+                            Button(p.favorite_at == nil ? "Add to favorites" : "Remove from favorites",
+                                   systemImage: p.favorite_at == nil ? "star" : "star.slash") {
+                                Task {
+                                    try? await app.client?.setProjectFavorite(p.id, p.favorite_at == nil)
+                                    await app.refresh()
+                                }
+                            }
+                            Button("Move up", systemImage: "arrow.up") { app.moveProject(p.id, by: -1) }
+                            Button("Move down", systemImage: "arrow.down") { app.moveProject(p.id, by: 1) }
+                            if !p.is_personal {
+                                Button("Archive project", systemImage: "archivebox", role: .destructive) {
+                                    Task {
+                                        try? await app.client?.archiveProject(p.id)
+                                        await app.refresh()
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 .padding(.vertical, 4)
@@ -231,6 +252,7 @@ struct ProjectRail: View {
         .padding(.vertical, 10)
         .frame(width: 64)
         .background(palette.rail.ignoresSafeArea())
+        .sheet(item: $settingsFor) { p in ProjectSettingsSheet(project: p) }
     }
 
     /// A second tap on Search or Requests goes back to the project's sessions.

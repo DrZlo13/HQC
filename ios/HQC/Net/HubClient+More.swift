@@ -284,3 +284,78 @@ extension HubClient {
         return try JSONDecoder().decode(SessionInfo.self, from: data)
     }
 }
+
+// MARK: projects and their lists
+
+extension HubClient {
+    /// The user's order of a project's session list.
+    func sessionOrder(projectID: String) async throws -> SessionOrder {
+        try await get("/api/projects/\(Self.enc(projectID))/session_order")
+    }
+
+    func putSessionOrder(projectID: String, mode: String? = nil, ids: [String]? = nil) async throws -> SessionOrder {
+        var body: [String: Any] = [:]
+        if let mode { body["mode"] = mode }
+        if let ids { body["session_ids"] = ids }
+        let data = try await send("PUT", "/api/projects/\(Self.enc(projectID))/session_order", body: body)
+        return try JSONDecoder().decode(SessionOrder.self, from: data)
+    }
+
+    /// The order of the project bar; the reply is the list in it.
+    func putProjectOrder(_ ids: [String]) async throws -> [Project] {
+        let data = try await send("PUT", "/api/me/project_order", body: ["project_ids": ids])
+        return try JSONDecoder().decode(ProjectList.self, from: data).projects
+    }
+
+    /// The archived projects, which `projects` leaves out.
+    func archivedProjects() async throws -> [Project] {
+        let list: ProjectList = try await get("/api/projects?archived=1")
+        return list.projects
+    }
+
+    func unarchiveProject(_ id: String) async throws {
+        _ = try await send("POST", "/api/projects/\(Self.enc(id))/unarchive")
+    }
+
+    func deleteProject(_ id: String) async throws {
+        _ = try await send("DELETE", "/api/projects/\(Self.enc(id))")
+    }
+
+    /// The project's icon image: PNG or JPEG, square, 128–1024 px, at most 256 KB.
+    func uploadProjectIcon(_ id: String, data: Data, mime: String) async throws {
+        guard let url = URL(string: "/api/projects/\(Self.enc(id))/icon", relativeTo: endpoint.baseURL) else {
+            throw HubError.badResponse("bad path")
+        }
+        let boundary = "hqc-\(UUID().uuidString)"
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        endpoint.authorize(&req)
+        var body = Data()
+        body.append(Data("--\(boundary)\r\n".utf8))
+        body.append(Data("Content-Disposition: form-data; name=\"file\"; filename=\"icon.\(mime == "image/png" ? "png" : "jpg")\"\r\n".utf8))
+        body.append(Data("Content-Type: \(mime)\r\n\r\n".utf8))
+        body.append(data)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        let (resp, r) = try await session.upload(for: req, from: body)
+        guard let http = r as? HTTPURLResponse else { throw HubError.badResponse("not HTTP") }
+        if (300..<400).contains(http.statusCode) { throw HubError.signInRequired }
+        guard (200..<300).contains(http.statusCode) else {
+            let obj = (try? JSONSerialization.jsonObject(with: resp)) as? [String: Any]
+            throw HubError.http(status: http.statusCode, code: obj?["error"] as? String,
+                                message: obj?["message"] as? String ?? "Upload failed")
+        }
+    }
+
+    /// Bytes at a path of the hub, signed in (a project's icon image).
+    func bytes(at path: String) async throws -> Data {
+        guard let url = URL(string: path, relativeTo: endpoint.baseURL) else { throw HubError.badResponse("bad path") }
+        var req = URLRequest(url: url)
+        endpoint.authorize(&req)
+        let (data, r) = try await session.data(for: req)
+        guard let http = r as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw HubError.badResponse("icon")
+        }
+        return data
+    }
+}

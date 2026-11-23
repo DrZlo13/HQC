@@ -164,6 +164,13 @@ struct SettingsView: View {
             } footer: {
                 Text("What agents do, felt and heard while a chat is open: tool calls, requests, questions, a finished answer. Sounds follow the ring/silent switch and mix with your music.")
             }
+            Section("Projects") {
+                NavigationLink {
+                    ArchivedProjectsView()
+                } label: {
+                    Label("Archived projects", systemImage: "archivebox")
+                }
+            }
             Section("Machines") {
                 NavigationLink {
                     WorkersView()

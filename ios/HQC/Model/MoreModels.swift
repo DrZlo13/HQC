@@ -218,3 +218,81 @@ nonisolated struct SessionOrder: Codable, Sendable {
     let mode: String
     let session_ids: [String]
 }
+
+// MARK: folders, models and keys
+
+/// One of hqc's allow rules of a folder.
+nonisolated struct WorkspaceRule: Codable, Identifiable, Hashable, Sendable {
+    let id: String
+    let rule: String
+    let created_at: String
+}
+
+nonisolated struct WorkspaceRuleList: Codable, Sendable { let rules: [WorkspaceRule] }
+
+/// The rules of one file the worker reads for the folder (worker.toml, Claude Code's settings).
+nonisolated struct RuleSource: Codable, Hashable, Sendable {
+    let source: String
+    let allow: [String]
+    let deny: [String]
+    let ask: [String]
+    let error: String?
+}
+
+nonisolated struct CheckResult: Codable, Sendable {
+    let verdict: String
+    let rule: String?
+    let source: String?
+}
+
+/// The worker's view of a folder's rules, and how it decides a command.
+nonisolated struct WorkspacePermissions: Codable, Sendable {
+    let mode: String?
+    let sources: [RuleSource]
+    let hqc: [String]
+    let check: CheckResult?
+}
+
+nonisolated struct WorkspaceKey: Codable, Identifiable, Hashable, Sendable {
+    let name: String
+    let fingerprint: String
+    var id: String { name }
+}
+
+nonisolated struct WorkspaceKeyList: Codable, Sendable { let keys: [WorkspaceKey] }
+
+/// Uncommitted changes and unpushed commits of a folder hqc made.
+nonisolated struct WorkspaceInspection: Codable, Sendable {
+    struct Unpushed: Codable, Hashable, Sendable {
+        let branch: String
+        let commits: Int
+    }
+    let git: Bool
+    let dirty: [String]
+    let dirty_count: Int
+    let unpushed: [Unpushed]
+}
+
+/// A folder with Claude Code sessions on a worker, to import.
+nonisolated struct Candidate: Codable, Identifiable, Hashable, Sendable {
+    let path: String
+    let sessions_count: Int
+    let last_active: String
+    var id: String { path }
+}
+
+nonisolated struct CandidateList: Codable, Sendable { let candidates: [Candidate] }
+
+/// An Anthropic-compatible endpoint with one model, which a session can pick (SPEC 0.144).
+nonisolated struct ModelProvider: Codable, Identifiable, Hashable, Sendable {
+    let id: String
+    let name: String
+    let label: String
+    let base_url: String
+    let model: String
+    let context_tokens: Int?
+    /// The workers whose worker.toml allows it.
+    let workers: [String]
+}
+
+nonisolated struct ProviderList: Codable, Sendable { let providers: [ModelProvider] }

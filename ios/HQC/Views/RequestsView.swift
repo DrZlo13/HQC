@@ -177,6 +177,11 @@ struct SettingsView: View {
                 } label: {
                     Label("Workers", systemImage: "desktopcomputer")
                 }
+                NavigationLink {
+                    ProvidersView()
+                } label: {
+                    Label("Models", systemImage: "cpu")
+                }
                 Button {
                     app.enrollCode = EnrollCode(code: "")
                 } label: {

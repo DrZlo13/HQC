@@ -211,9 +211,15 @@ struct ChatView: View {
             case .schedules:
                 NavigationStack { SchedulesView(sessionID: model.sessionID) }
             case .model:
-                ModelSheet(current: model.info?.model ?? "", limits: model.worker?.limits) { m in
-                    Task { await model.patch(["model": m.isEmpty ? NSNull() : m]) }
-                }
+                ModelSheet(current: model.info?.model ?? "", currentProvider: model.info?.provider_id,
+                           limits: model.worker?.limits, onPick: { m in
+                    // A Claude model leaves a provider the session ran on.
+                    var patch: [String: Any] = ["model": m.isEmpty ? NSNull() : m]
+                    if model.info?.provider_id != nil { patch["provider_id"] = NSNull() }
+                    Task { await model.patch(patch) }
+                }, onProvider: { id in
+                    Task { await model.patch(["provider_id": id.map { $0 as Any } ?? NSNull()]) }
+                })
                 .presentationDetents([.medium])
             case .roomAgents:
                 if let info = model.info {
@@ -238,7 +244,7 @@ struct ChatView: View {
         if let mode = model.info?.effective_permission_mode ?? model.info?.permission_mode, mode != .ask {
             parts.append(mode.label)
         }
-        if let m = model.info?.model { parts.append(m) }
+        if let p = model.info?.provider_label { parts.append(p) } else if let m = model.info?.model { parts.append(m) }
         if let r = model.info?.room_mode { parts.append(r == "council" ? "Council" : "Conversation") }
         return parts.joined(separator: " · ")
     }
@@ -733,35 +739,58 @@ struct PausedBar: View {
     }
 }
 
+/// A session's model: Claude Code's default, a family (its newest), a version of it, a model
+/// provider, or a name typed in; and the usage of the worker's account.
 struct ModelSheet: View {
+    @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     let current: String
+    var currentProvider: String?
     var limits: WorkerLimits?
+    /// A Claude model ("" for Claude Code's default) …
     let onPick: (String) -> Void
+    /// … or a provider (nil for Claude Code's own endpoint).
+    var onProvider: ((String?) -> Void)?
     @State private var custom = ""
+    @State private var providers: [ModelProvider] = []
 
-    private let families = [
-        ("Default", ""), ("Opus", "opus"), ("Sonnet", "sonnet"), ("Haiku", "haiku"), ("Fable", "fable"),
+    private let families = [("Opus", "opus"), ("Sonnet", "sonnet"), ("Haiku", "haiku"), ("Fable", "fable")]
+    /// The versions the web client's menus list (SPEC 0.168), newest first in each family.
+    static let versions = [
+        "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+        "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6",
+        "claude-haiku-5-5", "claude-haiku-4-5",
+        "claude-fable-5-2", "claude-fable-5-1", "claude-fable-5",
     ]
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    ForEach(families, id: \.1) { name, value in
-                        Button {
-                            onPick(value)
-                            dismiss()
+                    row("Default", selected: currentProvider == nil && current.isEmpty) { pick("") }
+                    ForEach(families, id: \.1) { name, alias in
+                        DisclosureGroup {
+                            ForEach(Self.versions.filter { $0.hasPrefix("claude-\(alias)-") }, id: \.self) { v in
+                                row(v, mono: true, selected: currentProvider == nil && current == v) { pick(v) }
+                            }
                         } label: {
-                            HStack {
-                                Text(name).foregroundStyle(.primary)
-                                Spacer()
-                                if current == value { Image(systemName: "checkmark").foregroundStyle(.tint) }
+                            row(name, selected: currentProvider == nil && current == alias) { pick(alias) }
+                        }
+                    }
+                } header: {
+                    Text("Claude")
+                } footer: {
+                    Text("A running agent switches at its next start; Default is Claude Code's own model.")
+                }
+                if !providers.isEmpty, let onProvider {
+                    Section("Providers") {
+                        ForEach(providers) { p in
+                            row(p.label.isEmpty ? p.name : p.label, selected: currentProvider == p.id) {
+                                onProvider(p.id)
+                                dismiss()
                             }
                         }
                     }
-                } footer: {
-                    Text("A running agent switches at its next start; Default is Claude Code's own model.")
                 }
                 if let limits { LimitsSection(limits: limits) }
                 Section("Another model") {
@@ -769,15 +798,34 @@ struct ModelSheet: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     Button("Use this model") {
-                        onPick(custom.trimmingCharacters(in: .whitespaces))
-                        dismiss()
+                        pick(custom.trimmingCharacters(in: .whitespaces))
                     }
                     .disabled(custom.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
             .navigationTitle("Model")
             .navigationBarTitleDisplayMode(.inline)
-            .onAppear { custom = families.contains { $0.1 == current } ? "" : current }
+            .onAppear {
+                let known = current.isEmpty || families.contains { $0.1 == current } || Self.versions.contains(current)
+                custom = known ? "" : current
+            }
+            .task { providers = (try? await app.client?.providers()) ?? [] }
+        }
+    }
+
+    private func pick(_ m: String) {
+        onPick(m)
+        dismiss()
+    }
+
+    private func row(_ title: String, mono: Bool = false, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Text(title).font(mono ? .callout.monospaced() : .body).foregroundStyle(.primary)
+                Spacer()
+                if selected { Image(systemName: "checkmark").foregroundStyle(.tint) }
+            }
+            .contentShape(.rect)
         }
     }
 }

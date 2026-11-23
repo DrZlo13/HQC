@@ -20,6 +20,14 @@ browser and Apple push (SPEC 0.217).
   copy and share, and ⌘↩ sends from a keyboard. What the agent runs in the background (subagents, commands, wakeups) sits above
   the input, each with Stop where the runtime allows it. Images show inline; any artifact opens
   in QuickLook; a published page opens at its public link.
+- **What a message offers.** Quote (its first sentences, or a part selected in a sheet) into
+  the input as `> ` lines, copy, share, fork the conversation from a message of the user, keep
+  it as a quick message; quick messages in the input's + menu.
+- **Secrets.** An agent's `hqc_secret` is a form with secure fields, never stored, in the chat
+  and in Requests; the + menu gives a secret or an ssh key to the running agent.
+- **Agent at work.** Move a running command to the background, open a subagent's own steps,
+  the usage limits of the worker's account (model sheet, and a bar above the input), take over
+  a session VS Code drove.
 - **Session controls.** Permission mode, model, schedules, pause and resume, restart, retry,
   rename, favorite, archive, unarchive, delete. A room lists its agents, each opening its own
   session.
@@ -27,6 +35,15 @@ browser and Apple push (SPEC 0.217).
   (AskUserQuestion) inline in the chat and, for every session, in the Requests tab.
 - **Schedules.** A session's schedules: once at a time or on a cron pattern, on and off, delete.
 - **Search.** Every session's messages, commands, output and answers (`GET /api/search`).
+- **Projects.** Settings (name, description, colour, an icon of letters, an emoji or an
+  image, quick messages, delete), archived projects with Restore, the bar's own order kept on
+  the hub, the session list by State, Recent or a Custom order. A folder's settings: its label,
+  VS Code sessions, hqc's allow rules and the rules the worker reads with a command check, its
+  ssh keys, and removing it (for a folder hqc made, with what is uncommitted first); new
+  folders by cloning a repository, a git worktree, or importing Claude Code's folders. Move a
+  session to another folder or project.
+- **Models.** Versions of each family and model providers in a session's model sheet;
+  Settings → Models manages the providers.
 - **Workers.** Online state, Claude Code's account on each machine and its sign-in from the
   phone (the worker runs `claude auth login`), revoking, and confirming a new machine's
   enrollment code (also from an `hqc-app://enroll?code=XXXX-XXXX` link). Workspaces: add a folder

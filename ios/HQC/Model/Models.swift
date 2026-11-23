@@ -136,6 +136,9 @@ nonisolated struct SessionInfo: Decodable, Identifiable, Hashable, Sendable {
     let effective_permission_mode: PermissionMode?
     /// `agent.model`: the model hqc starts the agent with; absent: the runtime's default.
     let model: String?
+    /// A model provider the session runs on instead of Claude Code's own endpoint (SPEC 0.144).
+    let provider_id: String?
+    let provider_label: String?
     let room_mode: String?
     let room_id: String?
     let favorite_at: String?
@@ -148,7 +151,7 @@ nonisolated struct SessionInfo: Decodable, Identifiable, Hashable, Sendable {
     private enum Keys: String, CodingKey {
         case id, project_id, workspace_id, worker_id, title, slug, state, unread, last_seq, last_read_seq
         case archived, updated_at, system, held_by, permission_mode, effective_permission_mode
-        case agent, model, room_mode, room_id, favorite_at, paused_at, archived_at, commands
+        case agent, model, room_mode, room_id, favorite_at, paused_at, archived_at, commands, provider
     }
 
     /// As the web client's `parseSessionInfo`: what may be absent has a default, and a mode this
@@ -175,6 +178,9 @@ nonisolated struct SessionInfo: Decodable, Identifiable, Hashable, Sendable {
             .flatMap { $0 }.flatMap(PermissionMode.init(rawValue:))
         let agent = (try? c.decodeIfPresent(JSONValue.self, forKey: .agent)) ?? nil
         model = agent?["model"]?.string
+        let p = (try? c.decodeIfPresent(JSONValue.self, forKey: .provider)) ?? nil
+        provider_id = p?["id"]?.string
+        provider_label = p?["label"]?.string
         room_mode = try c.decodeIfPresent(String.self, forKey: .room_mode)
         room_id = try c.decodeIfPresent(String.self, forKey: .room_id)
         favorite_at = try c.decodeIfPresent(String.self, forKey: .favorite_at)
@@ -206,6 +212,17 @@ nonisolated struct Workspace: Codable, Identifiable, Hashable, Sendable {
     let worker_id: String
     let path: String
     let label: String?
+    /// `folder`, `clone` or `worktree`.
+    let kind: String?
+    let branch: String?
+    /// A folder hqc made (a clone or a worktree): deleting it may remove the folder too.
+    let created_by_hqc: Bool?
+    /// The worker mirrors the folder's VS Code (Claude Code) sessions.
+    let mirror_enabled: Bool?
+    let hqc_rules: Int?
+    /// `ready`, `creating` (a clone in progress) or `error`.
+    let state: String?
+    let error: String?
 
     var displayName: String {
         if let label, !label.isEmpty { return label }

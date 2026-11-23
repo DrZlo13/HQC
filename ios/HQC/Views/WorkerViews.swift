@@ -90,6 +90,22 @@ struct WorkerDetailView: View {
                     LabeledContent("Last seen") { Text(seen, format: .relative(presentation: .named)) }
                 }
             }
+            if worker.isRevoked {
+                Section {
+                    Button("Delete for good", systemImage: "trash", role: .destructive) {
+                        Task {
+                            do {
+                                try await app.client?.purgeWorker(worker.id)
+                                message = "Deleted with its service session and folders."
+                            } catch {
+                                message = error.localizedDescription
+                            }
+                        }
+                    }
+                } footer: {
+                    Text("Deletes the revoked machine with its service session and folders; not while sessions work there.")
+                }
+            }
             if worker.isOnline {
                 Section {
                     if let status {
@@ -263,16 +279,27 @@ struct WorkspacesView: View {
     @State private var workers: [WorkerInfo] = []
     @State private var error: String?
     @State private var browsing: WorkerInfo?
+    @State private var newFolder: NewFolderSheet.Kind?
 
     var body: some View {
         List {
             Section {
                 ForEach(workspaces) { w in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(w.displayName).font(.body.weight(.medium))
-                        Text(w.path).font(.caption.monospaced()).foregroundStyle(.secondary)
-                        if let worker = workers.first(where: { $0.id == w.worker_id }) {
-                            Text(worker.name).font(.caption2).foregroundStyle(.tertiary)
+                    NavigationLink {
+                        WorkspaceDetailView(workspace: w) { await load() }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(w.displayName).font(.body.weight(.medium))
+                                if w.kind == "worktree" { Image(systemName: "arrow.triangle.branch").font(.caption) }
+                                if w.state == "creating" { ProgressView().controlSize(.mini) }
+                                if w.state == "error" { Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.caption) }
+                            }
+                            Text(w.path).font(.caption.monospaced()).foregroundStyle(.secondary)
+                            if let worker = workers.first(where: { $0.id == w.worker_id }) {
+                                Text(worker.name).font(.caption2).foregroundStyle(.tertiary)
+                            }
+                            if let e = w.error, w.state == "error" { Text(e).font(.caption2).foregroundStyle(.red) }
                         }
                     }
                     .swipeActions {
@@ -303,6 +330,15 @@ struct WorkspacesView: View {
                     Text("No worker is online.").foregroundStyle(.secondary)
                 }
             }
+            if workers.contains(where: \.isOnline) {
+                Section {
+                    Button("Clone a repository", systemImage: "square.and.arrow.down.on.square") { newFolder = .clone }
+                    if !workspaces.isEmpty {
+                        Button("New git worktree", systemImage: "arrow.triangle.branch") { newFolder = .worktree }
+                    }
+                    Button("Import from Claude Code", systemImage: "tray.and.arrow.down") { newFolder = .importClaude }
+                }
+            }
             if let error { Section { Text(error).foregroundStyle(.red).font(.footnote) } }
         }
         .navigationTitle("Workspaces")
@@ -314,6 +350,9 @@ struct WorkspacesView: View {
             }
         }
         .task { await load() }
+        .sheet(item: $newFolder) { k in
+            NewFolderSheet(kind: k, project: project, workers: workers, workspaces: workspaces) { await load() }
+        }
         .sheet(item: $browsing) { w in
             NavigationStack {
                 FolderBrowser(worker: w, path: nil) { path in

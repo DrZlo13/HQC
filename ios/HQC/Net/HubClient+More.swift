@@ -359,3 +359,92 @@ extension HubClient {
         return data
     }
 }
+
+// MARK: folders, models, keys and the rest of Settings
+
+extension HubClient {
+    private func decodeJSON<T: Decodable>(_ data: Data) throws -> T { try JSONDecoder().decode(T.self, from: data) }
+
+    /// A clone of `url` into a new folder, or a worktree of a folder on `branch`.
+    func createWorkspace(_ body: [String: Any]) async throws -> Workspace {
+        try decodeJSON(try await send("POST", "/api/workspaces", body: body))
+    }
+
+    func patchWorkspace(_ id: String, _ patch: [String: Any]) async throws -> Workspace {
+        try decodeJSON(try await send("PATCH", "/api/workspaces/\(Self.enc(id))", body: patch))
+    }
+
+    /// Removes the record; with `removeFolder` the worker deletes a folder hqc made too.
+    func deleteWorkspace(_ id: String, removeFolder: Bool, force: Bool, archiveSessions: Bool) async throws {
+        var q: [String] = []
+        if removeFolder { q.append("remove_folder=true") }
+        if removeFolder && force { q.append("force=true") }
+        if archiveSessions { q.append("archive_sessions=true") }
+        _ = try await send("DELETE", "/api/workspaces/\(Self.enc(id))" + (q.isEmpty ? "" : "?" + q.joined(separator: "&")))
+    }
+
+    func inspectWorkspace(_ id: String) async throws -> WorkspaceInspection {
+        try await get("/api/workspaces/\(Self.enc(id))/inspect")
+    }
+
+    func workspaceRules(_ id: String) async throws -> [WorkspaceRule] {
+        let list: WorkspaceRuleList = try await get("/api/workspaces/\(Self.enc(id))/rules")
+        return list.rules
+    }
+
+    func addWorkspaceRules(_ id: String, _ rules: [String]) async throws -> [WorkspaceRule] {
+        let list: WorkspaceRuleList = try decodeJSON(try await send("POST", "/api/workspaces/\(Self.enc(id))/rules", body: ["rules": rules]))
+        return list.rules
+    }
+
+    func deleteWorkspaceRule(_ id: String, ruleID: String) async throws {
+        _ = try await send("DELETE", "/api/workspaces/\(Self.enc(id))/rules/\(Self.enc(ruleID))")
+    }
+
+    /// The rules the worker reads for the folder and, with `command`, how it decides it.
+    func workspacePermissions(_ id: String, command: String? = nil) async throws -> WorkspacePermissions {
+        var path = "/api/workspaces/\(Self.enc(id))/permissions"
+        if let command, !command.isEmpty { path += "?command=\(Self.enc(command))" }
+        return try await get(path)
+    }
+
+    func workspaceKeys(_ id: String) async throws -> [WorkspaceKey] {
+        let list: WorkspaceKeyList = try await get("/api/workspaces/\(Self.enc(id))/keys")
+        return list.keys
+    }
+
+    func deleteWorkspaceKey(_ id: String, name: String) async throws {
+        _ = try await send("DELETE", "/api/workspaces/\(Self.enc(id))/keys/\(Self.enc(name))")
+    }
+
+    func candidates(workerID: String) async throws -> [Candidate] {
+        let list: CandidateList = try await get("/api/workers/\(Self.enc(workerID))/candidates")
+        return list.candidates
+    }
+
+    /// Deletes a revoked worker with its service session and workspaces.
+    func purgeWorker(_ id: String) async throws {
+        _ = try await send("DELETE", "/api/workers/\(Self.enc(id))?purge=1")
+    }
+
+    func providers() async throws -> [ModelProvider] {
+        let list: ProviderList = try await get("/api/providers")
+        return list.providers
+    }
+
+    func saveProvider(id: String?, _ fields: [String: Any]) async throws -> ModelProvider {
+        if let id {
+            return try decodeJSON(try await send("PATCH", "/api/providers/\(Self.enc(id))", body: fields))
+        }
+        return try decodeJSON(try await send("POST", "/api/providers", body: fields))
+    }
+
+    func deleteProvider(_ id: String) async throws {
+        _ = try await send("DELETE", "/api/providers/\(Self.enc(id))")
+    }
+
+    /// The owner unpublishes a published page (SPEC 0.209).
+    func unpublishArtifact(_ id: String) async throws {
+        _ = try await send("DELETE", "/api/artifacts/\(Self.enc(id))/publication")
+    }
+}

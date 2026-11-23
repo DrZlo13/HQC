@@ -62,6 +62,7 @@ struct ArtifactView: View {
     @Environment(AppModel.self) private var app
     let id: String
     var compact = false
+    @State private var unpublished = false
     @State private var preview: URL?
     @State private var opening = false
 
@@ -81,7 +82,23 @@ struct ArtifactView: View {
                 .buttonStyle(.plain)
             } else if let meta, meta.kind == "site", let link = meta.public_url, let url = URL(string: link) {
                 Link(destination: url) {
-                    chip(icon: "globe", title: meta.name, detail: "Published page")
+                    chip(icon: "globe", title: meta.name, detail: unpublished ? "Unpublished" : "Published page")
+                }
+                .disabled(unpublished)
+                .contextMenu {
+                    Button("Copy link", systemImage: "link") { UIPasteboard.general.string = link }
+                    ShareLink("Share", item: url)
+                    if !unpublished {
+                        Button("Unpublish", systemImage: "eye.slash", role: .destructive) {
+                            Task {
+                                do {
+                                    try await app.client?.unpublishArtifact(id)
+                                    unpublished = true
+                                    Feedback.play(.success)
+                                } catch {}
+                            }
+                        }
+                    }
                 }
             } else {
                 Button { open() } label: {

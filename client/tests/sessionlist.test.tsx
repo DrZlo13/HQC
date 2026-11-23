@@ -1311,8 +1311,19 @@ describe('ProjectRail', () => {
     expect(runningTitle('hqc', 3, 120)).toBe('hqc · 3 agents · 120 tokens/s');
   });
 
-  it("passes the speed to the turn of the stripe's ::before, which only a subtree lookup finds", async () => {
-    const anim = { updatePlaybackRate: vi.fn() };
+  it("passes the speed to the turn of the stripe's ::before, which only a subtree lookup finds, as the lap's duration from where the turn is", async () => {
+    // A quarter of the way round at the slowest lap. No `updatePlaybackRate` or `playbackRate`:
+    // a rate other than 1 takes the animation off WebKit's compositor.
+    // The fake counts the turn from its time and lap, as a browser does, so reading the turn after
+    // the new lap is set would land the stripe elsewhere.
+    let lap = 18000;
+    const updateTiming = vi.fn((t: { duration: number }) => {
+      lap = t.duration;
+    });
+    const anim = {
+      currentTime: 4500,
+      effect: { getComputedTiming: (): { progress: number } => ({ progress: (anim.currentTime % lap) / lap }), updateTiming },
+    };
     const own = Element.prototype.getAnimations;
     // As a browser answers: the span itself has no animation, its pseudo-element has the turn.
     Element.prototype.getAnimations = function (o?: GetAnimationsOptions) {
@@ -1320,7 +1331,9 @@ describe('ProjectRail', () => {
     };
     try {
       await mount(<RailRun rate={40} />);
-      expect(anim.updatePlaybackRate).toHaveBeenCalledWith(2);
+      // Twice as fast: a 9 s lap, and still a quarter of the way round.
+      expect(updateTiming).toHaveBeenCalledWith({ duration: 9000 });
+      expect(anim.currentTime).toBe(2250);
     } finally {
       Element.prototype.getAnimations = own;
     }

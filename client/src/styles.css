@@ -643,7 +643,8 @@ select.input {
   inset: -50%;
   background: conic-gradient(transparent 0deg 220deg, var(--text2) 360deg);
   /* The slowest lap, while the project's agents write no tokens; the more output tokens per
-     second they write, the faster it runs (RailRun, runSpeed). */
+     second they write, the faster it runs (RailRun, runSpeed). RailRun sets the lap itself from
+     RUN_LAP_MS (ProjectRail.tsx), which repeats these 18 s: change both. */
   animation: rail-run 18s linear infinite;
 }
 @keyframes rail-run {

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.229, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.230, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2990,7 +2990,7 @@ client fetches the session object when it opens an idle chat without `command_in
 from a list among them) and shows, after each command's name in the list, its argument hint
 and then its description, muted, in the same line.
 
-WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 1 MiB): the client sends `subscribe {session_id, after_seq}` and receives
+WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 1 MiB; since 0.230 the query `?deflate=raw` asks for compression, below): the client sends `subscribe {session_id, after_seq}` and receives
 events with `seq > after_seq`, then the live stream; `agent.delta` has no `seq`. Since 0.72
 the answer being written comes right after those events, before `subscribed`, as one
 `agent.delta` with its text so far, and the stream carries only the deltas after it. Since 0.161
@@ -3129,9 +3129,29 @@ After a reconnect the client repeats `subscribe` with the last `seq` it has seen
 before its first input still `pending` if that is earlier (since 0.40): a `delivery` frame sent
 while the socket was down is lost, and an event sent again carries its current `delivery`,
 which the client takes over the stored copy (the reply to `POST /input` never overrides a
-newer copy).
+newer copy). Since 0.230 the client applies the events that come before `subscribed` (sent after
+the backfill, the live text, `subagents.live`, `schedules.live` and `tasks`) without drawing the
+chat for each one: it draws at most every 100 ms while they come and once at `subscribed`. The
+same holds for the backfill after a reconnect, which starts a catch-up again. The hub answers each
+`subscribe`: with `subscribed`, or, when it refuses one (`not_found`, a failed lookup of the
+session), with an `error` naming the session and nothing more. Only a refused `subscribe` gets an
+error that names a session: a failed backfill, on a `subscribe`, on a gap in the live stream or
+when the hub catches a subscription up after its bus overflowed, gets an `error` without
+`session_id`, and a `subscribe` gets its `subscribed` after it. An answer
+to a subscription the client left and made again meanwhile does not end the new catch-up: the
+client counts the `subscribe` frames it sent on the socket and the answers that came.
 
-`/api/ws` frames are flat JSON objects `{type, ...}` with no `id` and no `payload` wrapper:
+`/api/ws` frames are flat JSON objects `{type, ...}` with no `id` and no `payload` wrapper. Since
+0.230, with `?deflate=raw` on the upgrade (any other value or none: as before), the hub sends every
+frame as a binary message instead of a text one: the connection has one raw DEFLATE stream (RFC
+1951, no zlib header, no gzip header), each frame's compact JSON followed by `\n` is compressed
+into it and ended with a sync flush, so a message holds whole frames only and the client inflates
+them as they come; a message may hold several frames, the client splits the inflated text on `\n`
+(a newline inside a JSON string is escaped, so none is raw). The pings stay WebSocket pings and the
+client's frames stay text. The client asks when its browser has `DecompressionStream` with
+`'deflate-raw'`; a text message on such a connection is a frame as it is. The macOS app's page
+script, which reads the page's own `/api/ws` frames for its notifications, its Dock badge and its
+window bar (`macos/`), inflates a compressed socket's messages on a stream of its own the same way.
 - client → hub: `{type: subscribe, session_id, after_seq?}`, `{type: unsubscribe,
   session_id}`, `{type: subscribe_summary}`, `{type: ping}`;
 - hub → client: `{type: event, event}`: the event as stored (§3), `agent.delta` and (since
@@ -3157,6 +3177,15 @@ newer copy).
   the session object; the modes since 0.42, so the header follows a switch the worker confirms,
   the cap since 0.43, `subagents` since 0.70, `background_tasks` since 0.104, `output_per_s`
   since 0.122, `foreground_calls` since 0.125, `activity` since 0.179, `paused_at` since 0.160);
+  a summary of a session the client does not have is a session created elsewhere: since 0.230,
+  when a `session.summary` names it and the client knows its project (on the bar or archived), it
+  fetches that session alone
+  (`GET /api/sessions/{id}`), one request per session at a time, and merges a summary of it that
+  came meanwhile after the answer when the answer is what brought the session (one that came
+  first with the lists or a reply keeps that); for a project it does not know, or a session moved
+  into one,
+  it fetches the project and session lists again as before, and so it does for a `summary` of every
+  session that names one (after a reconnect it may name many);
   `{type: requests, requests[]}` (since 0.41, T37,
   `client.requests.json`): the list of `GET /api/requests`, sent right after `summary` and then
   again, whole, whenever one of the user's requests opens or closes (an event of §4
@@ -7705,6 +7734,49 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.229 → 0.230 (a chat catching up draws a few times, the client socket compressed, one session fetched instead of the list)
+§6: a chat opened after a long absence took long to show the events it had missed: the hub sent
+them at once, but the client drew the chat for each frame. On a chat of 28 000 events with 3000
+missed, reopening drew 3000 times and took 2.7 to 6.1 s before this change; with it, it draws 5 to
+18 times and takes 0.6 to 2.0 s, about as long as the hub takes to send them (six runs each,
+Brave, live hub). The client now applies the events of a subscription without drawing until the
+hub's `subscribed` (and again after a socket reset, which subscribes with a backfill), and draws
+at most every 100 ms meanwhile, so a long backfill shows as it arrives. A `subscribed` of a
+subscription that was left and made again meanwhile (the hub answers each `subscribe`, a refused
+one with an `error` naming the session) does not end the new catch-up: the socket counts the
+`subscribe` frames it sent and the answers it got. So that an error naming a session answers only
+a refused `subscribe`, a failed backfill (on a `subscribe`, on a gap in the live stream, or after
+the hub's bus overflowed) now sends its `error` without `session_id`; the hub logs the session. An open chat also builds its
+feed only when what it is built from changed: the timeline's `revision` grows with a stored event
+(new or changed), the thinking being written, an invalid event and a message not stored yet, and
+not with the answer's text, `subagents.live` or `schedules.live`, which the feed does not read;
+each hub `session.summary` (1.5 to 3 a second) and each delta of the text redrew the chat and
+built the feed again without a change in it. `Timeline.items()` is kept per `revision`.
+
+§6: on a narrow channel the page paid for every byte of `/api/ws`: tungstenite, under axum's
+WebSocket, has no permessage-deflate, so the hub answered the upgrade without
+`Sec-WebSocket-Extensions` and sent plain text. Measured on the live hub with raw DEFLATE: the full
+`summary` 479 KB → 102 KB; a catch-up of 3000 `event` frames 2690 KB → 1498 KB when each frame is
+compressed alone, 686 KB when they are one stream, which is why there is one stream per
+connection. `/api/ws?deflate=raw` now asks for that stream (the hub uses `flate2` with the
+`zlib-rs` backend `zip` already brings, at level 2: level 1 there uses fixed Huffman codes only and
+compressed a synthetic summary to 178 KB against 127 KB at level 2, for the same CPU): every frame
+goes out as a binary message, its JSON and `\n` compressed and sync-flushed, without it the frames
+are text as before. The client asks when `DecompressionStream('deflate-raw')` exists, inflates the
+messages in order through one stream, takes each line as a frame, and reconnects when the stream
+breaks. The frames reach the listeners a few microtasks after the message, and not at all when the
+socket was replaced meanwhile; the client resubscribes from the last `seq` it has seen, so nothing
+is lost. The macOS app's page script read only text frames of a socket whose address ends in
+`/api/ws`, so on a compressed socket the app would have shown no notification, no Dock badge and
+no window bar; it now finds the socket by its path and inflates its binary messages on a stream of
+its own. An HQC.app built before 0.230 reads no frame of a hub that serves this client (no
+notifications, Dock badge or window bar, and answered permission cards stay): rebuild the app when
+the hub is updated. Also §6: a summary of an unknown session in a known project fetched `GET /api/sessions`,
+2.2 MB of JSON (243 KB gzipped by the proxy in front), to add one session; the client now fetches
+that session when one session's frame names it; the `summary` of every session, sent on each
+(re)subscribe, still fetches the lists, as it may name many. What the lists did besides adding it
+is not done then: a session deleted elsewhere stays on the page until the next list.
 
 ### 0.228 → 0.229 (the session's tokens next to its cost in the chat header)
 §4, §6, §8.1: the header showed only the session's cost. The worker now sends the runtime's

@@ -61,6 +61,25 @@ import {
   type WorkspaceRule,
 } from './proto';
 
+/** The page of events `raws` (oldest first); `from` is the `maxSeq` of an empty one. */
+export function eventPageOf(raws: unknown[], from: number): EventPage {
+  const page: EventPage = { events: [], invalid: [], raw: raws, maxSeq: from, minSeq: undefined, count: 0 };
+  for (const raw of raws) {
+    page.count++;
+    const seq = (raw as { seq?: unknown })?.seq;
+    if (typeof seq === 'number') {
+      page.maxSeq = Math.max(page.maxSeq, seq);
+      page.minSeq = Math.min(page.minSeq ?? seq, seq);
+    }
+    try {
+      page.events.push(parseEvent(raw));
+    } catch (e) {
+      page.invalid.push({ raw, error: (e as Error).message });
+    }
+  }
+  return page;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -140,6 +159,8 @@ export interface ProviderFields {
 export interface EventPage {
   events: HqcEvent[];
   invalid: { raw: unknown; error: string }[];
+  /** Every event as received, valid or not: what the device keeps (`HistoryCache`). */
+  raw: unknown[];
   /** Highest `seq` in the page, valid or not. */
   maxSeq: number;
   /** Lowest `seq` in the page, valid or not. */
@@ -559,21 +580,7 @@ export class Api {
 
   private async eventPage(id: string, q: string, from: number): Promise<EventPage> {
     const data = await this.req('GET', `/api/sessions/${enc(id)}/events?${q}`);
-    const page: EventPage = { events: [], invalid: [], maxSeq: from, minSeq: undefined, count: 0 };
-    for (const raw of parseEventPage(data).events) {
-      page.count++;
-      const seq = (raw as { seq?: unknown })?.seq;
-      if (typeof seq === 'number') {
-        page.maxSeq = Math.max(page.maxSeq, seq);
-        page.minSeq = Math.min(page.minSeq ?? seq, seq);
-      }
-      try {
-        page.events.push(parseEvent(raw));
-      } catch (e) {
-        page.invalid.push({ raw, error: (e as Error).message });
-      }
-    }
-    return page;
+    return eventPageOf(parseEventPage(data).events, from);
   }
 
   /** Returns the stored `user.message`; a repeated `client_op_id` returns the same event.

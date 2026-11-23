@@ -17,7 +17,8 @@ export type ConnState = 'connecting' | 'open' | 'closed';
 export interface SessionSubscriber {
   /** The `seq` to resume after; read at each (re)subscribe. */
   afterSeq(): number;
-  onEvent(ev: HqcEvent): void;
+  /** `raw` is the event object of the frame as the hub sent it, which the device keeps. */
+  onEvent(ev: HqcEvent, raw?: unknown): void;
   /** `delivery` of a stored input changed (the event itself is not sent again). */
   onDelivery(d: DeliveryChange): void;
   onInvalid(raw: unknown, error: string): void;
@@ -166,7 +167,7 @@ export class HubSocket {
     }
     switch (frame.type) {
       case 'event':
-        this.subs.get(frame.event.session_id)?.onEvent(frame.event);
+        this.subs.get(frame.event.session_id)?.onEvent(frame.event, (json as { event?: unknown }).event);
         break;
       case 'event.invalid': {
         const sid = (frame.raw as { session_id?: unknown })?.session_id;

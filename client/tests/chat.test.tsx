@@ -212,6 +212,14 @@ async function mount(app: AppState, phone = false) {
     render(<Chat app={app} sessionId="s1" phone={phone} />, root);
     await new Promise((r) => setTimeout(r, 50));
   });
+  // On a loaded machine the effect that opens the chat now and then runs only as the act ends,
+  // and the first page then lands after it: it is waited for here, and drawn (a page that never
+  // comes, a little longer).
+  if (!app.chat('s1').loaded)
+    for (let i = 0; i < 20; i++) {
+      await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+      if (app.chat('s1').loaded) break;
+    }
 }
 
 const $ = (sel: string) => root.querySelector<HTMLElement>(sel);
@@ -1322,7 +1330,11 @@ describe('header', () => {
     api.eventsBefore.mockImplementation(async (id: string, before?: number, limit?: number) => page(id, 0, before, limit));
     await mount(app);
     const lead = () => [...root.querySelectorAll('.live-agents-row[role="status"]')];
-    for (let i = 0; i < 20 && lead().length < 3; i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    // The rows come from the sessions' states, Opus's command from its chat's page.
+    for (let i = 0; i < 20; i++) {
+      await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+      if (lead().length === 3 && app.chat('m1').loaded) break;
+    }
     const lines = lead();
     expect(lines.map((l) => l.textContent!.replace(/\d+m \d+s$/, 'M:SS'))).toEqual(['Opus · Command: make testM:SS', 'Sonnet · Working', 'Haiku · Input queued']);
     // The room's own row is gone: it is never at work itself. The rows stand in the block, not the feed.
@@ -2765,39 +2777,32 @@ describe('slash command completion (T27)', () => {
 });
 
 describe('an image in the feed', () => {
-  it('a chat opened again shows it by the link it had; after the hub reconnects, by a new one', async () => {
-    const pic = ev('event.attachment', 4, (e) => (e.payload.artifact_id = 'img'));
-    const { api, app } = setup('idle', { history: [...HISTORY.slice(0, 3), pic] });
-    const artifactLink = vi.fn(async (id: string) => ({
-      url: `/artifacts/${id}?sig=${artifactLink.mock.calls.length}`,
-      expires_at: new Date(Date.now() + 600_000).toISOString(),
-    }));
-    const artifact = vi.fn(async (id: string) => ({ id, kind: 'image', name: 'screen.png', mime: 'image/png', size: 10, sha256: '', created_at: '' }));
-    Object.assign(api, { artifact, artifactLink });
-    let opened!: (s: 'open') => void;
-    Object.assign(app.socket, {
-      onState: (fn: (s: 'open') => void) => {
-        opened = fn;
-        return () => {};
-      },
-    });
-    const src = () => $('.attachment-image img')?.getAttribute('src');
-    /** The chat, its history and its image link in. */
-    const open = async () => {
+  it('is shown from the bytes downloaded, as a data: URL', async () => {
+    // happy-dom's observer never fires; a browser without one loads the image at once.
+    vi.stubGlobal('IntersectionObserver', undefined);
+    const png = new Uint8Array([137, 80, 78, 71]);
+    // happy-dom's FileReader reads only its own Blob.
+    const fetchImpl = vi.fn(async () =>
+      Object.assign(new Response(png), { ok: true, blob: async () => new Blob([png], { type: 'image/png' }) }),
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const pic = ev('event.attachment', 4, (e) => (e.payload.artifact_id = 'img'));
+      const { api, app } = setup('idle', { history: [...HISTORY.slice(0, 3), pic] });
+      const artifactLink = vi.fn(async (id: string) => ({
+        url: `/artifacts/${id}?sig=1`,
+        expires_at: new Date(Date.now() + 600_000).toISOString(),
+      }));
+      const artifact = vi.fn(async (id: string) => ({ id, kind: 'image', name: 'screen.png', mime: 'image/png', size: 10, sha256: '', created_at: '' }));
+      Object.assign(api, { artifact, artifactLink });
+      const src = () => $('.attachment-image img')?.getAttribute('src');
       await mount(app);
       for (let i = 0; i < 20 && !src(); i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
-    };
-    await open();
-    expect(src()).toBe('/artifacts/img?sig=1');
-    render(null, root);
-    await open();
-    expect(src()).toBe('/artifacts/img?sig=1');
-    expect(artifactLink).toHaveBeenCalledTimes(1);
-    render(null, root);
-    // A restarted hub may sign with another key: the links are asked for again.
-    opened('open');
-    await open();
-    expect(src()).toBe('/artifacts/img?sig=2');
+      expect(src()).toBe('data:image/png;base64,iVBORw==');
+      expect(fetchImpl).toHaveBeenCalledWith('/artifacts/img?sig=1');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -2916,14 +2921,20 @@ describe('history', () => {
       await new Promise((r) => setTimeout(r, 20));
     });
   const blocks = () => [...root.querySelectorAll<HTMLElement>('.feed-block')];
+  /** Past the pages the feed asks for one after another. */
+  const until = async (cond: () => boolean) => {
+    for (let i = 0; i < 300 && !cond(); i++) await settle();
+  };
 
   it('a feed shorter than its window renders the older history until the window is full', async () => {
     blockHigh();
     const { app } = setup('idle', { history: long });
     await mount(app);
-    await settle();
-    expect(blocks().length).toBe(120);
-    expect(blocks()[0].textContent).toContain('answer 331');
+    await until(() => blocks().length >= 160);
+    // The newest page holds 100 blocks, which do not fill the window: an older page of 200 loads
+    // behind them and 60 more blocks render, past what fills it.
+    expect(blocks().length).toBe(160);
+    expect(blocks()[0].textContent).toContain('answer 291');
   });
 
   it('"Requests only" there and back renders the last blocks of the log, not all of it', async () => {
@@ -2932,14 +2943,14 @@ describe('history', () => {
     const { app } = setup('idle', { history: log });
     app.sessions.get('s1')!.system = true;
     await mount(app);
-    await settle();
-    expect(blocks().length).toBe(120);
+    await until(() => blocks().length >= 160);
+    expect(blocks().length).toBe(160);
     await act(async () => button('Requests only')!.click());
-    await settle();
+    await until(() => !!root.querySelector('.perm'));
     expect(root.querySelector('.perm')).not.toBeNull();
     expect(root.querySelector('.feed-note')).toBeNull();
     await act(async () => button('Requests only')!.click());
-    await settle();
+    await until(() => blocks().length === 120);
     expect(blocks().length).toBe(120);
     expect(blocks().at(-1)!.textContent).toContain('answer 450');
   });
@@ -3519,6 +3530,7 @@ describe('switching chats', () => {
     const first = chat.open();
     chat.close();
     const second = chat.open();
+    await vi.waitFor(() => expect(page).toBeTypeOf('function'));
     page();
     await Promise.all([first, second]);
     expect(subscribe).toHaveBeenCalledTimes(1);
@@ -3540,6 +3552,8 @@ describe('fork', () => {
   it('forks before a message of the user: the new session opens with the message as its draft', async () => {
     const { app, api } = setup('idle');
     await mount(app);
+    // The history comes after the device's copy of it was asked for: a few steps more.
+    await act(async () => void (await new Promise((r) => setTimeout(r, 20))));
     const forks = [...root.querySelectorAll<HTMLButtonElement>('.btn-fork')];
     // The user's two messages; none on the agent's.
     expect(forks).toHaveLength(2);

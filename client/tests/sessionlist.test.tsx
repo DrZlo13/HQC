@@ -2176,6 +2176,7 @@ describe('loading a chat ahead', () => {
     expect(api.eventsBefore).toHaveBeenCalledTimes(1);
     // A press loads at once.
     link('Cave scene port').dispatchEvent(pointer('pointerdown'));
+    await wait(0);
     expect(api.eventsBefore).toHaveBeenLastCalledWith('cave', undefined, 100);
 
     render(null, root);

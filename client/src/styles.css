@@ -3051,7 +3051,8 @@ button.btn-mode-pill.perm-allow-all:hover,
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  --feed-gap: 24px;
+  gap: var(--feed-gap);
 }
 
 /* The empty feed's note (its first page on its way, no requests): in the middle of the feed. */
@@ -3065,6 +3066,26 @@ button.btn-mode-pill.perm-allow-all:hover,
   justify-content: center;
   color: var(--muted);
   font-size: 13px;
+}
+
+/* "Loading…" above the feed while an older page is on its way (Chat.tsx), in the timeline's top
+   padding: it takes no room in the feed (the negative margin cancels the feed's gap after it,
+   whatever that is in the look), so the blocks do not move when it comes and goes; WebKit keeps
+   no scroll anchor. The row is 14 px high and 2 px off the blocks, to fit the 16 px of the
+   padding where it is the smallest (Compact, the phone). */
+.feed-older {
+  position: relative;
+  height: 0;
+  margin-bottom: calc(-1 * var(--feed-gap));
+}
+.feed-older > .loading {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 2px;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 14px;
 }
 
 /* "Loading…" (Loading.tsx): a spinner before the word, in a note's muted colour at its parent's
@@ -3132,7 +3153,7 @@ button.btn-mode-pill.perm-allow-all:hover,
   padding: 16px 24px 12px;
 }
 :root.feed-column .chat:not(.chat-phone) .feed {
-  gap: 12px;
+  --feed-gap: 12px;
   font-size: 13.5px;
   line-height: 1.45;
 }
@@ -4977,7 +4998,7 @@ a.relay-peer {
 }
 .live-agents-history > .feed.live-agents-feed {
   max-width: none;
-  gap: 12px;
+  --feed-gap: 12px;
 }
 /* The goal's row (SPEC 0.218): a target in the dot's place, the condition cut at the line's end;
    the chevron opens it whole under the row with the reason of the last check. */
@@ -5491,7 +5512,7 @@ a.relay-peer {
 }
 
 .chat-phone .feed {
-  gap: 18px;
+  --feed-gap: 18px;
 }
 
 .chat-phone .composer-wrap {

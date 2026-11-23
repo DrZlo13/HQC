@@ -3785,6 +3785,8 @@ pub async fn push_subs_of(db: &PgPool, user: Uuid) -> sqlx::Result<Vec<PushSubRo
 pub struct ApnsDeviceRow {
     pub token: String,
     pub sandbox: bool,
+    /// The device's key for sealing its notices (SPEC 0.218); absent for an older app.
+    pub notice_key: Option<Vec<u8>>,
 }
 
 /// Store a device, or refresh the user's own one; another user's token is never taken over,
@@ -3794,6 +3796,7 @@ pub async fn upsert_apns_device(
     user: Uuid,
     token: &str,
     sandbox: bool,
+    notice_key: Option<&[u8]>,
     max: i64,
 ) -> sqlx::Result<PushUpsert> {
     let mut tx = db.begin().await?;
@@ -3811,8 +3814,9 @@ pub async fn upsert_apns_device(
         return Ok(PushUpsert::Limit);
     }
     let id: Option<Uuid> = sqlx::query_scalar(
-        "INSERT INTO apns_devices (id, user_id, token, sandbox) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (token) DO UPDATE SET sandbox = EXCLUDED.sandbox, updated_at = now()
+        "INSERT INTO apns_devices (id, user_id, token, sandbox, notice_key) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (token) DO UPDATE SET sandbox = EXCLUDED.sandbox,
+           notice_key = EXCLUDED.notice_key, updated_at = now()
            WHERE apns_devices.user_id = EXCLUDED.user_id
          RETURNING id",
     )
@@ -3820,6 +3824,7 @@ pub async fn upsert_apns_device(
     .bind(user)
     .bind(token)
     .bind(sandbox)
+    .bind(notice_key)
     .fetch_optional(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -3842,7 +3847,7 @@ pub async fn delete_apns_device(
 }
 
 pub async fn apns_devices_of(db: &PgPool, user: Uuid) -> sqlx::Result<Vec<ApnsDeviceRow>> {
-    sqlx::query_as("SELECT token, sandbox FROM apns_devices WHERE user_id = $1")
+    sqlx::query_as("SELECT token, sandbox, notice_key FROM apns_devices WHERE user_id = $1")
         .bind(user)
         .fetch_all(db)
         .await

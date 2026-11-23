@@ -690,8 +690,10 @@ line to `hub.env` and restart the hub:
 HQC_APNS_RELAY_URL=https://hqc.drewnja.xyz
 ```
 
-The hub then sends each notice for the app (the session's title, a short text, the request's
-options) to that relay, which passes it to Apple; nothing else leaves the hub. Without the line
+The hub then sends each notice for the app to that relay, which passes it to Apple. The app
+(since its notification extension, SPEC 0.218) registers a key of its own, and the hub seals each
+notice with it: the relay and Apple see a generic alert, the device token and ciphertext, never the
+session's title, the text or the request. Nothing else leaves the hub. Without the line
 the app works the same, without notifications. Settings in the app says whether they are on.
 
 #### Your own APNs key (only if you build and sign the app yourself)

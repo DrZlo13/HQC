@@ -162,10 +162,31 @@ pub fn collapse_id(tag: &str) -> String {
 /// the alert, the session's thread, a category the app hangs its actions on, and what the app
 /// needs to open the session or answer a request from the notification: `session_id`,
 /// `open_session_id`, `type`, `request_id` and, for an approval, its options.
-pub fn payload(web: &Value) -> Vec<u8> {
+/// The length of a device's notice key: AES-256 (SPEC 0.218).
+pub const NOTICE_KEY_LEN: usize = 32;
+
+/// The notice as Apple gets it. With the device's key (SPEC 0.218) the content (title, text,
+/// category, session, request and its options) is sealed with AES-256-GCM, and Apple, and a
+/// relay, see only a generic alert with `mutable-content`: the app's notification extension
+/// opens it on the device. Without one, as before: the notice in the clear.
+pub fn payload(web: &Value, key: Option<&[u8]>) -> Vec<u8> {
+    match key {
+        Some(k) if k.len() == NOTICE_KEY_LEN => sealed(web, k),
+        _ => plain(web),
+    }
+}
+
+/// What a notice says, apart from how it is sent.
+struct Notice<'a> {
+    kind: &'a str,
+    category: &'static str,
+    request_id: Option<&'a str>,
+    options: Vec<Value>,
+}
+
+fn notice(web: &Value) -> Notice<'_> {
     let kind = web["type"].as_str().unwrap_or_default();
     let event = &web["payload"];
-    let request_id = event["payload"]["request_id"].as_str();
     let category = match kind {
         "approval.request" => "APPROVAL",
         "clarify.request" => "QUESTION",
@@ -190,31 +211,31 @@ pub fn payload(web: &Value) -> Vec<u8> {
     } else {
         Vec::new()
     };
-    let build = |body_len: usize| {
-        let mut m = json!({
-            "aps": {
-                "alert": {
-                    "title": crate::push::clip(web["title"].as_str().unwrap_or("hqc"), 80),
-                    "body": crate::push::clip(web["body"].as_str().unwrap_or_default(), body_len),
-                },
-                "sound": "default",
-                "thread-id": web["session_id"],
-                "category": category,
-            },
-            "session_id": web["session_id"],
-            "type": kind,
-        });
-        if !web["open_session_id"].is_null() {
-            m["open_session_id"] = web["open_session_id"].clone();
-        }
-        if let Some(r) = request_id {
-            m["request_id"] = json!(r);
-        }
-        if !options.is_empty() {
-            m["options"] = json!(options);
-        }
-        serde_json::to_vec(&m).unwrap_or_default()
-    };
+    Notice {
+        kind,
+        category,
+        request_id: event["payload"]["request_id"].as_str(),
+        options,
+    }
+}
+
+/// The fields the app reads off a notice, beside its alert.
+fn fields(web: &Value, n: &Notice, m: &mut Value) {
+    m["session_id"] = web["session_id"].clone();
+    m["type"] = json!(n.kind);
+    if !web["open_session_id"].is_null() {
+        m["open_session_id"] = web["open_session_id"].clone();
+    }
+    if let Some(r) = n.request_id {
+        m["request_id"] = json!(r);
+    }
+    if !n.options.is_empty() {
+        m["options"] = json!(n.options);
+    }
+}
+
+/// Builds with shorter and shorter text until the notice fits APNs' 4 KB.
+fn fitting(build: impl Fn(usize) -> Vec<u8>) -> Vec<u8> {
     let mut body_len = 400;
     loop {
         let bytes = build(body_len);
@@ -223,6 +244,67 @@ pub fn payload(web: &Value) -> Vec<u8> {
         }
         body_len /= 2;
     }
+}
+
+fn plain(web: &Value) -> Vec<u8> {
+    let n = notice(web);
+    fitting(|body_len| {
+        let mut m = json!({
+            "aps": {
+                "alert": {
+                    "title": crate::push::clip(web["title"].as_str().unwrap_or("hqc"), 80),
+                    "body": crate::push::clip(web["body"].as_str().unwrap_or_default(), body_len),
+                },
+                "sound": "default",
+                "thread-id": web["session_id"],
+                "category": n.category,
+            },
+        });
+        fields(web, &n, &mut m);
+        serde_json::to_vec(&m).unwrap_or_default()
+    })
+}
+
+/// The generic alert of a sealed notice, shown as is only if the device cannot open it.
+pub const SEALED_TITLE: &str = "hqc";
+pub const SEALED_BODY: &str = "New notice. Open hqc to read it.";
+
+fn sealed(web: &Value, key: &[u8]) -> Vec<u8> {
+    use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
+    use base64::Engine as _;
+    let n = notice(web);
+    let Ok(cipher) = aes_gcm::Aes256Gcm::new_from_slice(key) else {
+        return plain(web);
+    };
+    fitting(|body_len| {
+        // Everything the notice says goes inside; outside only what APNs needs to deliver it
+        // and wake the extension.
+        let mut inner = json!({
+            "title": crate::push::clip(web["title"].as_str().unwrap_or("hqc"), 80),
+            "body": crate::push::clip(web["body"].as_str().unwrap_or_default(), body_len),
+            "category": n.category,
+        });
+        fields(web, &n, &mut inner);
+        let nonce = aes_gcm::Aes256Gcm::generate_nonce(&mut OsRng);
+        let Ok(ct) = cipher.encrypt(
+            &nonce,
+            serde_json::to_vec(&inner).unwrap_or_default().as_slice(),
+        ) else {
+            return Vec::new();
+        };
+        let mut boxed = nonce.to_vec();
+        boxed.extend_from_slice(&ct);
+        let m = json!({
+            "aps": {
+                "alert": { "title": SEALED_TITLE, "body": SEALED_BODY },
+                "sound": "default",
+                "mutable-content": 1,
+            },
+            "enc": base64::engine::general_purpose::STANDARD.encode(boxed),
+            "v": 1,
+        });
+        serde_json::to_vec(&m).unwrap_or_default()
+    })
 }
 
 /// The hub's own key, else the relay it was given, else no Apple push.
@@ -375,8 +457,8 @@ mod tests {
                 {"id": "o2", "canonical": "deny", "label": "Deny"}
             ]}}
         });
-        let p: Value = serde_json::from_slice(&payload(&web)).unwrap();
-        assert!(payload(&web).len() <= MAX_PAYLOAD);
+        let p: Value = serde_json::from_slice(&payload(&web, None)).unwrap();
+        assert!(payload(&web, None).len() <= MAX_PAYLOAD);
         assert_eq!(p["aps"]["category"], "APPROVAL");
         assert_eq!(p["request_id"], "r1");
         assert_eq!(p["options"][1]["canonical"], "deny");
@@ -384,5 +466,59 @@ mod tests {
             p["aps"]["thread-id"],
             "0199f3a2-7c10-7000-8000-0000000000aa"
         );
+    }
+
+    #[test]
+    fn a_sealed_notice_hides_its_content_and_opens_with_the_key() {
+        use aes_gcm::aead::{Aead, KeyInit};
+        use base64::Engine as _;
+        let key = [7u8; NOTICE_KEY_LEN];
+        let web = json!({
+            "type": "approval.request",
+            "title": "secret-project · Allow Bash?",
+            "body": "rm -rf build",
+            "session_id": "s1",
+            "tag": "t",
+            "payload": {"payload": {"request_id": "r1", "options": [
+                {"id": "o1", "canonical": "once", "label": "Allow once"},
+            ]}},
+        });
+        let bytes = payload(&web, Some(&key));
+        assert!(bytes.len() <= MAX_PAYLOAD);
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        // Nothing of the notice is readable on the way.
+        for leak in [
+            "secret-project",
+            "rm -rf",
+            "r1",
+            "s1",
+            "Allow once",
+            "APPROVAL",
+        ] {
+            assert!(!text.contains(leak), "{leak} leaked");
+        }
+        let p: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(p["aps"]["mutable-content"], 1);
+        assert_eq!(p["aps"]["alert"]["body"], SEALED_BODY);
+        let boxed = base64::engine::general_purpose::STANDARD
+            .decode(p["enc"].as_str().unwrap())
+            .unwrap();
+        let (nonce, ct) = boxed.split_at(12);
+        let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).unwrap();
+        let inner = cipher.decrypt(nonce.into(), ct).unwrap();
+        let inner: Value = serde_json::from_slice(&inner).unwrap();
+        assert_eq!(inner["title"], "secret-project · Allow Bash?");
+        assert_eq!(inner["request_id"], "r1");
+        assert_eq!(inner["category"], "APPROVAL");
+        assert_eq!(inner["options"][0]["id"], "o1");
+        // A wrong key opens nothing.
+        let other = aes_gcm::Aes256Gcm::new_from_slice(&[8u8; NOTICE_KEY_LEN]).unwrap();
+        assert!(other.decrypt(nonce.into(), ct).is_err());
+    }
+
+    #[test]
+    fn a_long_sealed_notice_still_fits() {
+        let web = json!({"type": "agent.message", "title": "t", "body": "x".repeat(10_000), "session_id": "s"});
+        assert!(payload(&web, Some(&[1u8; NOTICE_KEY_LEN])).len() <= MAX_PAYLOAD);
     }
 }

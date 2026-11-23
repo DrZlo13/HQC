@@ -195,6 +195,81 @@ async fn apns_device_gets_the_approval() {
     hub.finish().await;
 }
 
+/// SPEC 0.218: a device that registered a key gets its notices sealed: Apple and a relay see
+/// only a generic alert; the key opens the content, request and options included.
+#[tokio::test]
+async fn apns_notice_is_sealed_with_the_device_key() {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use base64::engine::general_purpose::STANDARD;
+    let hub = TestHub::start().await;
+    let device = "cd".repeat(32);
+    let key = [42u8; 32];
+    let (s, _) = hub
+        .post(
+            "/api/push/apns",
+            json!({"token": device, "sandbox": false, "key": STANDARD.encode([1u8; 16])}),
+        )
+        .await;
+    assert_eq!(s, 400, "a key must be 32 bytes");
+    let (s, _) = hub
+        .post(
+            "/api/push/apns",
+            json!({"token": device, "sandbox": false, "key": STANDARD.encode(key)}),
+        )
+        .await;
+    assert_eq!(s, 201);
+
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("sealed").await;
+    ack_start(&mut w, &sid).await;
+    w.event(agent_event(
+        &sid,
+        "approval.request",
+        json!({
+            "request_id": "req-9",
+            "tool": "Bash",
+            "description": "deploy to prod",
+            "options": [{"id": "allow", "label": "Allow once", "canonical": "once"}],
+            "expires_at": "2099-01-01T00:00:00Z",
+        }),
+    ))
+    .await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        if !hub.apns.sent.lock().unwrap().is_empty() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no APNs push");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (_, _, _, p): (String, bool, String, Value) = hub.apns.sent.lock().unwrap()[0].clone();
+    let text = p.to_string();
+    for leak in [
+        "deploy to prod",
+        "req-9",
+        sid.as_str(),
+        "Allow once",
+        "APPROVAL",
+    ] {
+        assert!(!text.contains(leak), "{leak} is readable on the way");
+    }
+    assert_eq!(p["aps"]["mutable-content"], 1);
+    let boxed = STANDARD.decode(p["enc"].as_str().unwrap()).unwrap();
+    let (nonce, ct) = boxed.split_at(12);
+    let inner = aes_gcm::Aes256Gcm::new_from_slice(&key)
+        .unwrap()
+        .decrypt(nonce.into(), ct)
+        .unwrap();
+    let inner: Value = serde_json::from_slice(&inner).unwrap();
+    assert_eq!(inner["category"], "APPROVAL");
+    assert_eq!(inner["session_id"], sid.as_str());
+    assert_eq!(inner["request_id"], "req-9");
+    assert_eq!(inner["options"][0]["id"], "allow");
+    assert!(inner["body"].as_str().unwrap().contains("deploy to prod"));
+    hub.finish().await;
+}
+
 /// SPEC §16: a hub with the key and `HQC_APNS_RELAY=1` sends other hubs' notices; a hub with
 /// `HQC_APNS_RELAY_URL` sends through it, and hears when a device is gone.
 #[tokio::test]

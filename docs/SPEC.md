@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.217, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.218, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -569,7 +569,8 @@ when it is connected, or after its `hello`. A publication done before the stop a
 Since 0.214 (§16): a user's iOS device that takes notices over APNs: `id`, `user_id`,
 `token` (the APNs device token in hex, unique), `sandbox` (a development build), `created_at`,
 `updated_at`. Written by `POST /api/push/apns`, deleted by `DELETE` or when APNs says the
-token is gone (hub migration `0055`).
+token is gone (hub migration `0055`). Since 0.218 also `notice_key`, the 32-byte AES key the
+device made for its notices (absent for an app that registered before; migration `0056`).
 
 ### ScheduledMessage
 `owner_id`, `session_id` or (`project_id`, `workspace_id`, template), `cron` or `at`,
@@ -2126,9 +2127,11 @@ the rest is marked "later"):
   at most 10 subscriptions per user (`409 push_limit`); someone else's `endpoint`: `409
   conflict`, not a takeover; a repeated request for one's own subscription updates it.
 - `/api/push/apns` (since 0.214, §16): Apple push to the native iOS client. `GET` →
-  `{enabled}` (the hub has `HQC_APNS_*`); `POST {token, sandbox?}` stores the device token the
+  `{enabled}` (the hub has `HQC_APNS_*`); `POST {token, sandbox?, key?}` stores the device token the
   app got from iOS (hex, 64 to 200 characters, kept in lower case; `sandbox: true` for a
-  development build, sent through APNs' sandbox host) → `201 {id}`; `400` for another token;
+  development build, sent through APNs' sandbox host; since 0.218 `key`: the device's notice
+  key, 32 bytes in base64, `400` otherwise; a later `POST` replaces it) → `201 {id}`; `400` for
+  another token;
   the limit and the rules of a push subscription apply (`409 push_limit`, someone else's token
   `409 conflict`); `DELETE {token}` → `204`, the device takes no more notices.
 - Native client sign-in (since 0.214, `crates/hqc-hub/src/native.rs`): the iOS app cannot read
@@ -6726,6 +6729,17 @@ the push body's `tag` (its SHA-256 in hex when longer than 64 bytes). APNs answe
 `BadDeviceToken`, `Unregistered` or `DeviceTokenNotForTopic` deletes the device, as a gone Web
 Push subscription is deleted.
 
+Since 0.218 a device that registered a `key` gets its notices sealed end to end. The hub puts
+what the payload above says (`title`, `body`, `category`, `session_id`, `open_session_id?`,
+`type`, `request_id?`, `options?`) into a JSON object, seals it with AES-256-GCM under the
+device's key and a random 12-byte nonce, and sends
+`{aps: {alert: {title: "hqc", body: "New notice. Open hqc to read it."}, sound, "mutable-content": 1}, enc, v: 1}`,
+`enc` being base64 of nonce ‖ ciphertext ‖ 16-byte tag. Apple and a relay see only that generic
+alert and the device token. The app's notification extension opens `enc` with the key, which
+the app keeps in a keychain group shared with the extension, and shows the notice as before,
+its category, thread and fields restored; if it cannot, the generic alert shows. The text is
+cut, as above, until the sealed payload fits 4 KB.
+
 A hub without a key sends through another hub that has one (`HQC_APNS_RELAY_URL`, the
 published app's publisher at `https://hqc.drewnja.xyz`): `POST <relay>/worker/push/relay
 {token, sandbox, collapse_id, payload}` with the APNs payload above. The relay
@@ -7285,6 +7299,13 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.217 → 0.218 (Apple push notices sealed end to end)
+§16, §6, §3: the iOS app makes a 32-byte key for its notices and registers it with
+`POST /api/push/apns {key}`; the hub seals each notice to that device with AES-256-GCM and sends
+Apple, and a relay, a generic alert with `mutable-content`, the content in `enc`. The app's
+notification extension opens it on the device. Hub migration `0056` (`apns_devices.notice_key`);
+an app that registered no key gets its notices in the clear as before.
 
 ### 0.216 → 0.217 (the iOS client signs in through the browser and gets Apple push)
 §6: `GET /api/native/login` and `POST /worker/native/token`, the native client's sign-in

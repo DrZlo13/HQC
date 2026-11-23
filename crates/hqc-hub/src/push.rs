@@ -328,9 +328,10 @@ async fn send_apns(
     if devices.is_empty() {
         return;
     }
-    let bytes = crate::apns::payload(payload);
     let collapse = crate::apns::collapse_id(payload["tag"].as_str().unwrap_or_default());
     for d in devices {
+        // Sealed for each device with its own key, where it has one (SPEC 0.218).
+        let bytes = crate::apns::payload(payload, d.notice_key.as_deref());
         match apns.send(&d.token, d.sandbox, &collapse, &bytes).await {
             Ok(()) => tracing::debug!(%user, "APNs push sent"),
             Err(PushError::Gone) => {

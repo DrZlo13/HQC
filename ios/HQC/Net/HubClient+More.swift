@@ -23,8 +23,11 @@ extension HubClient {
         (try? await get("/api/push/apns", as: JSONValue.self))?["enabled"]?.bool ?? false
     }
 
-    func registerDevice(token: String, sandbox: Bool) async throws {
-        _ = try await send("POST", "/api/push/apns", body: ["token": token, "sandbox": sandbox])
+    /// With `key`, the hub seals each notice for this device (SPEC 0.218).
+    func registerDevice(token: String, sandbox: Bool, key: String? = nil) async throws {
+        var body: [String: Any] = ["token": token, "sandbox": sandbox]
+        if let key { body["key"] = key }
+        _ = try await send("POST", "/api/push/apns", body: body)
     }
 
     func unregisterDevice(token: String) async throws {

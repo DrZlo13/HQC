@@ -2705,6 +2705,9 @@ pub struct ApnsDevice {
     pub token: String,
     #[serde(default)]
     pub sandbox: bool,
+    /// The device's 32-byte key for its notices, in base64 (SPEC 0.218).
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 /// `POST /api/push/apns`: the native client's device token (SPEC §16).
@@ -2719,8 +2722,22 @@ pub async fn apns_register(
             "token must be the APNs device token in hex".into(),
         ));
     }
+    let key = match b.key.as_deref() {
+        None => None,
+        Some(k) => {
+            use base64::Engine as _;
+            match base64::engine::general_purpose::STANDARD.decode(k.trim()) {
+                Ok(v) if v.len() == crate::apns::NOTICE_KEY_LEN => Some(v),
+                _ => {
+                    return Err(ApiError::BadRequest(
+                        "key must be 32 bytes in base64".into(),
+                    ))
+                }
+            }
+        }
+    };
     let max = app.config.limits.push_subs_per_user;
-    match db::upsert_apns_device(&app.db, user.id, &token, b.sandbox, max).await? {
+    match db::upsert_apns_device(&app.db, user.id, &token, b.sandbox, key.as_deref(), max).await? {
         db::PushUpsert::Stored(id) => Ok((StatusCode::CREATED, Json(json!({ "id": id })))),
         db::PushUpsert::Foreign => Err(ApiError::Conflict(
             "conflict",

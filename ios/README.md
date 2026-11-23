@@ -48,7 +48,10 @@ browser and Apple push (SPEC 0.217).
   phone (the worker runs `claude auth login`), revoking, and confirming a new machine's
   enrollment code (also from an `hqc-app://enroll?code=XXXX-XXXX` link). Workspaces: add a folder
   of a worker through a browser of its `allowed_roots`, or remove one.
-- **Notifications.** Apple push for permission requests, questions, final answers, room posts
+- **Notifications.** Sealed end to end (SPEC 0.218): the app makes a key, kept in a keychain
+  group it shares with its notification extension (`HQCNotifications`), and the hub seals each
+  notice with it, so Apple and the relay see only a generic alert; the extension opens it on the
+  device. Apple push for permission requests, questions, final answers, room posts
   and failed input. A hub gets it with one line, `HQC_APNS_RELAY_URL=https://hqc.drewnja.xyz`,
   the publisher's relay, or with its own key for a self-signed build (RUNBOOK §1.10). "Allow once" and "Deny" on an
   approval's notification answer it without opening the app; a tap opens the session. While a

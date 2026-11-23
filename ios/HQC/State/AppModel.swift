@@ -200,7 +200,7 @@ final class AppModel {
         #else
         let sandbox = false
         #endif
-        do { try await client.registerDevice(token: token, sandbox: sandbox) } catch {
+        do { try await client.registerDevice(token: token, sandbox: sandbox, key: NoticeKey.base64) } catch {
             lastError = error.localizedDescription
         }
     }

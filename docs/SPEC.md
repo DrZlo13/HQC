@@ -3352,8 +3352,9 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   path must lie inside the session's workspace and `allowed_roots`, as for `hqc_attach`; a folder
   is walked with its names sorted, every entry's canonical path must stay inside the folder and
   `allowed_roots` (a link pointing out is `invalid_args` naming it; a link to a folder up the
-  tree is skipped), an entry named `.git` or `.hqc` (a folder or a file) is never packed, at any
-  depth inside the folder (the published path itself is not checked), only regular files and
+  tree is skipped), an entry named `.git` or `.hqc` in any case (a folder or a file) is never
+  packed, at any depth inside the folder (the published path itself is not checked), and the hub
+  refuses an archive with such a component in a name, only regular files and
   folders, at most 10 000 files of at most 500 MiB together, each path at most 512 bytes (the
   hub's limits, §20); a folder without `index.html` is `invalid_args`. One file becomes the
   archive of that file under its name. The zip is deterministic — entries by path, deflated, one

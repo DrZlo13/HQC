@@ -8242,6 +8242,8 @@ button.ps-look {
 }
 .secret-card .secret-form {
   margin-top: 10px;
+  /* Inset as the card's head is (.perm-head), not flush with its border. */
+  padding: 0 16px 14px;
 }
 .secret-row {
   display: flex;

@@ -48,6 +48,8 @@ import { archivedLabel, atWorkAfterTurn, canPause, pausingAfterTurn, restartable
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
 /** Blocks of the feed rendered on open; scrolling to the top adds `SHOWN` more. */
 const SHOWN = 60;
+/** How far back from the newest event the header's `usage` is looked for in the older history. */
+const USAGE_DEPTH = 1000;
 /** How long the user's own scroll counts as still going after its last input, or after the last
  *  scroll event that came while it went: a trackpad's momentum sends wheel events to its end, a
  *  finger's fling and a bounce at an edge move the feed with scroll events only. */
@@ -99,7 +101,7 @@ export function Chat({
   const [requestsOnly, setRequestsOnly] = useState(false);
   const [schedules, setSchedules] = useState(false);
   const [moving, setMoving] = useState(false);
-  const artifacts = useMemo(() => new ArtifactStore(app.api, undefined, undefined, undefined, sharedLinks(app)), [app]);
+  const artifacts = useMemo(() => new ArtifactStore(app.api, undefined, undefined, undefined, sharedLinks(app), app.artifactCache), [app]);
   // The image or Markdown text shown in the viewer over the chat.
   const [viewing, setViewing] = useState<ViewedArtifact | null>(null);
   const peerMessage = useMemo(() => peerMessages(app.api), [app]);
@@ -130,8 +132,8 @@ export function Chat({
       }
     })();
   };
-  // The feed shows once the newest page is in, in the first frame for a chat kept in memory or
-  // loaded ahead; the older history loads behind it.
+  // The feed shows once the newest page is in (or the copy of it the device keeps), in the first
+  // frame for a chat kept in memory or loaded ahead; the older history loads when asked for.
   const [loaded, setLoaded] = useState(chat.loaded);
   // The feed renders from the block that starts at `from.current` (a `seq`): the last `SHOWN`
   // blocks on open, more as the user scrolls up. Set once, so blocks that come in at either
@@ -156,8 +158,8 @@ export function Chat({
   // The state comes over the socket, late after an answer of this client: the request is
   // closed already, and the agent is not waiting for it.
   const answeredState = state === 'waiting' && t.answeredLocally() && t.openRequests().length === 0 ? 'running' : state;
-  // A room's agents: their chats stay open while the room's is, the newest page and the live
-  // events only, for the running command each one's activity line names.
+  // A room's agents: their chats stay open while the room's is, for the running command each one's
+  // activity line names.
   const room = info?.room_mode;
   // It has no pills of its own: its mode stands in the meta row after the folder (on a phone,
   // after the state), and its agents' sessions go under the line.
@@ -165,7 +167,7 @@ export function Chat({
   const memberIds = members.map((m) => m.id).join(' ');
   const memberChats = useMemo(() => (memberIds ? memberIds.split(' ').map((id) => app.chat(id)) : []), [app, memberIds]);
   useEffect(() => {
-    for (const c of memberChats) void c.open({ older: false });
+    for (const c of memberChats) void c.open();
     return () => memberChats.forEach((c) => c.close());
   }, [memberChats]);
   useSubscription((fn) => {
@@ -212,7 +214,8 @@ export function Chat({
 
   // A message taken back (SPEC 0.219) returns to the input: its text after what is typed there
   // (the draft when the input is not shown, under a request's sheet), its files read again from
-  // the hub. Sending waits while they are read.
+  // the device when it holds them, else from the hub, and not kept on the device. Sending waits
+  // while they are read.
   const putBack = (e: EventOf<'user.message'>) => {
     const text = e.payload.text;
     if (text) {
@@ -226,7 +229,7 @@ export function Chat({
       let lost = 0;
       for (const id of ids) {
         try {
-          const [meta, blob] = await Promise.all([artifacts.meta(id), artifacts.blob(id)]);
+          const [meta, blob] = await Promise.all([artifacts.meta(id), artifacts.blob(id, false)]);
           const f = await toOutgoing(new File([blob], meta.name, { type: meta.mime }));
           setFiles((cur) => [...cur, f]);
         } catch {
@@ -448,6 +451,9 @@ export function Chat({
   const holding = () => losesScrollInGesture() && userScrolling();
   const more = useRef(false);
   const heldBack = useRef(false);
+  // The scroll to the top asked for an older page that has not been shown yet: its blocks show as
+  // `showMore`'s do once it is in, if the feed is still near its top.
+  const asked = useRef(false);
   const settle = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   /** `goesUp`: the input's direction; a scroll event without an input keeps the last one. */
   const userScrolled = (goesUp?: boolean) => {
@@ -497,10 +503,44 @@ export function Chat({
     const wanted = more.current;
     more.current = false;
     // A feed shorter than its window cannot be scrolled to the top, so the scroll below never
-    // asks for the older blocks: render them until it fills the window or none is left.
-    if (start > 0 && (el.scrollHeight <= el.clientHeight || (wanted && el.scrollTop < 400))) {
+    // asks for the older blocks: render them, and load the older history behind them, until it
+    // fills the window or none is left.
+    if (start > 0 && (el.scrollHeight <= el.clientHeight || ((wanted || asked.current) && el.scrollTop < 400))) {
       showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
+    } else if (loaded && start === 0 && t.olderFrom > 0 && el.scrollHeight <= el.clientHeight) {
+      // `loaded`: the newest page is in the timeline a render before it is drawn, and the feed,
+      // still empty then, is no shorter than its window.
+      void chat.loadOlder(undefined, true);
     }
+    // The page the scroll to the top asked for may add no block (its events all joined the top
+    // group of calls, so `start` stays 0); the user then sits at the top with no further scroll
+    // event to ask again: ask for the next page.
+    if (asked.current && start === 0 && !chat.loadingOlder && t.olderFrom > 0 && el.scrollTop < 400) {
+      void chat.loadOlder(undefined, true);
+    } else if (start > 0 || !chat.loadingOlder) asked.current = false;
+  });
+  // Behind the newest page, the header's cost and model come from a `usage` event and the cards
+  // of the session's open requests from their events: older pages load, one after another, until
+  // they are in. A turn ends with a `usage`, so it is looked for only `USAGE_DEPTH` events back
+  // (a session with none, as a worker's service session, would load its whole history).
+  const needsUsage =
+    loaded &&
+    t.olderFrom > 0 &&
+    !system &&
+    !room &&
+    t.olderFrom > t.lastSeq - USAGE_DEPTH &&
+    !t.events().some((e) => e.type === 'usage');
+  // Whatever its kind (`publish`, `move`, `worker_approval`…), the request's own event stands
+  // in the session, and its card comes from there: the pages go down to the oldest of them.
+  const requestSeqs = loaded
+    ? app.requests
+        .filter((r) => r.session_id === sessionId && (r.event.seq ?? 0) < t.olderFrom)
+        .map((r) => r.event.seq ?? 0)
+    : [];
+  const requestsDownTo = requestSeqs.length ? Math.min(...requestSeqs) : undefined;
+  useEffect(() => {
+    // The page that was missing may have landed since the render.
+    if ((needsUsage || requestsDownTo !== undefined) && t.olderFrom > 0) void chat.loadOlder(requestsDownTo, true);
   });
   useEffect(() => {
     const el = scroller.current;
@@ -594,7 +634,11 @@ export function Chat({
   const focused = useRef<number | undefined>(undefined);
   useLayoutEffect(() => {
     const el = scroller.current;
-    if (!el || focusSeq === undefined || focused.current === focusSeq || t.lastSeq < focusSeq || t.olderFrom > focusSeq) return;
+    if (!el || focusSeq === undefined || focused.current === focusSeq || t.lastSeq < focusSeq) return;
+    if (t.olderFrom > focusSeq) {
+      void chat.loadOlder(focusSeq, true);
+      return;
+    }
     if (focusSeq < (from.current ?? 0)) {
       let at = 0;
       blocks.forEach((b, i) => {
@@ -996,6 +1040,9 @@ export function Chat({
             if (el.scrollTop < 400 && start > 0) {
               if (holding()) more.current = true;
               else showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
+            } else if (loaded && el.scrollTop < 400 && t.olderFrom > 0) {
+              asked.current = true;
+              void chat.loadOlder();
             }
           }}
         >
@@ -1005,6 +1052,11 @@ export function Chat({
             {!loaded && (
               <div class="feed-note">
                 <Loading center />
+              </div>
+            )}
+            {chat.loadingOlder && start === 0 && (
+              <div class="feed-older">
+                <Loading />
               </div>
             )}
             <FeedBlocks blocks={start ? blocks.slice(start) : blocks} actions={actions} />
@@ -2080,6 +2132,9 @@ export function Composer({
  *  without a `seq` (messages not stored yet) come last and always render. */
 function firstShown(blocks: ReturnType<typeof buildFeed>, from: number): number {
   const i = blocks.findIndex((b) => (blockSeq(b) ?? Infinity) >= from);
+  // No block starts at `from` any more: an older page joined the block that did to the events
+  // before it (a group of calls the page's edge cut), and the block before holds it now.
+  if (i > 0 && (blockSeq(blocks[i]) ?? from) > from) return i - 1;
   return i < 0 ? blocks.length : i;
 }
 

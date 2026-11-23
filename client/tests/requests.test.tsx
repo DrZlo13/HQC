@@ -104,6 +104,8 @@ async function mount(node: preact.ComponentChild) {
     render(node, root);
     await new Promise((r) => setTimeout(r, 50));
   });
+  // The chat opened by the effects the act ran at its end: its history takes a few more steps.
+  await act(async () => void (await new Promise((r) => setTimeout(r, 20))));
 }
 
 const $ = (sel: string) => root.querySelector<HTMLElement>(sel);

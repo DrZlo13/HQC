@@ -111,7 +111,7 @@ export class Timeline {
     return () => this.listeners.delete(fn);
   }
 
-  private changed(): void {
+  changed(): void {
     this.version++;
     for (const fn of this.listeners) fn();
   }
@@ -523,6 +523,27 @@ export class Timeline {
     this.pending.delete(clientOpId);
     this.changed();
     return p;
+  }
+
+  /** Drops the stored events and all that was drawn from them, when what was loaded does not
+   *  continue the hub's history (`ChatSession.load`). Messages not stored yet, the answers this
+   *  client sent and the transport state (deltas, live lists) stay, and so do the listeners. */
+  clear(): void {
+    this.bySeq.clear();
+    this.invalid.length = 0;
+    this.echoed.clear();
+    this.fates.clear();
+    this.results.clear();
+    this.calls.clear();
+    this.endsByCall.clear();
+    this.endsByTask.clear();
+    this.retracted.clear();
+    this.requests.clear();
+    this.keys.clear();
+    this.sorted = null;
+    this.lastSeq = 0;
+    this.olderFrom = 0;
+    this.changed();
   }
 
   /** The socket dropped: deltas after the gap would not continue the buffered text, and the

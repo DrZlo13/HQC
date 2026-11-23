@@ -27,6 +27,7 @@
     "@preact/preset-vite": "^2.10.6",
     "@types/node": "^26.6.5",
     "@types/ws": "^8.18.2",
+    "fake-indexeddb": "^6.2.8",
     "happy-dom": "^21.0.4",
     "typescript": "^7.0.2",
     "vite": "^8.3.5",

@@ -23,6 +23,8 @@ import type {
   Workspace,
 } from './proto';
 import { PROJECT_SORT_NAMES } from './proto';
+import { deviceArtifactCache, laterArtifactCache, noArtifactCache, type ArtifactCache } from './artifactcache';
+import { deviceHistoryCache, laterHistoryCache, noHistoryCache, type HistoryCache } from './historycache';
 import { ChatSession, type OutgoingFile } from './session';
 import { storedLook, storedTheme, type DeviceLayout } from './theme';
 import { projectName } from './ui/Appearance';
@@ -57,6 +59,13 @@ const CHATS = 12;
 /** Unsent messages by session id, on this device: a convenience, so storage that fails or is
  *  empty only loses them on a reload. */
 const DRAFTS_KEY = 'hqc.drafts';
+/** A promise with its resolver at hand. */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
 function loadDrafts(): Map<string, string> {
   try {
     const v = JSON.parse(localStorage.getItem(DRAFTS_KEY) ?? '{}');
@@ -184,10 +193,20 @@ export class AppState {
   private edits = 0;
   /** By session id, the least recently used first. */
   private readonly chats = new Map<string, ChatSession>();
+  /** Resolves once `init` has asked the hub who the user is, whatever the answer. */
+  private readonly userKnown = deferred();
+  /** The device's copies of the history and of attachments are the user's own, and a chat opens
+   *  from the list the page kept before the user is known: their calls wait for it then. */
+  private readonly deviceHistory: HistoryCache =
+    typeof indexedDB === 'undefined' ? noHistoryCache : laterHistoryCache(this.userKnown.promise.then(() => deviceHistoryCache(this.me?.id)));
+  readonly artifactCache: ArtifactCache =
+    typeof indexedDB === 'undefined' ? noArtifactCache : laterArtifactCache(this.userKnown.promise.then(() => deviceArtifactCache(this.me?.id)));
 
   constructor(
     readonly api: Api,
     readonly socket: HubSocket,
+    /** What this device keeps of the sessions' history, by default the signed-in user's own. */
+    private readonly history?: HistoryCache,
   ) {
     socket.onState((s) => {
       this.conn = s;
@@ -255,6 +274,10 @@ export class AppState {
     this.changed();
   }
 
+  private historyCache(): HistoryCache {
+    return this.history ?? this.deviceHistory;
+  }
+
   /** The chat of session `id`, kept with what it has loaded for the `CHATS` most recently
    *  used; past that the least recently used one that is not open is dropped. */
   chat(id: string): ChatSession {
@@ -262,7 +285,7 @@ export class AppState {
     if (c) {
       this.chats.delete(id);
     } else {
-      c = new ChatSession(this.api, this.socket, id);
+      c = new ChatSession(this.api, this.socket, id, this.historyCache());
       // A typed `/model` switches the session's model on the hub, which the summary does not
       // carry: the session object is fetched again.
       c.onStored = (text) => {
@@ -292,6 +315,7 @@ export class AppState {
   async init(): Promise<void> {
     try {
       this.me = await this.api.me();
+      this.userKnown.resolve();
       this.keepProjectSort(this.me.project_sort);
       this.currentProjectId ??= this.me.personal_project_id;
       this.syncTimezone();
@@ -303,6 +327,8 @@ export class AppState {
       this.error = null;
     } catch (e) {
       this.error = (e as Error).message;
+      // No user: the copies keep nothing on this page load.
+      this.userKnown.resolve();
     }
     this.socket.onRequests((list) => this.setRequests(list));
     this.socket.onSummary((list) => this.mergeSummary(list));
@@ -903,9 +929,33 @@ export class AppState {
     this.edited();
   }
 
+  /** Deleted sessions leave the device: their history and the attachments it names (those the
+   *  hub's clean-up takes with the events: `payload.artifact_ids`, `payload.artifact_id`). A
+   *  chat of the session still holding events it has not kept yet keeps none of them: that part
+   *  is done before the first wait, the rest goes on behind the deletion. */
+  private async forgetCopies(ids: string[]): Promise<void> {
+    for (const id of ids) this.chats.get(id)?.forget();
+    const history = this.historyCache();
+    const artifacts = new Set<string>();
+    for (const id of ids) {
+      const r = await history.range(id);
+      const raws = r ? await history.read(id, r.from, r.to) : undefined;
+      for (const raw of raws ?? []) {
+        const payload = (raw as { payload?: Record<string, unknown> | null }).payload;
+        const many = payload?.artifact_ids;
+        if (Array.isArray(many)) for (const a of many) if (typeof a === 'string') artifacts.add(a);
+        if (typeof payload?.artifact_id === 'string') artifacts.add(payload.artifact_id);
+      }
+      await history.drop(id);
+    }
+    await this.artifactCache.forget([...artifacts]);
+  }
+
   async deleteSession(id: string): Promise<void> {
     await this.api.deleteSession(id);
+    const gone = [id, ...this.roomMembers(id).map((m) => m.id)];
     this.removeSession(id);
+    void this.forgetCopies(gone);
   }
 
   async renameSession(id: string, title: string): Promise<void> {
@@ -1358,12 +1408,14 @@ export class AppState {
 
   async deleteProject(id: string): Promise<void> {
     await this.api.deleteProject(id);
+    const gone = [...this.sessions.values()].filter((s) => s.project_id === id).map((s) => s.id);
     this.projects.delete(id);
     this.archivedProjects.delete(id);
     this.workspaces.delete(id);
     for (const [sid, s] of this.sessions) if (s.project_id === id) this.sessions.delete(sid);
     if (this.currentProjectId === id) this.currentProjectId = this.me?.personal_project_id ?? null;
     this.edited();
+    void this.forgetCopies(gone);
   }
 
   async loadWorkspaces(projectId: string): Promise<Workspace[]> {

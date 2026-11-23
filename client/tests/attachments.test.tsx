@@ -3,12 +3,13 @@
 // input, signed links renewed on 403/410, rendering of images, diffs, files and HTML, and
 // paths of the working copy in markdown that copy themselves (t11 #1).
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'preact';
 import { act } from 'preact/test-utils';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ArtifactStore, formatSize } from '../src/artifacts';
+import { memoryArtifactCache } from '../src/artifactcache';
+import { ArtifactStore, formatSize, MAX_INLINE_TEXT } from '../src/artifacts';
 import { parseEvent, type Artifact, type ArtifactUrl, type HqcEvent } from '../src/proto';
 import { ChatSession, type OutgoingFile } from '../src/session';
 import { Timeline } from '../src/timeline';
@@ -27,6 +28,8 @@ const ev = (name: string, patch: (e: any) => void = () => {}): HqcEvent => {
 };
 
 let root: HTMLElement | undefined;
+// happy-dom's observer never fires: unless a test installs its own, images load at once.
+beforeEach(() => vi.stubGlobal('IntersectionObserver', undefined));
 afterEach(() => {
   if (root) render(null, root);
   root = undefined;
@@ -42,7 +45,13 @@ function mount(node: preact.ComponentChild): HTMLElement {
   return root;
 }
 
+const DIFF = '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n same';
+
 const flush = () => act(async () => new Promise((r) => setTimeout(r, 0)));
+/** Until an image's bytes are in: the download, then happy-dom's FileReader, which takes ticks. */
+const settle = async () => {
+  for (let i = 0; i < 6; i++) await flush();
+};
 
 const meta = (id: string, kind: Artifact['kind'], name: string, size = 10): Artifact => ({
   id,
@@ -71,8 +80,20 @@ function fakeSource(metas: Artifact[], base = '') {
   };
 }
 
+/** Four bytes of a PNG, and the `data:` URL an image of them is shown from. */
+const PNG_BYTES = Uint8Array.from([137, 80, 78, 71]);
+const PNG_URL = 'data:image/png;base64,iVBORw==';
+/** A response whose `blob()` is happy-dom's own Blob, the only kind its FileReader reads. */
+const bytesResponse = (bytes: Uint8Array<ArrayBuffer>, type: string) =>
+  Object.assign(new Response(bytes, { headers: { 'content-type': type } }), {
+    blob: async () => new Blob([bytes], { type }),
+  });
+const png = () => bytesResponse(PNG_BYTES, 'image/png');
+/** A host that gives the diff to any link but an image's. */
+const diffOrPng = () => vi.fn(async (url: string) => (url.includes('/artifacts/img') ? png() : new Response(DIFF)));
+
 /** The start of a HEIC file (`ftyp`). */
-const HEIC_BYTES = new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112]);
+const HEIC_BYTES = Uint8Array.from([0, 0, 0, 24, 102, 116, 121, 112]);
 
 /** A global `Worker` that answers each message with `answer`, as the HEIC worker does; the
  *  list has what each one was sent and whether it was ended. */
@@ -140,6 +161,44 @@ describe('ArtifactStore', () => {
     await expect(store.meta('b')).rejects.toThrow();
     await expect(store.meta('b')).rejects.toThrow();
     expect(src.artifact).toHaveBeenCalledTimes(3);
+  });
+
+  it('the record comes from the device without a request; a site is not kept', async () => {
+    const cache = memoryArtifactCache();
+    const metas = [meta('a', 'text', 'a.txt'), { ...meta('s', 'site', 'page'), public_url: 'https://pages.example.com/x' }];
+    const src = fakeSource(metas);
+    const store = () => new ArtifactStore(src as never, undefined, undefined, undefined, undefined, cache);
+    expect((await store().meta('a')).name).toBe('a.txt');
+    await store().meta('s');
+    expect(src.artifact).toHaveBeenCalledTimes(2);
+    // A new page load: the first from the device, the site from the hub again.
+    expect((await store().meta('a')).name).toBe('a.txt');
+    expect((await store().meta('s')).public_url).toBe('https://pages.example.com/x');
+    expect(src.artifact.mock.calls.map((c) => c[0])).toEqual(['a', 's', 's']);
+    expect(await cache.getMeta('s')).toBeUndefined();
+    // `fresh` asks the hub whatever the device has, and keeps the answer.
+    metas[0] = meta('a', 'file', 'a.txt');
+    expect((await store().meta('a', true)).kind).toBe('file');
+    expect((await store().meta('a')).kind).toBe('file');
+  });
+
+  it('the bytes come from the device; a body over the cap is refused before it is read and not kept', async () => {
+    const cache = memoryArtifactCache();
+    const fetchImpl = vi.fn(async () => new Response('hello'));
+    const store = () => new ArtifactStore(fakeSource([]) as never, fetchImpl as never, undefined, undefined, undefined, cache);
+    expect(await store().text('t')).toBe('hello');
+    expect(await store().text('t')).toBe('hello');
+    expect(await (await store().blob('t')).text()).toBe('hello');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // Kept bytes over a smaller cap are refused as well.
+    await expect(store().text('t', 3)).rejects.toThrow('too large');
+
+    const read = vi.fn(async () => 'big');
+    const big = { ok: true, status: 200, headers: new Headers({ 'content-length': String(MAX_INLINE_TEXT + 1) }), body: { cancel: vi.fn() }, text: read, blob: read };
+    fetchImpl.mockResolvedValueOnce(big as never);
+    await expect(store().text('big')).rejects.toThrow('too large');
+    expect(read).not.toHaveBeenCalled();
+    expect(await cache.getBlob('big')).toBeUndefined();
   });
 
   it('sizes', () => {
@@ -328,7 +387,6 @@ describe('rendering attachments', () => {
     return { el: mount(<ChatItems items={t.items()} actions={actions} />), actions };
   }
 
-  const DIFF = '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n same';
 
   it('an image inline, a diff as a diff, text and file as cards, from user.message and attachment', async () => {
     const metas = [
@@ -338,7 +396,7 @@ describe('rendering attachments', () => {
       meta('bin', 'file', 'data.bin', 5),
     ];
     const src = fakeSource(metas);
-    const fetchImpl = vi.fn(async () => new Response(DIFF));
+    const fetchImpl = diffOrPng();
     const store = new ArtifactStore(src as never, fetchImpl as never);
     const { el, actions } = chatWith(
       [
@@ -353,10 +411,10 @@ describe('rendering attachments', () => {
       ],
       store,
     );
-    await flush();
-    await flush();
+    await settle();
+    await settle();
     const img = el.querySelector<HTMLImageElement>('.msg-user .attachment-image img')!;
-    expect(img.getAttribute('src')).toBe('/artifacts/img?exp=1&sig=s1');
+    expect(img.getAttribute('src')).toBe(PNG_URL);
     expect(img.alt).toBe('screen.png');
 
     const diff = el.querySelector('.msg-user .md-code-diff')!;
@@ -449,17 +507,81 @@ describe('rendering attachments', () => {
     await expect(store.text('d')).rejects.toThrow('too large');
   });
 
-  it('an image shown again has its link in the first render, without asking the hub', async () => {
+  it('an image downloaded once is not downloaded again: shown again at once, by another store from the device', async () => {
+    const cache = memoryArtifactCache();
     const src = fakeSource([meta('img', 'image', 'screen.png')]);
-    const store = new ArtifactStore(src as never);
-    const first = chatWith([ev('event.attachment', (e) => (e.payload.artifact_id = 'img'))], store);
-    await flush();
-    expect(first.el.querySelector('.attachment-image img')!.getAttribute('src')).toBe('/artifacts/img?exp=1&sig=s1');
-    // The chat opened again: the same link at once, so the browser has the image in its cache.
-    const again = chatWith([ev('event.attachment', (e) => (e.payload.artifact_id = 'img'))], store);
-    expect(again.el.querySelector('.attachment-image img')!.getAttribute('src')).toBe('/artifacts/img?exp=1&sig=s1');
-    await flush();
+    const fetchImpl = vi.fn(async () => png());
+    const store = new ArtifactStore(src as never, fetchImpl as never, undefined, undefined, undefined, cache);
+    const event = () => ev('event.attachment', (e) => (e.payload.artifact_id = 'img'));
+    const first = chatWith([event()], store);
+    await settle();
+    expect(first.el.querySelector('.attachment-image img')!.getAttribute('src')).toBe(PNG_URL);
+    // The chat opened again: the image is in the first render.
+    const again = chatWith([event()], store);
+    expect(again.el.querySelector('.attachment-image img')!.getAttribute('src')).toBe(PNG_URL);
+    // Another page load: a new store over the same device cache, no request for the bytes,
+    // the record or a link.
+    const reloaded = new ArtifactStore(src as never, fetchImpl as never, undefined, undefined, undefined, cache);
+    const third = chatWith([event()], reloaded);
+    await settle();
+    await settle();
+    expect(third.el.querySelector('.attachment-image img')!.getAttribute('src')).toBe(PNG_URL);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(src.artifactLink).toHaveBeenCalledTimes(1);
+    expect(src.artifact).toHaveBeenCalledTimes(1);
+  });
+
+  it('a file read for the input (a message taken back) is not kept on the device; one kept is read from it', async () => {
+    const cache = memoryArtifactCache();
+    const src = fakeSource([meta('f', 'file', 'notes.txt')]);
+    const fetchImpl = vi.fn(async () => new Response('hi'));
+    const store = new ArtifactStore(src as never, fetchImpl as never, undefined, undefined, undefined, cache);
+    expect(await (await store.blob('f', false)).text()).toBe('hi');
+    expect(await cache.getBlob('f')).toBeUndefined();
+    // Shown, it is kept; read for the input again, it comes from the device.
+    await store.blob('f');
+    expect(await cache.getBlob('f')).toBeDefined();
+    expect(await (await store.blob('f', false)).text()).toBe('hi');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('a feed image is downloaded once it is near the viewport, not before', async () => {
+    const observers: { cb: (e: { isIntersecting: boolean }[]) => void; opts: IntersectionObserverInit; el?: Element }[] = [];
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(
+          readonly cb: (e: { isIntersecting: boolean }[]) => void,
+          readonly opts: IntersectionObserverInit,
+        ) {
+          observers.push(this);
+        }
+        el?: Element;
+        observe(el: Element) {
+          this.el = el;
+        }
+        disconnect() {}
+      },
+    );
+    const fetchImpl = vi.fn(async () => png());
+    const store = new ArtifactStore(fakeSource([meta('img', 'image', 'screen.png')]) as never, fetchImpl as never, undefined, undefined, undefined, memoryArtifactCache());
+    const { el } = chatWith([ev('event.attachment', (e) => (e.payload.artifact_id = 'img'))], store);
+    await settle();
+    await settle();
+    expect(observers).toHaveLength(1);
+    expect(observers[0].el).toBe(el.querySelector('.attachment-image'));
+    // About one screen around the viewport.
+    expect(observers[0].opts.rootMargin).toBe('100% 0px');
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(el.querySelector('.attachment-image img')).toBeNull();
+    // Far away still: nothing yet.
+    await act(async () => observers[0].cb([{ isIntersecting: false }]));
+    await settle();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await act(async () => observers[0].cb([{ isIntersecting: true }]));
+    await settle();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(el.querySelector('.attachment-image img')!.getAttribute('src')).toBe(PNG_URL);
   });
 
   it('a file attached again with another kind is shown with it in an open chat', async () => {
@@ -479,64 +601,52 @@ describe('rendering attachments', () => {
     expect([...again.el.querySelectorAll('.card-attachment button')].map((b) => b.textContent)).toEqual(['Open', 'Download']);
   });
 
-  it('a broken image link is renewed once, then the image becomes a card', async () => {
+  it('an image the browser cannot draw becomes a card', async () => {
     const src = fakeSource([meta('img', 'image', 'screen.png')]);
-    const store = new ArtifactStore(src as never);
+    const store = new ArtifactStore(src as never, vi.fn(async () => png()) as never);
     const { el } = chatWith([ev('event.attachment', (e) => (e.payload.artifact_id = 'img'))], store);
-    await flush();
-    let img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
+    await settle();
+    const img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
     await act(async () => void img.dispatchEvent(new Event('error')));
-    await flush();
-    img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
-    expect(img.getAttribute('src')).toBe('/artifacts/img?exp=1&sig=s2');
-    await act(async () => void img.dispatchEvent(new Event('error')));
-    await flush();
+    await settle();
     expect(el.querySelector('.attachment-image')).toBeNull();
     expect(el.querySelector('.card-attachment')!.textContent).toContain('screen.png');
   });
 
-  it('a HEIC the browser does not show is decoded in a worker and shown as a JPEG, once for the feed and the viewer', async () => {
+  it('a HEIC the browser does not show is decoded in a worker from the stored bytes and shown as a JPEG, once for the feed and the viewer', async () => {
     const src = fakeSource([meta('heic', 'image', 'IMG_1161.HEIC')]);
-    const fetchImpl = vi.fn(async () => new Response(HEIC_BYTES, { headers: { 'content-type': 'image/heic' } }));
-    const store = new ArtifactStore(src as never, fetchImpl as never);
+    const fetchImpl = vi.fn(async () => bytesResponse(HEIC_BYTES, 'image/heic'));
+    const store = new ArtifactStore(src as never, fetchImpl as never, undefined, undefined, undefined, memoryArtifactCache());
     const workers = workerAnswering(new Blob(['jpeg'], { type: 'image/jpeg' }));
     const { el } = chatWith([ev('event.attachment', (e) => (e.payload = { artifact_id: 'heic', kind: 'image', name: 'IMG_1161.HEIC' }))], store);
-    await flush();
-    let img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
-    // The browser is given the link first: Safari shows HEIC itself.
-    expect(img.getAttribute('src')).toBe('/artifacts/heic?exp=1&sig=s1');
-    // A first failure renews the link, as for any image: it may have expired.
-    await act(async () => void img.dispatchEvent(new Event('error')));
-    await vi.waitFor(() => expect(el.querySelector('.attachment-image img')!.getAttribute('src')).toBe('/artifacts/heic?exp=1&sig=s2'));
-    expect(fetchImpl).not.toHaveBeenCalled();
+    await settle();
+    const img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
+    // The browser is given the bytes first: Safari shows HEIC itself.
+    expect(img.getAttribute('src')).toMatch(/^data:image\/heic;base64,/);
     expect(workers).toEqual([]);
-    img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
     await act(async () => void img.dispatchEvent(new Event('error')));
     await vi.waitFor(() => expect(el.querySelector('.attachment-image img')!.getAttribute('src')).toMatch(/^data:image\/jpeg;base64,/));
-    expect(fetchImpl).toHaveBeenCalledWith('/artifacts/heic?exp=1&sig=s2');
     expect(workers).toEqual([{ sent: HEIC_BYTES, terminated: true }]);
+    // The worker was given the bytes kept from the first download, not a second one.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
 
     render(null, root!);
     const viewer = mount(<ArtifactViewer id="heic" name="IMG_1161.HEIC" kind="image" store={store} onClose={vi.fn()} onDownload={vi.fn()} />);
-    await flush();
-    // Decoded already: the viewer starts from the JPEG, not from the link that fails.
+    await settle();
+    // Decoded already: the viewer starts from the JPEG.
     expect(viewer.querySelector('.viewer-body img')!.getAttribute('src')).toMatch(/^data:image\/jpeg;base64,/);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(workers).toHaveLength(1);
   });
 
-  it('a HEIC libheif does not read becomes a card after the renewed link fails; the failure is not kept', async () => {
+  it('a HEIC libheif does not read becomes a card; the failure is not kept', async () => {
     const src = fakeSource([meta('heic', 'image', 'IMG_1161.HEIC')]);
-    const fetchImpl = vi.fn(async () => new Response(HEIC_BYTES, { headers: { 'content-type': 'image/heic' } }));
+    const fetchImpl = vi.fn(async () => bytesResponse(HEIC_BYTES, 'image/heic'));
     const store = new ArtifactStore(src as never, fetchImpl as never);
     const workers = workerAnswering(null);
     const { el } = chatWith([ev('event.attachment', (e) => (e.payload = { artifact_id: 'heic', kind: 'image', name: 'IMG_1161.HEIC' }))], store);
-    await flush();
-    let img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
-    await act(async () => void img.dispatchEvent(new Event('error')));
-    await vi.waitFor(() => expect(el.querySelector('.attachment-image img')!.getAttribute('src')).toBe('/artifacts/heic?exp=1&sig=s2'));
-    expect(workers).toEqual([]);
-    img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
+    await settle();
+    const img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
     await act(async () => void img.dispatchEvent(new Event('error')));
     await vi.waitFor(() => expect(el.querySelector('.attachment-image')).toBeNull());
     expect(workers).toHaveLength(1);
@@ -565,7 +675,7 @@ describe('rendering attachments', () => {
 
   it("the agent's hqc_attach (T31): the files render as a user's do, after the tool call", async () => {
     const src = fakeSource([meta('img', 'image', 'shot.png'), meta('dif', 'diff', 'fix.patch')]);
-    const fetchImpl = vi.fn(async () => new Response(DIFF));
+    const fetchImpl = diffOrPng();
     const store = new ArtifactStore(src as never, fetchImpl as never);
     const call = (seq: number, id: string) =>
       ev('event.tool.call', (e) => {
@@ -595,12 +705,12 @@ describe('rendering attachments', () => {
       ],
       store,
     );
-    await flush();
-    await flush();
+    await settle();
+    await settle();
     expect(el.querySelectorAll('.tool-group').length).toBe(2);
     expect(el.querySelectorAll('.tool-group.tool-running').length).toBe(0);
     const img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
-    expect(img.getAttribute('src')).toBe('/artifacts/img?exp=1&sig=s1');
+    expect(img.getAttribute('src')).toBe(PNG_URL);
     expect(el.querySelector('.attachment-caption')!.textContent).toBe('The layout');
     expect(el.querySelector('.md-code-diff .diff-add')!.textContent).toBe('+new');
     // The order of the feed: the call, the image, the call, the diff.
@@ -612,7 +722,7 @@ describe('rendering attachments', () => {
 
   it('a message from another session shows the files it handed over (T41)', async () => {
     const src = fakeSource([meta('img', 'image', 'board.png'), meta('txt', 'text', 'notes.txt')]);
-    const store = new ArtifactStore(src as never);
+    const store = new ArtifactStore(src as never, diffOrPng() as never);
     const { el } = chatWith(
       [
         ev('event.peer.message', (e) => {
@@ -626,8 +736,8 @@ describe('rendering attachments', () => {
       ],
       store,
     );
-    await flush();
-    await flush();
+    await settle();
+    await settle();
     const cards = [...el.querySelectorAll('.relay')];
     expect(cards.length).toBe(2);
     expect(cards[0].querySelector<HTMLImageElement>('.attachment-image img')!.alt).toBe('board.png');
@@ -681,7 +791,8 @@ describe('rendering attachments', () => {
       { ...meta('typed', 'text', 'summary'), mime: 'text/markdown; charset=utf-8' },
       meta('txt', 'text', 'notes.txt'),
     ];
-    const store = new ArtifactStore(fakeSource(metas) as never);
+    // The image's bytes are downloaded to show it: from this host, not the network.
+    const store = new ArtifactStore(fakeSource(metas) as never, vi.fn(async () => png()) as never);
     const viewArtifact = vi.fn();
     const { el, actions } = chatWith(
       [
@@ -766,7 +877,7 @@ describe('rendering attachments', () => {
   });
 
   it("a tool result's images are thumbnails in its row that open in the viewer (SPEC 0.180)", async () => {
-    const store = new ArtifactStore(fakeSource([meta('shot', 'image', 'image.png')]) as never);
+    const store = new ArtifactStore(fakeSource([meta('shot', 'image', 'image.png')]) as never, vi.fn(async () => png()) as never);
     const viewArtifact = vi.fn();
     const { el } = chatWith(
       [
@@ -777,9 +888,9 @@ describe('rendering attachments', () => {
       { viewArtifact },
     );
     await act(async () => el.querySelector<HTMLButtonElement>('.tool-group-head')!.click());
-    await flush();
+    await settle();
     const thumb = el.querySelector<HTMLButtonElement>('.tool-row .tool-images .attachment-image')!;
-    expect(thumb.querySelector('img')!.getAttribute('src')).toBe('/artifacts/shot?exp=1&sig=s1');
+    expect(thumb.querySelector('img')!.getAttribute('src')).toBe(PNG_URL);
     await act(async () => thumb.click());
     expect(viewArtifact).toHaveBeenCalledWith({ id: 'shot', name: 'image.png', kind: 'image' });
   });
@@ -833,22 +944,21 @@ describe('the viewer over the chat (SPEC §12)', () => {
     expect(el.querySelector('.viewer-body .error-text')!.textContent).toContain('HTTP 500');
   });
 
-  it('an image from its signed link, renewed once when refused', async () => {
-    const el = viewer('image', new ArtifactStore(fakeSource([]) as never));
-    await flush();
-    let img = el.querySelector<HTMLImageElement>('.viewer-body img')!;
-    expect(img.getAttribute('src')).toBe('/artifacts/a?exp=1&sig=s1');
+  it('an image from its bytes, at once, not waiting to be near anything', async () => {
+    const io = vi.fn();
+    vi.stubGlobal('IntersectionObserver', io);
+    const el = viewer('image', new ArtifactStore(fakeSource([]) as never, vi.fn(async () => png()) as never));
+    await settle();
+    const img = el.querySelector<HTMLImageElement>('.viewer-body img')!;
+    expect(img.getAttribute('src')).toBe(PNG_URL);
     expect(img.alt).toBe('screen.png');
-    await act(async () => void img.dispatchEvent(new Event('error')));
-    await flush();
-    img = el.querySelector<HTMLImageElement>('.viewer-body img')!;
-    expect(img.getAttribute('src')).toBe('/artifacts/a?exp=1&sig=s2');
+    expect(io).not.toHaveBeenCalled();
   });
 
   it('a click outside it or on its close button closes it, a click inside or a selection ending outside does not', async () => {
     const onClose = vi.fn();
-    const el = viewer('image', new ArtifactStore(fakeSource([]) as never), onClose);
-    await flush();
+    const el = viewer('image', new ArtifactStore(fakeSource([]) as never, vi.fn(async () => png()) as never), onClose);
+    await settle();
     const img = el.querySelector<HTMLElement>('.viewer-body img')!;
     const scrim = el.querySelector<HTMLElement>('.modal-scrim')!;
     const down = (on: HTMLElement) => act(async () => void on.dispatchEvent(new Event('pointerdown', { bubbles: true })));

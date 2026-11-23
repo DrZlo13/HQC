@@ -3296,9 +3296,11 @@ button.btn-mode-pill.perm-allow-all:hover,
 .msg-time {
   float: right;
   margin-left: 16px;
-  /* The float stays within the first text line, whatever its buttons are: WebKit rounds a text
-     line down to whole pixels (22.5 px is 22), and a float as tall as --feed-line reaches into
-     the second line, shortens it by its own width, and a long word there splits. */
+  /* The float stays within the first text line, whatever it holds (a note's icon, the buttons
+     of a bubble with no text): WebKit rounds a text line down to whole pixels (22.5 px is 22),
+     and a float as tall as --feed-line reaches into the second line, shortens it by its own
+     width, and a long word there splits. The buttons at the end of the text (`.msg-tail`) are
+     floats of the same height for the same reason. */
   height: calc(var(--feed-line) - 1px);
   font-size: 12px;
   line-height: var(--feed-line);
@@ -3326,6 +3328,15 @@ button.btn-mode-pill.perm-allow-all:hover,
   gap: 4px;
 }
 
+/* The roots of a message hold the floats at the end of their text, a time's and the buttons': a
+   tail that a full last line pushed under it stands within the message. Only the roots: the
+   text blocks inside stay in the message's flow, or their first line would not wrap around the
+   time. (`.relay` is a flex column: each of its parts holds its own floats.) */
+.msg-agent,
+.msg-bubble,
+.thinking-text {
+  display: flow-root;
+}
 .msg-bubble {
   max-width: 80%;
   padding: 10px 14px;
@@ -3334,9 +3345,10 @@ button.btn-mode-pill.perm-allow-all:hover,
   color: var(--text);
   overflow-wrap: anywhere;
 }
-/* A message's buttons (Search, Copy, Quote and the user's Add to quick messages and Fork): always
-   shown, in the line's flow so that they cover no text: left of the time, in a head, and at the
-   right end of a phone's usage line or of a reasoning's summary. */
+/* A message's buttons (Search, Copy, Quote and the user's Take back, Send now, Add to quick
+   messages and Fork): always shown, in the line's flow so that they cover no text, at the bottom
+   right of the message: the right end of its usage line or of a reasoning's summary, else the
+   end of the text's last line (`.msg-tail`); by the time only in a bubble with no text. */
 .msg-buttons {
   display: inline-flex;
   gap: 2px;
@@ -3344,9 +3356,34 @@ button.btn-mode-pill.perm-allow-all:hover,
   vertical-align: middle;
 }
 .msg-agent > .meta .msg-buttons,
+.relay > .meta .msg-buttons,
 .thinking summary .msg-buttons {
   margin-left: auto;
   margin-right: 0;
+}
+/* At the end of the text's last line, as Telegram has the time: a last line with room keeps the
+   buttons on it, a full one pushes them onto a line of their own at the right. As tall as a
+   text line less a pixel (see `.msg-time`), centred in it (a phone's 24 px buttons overflow it,
+   as they did in the time's float). */
+.msg-tail {
+  float: right;
+  align-items: center;
+  height: calc(var(--feed-line) - 1px);
+  margin: 0 0 0 12px;
+}
+/* After a block that holds no line of text (a code block, a table), the buttons' line. */
+.msg-tail-line {
+  display: flex;
+  justify-content: flex-end;
+}
+/* What follows a text (files) starts under the buttons that a full last line pushed down. */
+.msg-text ~ .attachments,
+.msg-agent > .md ~ .relay-files {
+  clear: right;
+}
+/* A reasoning has its buttons in the summary while folded, at the end of its text when open. */
+.thinking[open] summary .msg-buttons {
+  display: none;
 }
 /* Search keeps its place while the message holds no selection, so that the line does not
    re-wrap when one is made. */

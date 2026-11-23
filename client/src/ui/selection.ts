@@ -55,6 +55,12 @@ function flat(n: Node): string {
   if (n instanceof Element) {
     if (n.matches(LEFT_OUT)) return '';
     if (n.tagName === 'BR') return '\n';
+    // A folded block (a reasoning, a run of calls, a task's report) shows its summary line only:
+    // the rest is in the DOM but not on the screen, so it is no text of the selection.
+    if (n.tagName === 'DETAILS' && !n.hasAttribute('open')) {
+      const summary = [...n.children].find((c) => c.tagName === 'SUMMARY');
+      return summary ? flat(summary) : '';
+    }
   }
   const inner = [...n.childNodes].map(flat).join('');
   if (!(n instanceof Element)) return inner;
@@ -70,6 +76,9 @@ function flat(n: Node): string {
   }
 }
 
+/** The message a node is in. */
+const rootOf = (n: Node) => (n instanceof Element ? n : n.parentElement)?.closest(MESSAGE);
+
 /** The selection as the message that holds it: the one that contains the range's start, else
  *  the one that contains its end. A range inside it is `sel.toString()` as the browser lays it
  *  out; one that leaves it is clipped to the message. */
@@ -77,7 +86,6 @@ function held(scope: HTMLElement | null): Held | null {
   const sel = scope?.ownerDocument.getSelection();
   if (!scope || !sel || sel.isCollapsed || sel.rangeCount === 0) return null;
   const range = sel.getRangeAt(0);
-  const rootOf = (n: Node) => (n instanceof Element ? n : n.parentElement)?.closest(MESSAGE);
   const root = rootOf(range.startContainer) ?? rootOf(range.endContainer);
   if (!root || !scope.contains(root)) return null;
   const startsIn = root.contains(range.startContainer);
@@ -101,6 +109,20 @@ function held(scope: HTMLElement | null): Held | null {
   }
   text = text.trim();
   return text ? { root, text } : null;
+}
+
+/** The whole selection inside `scope`, for a menu about the selection and not about one message:
+ *  inside one message, that message's text as `held` gives it; across several, the range's text
+ *  by lines, without what `LEFT_OUT` names (times, heads, meta lines, buttons). Undefined when
+ *  the selection is empty or not inside `scope`. */
+export function selectedText(scope: HTMLElement | null): string | undefined {
+  const sel = scope?.ownerDocument.getSelection();
+  if (!scope || !sel || sel.isCollapsed || sel.rangeCount === 0) return undefined;
+  const range = sel.getRangeAt(0);
+  if (!scope.contains(range.commonAncestorContainer)) return undefined;
+  const start = rootOf(range.startContainer);
+  if (start && start === rootOf(range.endContainer)) return held(scope)?.text;
+  return flat(range.cloneContents()).replace(/\n{3,}/g, '\n\n').trim() || undefined;
 }
 
 /** Keeps the selection inside `scope` (the chat) and publishes which message holds it; the state

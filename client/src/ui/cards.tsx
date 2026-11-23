@@ -1,9 +1,10 @@
 // The feed of a chat (T26): agent messages as text without a bubble, the user's in a bubble
 // on the right (or, in the Compact look, a plate from the left edge and a mark in a
 // gutter before every other item), runs of tool calls folded into groups, request cards,
-// service lines. A message's time sits at the right end of its first line, its Search, Copy,
-// Quote and fork buttons left of it, always shown (a phone's usage line and a reasoning's
-// summary hold them at their right end). One component per event type of SPEC §4; unknown
+// service lines. A message's time sits at the right end of its first line; its Search, Copy,
+// Quote and fork buttons, always shown, at the bottom right: at the right end of the usage line
+// of an agent message that has one, else at the end of the text's last line (a reasoning folded
+// holds them at the right end of its summary). One component per event type of SPEC §4; unknown
 // and invalid events render as a collapsed row and never throw.
 
 import type { SecretFields } from '../api';
@@ -843,7 +844,8 @@ function Line({ kind, children }: { kind: string; children: preact.ComponentChil
 }
 
 /** A message's time at the right end of its first line, as Telegram has it: floated, so the
- *  text wraps around it; `children` after the time ("· scheduled"). */
+ *  text wraps around it; `before` (a bubble's note, the buttons of a message with no text) and
+ *  `children` (" · scheduled") around the time. */
 function MessageTime({ ts, before, children }: { ts: string; before?: ComponentChildren; children?: ComponentChildren }) {
   return (
     <span class="msg-time">
@@ -864,7 +866,9 @@ const JOINED: BubbleNote = { label: 'Joined the turn', icon: <IconJoined /> };
 const INSTEAD: BubbleNote = { label: 'Instead of the request', icon: <IconReply /> };
 
 /** The user's bubble (a plate in one column) with its time and, when there is one, its note:
- *  an icon right before the time, in the time's line, so it takes an icon's room. */
+ *  an icon right before the time, in the time's line, so it takes an icon's room. The buttons
+ *  of a message with text are at the end of its text (`UserText`); `buttons` are those of one
+ *  without, by the time. */
 function Bubble({
   ts,
   note,
@@ -875,7 +879,7 @@ function Bubble({
   ts: string;
   note?: BubbleNote;
   time?: ComponentChildren;
-  /** The message's buttons, left of the time. */
+  /** The buttons of a bubble with no text, left of the time. */
   buttons?: ComponentChildren;
   children: ComponentChildren;
 }) {
@@ -884,7 +888,7 @@ function Bubble({
       <MessageTime
         ts={ts}
         before={[
-          buttons && <MessageButtons>{buttons}</MessageButtons>,
+          buttons,
           note && (
             <span class="msg-note" role="img" aria-label={note.label} title={note.label}>
               {note.icon}
@@ -917,10 +921,12 @@ function usePress() {
 }
 
 /** A message's buttons, always shown, in the line's flow so that they cover no text (styles.css):
- *  by the message's time, in a head, at the end of a usage line or of a `<summary>`. */
-export function MessageButtons({ children }: { children: ComponentChildren }) {
+ *  at the right end of a usage line or of a `<summary>`, by the time of a message with no text,
+ *  and with `tail` at the end of the text's last line (`Markdown`'s and `UserText`'s `tail`), as
+ *  Telegram has the time: a float, which a full last line pushes onto a line of its own. */
+export function MessageButtons({ children, tail }: { children: ComponentChildren; tail?: boolean }) {
   return (
-    <span class="msg-buttons" {...usePress()}>
+    <span class={tail ? 'msg-buttons msg-tail' : 'msg-buttons'} {...usePress()}>
       {children}
     </span>
   );
@@ -987,9 +993,10 @@ function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'
   // into a running one.
   const waiting = event.author.kind === 'user' && d === 'pending' && event.payload.human === true;
   const sendable = waiting && !event.payload.text.trim().startsWith('/');
-  const buttons = (event.payload.text || fork || waiting) && (
-    <>
-      {event.payload.text && <SelectionButtons root={root} text={event.payload.text} actions={actions} />}
+  const hasText = !!event.payload.text;
+  const buttons = (hasText || fork || waiting) && (
+    <MessageButtons tail={hasText}>
+      {hasText && <SelectionButtons root={root} text={event.payload.text} actions={actions} />}
       {waiting && actions.withdraw && <WaitingButton event={event} label="Take back" title="Take back: the message returns to the input" run={actions.withdraw} icon={<IconRestore size={13} />} cls="btn-withdraw" />}
       {sendable && actions.sendNow && (
         <WaitingButton
@@ -1014,13 +1021,13 @@ function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'
           <IconFork />
         </button>
       )}
-    </>
+    </MessageButtons>
   );
   return (
     <div class="msg-user" ref={root}>
       <Bubble
         ts={event.ts}
-        buttons={buttons}
+        buttons={hasText ? undefined : buttons}
         note={event.payload.joined ? JOINED : undefined}
         time={[
           event.payload.schedule_id && <span class="scheduled"> · scheduled</span>,
@@ -1033,7 +1040,7 @@ function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'
           ),
         ]}
       >
-        {event.payload.text && <UserText text={event.payload.text} />}
+        {hasText && <UserText text={event.payload.text} tail={buttons} />}
         {ids.length > 0 && (
           <div class="attachments">
             {ids.map((id) => (
@@ -1097,20 +1104,30 @@ function QuickAddButton({ text, quick }: { text: string; quick: NonNullable<Chat
 }
 
 /** What the user typed, as the tab shows it: the text as is with its line breaks, no
- *  Markdown. */
-function UserText({ text }: { text: string }) {
-  return <div class="text msg-text">{text}</div>;
+ *  Markdown; `tail` (the message's buttons) at the end of its last line. Trailing line breaks
+ *  are not shown: they would put the buttons lines below the text. */
+function UserText({ text, tail }: { text: string; tail?: ComponentChildren }) {
+  return (
+    <div class="text msg-text">
+      {text.trimEnd()}
+      {tail}
+    </div>
+  );
 }
 
 /** "Reply with text instead": the user's text went to the agent with the denial. */
 function TextAnswer({ event, actions }: { event: EventOf<'approval.response'>; actions: ChatActions }) {
   const text = event.payload.message!;
   const root = useRef<HTMLDivElement>(null);
-  const buttons = <SelectionButtons root={root} text={text} actions={actions} />;
+  const buttons = (
+    <MessageButtons tail>
+      <SelectionButtons root={root} text={text} actions={actions} />
+    </MessageButtons>
+  );
   return (
     <div class="msg-user msg-answer" ref={root}>
-      <Bubble ts={event.ts} note={INSTEAD} buttons={buttons}>
-        <UserText text={text} />
+      <Bubble ts={event.ts} note={INSTEAD}>
+        <UserText text={text} tail={buttons} />
       </Bubble>
     </div>
   );
@@ -1177,26 +1194,26 @@ export function UsageParts({ usage }: { usage: EventOf<'usage'> }) {
 function AgentMessage({ event, usage, actions }: { event: EventOf<'agent.message'>; usage?: EventOf<'usage'>; actions: ChatActions }) {
   // An interrupt cut it off: muted, marked after its time.
   const interrupted = event.payload.interrupted;
-  const phone = useIsPhone();
   const root = useRef<HTMLElement>(null);
-  const buttons = <SelectionButtons root={root} text={event.payload.text} actions={actions} />;
-  // A phone's line is full: the buttons go to the end of the usage line when there is one.
-  const inUsage = phone && !!usage;
+  // At the bottom right: the end of the usage line when there is one, else of the text.
+  const buttons = (
+    <MessageButtons tail={!usage}>
+      <SelectionButtons root={root} text={event.payload.text} actions={actions} />
+    </MessageButtons>
+  );
   return (
     <article
       class={`msg-agent ${event.payload.final ? 'msg-final' : 'msg-interim'}${interrupted ? ' msg-interrupted' : ''}`}
       ref={root}
     >
-      <MessageTime ts={event.ts} before={!inUsage && <MessageButtons>{buttons}</MessageButtons>}>
-        {interrupted && <span class="interrupted"> · interrupted</span>}
-      </MessageTime>
-      <Markdown class="text" text={event.payload.text} />
+      <MessageTime ts={event.ts}>{interrupted && <span class="interrupted"> · interrupted</span>}</MessageTime>
+      <Markdown class="text" text={event.payload.text} tail={usage ? undefined : buttons} />
       {usage && (
         <div class="meta">
           <span class="usage">
             <UsageParts usage={usage} />
           </span>
-          {inUsage && <MessageButtons>{buttons}</MessageButtons>}
+          {buttons}
         </div>
       )}
     </article>
@@ -1215,18 +1232,22 @@ export function StreamingMessage({ text }: { text: string }) {
 /** The thinking, stored or being written: drawn the same, so nothing moves when it is stored. */
 function Thinking({ event, actions }: { event: EventOf<'agent.thinking' | 'agent.delta'>; actions: ChatActions }) {
   const root = useRef<HTMLDetailsElement>(null);
+  const selection = <SelectionButtons root={root} text={event.payload.text} actions={actions} />;
   return (
     <details class="thinking" ref={root}>
       <summary>
         <IconChevron size={12} />
         {/* Cut where the line ends: 2000 characters are wider than any window. */}
         <span class="thinking-peek">Thinking · {oneLine(event.payload.text.slice(0, 2000), 2000)}</span>
-        <MessageButtons>
-          <SelectionButtons root={root} text={event.payload.text} actions={actions} />
-        </MessageButtons>
+        {/* Folded, the buttons stand in the summary; open, at the end of the text (the CSS hides these). */}
+        <MessageButtons>{selection}</MessageButtons>
       </summary>
       {/* The feed's own font, no box: prose, as in the VS Code tab. */}
-      <div class="thinking-text">{event.payload.text}</div>
+      <div class="thinking-text">
+        {/* The runtime ends a thinking with blank lines: shown, they put the buttons below them. */}
+        {event.payload.text.trimEnd()}
+        <MessageButtons tail>{selection}</MessageButtons>
+      </div>
     </details>
   );
 }

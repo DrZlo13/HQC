@@ -4164,15 +4164,14 @@ describe('Quote', () => {
     try {
       const open = vi.fn();
       vi.stubGlobal('open', open);
-      // The message's buttons are a phone's row where the screen is narrow (`useIsPhone`).
       vi.stubGlobal('matchMedia', (media: string) => ({ matches: true, media, addEventListener: () => {}, removeEventListener: () => {} }));
       // Without the open request of HISTORY: on a phone it would take the composer's place.
       const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
       await mount(app, true);
       const row = $('.msg-agent .msg-buttons')!;
-      // A phone's usage line holds them, the time line none.
+      // The usage line holds them, the time line none.
       expect($('.msg-agent .msg-time .msg-buttons')).toBeNull();
-      expect($('.msg-agent > .meta .msg-buttons')).not.toBeNull();
+      expect($('.msg-agent > .meta > .msg-buttons')).not.toBeNull();
       await select(textNode('All tests pass.'), 4, 9);
       const search = row.querySelector<HTMLButtonElement>(SEARCH)!;
       const quote = row.querySelector<HTMLButtonElement>('.btn-msg-quote')!;
@@ -4217,16 +4216,244 @@ describe('Quote', () => {
     expect($('.btn-quote')).toBeNull();
   });
 
-  it('leaves the browser\'s menu to a right click, on a selection too', async () => {
+  /** A right click on `node` (its parent for a text): the press first, then `between` (what a Mac
+   *  does: it selects the word under the pointer), then `contextmenu`; whether the browser keeps
+   *  its own menu (not prevented). All in one act: no `selectionchange` is heard in between. */
+  const rightClick = async (node: Node, x = 300, y = 200, between?: () => void) => {
+    let kept = true;
+    await act(() => {
+      const el = node instanceof Element ? node : node.parentElement!;
+      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 2 }));
+      between?.();
+      kept = el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+    });
+    return kept;
+  };
+  const selecting = (node: Node, from: number, to: number) => () => {
+    const r = document.createRange();
+    r.setStart(node, from);
+    r.setEnd(node, to);
+    document.getSelection()!.removeAllRanges();
+    document.getSelection()!.addRange(r);
+  };
+  /** `document.caretRangeFromPoint` that finds the click in `node`, at its third character. */
+  const pointAt = (node: Node) => () => {
+    const r = document.createRange();
+    r.setStart(node, 2);
+    r.collapse(true);
+    return r;
+  };
+
+  it('opens the client\'s menu on a right click of selected text: Quote, Copy, Search in …', async () => {
+    const writeText = clipboard();
+    const open = vi.fn();
+    vi.stubGlobal('open', open);
     const { app } = setup('idle');
     await mount(app);
-    await select(textNode('All tests pass.'));
-    let kept = false;
-    await act(() => {
-      kept = textNode('All tests pass.').parentElement!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
-    });
-    expect(kept, 'not prevented').toBe(true);
+    await select(textNode('All tests pass.'), 4, 9);
+    expect(await rightClick(textNode('All tests pass.')), 'the browser\'s menu is prevented').toBe(false);
+    expect([...document.querySelectorAll('.ctx-menu .menu-item')].map((b) => b.textContent!.trim())).toEqual(['Quote', 'Copy', 'Search in Google']);
+    // Quote puts the text selected into the input and clears the selection.
+    await act(async () => $('.ctx-menu .menu-quote')!.click());
+    expect(area().value).toBe('> tests\n\n');
+    expect(document.getSelection()!.rangeCount).toBe(0);
     expect($('.ctx-menu')).toBeNull();
+    // Copy: the same text.
+    await select(textNode('All tests pass.'), 4, 9);
+    await rightClick(textNode('All tests pass.'));
+    await act(async () => $('.ctx-menu .btn-copy-selection')!.click());
+    expect(writeText).toHaveBeenLastCalledWith('tests');
+    // Search: in a new tab, without the opener.
+    await select(textNode('All tests pass.'), 4, 9);
+    await rightClick(textNode('All tests pass.'));
+    await act(async () => $('.ctx-menu .menu-web-search')!.click());
+    expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=tests', '_blank', 'noopener');
+    // The search picked in Settings.
+    await act(() => app.setWebSearch(WEB_SEARCHES.find((w) => w.id === 'yandex')!));
+    await select(textNode('All tests pass.'), 4, 9);
+    await rightClick(textNode('All tests pass.'));
+    expect($('.ctx-menu .menu-web-search')!.textContent!.trim()).toBe('Search in Yandex');
+    act(() => app.setWebSearch(WEB_SEARCHES[0]));
+    vi.unstubAllGlobals();
+  });
+
+  it('takes any selection in the feed on a right click, and has no Quote where there is no input', async () => {
+    const call = ev('event.tool.call', 3, (e) => ((e.payload.call_id = 'toolu_x'), (e.payload.args_preview = '{"command":"ls /"}')));
+    const result = ev('event.tool.result', 4, (e) => ((e.payload.call_id = 'toolu_x'), (e.payload.error = false), (e.payload.result_preview = 'bin etc')));
+    const { app } = setup('locked_vscode', { history: [HISTORY[0], HISTORY[1], call, result] });
+    await mount(app);
+    // A tool call's line is no message: the selection as the browser has it.
+    const peek = document.createTreeWalker($('.feed .tool-group .tool-peek')!, NodeFilter.SHOW_TEXT).nextNode()!;
+    expect(peek.parentElement!.closest('.msg-agent, .msg-user, .relay, .thinking')).toBeNull();
+    await select(peek, 0, 1);
+    expect(await rightClick(peek)).toBe(false);
+    expect([...document.querySelectorAll('.ctx-menu .menu-item')].map((b) => b.textContent!.trim())).toEqual(['Copy', 'Search in Google']);
+  });
+
+  it('leaves the browser\'s menu to a right click with no selection, in the composer, in the header and on a phone', async () => {
+    const { app } = setup('idle');
+    await mount(app);
+    expect(await rightClick(textNode('All tests pass.')), 'no selection').toBe(true);
+    expect($('.ctx-menu')).toBeNull();
+    // A selection in the composer's text is the field's own.
+    await act(() => {
+      area().value = 'draft text';
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+      area().setSelectionRange(0, 5);
+    });
+    await select(textNode('All tests pass.'), 4, 9);
+    expect(await rightClick(area()), 'in the composer').toBe(true);
+    // Text outside the feed (the header) is not a message's.
+    await select(textNode('test 12', '.chat-head'));
+    expect(await rightClick(textNode('test 12', '.chat-head')), 'in the header').toBe(true);
+    expect($('.ctx-menu')).toBeNull();
+    vi.stubGlobal('matchMedia', (media: string) => ({ matches: true, media, addEventListener: () => {}, removeEventListener: () => {} }));
+    try {
+      const phone = setup('idle', { history: HISTORY.slice(0, 3) });
+      await mount(phone.app, true);
+      await select(textNode('All tests pass.'), 4, 9);
+      expect(await rightClick(textNode('All tests pass.')), 'on a phone').toBe(true);
+      expect($('.ctx-menu')).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  const twoAgents = () => [
+    HISTORY[0],
+    ev('event.agent.message', 2, (e) => (e.payload.text = 'First part.')),
+    ev('event.agent.message', 3, (e) => ((e.payload.text = 'Second part.'), (e.payload.final = true))),
+  ];
+
+  it('leaves the browser\'s menu when the press moved the selection (a Mac selects the word under the pointer)', async () => {
+    const { app } = setup('idle', { history: twoAgents() });
+    await mount(app);
+    await select(textNode('First part.'), 0, 5);
+    // The press lands on another message, and the browser selects the word there before `contextmenu`.
+    const other = textNode('Second part.');
+    expect(await rightClick(other, 300, 200, selecting(other, 0, 6))).toBe(true);
+    expect($('.ctx-menu')).toBeNull();
+  });
+
+  it('leaves the browser\'s menu when there was no selection at the press, though one is made before the menu', async () => {
+    const { app } = setup('idle', { history: twoAgents() });
+    await mount(app);
+    await select(null);
+    const node = textNode('First part.');
+    expect(await rightClick(node, 300, 200, selecting(node, 0, 5))).toBe(true);
+    expect($('.ctx-menu')).toBeNull();
+  });
+
+  it('takes the whole selection across messages, without their times', async () => {
+    const writeText = clipboard();
+    const { app } = setup('idle', { history: twoAgents() });
+    await mount(app);
+    await selectRange([textNode('First part.'), 0], [textNode('Second part.'), 6]);
+    expect(await rightClick(textNode('Second part.'))).toBe(false);
+    await act(async () => $('.ctx-menu .btn-copy-selection')!.click());
+    expect(writeText).toHaveBeenLastCalledWith('First part.\n\nSecond');
+    vi.unstubAllGlobals();
+  });
+
+  it('leaves the hidden text of a folded block out of a selection across messages', async () => {
+    const writeText = clipboard();
+    const history = [
+      HISTORY[0],
+      ev('event.agent.message', 2, (e) => (e.payload.text = 'First part.')),
+      ev('event.agent.thinking', 3, (e) => (e.payload.text = 'Hidden reasoning.')),
+      ev('event.agent.message', 4, (e) => ((e.payload.text = 'Second part.'), (e.payload.final = true))),
+    ];
+    const { app } = setup('idle', { history });
+    await mount(app);
+    expect($('.feed .thinking:not([open])')).not.toBeNull();
+    await selectRange([textNode('First part.'), 0], [textNode('Second part.'), 6]);
+    expect(await rightClick(textNode('Second part.'))).toBe(false);
+    await act(async () => $('.ctx-menu .btn-copy-selection')!.click());
+    expect(writeText).toHaveBeenLastCalledWith('First part.\n\nSecond');
+    vi.unstubAllGlobals();
+  });
+
+  it('leaves the browser\'s menu to a click outside the selection that did not move it', async () => {
+    const { app } = setup('idle', { history: twoAgents() });
+    await mount(app);
+    const first = textNode('First part.');
+    const second = textNode('Second part.');
+    try {
+      await select(first, 0, 5);
+      Object.defineProperty(document, 'caretRangeFromPoint', { value: pointAt(second), configurable: true });
+      expect(await rightClick(second), 'outside the selection').toBe(true);
+      expect($('.ctx-menu')).toBeNull();
+      Object.defineProperty(document, 'caretRangeFromPoint', { value: pointAt(first), configurable: true });
+      expect(await rightClick(first), 'on the selection').toBe(false);
+      expect($('.ctx-menu')).not.toBeNull();
+    } finally {
+      delete (document as { caretRangeFromPoint?: unknown }).caretRangeFromPoint;
+    }
+  });
+
+  it('gives the selection back and opens the menu when the press cleared it and the click is inside it (WebKit off a Mac)', async () => {
+    const writeText = clipboard();
+    const { app } = setup('idle', { history: twoAgents() });
+    await mount(app);
+    const first = textNode('First part.');
+    const clear = () => document.getSelection()!.removeAllRanges();
+    try {
+      await select(first, 0, 5);
+      // Without the point under the pointer (Firefox) inside cannot be told: the browser's menu.
+      expect(await rightClick(first, 300, 200, clear), 'no point').toBe(true);
+      expect($('.ctx-menu')).toBeNull();
+      Object.defineProperty(document, 'caretRangeFromPoint', { value: pointAt(first), configurable: true });
+      await select(first, 0, 5);
+      expect(await rightClick(first, 300, 200, clear), 'inside').toBe(false);
+      expect(document.getSelection()!.toString()).toBe('First');
+      await act(async () => $('.ctx-menu .btn-copy-selection')!.click());
+      expect(writeText).toHaveBeenLastCalledWith('First');
+    } finally {
+      delete (document as { caretRangeFromPoint?: unknown }).caretRangeFromPoint;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('leaves the browser\'s menu on the head, the composer\'s buttons and the rows above it, though the feed has a selection', async () => {
+    const { app } = setup('idle', { history: twoAgents() });
+    await mount(app);
+    await select(textNode('First part.'), 0, 5);
+    expect(await rightClick($('.chat-head')!), 'head').toBe(true);
+    await select(textNode('First part.'), 0, 5);
+    expect(await rightClick($('.composer button')!), 'a composer button').toBe(true);
+    expect($('.ctx-menu')).toBeNull();
+  });
+
+  it("opens it on text selected in a subagent's history too", async () => {
+    const { api, app } = setup('running', { subagents: 1, background_tasks: 1, history: HISTORY.slice(0, 3) });
+    await mount(app);
+    api.subagentHistory.mockImplementation(async () => ({
+      events: [
+        ev('event.agent.message', 0, (e) => {
+          delete e.seq;
+          e.event_id = '0199f3a2-7c10-7000-8000-0000000002e4';
+          e.payload = { text: 'The import keeps the power nets.', final: false };
+        }),
+      ],
+      truncated: false,
+    }));
+    const subagent = { task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000, call_id: 'toolu_ag' };
+    await act(async () =>
+      subscriber!.onEvent(
+        ev('event.subagents.live', 0, (e) => {
+          delete e.seq;
+          e.payload.agents = [subagent];
+        }),
+      ),
+    );
+    await act(async () => $('button.live-agents-opens')!.click());
+    await act(async () => {});
+    const node = textNode('The import keeps the power nets.', '.live-agents');
+    await select(node, 4, 10);
+    expect(await rightClick(node)).toBe(false);
+    expect($('.ctx-menu .menu-quote')).not.toBeNull();
+    await act(async () => $('.ctx-menu .menu-quote')!.click());
+    expect(area().value).toBe('> import\n\n');
   });
 
   it('quotes every line, a blank one as a bare «>», after a blank line', () => {

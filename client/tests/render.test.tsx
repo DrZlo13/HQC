@@ -3217,8 +3217,8 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
     // The next attempt goes at once: no delay to count.
     expect(line({ ...retry, retry_delay_ms: 0 })).toBe("Main agent: Retrying 3/10 (no response)");
     expect(line({ kind: "compacting" })).toBe("Main agent: Compacting the conversation…");
-    expect(line({ kind: "thinking", estimated_tokens: 12340 })).toBe("Main agent: Thinking · ~12.34k tokens");
-    expect(line({ kind: "thinking", estimated_tokens: 840 })).toBe("Main agent: Thinking · ~840 tokens");
+    expect(line({ kind: "thinking", estimated_tokens: 12340 })).toBe("Main agent: Thinking · 12.34k tokens");
+    expect(line({ kind: "thinking", estimated_tokens: 840 })).toBe("Main agent: Thinking · 840 tokens");
     // A running command keeps its own line; other states keep theirs.
     const t = new Timeline();
     t.apply(call(1, "b", "Bash", { command: "sleep 30" }));
@@ -3244,35 +3244,35 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
       document.body.appendChild(root);
       // The first estimate is shown as it comes.
       draw(thinking(1000));
-      expect(text()).toBe("Thinking · ~1.00k tokens");
+      expect(text()).toBe("Thinking · 1.00k tokens");
       // The next one, 2 s later, runs up from there over 2 s.
       wait(2000);
       draw(thinking(3000));
-      expect(text()).toBe("Thinking · ~1.00k tokens");
+      expect(text()).toBe("Thinking · 1.00k tokens");
       wait(500);
-      expect(text()).toBe("Thinking · ~1.50k tokens");
+      expect(text()).toBe("Thinking · 1.50k tokens");
       wait(500);
-      expect(text()).toBe("Thinking · ~2.00k tokens");
+      expect(text()).toBe("Thinking · 2.00k tokens");
       // An estimate that comes mid-run starts from the number shown, over the time since the
       // last one (1 s).
       draw(thinking(4000));
       wait(500);
-      expect(text()).toBe("Thinking · ~3.00k tokens");
+      expect(text()).toBe("Thinking · 3.00k tokens");
       wait(500);
-      expect(text()).toBe("Thinking · ~4.00k tokens");
+      expect(text()).toBe("Thinking · 4.00k tokens");
       wait(5000);
-      expect(text()).toBe("Thinking · ~4.00k tokens");
+      expect(text()).toBe("Thinking · 4.00k tokens");
       // Once the count is there, the 100 ms redraw stops.
       expect(vi.getTimerCount()).toBe(0);
       // A smaller one (a new thinking block) is shown at once, and so is the first after none.
       draw(thinking(200));
-      expect(text()).toBe("Thinking · ~200 tokens");
+      expect(text()).toBe("Thinking · 200 tokens");
       expect(vi.getTimerCount()).toBe(0);
       draw(undefined);
       expect(text()).toBe("Working");
       wait(1000);
       draw(thinking(900));
-      expect(text()).toBe("Thinking · ~900 tokens");
+      expect(text()).toBe("Thinking · 900 tokens");
     } finally {
       render(null, root);
       vi.useRealTimers();
@@ -3513,7 +3513,7 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
       ),
     );
     expect([...root.querySelectorAll(".live-agents-what")].map((e) => e.textContent)).toEqual([
-      "Optimist · Thinking · ~647 tokens",
+      "Optimist · Thinking · 647 tokens",
       "Pessimist · Command: sleep 15",
       "Realist · Input queued",
     ]);

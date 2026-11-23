@@ -253,7 +253,7 @@ export function activityLabel(a: Activity): string {
       // Two decimals from 1k up: the count runs up (`useRunUp`), and whole thousands would
       // hold still for seconds.
       const n = a.estimated_tokens;
-      return `Thinking · ~${n < 1000 ? n : `${(n / 1000).toFixed(2)}k`} tokens`;
+      return `Thinking · ${n < 1000 ? n : `${(n / 1000).toFixed(2)}k`} tokens`;
     }
   }
 }

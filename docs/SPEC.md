@@ -7197,7 +7197,7 @@ failure shown as a notice; the button
 goes once the worker reports the call moved or ended; since 0.179, with no such call, the
 session's `activity`, §6, stands in place of "Working": "Retrying 3/10 (529), next in
 8 s" — "no response" in place of a status the attempt did not get, the delay rounded up to
-whole seconds and left out when it is 0 —, "Compacting the conversation…", "Thinking · ~12.34k
+whole seconds and left out when it is 0 —, "Compacting the conversation…", "Thinking · 12.34k
 tokens" — since 0.227 a count that runs up to each new estimate, as in the VS Code tab: from the
 number shown, linearly, over the time since the estimate before it (0.3–3 s), redrawn every
 100 ms, the first estimate and a smaller one (a new thinking block) shown at once —; a waiting
@@ -7682,7 +7682,7 @@ estimate at most once per 2 s, and the client drew each as it came, in whole tho
 up, so the count stood still for seconds. The VS Code tab runs its own count up to each new
 estimate over the time since the one before; the client now does the same (0.3–3 s, redrawn every
 100 ms; the first estimate and a smaller one shown at once) and writes it with two decimals from
-1k up, "~12.34k tokens". Only the client changed.
+1k up and without the "~", "Thinking · 12.34k tokens". Only the client changed.
 
 ### 0.225 → 0.226 (the publication card: secrets capped, hidden files named, no link into `.git`)
 §7, §20: the owner's card of an `hqc_publish` listed every name that looks like a secret in the

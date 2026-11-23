@@ -133,6 +133,9 @@ function setup(
     background: vi.fn(async () => {}),
     // POST /api/sessions/{id}/tasks/{task_id}/stop.
     stopTask: vi.fn(async () => {}),
+    // POST /api/sessions/{id}/inputs/{event_id}/withdraw and /now.
+    withdrawInput: vi.fn(async () => {}),
+    inputNow: vi.fn(async () => true),
     // POST /api/sessions/{id}/stop, /pause, /resume, /restart.
     stop: vi.fn(async () => {}),
     pauseSession: vi.fn(async () => {}),
@@ -4101,5 +4104,144 @@ describe('goal banner', () => {
     await mount(app);
     expect($('.live-goal')).not.toBeNull();
     expect($('button[aria-label="Clear goal"]')).toBeNull();
+  });
+});
+
+// SPEC 0.219: the user's message that waits for the agent has Take back (its text and files return
+// to the input) and, while a turn runs, Send now.
+describe('a message that waits for the agent', () => {
+  const WAITING = '0199f3a2-7c10-7000-8000-0000000001c8';
+  const FILE = '0199f3a2-7c10-7000-8000-0000000000f1';
+  const waiting = (artifacts: string[] = []) =>
+    ev('event.user.message', 8, (e) => {
+      e.event_id = WAITING;
+      e.delivery = 'pending';
+      delete e.delivered_at;
+      e.payload = { text: 'Run it again', artifact_ids: artifacts, human: true };
+    });
+  const history = (artifacts: string[] = []) => [...HISTORY.slice(0, 3), waiting(artifacts)];
+  const withdraw = () => $('.msg-user .btn-withdraw') as HTMLButtonElement | null;
+  const sendNow = () => $('.msg-user .btn-send-now') as HTMLButtonElement | null;
+  const press = (b: HTMLButtonElement | null) => act(async () => void b!.click());
+  const area = () => $('.composer textarea') as HTMLTextAreaElement;
+  const typeInto = (text: string) =>
+    act(() => {
+      area().value = text;
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+  it('has Take back whatever the state, and Send now only while a turn runs', async () => {
+    for (const [state, now] of [['running', true], ['idle', false], ['waiting', false]] as const) {
+      const { app } = setup(state, { history: history() });
+      await mount(app);
+      expect(withdraw()!.getAttribute('aria-label'), state).toBe('Take back');
+      expect(sendNow() !== null, state).toBe(now);
+      // Only the waiting message has them.
+      expect(root.querySelectorAll('.btn-withdraw')).toHaveLength(1);
+      render(null, root);
+    }
+  });
+
+  it('is taken back: the bubble goes and its text stands in the input after what was typed', async () => {
+    const { app, api } = setup('running', { history: history() });
+    await mount(app);
+    await typeInto('Also the logs');
+    await press(withdraw());
+    expect(api.withdrawInput).toHaveBeenCalledWith('s1', WAITING);
+    await vi.waitFor(() => expect(area().value).toBe('Also the logs\n\nRun it again'));
+    expect(root.textContent).not.toContain('awaiting delivery');
+    expect([...root.querySelectorAll('.msg-user .msg-text')].map((t) => t.textContent)).not.toContain('Run it again');
+  });
+
+  it('is taken back into an empty input as it is', async () => {
+    const { app } = setup('running', { history: history() });
+    await mount(app);
+    await press(withdraw());
+    await vi.waitFor(() => expect(area().value).toBe('Run it again'));
+  });
+
+  it("returns the files too: read from the hub again, into the input's files", async () => {
+    const { app, api } = setup('running', { history: history([FILE]) });
+    Object.assign(api, {
+      artifact: vi.fn(async () => ({ id: FILE, kind: 'file', name: 'notes.txt', mime: 'text/plain', size: 5, sha256: '', created_at: '2026-10-22T10:00:00Z' })),
+      artifactLink: vi.fn(async () => ({ url: 'https://hub.test/a/notes', expires_at: new Date(Date.now() + 600_000).toISOString() })),
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('hello', { status: 200 })));
+    await mount(app);
+    await press(withdraw());
+    await vi.waitFor(() => expect($('.composer-files')?.textContent).toContain('notes.txt'));
+    expect(area().value).toBe('Run it again');
+  });
+
+  it('says so when the agent took the message already, and leaves it and the input as they are', async () => {
+    const { app, api } = setup('running', { history: history() });
+    api.withdrawInput.mockRejectedValueOnce(new ApiError(409, 'the agent already took this message', 'already_taken'));
+    await mount(app);
+    await typeInto('typed');
+    await press(withdraw());
+    await vi.waitFor(() => expect($('.notice')?.textContent).toBe('The agent already took this message'));
+    expect(area().value).toBe('typed');
+    expect(withdraw()).not.toBeNull();
+  });
+
+  it('puts the text back of a message taken back already, as on success', async () => {
+    const { app, api } = setup('running', { history: history() });
+    api.withdrawInput.mockRejectedValueOnce(new ApiError(409, 'this message was taken back already', 'withdrawn'));
+    await mount(app);
+    await typeInto('typed');
+    await press(withdraw());
+    await vi.waitFor(() => expect(area().value).toBe('typed\n\nRun it again'));
+    expect($('.notice')).toBeNull();
+  });
+
+  it('puts the text into the draft when the input is not shown (a request sheet on a phone)', async () => {
+    const { app } = setup('waiting', { history: [...HISTORY, waiting()] });
+    await mount(app, true);
+    expect($('.composer textarea')).toBeNull();
+    await press(withdraw());
+    await vi.waitFor(() => expect(app.draft('s1')).toBe('Run it again'));
+  });
+
+  it('sends now, and a refusal of the hub is said', async () => {
+    const { app, api } = setup('running', { history: history() });
+    await mount(app);
+    await press(sendNow());
+    expect(api.inputNow).toHaveBeenCalledWith('s1', WAITING);
+    expect($('.notice')).toBeNull();
+    // The button is disabled while its call is out.
+    await vi.waitFor(() => expect(sendNow()!.disabled).toBe(false));
+    api.inputNow.mockRejectedValueOnce(new ApiError(409, 'the agent cannot take this message into its turn now', 'not_now'));
+    await press(sendNow());
+    await vi.waitFor(() => expect($('.notice')?.textContent).toBe('The agent cannot take this message into its turn now'));
+    expect(withdraw()).not.toBeNull();
+    // The agent had taken it: the hub says `sent_now: false`, and so does the notice.
+    await vi.waitFor(() => expect(sendNow()!.disabled).toBe(false));
+    api.inputNow.mockResolvedValueOnce(false);
+    await press(sendNow());
+    await vi.waitFor(() => expect($('.notice')?.textContent).toBe('Not sent now: the agent took it already, or it goes next'));
+  });
+
+  it('has neither button on a message of the hub or a schedule that is not the user\'s own', async () => {
+    const note = ev('event.user.message', 8, (e) => {
+      e.event_id = WAITING;
+      e.delivery = 'pending';
+      delete e.delivered_at;
+      e.payload = { text: 'You were paused', artifact_ids: [] };
+    });
+    const { app } = setup('running', { history: [...HISTORY.slice(0, 3), note] });
+    await mount(app);
+    expect(withdraw()).toBeNull();
+    expect(sendNow()).toBeNull();
+  });
+
+  it('is gone from the chat when the hub says it is withdrawn, from this device or another', async () => {
+    const { app } = setup('running', { history: history() });
+    await mount(app);
+    expect(withdraw()).not.toBeNull();
+    await act(async () => subscriber!.onDelivery({ session_id: 's1', event_id: WAITING, seq: 8, delivery: 'withdrawn' }));
+    expect(withdraw()).toBeNull();
+    expect([...root.querySelectorAll('.msg-user .msg-text')].map((t) => t.textContent)).not.toContain('Run it again');
+    // And the hub's copy of it does not bring it back.
+    expect(area().value).toBe('');
   });
 });

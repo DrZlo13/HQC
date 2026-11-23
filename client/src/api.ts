@@ -620,6 +620,20 @@ export class Api {
     await this.req('POST', `/api/sessions/${enc(id)}/background`, { call_id: callId });
   }
 
+  /** `POST .../inputs/{eventId}/withdraw`: takes back a message of the user's that the agent has
+   *  not taken (SPEC 0.219); `409 already_taken` when it has. */
+  async withdrawInput(id: string, eventId: string): Promise<void> {
+    await this.req('POST', `/api/sessions/${enc(id)}/inputs/${enc(eventId)}/withdraw`);
+  }
+
+  /** `POST .../inputs/{eventId}/now`: sends a message of the user's that waits into the running
+   *  turn at once (SPEC 0.219); `false` when the agent had taken it already, `409 not_now` when
+   *  it cannot be taken now. */
+  async inputNow(id: string, eventId: string): Promise<boolean> {
+    const r = (await this.req('POST', `/api/sessions/${enc(id)}/inputs/${enc(eventId)}/now`)) as { sent_now?: unknown };
+    return r?.sent_now === true;
+  }
+
   /** Ends the agent's process and starts it again, resuming the conversation (SPEC §17.3). */
   async restartSession(id: string): Promise<void> {
     await this.req('POST', `/api/sessions/${enc(id)}/restart`);

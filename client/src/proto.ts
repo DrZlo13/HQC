@@ -53,7 +53,9 @@ export type PeerMode = (typeof PEER_MODES)[number] | Unknown;
 export const ARTIFACT_KINDS = ['file', 'image', 'diff', 'html', 'text', 'site'] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number] | Unknown;
 
-export const DELIVERIES = ['pending', 'delivered', 'failed'] as const;
+/** `withdrawn` (SPEC 0.219): the owner took the message back before the agent took it; no client
+ *  shows it. */
+export const DELIVERIES = ['pending', 'delivered', 'failed', 'withdrawn'] as const;
 export type Delivery = (typeof DELIVERIES)[number];
 
 export const PROCESS_STATES = ['stopped', 'starting', 'running', 'stopping'] as const;
@@ -129,6 +131,9 @@ export interface UserMessage {
   /** The runtime took it into the turn already running (SPEC §17.2); the hub sets it on
    *  delivery. */
   joined?: boolean;
+  /** The user typed it in the input route (SPEC 0.219): the only kind of message that can be
+   *  taken back or sent now; the hub's own notes and a schedule's runs do not have it. */
+  human?: boolean;
 }
 export interface AgentDelta {
   text: string;
@@ -573,6 +578,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     schedule_id: optStr(p, 'schedule_id'),
     during_text: optBool(p, 'during_text'),
     joined: optBool(p, 'joined'),
+    human: optBool(p, 'human'),
   }),
   'agent.delta': (p) => ({ text: str(p, 'text'), reset: optBool(p, 'reset'), thinking: optBool(p, 'thinking') }),
   'subagents.live': (p) => ({
@@ -1082,6 +1088,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
       optStr(x, 'request_id');
     }
     optPermissionMode(p, 'permission_cap');
+    optBool(p, 'human');
   },
   'session.stop': (p) => void str(p, 'session_id'),
   'session.background': (p) => {
@@ -1091,6 +1098,17 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
   'session.stop_task': (p) => {
     str(p, 'session_id');
     str(p, 'task_id');
+  },
+  // SPEC 0.219: a message of the owner's taken back, or sent into the running turn at once.
+  'session.withdraw': (p) => {
+    str(p, 'request_id');
+    str(p, 'session_id');
+    str(p, 'event_id');
+  },
+  'session.input_now': (p) => {
+    str(p, 'request_id');
+    str(p, 'session_id');
+    str(p, 'event_id');
   },
   'session.subagent_history': (p) => {
     str(p, 'request_id');

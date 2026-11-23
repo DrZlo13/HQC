@@ -81,6 +81,10 @@ pub enum StartState {
 pub struct SessConn {
     pub start: StartState,
     pub inflight: HashSet<Uuid>,
+    /// Inputs the owner is taking back: a `session.withdraw` of each is outstanding. Handed
+    /// again by nobody meanwhile (`delivery::kick` skips them like `inflight`), and a second
+    /// take-back of one is refused (SPEC 0.219).
+    pub withdrawing: HashSet<Uuid>,
     /// The session's newest record time the mirror last read from the database
     /// (`mirror::follow`).
     pub newest: Option<chrono::DateTime<chrono::Utc>>,

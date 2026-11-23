@@ -537,11 +537,12 @@ export class Timeline {
     this.changed();
   }
 
-  /** The stored events in `seq` order, without the retracted ones and the retractions. */
+  /** The stored events in `seq` order, without the retracted ones and the retractions, and the
+   *  inputs the owner took back (`delivery` `withdrawn`, SPEC 0.219). */
   events(): HqcEvent[] {
     if (!this.sorted)
       this.sorted = [...this.bySeq.values()]
-        .filter((e) => e.type !== "retraction" && !this.retracted.has(e.event_id))
+        .filter((e) => e.type !== "retraction" && !this.retracted.has(e.event_id) && e.delivery !== "withdrawn")
         .sort((a, b) => a.seq! - b.seq!);
     return this.sorted;
   }

@@ -106,6 +106,9 @@ pub mod error_code {
     pub const INVALID_FRAME: &str = "invalid_frame";
     pub const AGENT_START_FAILED: &str = "agent_start_failed";
     pub const INTERNAL: &str = "internal";
+    /// `session.input_now` of an input the runtime cannot take into the running turn now (no
+    /// turn runs, a request waits for an answer): the owner's press of Send now is refused.
+    pub const NOT_NOW: &str = "not_now";
     /// `mirror.event` of a new transcript over the worker's daily limit of imported sessions
     /// (SPEC §9.1, §20); retryable: the worker reads the transcript again later.
     pub const MIRROR_QUOTA: &str = "mirror_quota";
@@ -537,6 +540,16 @@ pub enum HubFrame {
     /// (since SPEC 0.181): answered with `result` [`SubagentHistoryResult`].
     #[serde(rename = "session.subagent_history")]
     SessionSubagentHistory(SubagentHistory),
+    /// Send the input `event_id`, which the worker holds and the agent has not taken, into the
+    /// running turn at once (since SPEC 0.219; Claude Code: `priority: "now"`, which moves the
+    /// running call to the background): answered with `result` [`InputNowResult`], or `error`
+    /// [`error_code::NOT_NOW`].
+    #[serde(rename = "session.input_now")]
+    SessionInputNow(InputRef),
+    /// Take the input `event_id` back before the agent takes it (since SPEC 0.219): answered
+    /// with `result` [`InputWithdrawnResult`]; one withdrawn is never acked and never failed.
+    #[serde(rename = "session.withdraw")]
+    SessionWithdraw(InputRef),
     /// Terminate the agent process.
     #[serde(rename = "session.kill")]
     SessionKill { session_id: Uuid },
@@ -901,9 +914,35 @@ pub enum ResultBody {
     WorkspaceKeys(WorkspaceKeysResult),
     WorkspaceKeyDeleted(WorkspaceKeyDeleteResult),
     SubagentHistory(SubagentHistoryResult),
+    InputNow(InputNowResult),
+    InputWithdrawn(InputWithdrawnResult),
     ClaudeAuth(ClaudeAuthResult),
     ClaudeLogin(ClaudeLoginResult),
     ClaudeLoginDone(ClaudeLoginDoneResult),
+}
+
+/// `session.input_now {request_id, session_id, event_id}` and `session.withdraw {…}` (since SPEC
+/// 0.219): `event_id` is the input of an earlier `session.input`; `request_id` equals the frame
+/// `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputRef {
+    pub request_id: String,
+    pub session_id: Uuid,
+    pub event_id: Uuid,
+}
+
+/// Result of `session.input_now`: `false` when the agent had taken the input already, so
+/// nothing moved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputNowResult {
+    pub sent_now: bool,
+}
+
+/// Result of `session.withdraw`: `true` when the input is gone from the worker and the agent
+/// will never see it, `false` when the agent had taken it already.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputWithdrawnResult {
+    pub withdrawn: bool,
 }
 
 /// `claude.auth {request_id}` -> `result {claude_auth}`; `claude.login {request_id}` ->
@@ -1681,6 +1720,16 @@ pub struct SessionInput {
     /// waits for the end of a running turn instead of joining it (§17.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule_id: Option<Uuid>,
+    /// The owner typed `text` in the hub's input route, and nothing of the hub's or of another
+    /// session was put in front of it or in its place (since SPEC 0.219): the worker writes
+    /// `origin: {kind: "human"}` for such an input only, which Claude Code's strict `isHuman()`
+    /// gates ask for. A message of another session, a room's input, a run of a schedule and the
+    /// hub's own notes are not human, nor is an input with buffered `send` messages in front.
+    /// Two notes of hqc's own do stand in front of a human input: a fork's first input carries
+    /// the note that the session is a copy, and the worker puts the note of the background
+    /// tasks a move stopped in front of the first input after it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub human: bool,
 }
 
 /// `session.input.peer` (SPEC §5.3, §7.1).
@@ -1733,6 +1782,8 @@ mod tests {
         "session.background",
         "session.stop_task",
         "session.subagent_history",
+        "session.input_now",
+        "session.withdraw",
         "session.kill",
         "session.permission_mode",
         "session.model",
@@ -1800,6 +1851,10 @@ mod tests {
             include_str!("../examples/wire/hub.session.input.scheduled.json"),
         ),
         (
+            "session.input",
+            include_str!("../examples/wire/hub.session.input.human.json"),
+        ),
+        (
             "session.stop",
             include_str!("../examples/wire/hub.session.stop.json"),
         ),
@@ -1818,6 +1873,14 @@ mod tests {
         (
             "session.subagent_history",
             include_str!("../examples/wire/hub.session.subagent_history.before.json"),
+        ),
+        (
+            "session.input_now",
+            include_str!("../examples/wire/hub.session.input_now.json"),
+        ),
+        (
+            "session.withdraw",
+            include_str!("../examples/wire/hub.session.withdraw.json"),
         ),
         (
             "session.kill",
@@ -2055,6 +2118,14 @@ mod tests {
             include_str!("../examples/wire/worker.result.subagent_history.json"),
         ),
         (
+            "result",
+            include_str!("../examples/wire/worker.result.input_now.json"),
+        ),
+        (
+            "result",
+            include_str!("../examples/wire/worker.result.withdrawn.json"),
+        ),
+        (
             "worker.approval.request",
             include_str!("../examples/wire/worker.worker.approval.request.json"),
         ),
@@ -2108,6 +2179,8 @@ mod tests {
             HubFrame::SessionBackground { .. } => "session.background",
             HubFrame::SessionStopTask { .. } => "session.stop_task",
             HubFrame::SessionSubagentHistory(_) => "session.subagent_history",
+            HubFrame::SessionInputNow(_) => "session.input_now",
+            HubFrame::SessionWithdraw(_) => "session.withdraw",
             HubFrame::SessionKill { .. } => "session.kill",
             HubFrame::SessionPermissionMode { .. } => "session.permission_mode",
             HubFrame::SessionModel { .. } => "session.model",
@@ -2509,6 +2582,14 @@ mod tests {
                 include_str!("../examples/wire/hub.session.subagent_history.json"),
                 include_str!("../examples/wire/worker.result.subagent_history.json"),
             ),
+            (
+                include_str!("../examples/wire/hub.session.input_now.json"),
+                include_str!("../examples/wire/worker.result.input_now.json"),
+            ),
+            (
+                include_str!("../examples/wire/hub.session.withdraw.json"),
+                include_str!("../examples/wire/worker.result.withdrawn.json"),
+            ),
         ];
         for (req, res) in pairs {
             let req: Envelope<HubFrame> = serde_json::from_str(req).unwrap();
@@ -2528,6 +2609,8 @@ mod tests {
                 HubFrame::ClaudeAuth(r) => (&r.request_id, 11),
                 HubFrame::ClaudeLogin(r) => (&r.request_id, 12),
                 HubFrame::ClaudeLoginCode(r) => (&r.request_id, 13),
+                HubFrame::SessionInputNow(r) => (&r.request_id, 14),
+                HubFrame::SessionWithdraw(r) => (&r.request_id, 15),
                 other => panic!("not a request: {other:?}"),
             };
             assert_eq!(&req.id, request_id, "request_id is the frame id");
@@ -2550,6 +2633,8 @@ mod tests {
                 ResultBody::ClaudeAuth(_) => 11,
                 ResultBody::ClaudeLogin(_) => 12,
                 ResultBody::ClaudeLoginDone(_) => 13,
+                ResultBody::InputNow(_) => 14,
+                ResultBody::InputWithdrawn(_) => 15,
             };
             assert_eq!(got, kind);
         }

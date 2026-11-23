@@ -200,7 +200,14 @@ impl Client {
             let Some(&after) = self.subs.get(&session_id) else {
                 return true;
             };
-            let page = match db::events_after(&self.app.db, session_id, after, BACKFILL_PAGE).await
+            let page = match db::events_after(
+                &self.app.db,
+                session_id,
+                after,
+                BACKFILL_PAGE,
+                db::Withdrawn::Included,
+            )
+            .await
             {
                 Ok(rows) => db::events_for_clients(&self.app.db, &rows)
                     .await

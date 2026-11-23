@@ -27,6 +27,16 @@ pub enum FakeCall {
         session_id: Uuid,
         event_id: Uuid,
     },
+    /// An input written into the running turn with priority now (SPEC 0.219).
+    InjectNow {
+        session_id: Uuid,
+        event_id: Uuid,
+    },
+    /// An input taken back from the runtime (SPEC 0.219).
+    Withdraw {
+        session_id: Uuid,
+        event_id: Uuid,
+    },
     Stop(Uuid),
     Kill(Uuid),
     /// A process with nothing running ended through [`Adapter::close`].
@@ -66,6 +76,9 @@ struct State {
     injectable: bool,
     /// What [`Adapter::runs_own_turn`] answers; false by default.
     own_turn: bool,
+    /// What [`Adapter::withdraw_input`] answers: true by default, as for a runtime that has
+    /// not taken the input yet.
+    withdraw_refused: bool,
     /// The folder of [`Adapter::subagent_transcript`]; none by default.
     subagents: Option<std::path::PathBuf>,
 }
@@ -101,6 +114,12 @@ impl FakeAdapters {
     /// does after a background task's end, until the test ends it with [`Self::end_turn`].
     pub fn set_own_turn(&self, own: bool) {
         self.lock().own_turn = own;
+    }
+
+    /// Whether the agents have taken an input already when it is withdrawn from now on: their
+    /// `withdraw_input` answers `false` then.
+    pub fn set_withdraw_refused(&self, refused: bool) {
+        self.lock().withdraw_refused = refused;
     }
 
     /// The agents' subagent transcripts are `agent-<task_id>.jsonl` in `dir` from now on.
@@ -319,6 +338,33 @@ impl Adapter for FakeAdapter {
             event_id: input.event_id,
         });
         Ok(true)
+    }
+
+    async fn inject_now_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<bool> {
+        if !self.can_inject() {
+            return Ok(false);
+        }
+        self.shared
+            .lock()
+            .inputs
+            .push((input.clone(), files.to_vec()));
+        self.record(FakeCall::InjectNow {
+            session_id: self.session_id,
+            event_id: input.event_id,
+        });
+        Ok(true)
+    }
+
+    async fn withdraw_input(&mut self, event_id: Uuid) -> anyhow::Result<bool> {
+        self.record(FakeCall::Withdraw {
+            session_id: self.session_id,
+            event_id,
+        });
+        Ok(!self.shared.lock().withdraw_refused)
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {

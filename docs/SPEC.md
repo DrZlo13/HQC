@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.218, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.219, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -461,7 +461,17 @@ session), `ts`, `author` (`{kind: user|agent, id}` or `{kind: system}` without `
 agent `id` = its `session_id`), `type`, `payload`, `chain` (`{chain_id, depth, hops,
 permission_cap?, capped_by?}` for agent→agent chains, otherwise null; the cap since 0.43, §7.1), `client_op_id` (echoed back to the client), `delivery` and
 `delivered_at` — two flat event fields, only on `user.message` and `peer.message`:
-`delivery` ∈ `pending | delivered | failed`, `delivered_at` — the delivery time. Since 0.112
+`delivery` ∈ `pending | delivered | failed | withdrawn`, `delivered_at` — the delivery time;
+`withdrawn` (since 0.219) is a message its owner took back before the agent took it (§17.2): it is
+delivered to nobody. The hub's reads for a client (the pages of `GET .../events`, the backlog of a
+subscription) still return it with `delivery: withdrawn`, so that a device that missed the `delivery`
+frame learns of it, and a client's timeline shows no such message; every read for the agent or a
+search (`hqc_read`, a fork's copy, the search, the title, the turn marks) leaves it out. A
+`user.message` also has a column of the hub's own, not in the event JSON: `handed_at` (since 0.219, migration
+`0055`) — when the hub
+first sent the input to a worker (set before the `session.input` goes, and kept); an input that was
+ever handed over may be held by the worker across a reconnect, so the hub alone withdraws only one with
+no `handed_at` (§6). Since 0.112
 the hub also sets `payload.joined: true` on a person's `user.message`, since 0.172 on a
 room's input to its agent (§7.1.1) and since 0.174 on a `peer.message` of mode `send`, when it
 is delivered into the turn already running (§17.2), with `delivery`; no other field of a stored
@@ -588,7 +598,7 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.203: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
+| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise), `human?` (since 0.219: `true` on a message the owner typed in `POST /api/sessions/{id}/input` (§6), written there and nowhere else, so it is absent on a hub's own note (a resume, `hqc_move`, subagent leftovers), a run of a schedule, a room's post to its agent and a message from the Claude Code transcript; it is what Take back and Send now require (§6, §17.2) and what the worker writes Claude Code's `origin: human` for (§5.3, §8.1)) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.203: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text`, `reset?` (since 0.161: `true` when the runtime abandoned the attempt that wrote the text so far, which the hub and the client drop, and (since 0.208) the thinking being written with it, §6, §8.1; `text` is then empty; absent when false), `thinking?` (since 0.208: `true` for a piece of the agent's thinking being written, not of its answer; absent when false; §6, §8.1) | adapter; transport only, not written to the database |
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?, due_in_ms?, retry?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands and (since 0.169) Monitor watchers, in the order they became rows, then (since 0.169) the wakeup the agent armed and its cron jobs, empty when none (§8.1); since 0.181 a task the CLI marks `ambient` is no row, and the commands and subagents it starts are rows as the agent's own (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.161; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row, a command's and (since 0.169) a Monitor's say, `retry` (since 0.179) `{attempt, max_retries, retry_delay_ms, error_status?}` while its request to the model API failed and waits to be retried (`error_status` absent: the attempt got no response; §8.1), `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row, `command` for a command's and, since 0.169, `monitor` for a Monitor's, `wakeup` for the agent's wakeup and `cron` for one of its cron jobs; a command's or a Monitor's row carries only `task_id`, `description` (its Bash call's description, or the command; the Monitor's description), `duration_ms`, `call_id?`, `kind` and `stoppable`; a wakeup's and a job's row also `due_in_ms` (since 0.169), the milliseconds until it fires when the list was sent, by the worker's clock, 0 once due, absent on a job whose next fire is not known |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops, and (since 0.179) again, unchanged, at each heartbeat of a long call of the main agent (§8.1, §17.3) |
@@ -1143,6 +1153,15 @@ MCP calls (worker → hub → worker):
   schedule, a message from before 0.43).
   `schedule_id?` (since 0.70) — the `schedule_id` of a `user.message` the hub cron sent (§4,
   §16): such a run waits for the end of a running turn instead of joining it (§17.2).
+  `human?` (since 0.219) — `true` only for what the owner typed: the `user.message` has
+  `payload.human` (§4), no `peer`, no `schedule_id`, the room did not rewrite its text (§7.1.1) and
+  no buffered `send` message of another session stands in front of it (`peer_prefix` is empty);
+  absent otherwise (a message of another session, a room's input, a run of a schedule, a note of the
+  hub's own: a resume, `hqc_move`, subagent leftovers). The worker writes Claude Code's
+  `origin: {kind: "human"}` for such an input alone (§8.1); one with a `peer`, a `peer_prefix` or a
+  `schedule_id` is not human whatever the frame says. The two exceptions are hqc's own notes that
+  stand in front of a human input without taking its mark: a fork's first-input note and the
+  worker's note of the background tasks a move stopped.
 - `session.stop` {session_id} — interrupt the current turn.
 - `session.background` {session_id, call_id} → `ack` (since 0.125) — move the agent's
   running call `call_id` to the background: the agent goes on, the call keeps running (Claude
@@ -1156,6 +1175,23 @@ MCP calls (worker → hub → worker):
   request, §8.1). The client sends a `stoppable` row of the session's `subagents.live` (§4).
   Like `session.kill` it is acked also when no agent runs; what the runtime answers (stopped,
   refused) is only in the worker's log, and the task's end comes as any end of it.
+- `session.withdraw` {request_id, session_id, event_id} → `result {request_id, withdrawn}`
+  (since 0.219) — the owner takes back the input `event_id`, which the hub sent as
+  `session.input` and the worker has not acked. `withdrawn: true`: the input is gone, the agent
+  will never see it, and the worker sends no `ack` and no `error` for it (nor "cancelled by
+  Stop"); `false`: the agent has taken it already (§17.2). A session the worker does not run, and an
+  input it neither queues nor has written to the runtime (after a `session.kill` or a restart),
+  hold nothing: `true`. When the runtime does not answer the cancel in time (§8.1) the worker answers
+  `error`, and the input is a written one again: if the runtime then cancels it by itself, that is
+  a drop like any other and the input is sent again, not taken for a withdrawn one.
+- `session.input_now` {request_id, session_id, event_id} → `result {request_id, sent_now}`, or
+  `error {code: not_now}` (since 0.219) — the owner sends the input `event_id`, which the worker
+  holds and the agent has not taken, into the running turn at once (§17.2). `sent_now: true`:
+  written into the turn with priority now; `false`: the agent had taken it already, or the turn
+  ended meanwhile and the input waits as before. `not_now`: the runtime cannot take it into a
+  turn now (none runs, a request waits for an answer, a move waits, the turn answers an `hqc_ask`),
+  the input is no person's plain message (a slash command, a capped one, one of another session,
+  a run of a schedule), or it is the turn's own input.
 - `session.subagent_history` {request_id, session_id, task_id, after?, before?} → `result
   {request_id, events[], truncated, continues?}` (since 0.181) — what subagent `task_id` of
   `subagents.live` (§4) has done, for the history the client opens under its line (§6) and, since
@@ -1915,6 +1951,50 @@ the rest is marked "later"):
   `foreground_calls`: Claude Code moves a foreground call of the session by its id, a
   subagent's too, and the session is the user's own. A `call_id` that is empty, longer than
   128 bytes or has U+0000: `400 bad_request`; service session: `409 system_session`
+- `POST /api/sessions/{id}/inputs/{event_id}/withdraw` → `{withdrawn: true}` (since 0.219;
+  `write` level, as `/input`): the owner takes back a message of theirs that waits for the agent
+  (§17.2). The message becomes `delivery: withdrawn`, which the hub tells the open clients with a
+  `delivery` frame and removes from `inflight`; the pages of the feed and the subscription backlog
+  go on returning it as withdrawn (§3), `hqc_read`, a fork's copy and the search never do. What
+  the hub does depends on whether a worker may hold the message. One the hub never handed to a
+  worker (no `handed_at`, §3: the worker was away since it was typed, the session is paused or not
+  started) is withdrawn on the hub alone. One that was handed is asked about at the worker with
+  `session.withdraw` (§5.3) on the worker's connection, whatever the session's start state there
+  (a `session.kill` clears the hub's `inflight` and the worker's queue, so the connection of a
+  paused session holds nothing, and the worker says so): `withdrawn: true` withdraws it, `false`
+  is `409 already_taken` and the message stays as it is. With no worker connection a handed
+  message is not withdrawn (the worker may keep the input and give it to the agent): `409
+  worker_offline`, "the worker holds this message; try again when it is connected", the message
+  stays pending. While the request is outstanding the connection's state keeps the message in
+  `withdrawing`, so the hub hands it to nobody and a second take-back of it is `409 withdrawing`,
+  "this message is being taken back already"; the set is cleared when the request ends in any
+  way (the answer, an error, the connection closed). The worker's answer is waited for 10 s, and
+  settled also when the owner's request is gone meanwhile. One that is withdrawn already is `409
+  withdrawn`, "this message was taken back already", and the client that asked puts its text and
+  files back into the input, as on `withdrawn: true`. One the agent took already (`delivery: delivered`, or no longer pending) is `409
+  already_taken`. The hub sends no input that is withdrawn (it marks
+  `handed_at` and checks `delivery = pending` in one statement before each `session.input`). An
+  event that is not a `user.message` of this session with `payload.human` (§4: an unknown id,
+  another session's, a resume note, a hub's note, a run of a schedule): `404`; archived: `409
+  archived`, driven from VS Code: `409 locked_vscode`, service session: `409 system_session`, a
+  room: `409 room`; no answer from the worker `504 worker_timeout`, a worker that answers `error`
+  (e.g. a runtime that does not answer the cancel): `502` with the worker's own `error` code and
+  message, not `400 invalid_path`. Two limitations. A worker that answers after the 10 s: the
+  owner has `504` and the hub drops the answer; when the worker had dropped the message, it stays
+  queued and handed to nobody until the owner takes it back again (the worker holds nothing then
+  and says so: the message is withdrawn and its text comes back), or until the worker connects
+  again or the agent's process restarts, which hands it again and it runs. The owner's request is
+  gone (the connection broke) or its `200` is lost: the hub withdraws the message all the same and
+  the chat hides it, but its text does not come back into the input, unless the owner takes it
+  back again before the client learns of it (`409 withdrawn`)
+- `POST /api/sessions/{id}/inputs/{event_id}/now` → `{sent_now}` (since 0.219; `write` level):
+  the owner sends such a message into the running turn at once (§17.2): `session.input_now` to
+  the worker connection that holds the message in `inflight` (§5.3), whose `sent_now` comes back as
+  it is. `409 not_now` when the worker answers `not_now` (no turn runs, the turn waits for an
+  answer to a card of the agent's, a move waits, the turn answers an `hqc_ask`), or when no started
+  connection holds the message (the worker is offline, the session paused or not started, the
+  message handed in an earlier connection); a worker's other `error` is `502` as for `/withdraw`,
+  and the other refusals are those of `/withdraw`
 - `POST /api/sessions/{id}/tasks/{task_id}/stop` → `{sent}` (since 0.161; `write` level, as
   `/stop`): `session.stop_task` to the worker (§5.3), `sent: false` when the worker is not
   connected; nothing comes back of what the runtime did, the task's row leaves
@@ -4549,7 +4629,16 @@ Since 0.70 every user message the adapter writes carries a fresh v4 `uuid` (not 
 `event_id`: 2.1.312 drops a line whose `uuid` it has seen, echo and all, without a turn); its
 echo and its `command_lifecycle {command_uuid, state}` lines carry it (2.1.312: `queued` when
 the line is read, `started` when the CLI takes it, right after the echo for one that went into a
-running turn, then `completed` or `cancelled`; a turn the CLI begins by itself has none). The
+running turn, then `completed` or `cancelled`; a turn the CLI begins by itself has none). Since
+0.219 the line of an input the hub marked `human` (`session.input.human`, §5.3: what the owner
+typed, nothing of another session or of the hub's put in front of it or in its place) carries
+`origin: {kind: "human"}`, without which the CLI takes it as unattributed and its strict
+`isHuman()` gates refuse it; a message of another session, a room's input, a run of a schedule and
+a note of the hub's own (a resume, `hqc_move`, subagent leftovers) carry none. Two notes of hqc's own
+do stand in front of a human input, and it stays human: a fork's first input carries the note that
+the session is a copy (§6), and the worker puts the note of the background tasks a move stopped in
+front of the first input after the move. Each input is a line
+of its own: the worker joins none, so a line never mixes a human's text with another's. The
 input of a turn, for `in_reply_to`, is the one whose `started` or echo begins a turn or comes
 during a turn the CLI began by itself (the first input of a process, and every input with a CLI
 that sends no such lines: the one written). At `result`
@@ -5106,6 +5195,23 @@ Bash task or subagent to the background if it has not been moved yet and answers
 with `{backgrounded: bool}`, or an error when background tasks are disabled; the call gets its
 tool result ("Command was manually backgrounded by user with ID: …" for Bash, `async_launched`
 for a subagent) and the agent goes on. The adapter only logs the answer.
+
+Since 0.219 the adapter takes input back and sends it now. `session.withdraw` (§5.3) is
+`control_request {subtype: "cancel_async_message", message_uuid: <the line's uuid>}` for an
+input written and not taken (2.1.312): the CLI answers `success` with `{cancelled: bool}`, and
+with `true` writes `command_lifecycle` `cancelled` for the line before it, which then never
+reaches the model. The adapter waits for the answer (`interrupt_answer`, 2 s; an error after
+it: the CLI is hung, and the input is then a written one again, which a later `cancelled` of the
+CLI's own drops like any other) and treats the line as no one's drop: it is not acked, not carried and not
+`dropped` at a `result`; one that was carried, or opened the turn, ends the turn it kept
+running with no `result` to come, as a carried input the CLI cancelled does. An input echoed or
+`started` is not asked for (`false`). `session.input_now` is the line of `session.input` written
+into the running turn with `priority: "now"`: the CLI moves the running Bash, MCP call or
+subagent to the background and takes the line into the same turn at once (the echo is
+`isReplay`, both uuids in `result.user_message_uuids`); during model text with no open call the
+turn ends `terminal_reason: "aborted_streaming"` and the line runs as a turn of its own, as a
+carried input does. An input already written to the CLI and held there is cancelled first and
+written again as it was, with a new `uuid` and the same `event_id`.
 
 The working directory is `<workspace>/<cwd>`. The process environment comes from the binding
 of the workspace path in the worker's local config (§14). Authentication is the subscription
@@ -6962,6 +7068,35 @@ Each turn runs in its own input's mode (since 0.43, T39): a person's input queue
 capped turn runs in the session's mode (§5.3), unless (since 0.44, T40) it carries a buffered
 send from a session in a lower mode (§7.1).
 
+Since 0.219 the owner may take a message of theirs back, or send it in at once, while it waits
+for the agent: it shows `queued` or `awaiting delivery` and, beside its Copy and Quote buttons,
+Take back and (only while the session's turn runs) Send now. A message waits in the hub (the
+worker is away, the session paused), in the worker's queue, or written into the CLI's queue and
+not yet taken. Take back (`POST .../inputs/{event_id}/withdraw`, §6) removes it from wherever it
+waits, or has the CLI drop the line (§8.1), and then no one ever sees it: it is `delivery:
+withdrawn`, never acked, never failed, never copied into a fork, and the client puts its text
+after what is typed in the input (a blank line between them) and its files back among the input's
+files, read from the hub again; a refusal, because the agent took the message first, is `409
+already_taken` and says so, and the bubble stays. A message that was handed to a worker is asked
+about at its connection whatever the session's start state (a paused session's worker holds
+nothing: `true`); with no worker connected it is `409 worker_offline`; while the question is open
+the message is `withdrawing`, handed to nobody and refused a second take-back (`409 withdrawing`);
+a message taken back already is `409 withdrawn`, and the client that asked puts the text back as on
+success; a worker's answer after the hub's `504` is dropped, and a take-back whose answer the
+client lost hides the message without putting its text back (§6, limitations). Only a message the
+owner typed (`payload.human`, §4) has them, and Send now not a slash command.
+Send now (`.../now`) writes a message the worker only queues into the turn with priority now (§8.1),
+or has a line the CLI holds cancelled and written again that way; the CLI moves the call the agent
+is in to the background, which is the point; while the agent writes its answer, the answer stops and
+the message runs next. It goes past the inputs waiting in front of it, as the owner chose; the turn
+takes it under the rules of the input that joins (no `hqc_ask` turn, no move waiting, no open
+request, no slash command, no cap): a turn that waits for an answer to a card of the agent's takes
+nothing, so that is `409 not_now` (the client says "The agent cannot take this message into its turn
+now"); one the agent took meanwhile is `sent_now: false` (the client says "Not sent now: the agent
+took it already, or it goes next") and nothing else. A turn's own input is not sent now; it is not taken back once the CLI
+started it. A message the hub handed to a worker in an earlier connection is neither taken back nor
+sent now until that worker is connected (§6).
+
 ### 17.3 Processes
 - An idle agent is left alone by default. With the worker's `idle_timeout` > 0 the
   process exits, and the next input brings it back via resume. Since 0.70 an agent is not idle
@@ -7323,6 +7458,37 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.218 → 0.219 (take a waiting message back, or send it now)
+§3 Event, §5.3, §6, §8.1, §17.2: a message of the owner's that waits for the agent shows two buttons,
+Take back and (while a turn runs) Send now. Take back withdraws it (`delivery: withdrawn`, a new
+value): the hub drops it, a worker that holds it takes it out of its queue or has Claude Code drop
+the line with `cancel_async_message`, an agent that has taken it already makes it `409
+already_taken`; `hqc_read`, a fork's copy and the search leave it out, the feed pages and a
+subscription's backlog return it as `withdrawn` and the client hides it, and puts its text and
+files back into the input. Send now writes it
+into the running turn with `priority: "now"`, which makes Claude Code move the running Bash, MCP
+call or subagent to the background and take the message into the same turn. New frames
+`session.withdraw` and `session.input_now`, answered with `result {withdrawn}` / `{sent_now}`
+(`error not_now` for a turn that cannot take input), routes `POST .../inputs/{event_id}/withdraw`
+and `.../now`; an input the owner typed is written to the CLI with `origin: {kind: "human"}`, which a
+message of another session, a room's input, a run of a schedule and a note of the hub's own do not
+carry: the hub marks the owner's `user.message` `payload.human` in its input route alone and sets
+`session.input.human` from it, unless a peer header, a room's rewrite or buffered `send` messages
+make the input something else; Take back and Send now are for such messages only. A worker keeps an
+input across a reconnect, so the hub marks `events.handed_at` (migration `0055`) before each
+`session.input` and withdraws on its own word only an input never handed; one handed is asked about
+at its worker's connection whatever the session's start state (a worker that was killed or paused
+holds nothing and says so), with no connection it is `409 worker_offline`; while the question is
+open the connection's `withdrawing` keeps the message from being handed and refuses a second
+take-back (`409 withdrawing`); the answer is settled also when the owner's request is gone. A
+withdrawn input is never sent; a client whose take-back got `409 withdrawn` puts the text back. Two
+limitations (§6): a worker's answer after `504 worker_timeout` is dropped, and a message the worker
+dropped meanwhile stays queued until the owner takes it back again, the worker reconnects or the
+agent's process restarts; a take-back whose `200` the client lost hides the message without
+putting its text back. A worker's `error` for the two frames is `502` with its own code. When the
+CLI does not answer a cancel in time the input is a written one again, and a session that waited
+for a slot for a withdrawn input leaves the line. Hub, worker, protocol and client.
 
 ### 0.217 → 0.218 (the agent's goal: a row above the input, its checks in the feed)
 §4, §6, §8.1: Claude Code's `/goal <condition>` already reached the CLI, which keeps the agent at

@@ -325,6 +325,8 @@ const MODE_REQUEST: &str = "hqc-mode-";
 const MODEL_REQUEST: &str = "hqc-model-";
 /// `request_id` prefix of our `background_tasks` control requests.
 const BACKGROUND_REQUEST: &str = "hqc-background-";
+/// `request_id` prefix of our `cancel_async_message` control requests.
+const CANCEL_REQUEST: &str = "hqc-cancel-";
 /// `request_id` prefix of our `stop_task` control requests.
 const STOP_TASK_REQUEST: &str = "hqc-stop-task-";
 const INTERRUPT_REQUEST: &str = "hqc-interrupt-";
@@ -389,6 +391,9 @@ struct Written {
     state: Option<String>,
     /// A turn ended without taking it: the CLI runs it next by itself.
     carried: bool,
+    /// The `request_id` of the `cancel_async_message` asking the CLI to drop it (SPEC 0.219),
+    /// until the CLI answers.
+    withdrawing: Option<String>,
 }
 
 /// A subagent of [`Core::live`], a command or a Monitor of [`Core::live_commands`], the wakeup
@@ -548,6 +553,9 @@ pub struct Core {
     turn: u64,
     /// The ids of the `interrupt` requests the CLI answered.
     interrupt_answers: HashSet<String>,
+    /// The CLI's answers to our `cancel_async_message` requests by `request_id`: whether it
+    /// dropped the message ([`Core::withdraw_answer`]).
+    cancel_answers: HashMap<String, bool>,
     pending: HashMap<String, Pending>,
     rules: SessionRules,
     /// `[permissions]` of the worker config, for `policy_hint` and denying what a deny
@@ -707,6 +715,7 @@ impl Core {
             stopping: false,
             turn: 0,
             interrupt_answers: HashSet::new(),
+            cancel_answers: HashMap::new(),
             pending: HashMap::new(),
             rules: SessionRules::default(),
             policy: Arc::default(),
@@ -914,7 +923,7 @@ impl Core {
         if !self.self_turn {
             out.extend(self.drop_held());
         }
-        out.push(self.write(input, images, false));
+        out.push(self.write(input, images, false, false));
         out
     }
 
@@ -935,12 +944,38 @@ impl Core {
         if !self.can_inject() {
             return None;
         }
-        Some(vec![self.write(input, images, true)])
+        Some(vec![self.write(input, images, true, false)])
+    }
+
+    /// [`Core::inject_with_images`] with `priority: "now"` (SPEC 0.219): the CLI moves the
+    /// running Bash, MCP call or subagent to the background and takes the line into the same
+    /// turn at once, instead of at the end of the call; a turn with no open call ends
+    /// `aborted_streaming` and runs the line as a turn of its own, which comes back as a
+    /// carried input.
+    pub fn inject_now_with_images(
+        &mut self,
+        input: &SessionInput,
+        images: Vec<Value>,
+    ) -> Option<Vec<Action>> {
+        if !self.can_inject() {
+            return None;
+        }
+        Some(vec![self.write(input, images, true, true)])
     }
 
     /// The user message of stream-json, with a fresh `uuid` its echo and `command_lifecycle`
-    /// will name.
-    fn write(&mut self, input: &SessionInput, images: Vec<Value>, mid_turn: bool) -> Action {
+    /// will name. `now`: `priority: "now"`. What the owner typed (`input.human`, which the hub
+    /// sets for no message of another session, room input, schedule run or note of its own)
+    /// carries `origin: {kind: "human"}`, without which the CLI takes the line as unattributed
+    /// and its strict `isHuman()` gates refuse it (2.1.312). Every input is a line of its own:
+    /// the worker joins no two, so no line mixes a human's text with another's.
+    fn write(
+        &mut self,
+        input: &SessionInput,
+        images: Vec<Value>,
+        mid_turn: bool,
+        now: bool,
+    ) -> Action {
         // `peer_prefix` and `peer` are in `text` already (crate::peer, SPEC §7.1).
         let uuid = Uuid::new_v4();
         self.wrote = true;
@@ -950,6 +985,7 @@ impl Core {
             mid_turn,
             state: None,
             carried: false,
+            withdrawing: None,
         });
         let content = if images.is_empty() {
             json!(input.text)
@@ -958,11 +994,63 @@ impl Core {
             blocks.extend(images);
             Value::Array(blocks)
         };
-        Action::Write(json!({
+        let mut line = json!({
             "type": "user",
             "uuid": uuid,
             "message": {"role": "user", "content": content},
-        }))
+        });
+        if input.human {
+            line["origin"] = json!({"kind": "human"});
+        }
+        if now {
+            line["priority"] = json!("now");
+        }
+        Action::Write(line)
+    }
+
+    /// `control_request` `cancel_async_message` for the input `event_id` the CLI has not taken
+    /// (SPEC 0.219), with the request's id ([`Core::withdraw_answer`]); `None` when no such
+    /// input waits: it was echoed, or its `command_lifecycle` says the CLI started it, or the
+    /// CLI is already asked. On `cancelled: true` the CLI drops the line (`command_lifecycle`
+    /// `cancelled`, 2.1.312), which then never reaches the model and is no `dropped` input of
+    /// a turn's end; the input is gone from [`Core::awaiting_echo`] and, when it was what kept
+    /// a turn running, that turn is over ([`Core::carried_gone`]).
+    pub fn withdraw(&mut self, event_id: Uuid) -> Option<(Action, String)> {
+        let w = self.awaiting_echo.iter_mut().find(|w| {
+            w.event_id == event_id
+                && w.withdrawing.is_none()
+                && !matches!(w.state.as_deref(), Some("started" | "completed"))
+        })?;
+        let request_id = format!("{CANCEL_REQUEST}{}", Uuid::now_v7());
+        w.withdrawing = Some(request_id.clone());
+        let req = json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {"subtype": "cancel_async_message", "message_uuid": w.uuid},
+        });
+        Some((Action::Write(req), request_id))
+    }
+
+    /// Whether the CLI dropped the message of the `cancel_async_message` with this id, once
+    /// it answered; the answer is taken out, so it is told once.
+    pub fn withdraw_answer(&mut self, request_id: &str) -> Option<bool> {
+        self.cancel_answers.remove(request_id)
+    }
+
+    /// The CLI did not answer the `cancel_async_message` with this id in time (SPEC 0.219): the
+    /// input is no longer being withdrawn. An answer or a `cancelled` line that comes late is
+    /// then no word of the owner's withdrawal: the input goes the way of any other the CLI
+    /// drops (`dropped` at the turn's end, resent), instead of being taken for a withdrawn one
+    /// that is out of the supervisor's books.
+    pub fn withdraw_unanswered(&mut self, request_id: &str) {
+        self.cancel_answers.remove(request_id);
+        if let Some(w) = self
+            .awaiting_echo
+            .iter_mut()
+            .find(|w| w.withdrawing.as_deref() == Some(request_id))
+        {
+            w.withdrawing = None;
+        }
     }
 
     /// `control_request` `initialize` with only `perTaskStopAffordance: true`, the first line
@@ -1235,6 +1323,7 @@ impl Core {
         self.self_turn = false;
         self.stopping = false;
         self.interrupt_answers.clear();
+        self.cancel_answers.clear();
         let mut out: Vec<Action> = self.release_compaction(None).into_iter().collect();
         out.extend(self.flush(false));
         // A subagent end held while the subagent still counted ([`Core::held_ends`]) is its
@@ -1624,6 +1713,9 @@ impl Core {
             self.interrupt_answers.insert(id.to_owned());
             return vec![];
         }
+        if id.starts_with(CANCEL_REQUEST) {
+            return self.on_cancel_answer(id, r);
+        }
         if id.starts_with(STOP_TASK_REQUEST) {
             if r["subtype"] == "success" {
                 tracing::info!(session_id = %self.session_id, request_id = id, "task stopped");
@@ -1694,6 +1786,55 @@ impl Core {
         }
         tracing::warn!(session_id = %self.session_id, error = %r["error"], "claude refused the permission mode switch");
         vec![]
+    }
+
+    /// The CLI's answer to a `cancel_async_message` ([`Core::withdraw`]): `cancelled: true`
+    /// drops the input from the books, any other answer leaves it waiting. Either is noted for
+    /// [`Core::withdraw_answer`].
+    fn on_cancel_answer(&mut self, id: &str, r: &Value) -> Vec<Action> {
+        let cancelled = r["subtype"] == "success" && r["response"]["cancelled"] == true;
+        self.cancel_answers.insert(id.to_owned(), cancelled);
+        let Some(i) = self
+            .awaiting_echo
+            .iter()
+            .position(|w| w.withdrawing.as_deref() == Some(id))
+        else {
+            // A turn's end dropped it already ([`Core::on_result`]).
+            return vec![];
+        };
+        if !cancelled {
+            tracing::info!(session_id = %self.session_id, request_id = id, "claude did not cancel the message; it has been taken");
+            self.awaiting_echo[i].withdrawing = None;
+            return vec![];
+        }
+        let Some(w) = self.awaiting_echo.remove(i) else {
+            return vec![];
+        };
+        tracing::info!(session_id = %self.session_id, event_id = %w.event_id, "input withdrawn from the CLI's queue");
+        if w.carried || !w.mid_turn {
+            return self.carried_gone(vec![]);
+        }
+        vec![]
+    }
+
+    /// A carried input, or the one that began the turn, left the CLI's queue without being
+    /// taken (cancelled by the CLI, or withdrawn): the turn it kept running is over, with no
+    /// `result` to come, unless other carried inputs go on. [`AdapterEvent::TurnEnded`] with
+    /// those in `carried` and `dropped` the inputs the runtime will not take.
+    fn carried_gone(&mut self, dropped: Vec<Uuid>) -> Vec<Action> {
+        let carried: Vec<Uuid> = self
+            .awaiting_echo
+            .iter()
+            .filter(|w| w.carried)
+            .map(|w| w.event_id)
+            .collect();
+        // As at `result`: the CLI goes on with the other carried inputs, in a turn nobody stops.
+        self.stopping = false;
+        self.in_turn = !carried.is_empty();
+        if self.in_turn {
+            self.turn += 1;
+        }
+        vec![Action::Emit(AdapterEvent::TurnEnded { carried, dropped })]
     }
 
     /// `system/session_writes_lost` (CLI 2.1.317): a line when the transcript is among what
@@ -2034,27 +2175,15 @@ impl Core {
             self.last_input = Some(w.event_id);
         }
         w.state = Some(state.to_owned());
-        if !(w.carried && state == "cancelled") {
+        // A withdrawn input is no one's drop: its `cancel_async_message` answer closes it.
+        if !(w.carried && state == "cancelled") || w.withdrawing.is_some() {
             return vec![];
         }
         let Some(w) = self.awaiting_echo.remove(i) else {
             return vec![];
         };
         tracing::info!(session_id = %self.session_id, event_id = %w.event_id, "carried input cancelled by the CLI, not taken");
-        let dropped = vec![w.event_id];
-        let carried: Vec<Uuid> = self
-            .awaiting_echo
-            .iter()
-            .filter(|w| w.carried)
-            .map(|w| w.event_id)
-            .collect();
-        // As at `result`: the CLI goes on with the other carried inputs, in a turn nobody stops.
-        self.stopping = false;
-        self.in_turn = !carried.is_empty();
-        if self.in_turn {
-            self.turn += 1;
-        }
-        vec![Action::Emit(AdapterEvent::TurnEnded { carried, dropped })]
+        self.carried_gone(vec![w.event_id])
     }
 
     /// Subagent `task_id` started (`add`) or ended by the CLI's word: the new count when it
@@ -2817,6 +2946,9 @@ impl Core {
         let (mut carried, mut dropped, mut taken) = (Vec::new(), Vec::new(), Vec::new());
         for mut w in std::mem::take(&mut self.awaiting_echo) {
             let carry = match w.state.as_deref() {
+                // Withdrawn: the owner took it back, so it is dropped with no word to the
+                // supervisor, which has it out of its books already.
+                Some("cancelled") if w.withdrawing.is_some() => continue,
                 Some("cancelled") => {
                     tracing::info!(session_id = %self.session_id, event_id = %w.event_id, "input cancelled by the CLI, not taken");
                     dropped.push(w.event_id);

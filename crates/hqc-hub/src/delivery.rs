@@ -80,7 +80,13 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
             // The note of a resume goes ahead of the inputs typed during the pause (SPEC §17.3).
             pending.sort_by_key(|p| p.payload.get("resume") != Some(&Value::Bool(true)));
             for p in pending {
-                if sc.inflight.contains(&p.event_id) {
+                if sc.inflight.contains(&p.event_id) || sc.withdrawing.contains(&p.event_id) {
+                    continue;
+                }
+                // Marked as handed before anything else of it is done, and not sent if it is no
+                // longer pending: the owner took it back since `pending_inputs` read it. From
+                // here a withdrawal on the hub alone is refused (SPEC 0.219).
+                if !db::mark_input_handed(&app.db, p.event_id).await? {
                     continue;
                 }
                 let mut frame = input_frame(session_id, p.event_id, &p.payload, p.chain.as_ref());
@@ -89,8 +95,14 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
                 if let Some(text) = crate::rooms::input_text(app, &s, &p).await? {
                     frame.text = text;
                     frame.peer = None;
+                    frame.human = false;
                 }
                 let prefix = crate::peers::take_prefix(app, session_id, p.event_id).await?;
+                // Messages of other sessions in front of the owner's text: the line is no longer
+                // what the owner typed.
+                if !prefix.messages.is_empty() {
+                    frame.human = false;
+                }
                 frame.peer_prefix = prefix.messages;
                 // Buffered text never runs above the mode of the session that sent it (T40).
                 if let Some(cap) = prefix
@@ -123,7 +135,13 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
 }
 
 /// The input without `peer_prefix`; `peer` for a `peer.message` (SPEC §7.1); the cap of
-/// its chain, if it has one (T39); `schedule_id` of a run of a schedule (§16, §17.2).
+/// its chain, if it has one (T39); `schedule_id` of a run of a schedule (§16, §17.2); `human`
+/// only for what the owner typed in the input route (`payload.human`, SPEC 0.219) and no
+/// message of another session or schedule run. The hub's own notes, which are `user.message`
+/// too, have no such mark; the caller takes it off an input with text of a room or of other
+/// sessions put in front of it or in its place. Two notes of hqc's own stand in front of a human
+/// input and leave its mark: a fork's first-input note, put in front by the caller, and the
+/// worker's note of the background tasks a move stopped.
 fn input_frame(
     session_id: Uuid,
     event_id: Uuid,
@@ -144,6 +162,9 @@ fn input_frame(
         }),
         _ => None,
     };
+    let human = payload.get("human") == Some(&Value::Bool(true))
+        && peer.is_none()
+        && payload.get("schedule_id").is_none();
     SessionInput {
         session_id,
         event_id,
@@ -164,6 +185,7 @@ fn input_frame(
         schedule_id: payload
             .get("schedule_id")
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        human,
     }
 }
 

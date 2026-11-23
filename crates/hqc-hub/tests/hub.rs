@@ -259,7 +259,7 @@ async fn pending_input_is_delivered_after_hello() {
     assert_eq!(input["client_op_id"], "op-1");
     assert_eq!(
         input["payload"],
-        json!({"text": "Run the tests", "artifact_ids": []})
+        json!({"text": "Run the tests", "artifact_ids": [], "human": true})
     );
 
     // The same client_op_id is the same input.
@@ -284,7 +284,7 @@ async fn pending_input_is_delivered_after_hello() {
     assert_eq!(
         si["payload"],
         json!({"session_id": sid, "event_id": input["event_id"], "text": "Run the tests",
-               "artifact_ids": [], "peer_prefix": []})
+               "artifact_ids": [], "peer_prefix": [], "human": true})
     );
     w.reply(&si["id"], "ack", json!({"event_id": input["event_id"]}))
         .await;
@@ -2237,6 +2237,8 @@ async fn pause_stops_an_idle_agent_and_resume_tells_it_first() {
     assert_eq!(start["payload"]["mode"], "resume");
     w.reply(&start["id"], "ack", json!({})).await;
     let note = w.expect("session.input").await;
+    // The hub's own note: no `human` mark (SPEC 0.219).
+    assert!(note["payload"].get("human").is_none(), "{note}");
     let text = note["payload"]["text"].as_str().unwrap();
     // No turn ran, so the pause cut no step: a rejected step in the history is the user's own.
     assert!(
@@ -2539,6 +2541,8 @@ async fn subagent_leftovers_give_the_agent_a_note() {
         "{got:?}"
     );
     let si = &got[1];
+    // The hub's own note: no `human` mark (SPEC 0.219).
+    assert!(si["payload"].get("human").is_none(), "{si}");
     assert_eq!(
         si["payload"]["text"],
         "[hqc] Subagent \"Heightmap: 25 frames\" reported 30 min ago, but background commands it \

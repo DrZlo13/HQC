@@ -83,6 +83,8 @@ fn without_uuids(lines: Vec<Value>) -> Vec<Value> {
                 assert_eq!(u.get_version_num(), 4, "{v}");
                 assert!(seen.insert(u), "uuid written twice: {v}");
                 v.as_object_mut().unwrap().remove("uuid");
+                // A person's `origin` is checked on its own (SPEC 0.219).
+                v.as_object_mut().unwrap().remove("origin");
             }
             v
         })
@@ -251,6 +253,7 @@ impl Harness {
                 peer: None,
                 permission_cap: None,
                 schedule_id: None,
+                human: false,
             })
             .await
             .unwrap();
@@ -1860,6 +1863,7 @@ async fn stop_interrupts_then_falls_back_to_sigint() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -1895,6 +1899,7 @@ async fn stop_interrupts_then_falls_back_to_sigint() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .is_err());
@@ -1928,6 +1933,7 @@ async fn stop_escalates_to_sigterm_when_sigint_does_not_end_the_turn() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -1991,6 +1997,198 @@ async fn an_answered_interrupt_is_waited_for() {
     assert_eq!(h.claude.signals(), []);
 }
 
+/// Input the running turn of [`running_turn`] takes, `event_id` its id.
+fn another_input(h: &Harness, event_id: Uuid) -> SessionInput {
+    SessionInput {
+        session_id: h.session_id,
+        event_id,
+        text: "now".into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+        schedule_id: None,
+        human: true,
+    }
+}
+
+/// SPEC 0.219: `inject_now_with` writes the line with `priority: "now"`; `withdraw_input` asks
+/// the CLI to cancel that very line (its `uuid`) and tells whether the CLI did, waiting for the
+/// answer; a message not written is not withdrawn.
+#[tokio::test]
+async fn a_message_sent_now_is_withdrawn_by_its_uuid() {
+    let fx = fixture!("permission-allow");
+    let claude = ScriptedClaude::new(&running_turn(&fx)).answering_cancels(true);
+    let mut h = Harness::start_with_options(claude, fx.claude_session(), |_| {}).await;
+    start_the_turn(&mut h).await;
+    let id = Uuid::now_v7();
+    assert!(h
+        .adapter
+        .inject_now_with(&another_input(&h, id), &[])
+        .await
+        .unwrap());
+    // The scripted CLI reads its stdin in a task of its own.
+    let sent = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let line = h
+                .claude
+                .stdin()
+                .into_iter()
+                .find(|l| l["priority"] == "now");
+            if let Some(line) = line {
+                break line;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the line sent now is not on the CLI's stdin");
+    assert_eq!(sent["priority"], "now");
+    assert_eq!(sent["origin"], json!({"kind": "human"}));
+    assert!(h.adapter.withdraw_input(id).await.unwrap());
+    let asked = h.claude.stdin().last().cloned().unwrap();
+    assert_eq!(asked["request"]["subtype"], "cancel_async_message");
+    assert_eq!(asked["request"]["message_uuid"], sent["uuid"]);
+    assert!(
+        !h.adapter.withdraw_input(id).await.unwrap(),
+        "it is gone: nothing to withdraw"
+    );
+    assert!(!h.adapter.withdraw_input(Uuid::now_v7()).await.unwrap());
+}
+
+/// SPEC 0.219, through the adapter: the line of an input the hub marked `human` (the owner's)
+/// reaches the CLI with `origin: {kind: "human"}`, the line of one it did not (a message of
+/// another session, a room's input, a note of the hub's own: all arrive with `human` false)
+/// without it, and each input is a line of its own.
+#[tokio::test]
+async fn only_the_owners_input_reaches_the_cli_with_origin_human() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start_with_options(
+        ScriptedClaude::new(&running_turn(&fx)),
+        fx.claude_session(),
+        |_| {},
+    )
+    .await;
+    start_the_turn(&mut h).await;
+    let owner = another_input(&h, Uuid::now_v7());
+    let mut other = another_input(&h, Uuid::now_v7());
+    other.text = "from another session".into();
+    other.human = false;
+    assert!(h.adapter.inject_with(&owner, &[]).await.unwrap());
+    assert!(h.adapter.inject_with(&other, &[]).await.unwrap());
+    // The scripted CLI reads its stdin in a task of its own.
+    let users = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let users: Vec<Value> = h
+                .claude
+                .stdin()
+                .into_iter()
+                .filter(|l| l["type"] == "user")
+                .collect();
+            if users.len() == 3 {
+                break users;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the lines are not on the CLI's stdin");
+    let by_text = |text: &str| {
+        users
+            .iter()
+            .find(|l| l["message"]["content"] == json!(text))
+            .unwrap_or_else(|| panic!("no line {text:?}: {users:?}"))
+    };
+    assert_eq!(by_text("now")["origin"], json!({"kind": "human"}));
+    assert!(by_text("hi").get("origin").is_none());
+    assert!(by_text("from another session").get("origin").is_none());
+}
+
+/// The CLI answers `cancelled: false`: the message has been taken, `false`.
+#[tokio::test]
+async fn a_message_the_cli_will_not_cancel_is_not_withdrawn() {
+    let fx = fixture!("permission-allow");
+    let claude = ScriptedClaude::new(&running_turn(&fx)).answering_cancels(false);
+    let mut h = Harness::start_with_options(claude, fx.claude_session(), |_| {}).await;
+    start_the_turn(&mut h).await;
+    let id = Uuid::now_v7();
+    assert!(h
+        .adapter
+        .inject_with(&another_input(&h, id), &[])
+        .await
+        .unwrap());
+    assert!(!h.adapter.withdraw_input(id).await.unwrap());
+}
+
+/// A CLI that does not answer the cancel is hung: an error after `interrupt_answer`, not a wait
+/// for ever and not a guess.
+#[tokio::test]
+async fn a_cancel_the_cli_does_not_answer_is_an_error() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start_with_options(
+        ScriptedClaude::new(&running_turn(&fx)),
+        fx.claude_session(),
+        |o| o.interrupt_answer = Duration::from_millis(100),
+    )
+    .await;
+    start_the_turn(&mut h).await;
+    let id = Uuid::now_v7();
+    assert!(h
+        .adapter
+        .inject_with(&another_input(&h, id), &[])
+        .await
+        .unwrap());
+    assert!(h.adapter.withdraw_input(id).await.is_err());
+    // SPEC 0.219: the input is no longer being withdrawn: it is a written one that the CLI may
+    // cancel by itself later, which is then its drop. A second ask is made (and not met with
+    // "it is gone", which a withdrawal still marked under way would give).
+    assert!(h.adapter.withdraw_input(id).await.is_err());
+}
+
+/// SPEC 0.219: a cancel the CLI does not answer in time leaves the input a written one again:
+/// when the CLI then cancels it after all (its `cancelled` line comes late), that is a drop like
+/// any other, which the turn's end reports as `dropped` so the input is sent again, not the
+/// silence of a withdrawal the owner was told had failed.
+#[test]
+fn an_unanswered_cancel_leaves_a_late_cancelled_input_dropped() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b) = (user_input(sid, "first"), user_input(sid, "second"));
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ub, "queued"));
+    let rid = cancel_request(&mut core, b.event_id, &ub);
+    // The adapter gave up waiting for the answer.
+    core.withdraw_unanswered(&rid);
+    // No cancel is under way any more: it is asked for again, and left unanswered again.
+    let rid2 = cancel_request(&mut core, b.event_id, &ub);
+    core.withdraw_unanswered(&rid2);
+    let mut out = play(&mut core, &lifecycle(&ub, "cancelled"));
+    out.extend(play(&mut core, &cancel_answer(&rid, true)));
+    out.extend(play(
+        &mut core,
+        &lines_of(&[tool_result("toolu_1"), reply("DONE"), result("success")]),
+    ));
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "message \"DONE\" to A",
+            "status to A",
+            "turn_ended [] dropped [B]"
+        ]
+    );
+}
+
 /// The echo of the prompt and a delta, then silence: a turn that never ends by itself.
 fn running_turn(fx: &Fixture) -> String {
     fx.stream
@@ -2013,6 +2211,7 @@ async fn start_the_turn(h: &mut Harness) {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -3549,6 +3748,7 @@ fn deny_is_the_tabs_no() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     });
     core.on_line(&can_use_tool_line(&fx, "r1", None));
     let w = writes(&core.answer_approval("r1", "deny", None).unwrap());
@@ -4410,6 +4610,7 @@ async fn image_attachments_are_image_blocks() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     };
     let a = core.input_with_images(&input, images);
     assert!(
@@ -4438,6 +4639,7 @@ fn held_text_is_not_final_before_a_tool_call() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     });
     core.on_line(&echo(&Uuid::new_v4().to_string(), "x"));
     let u1 = Uuid::new_v4();
@@ -4491,6 +4693,7 @@ fn nul_never_reaches_an_event() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     });
     let lines = [
         json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta",
@@ -4721,6 +4924,7 @@ async fn takeover_records_are_registered_as_own() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     })
     .await
     .unwrap();
@@ -5555,6 +5759,7 @@ fn written(core: &mut Core, sid: Uuid, text: &str) -> Uuid {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     });
     input
 }
@@ -7413,6 +7618,7 @@ fn a_goal_behind_a_dropped_text_is_still_sent() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     };
     assert_eq!(goal_shape(core.input(&input)), ["goal:met"]);
     assert!(core.on_exit().is_empty(), "nothing left behind");
@@ -7486,6 +7692,7 @@ fn user_input(sid: Uuid, text: &str) -> SessionInput {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: true,
     }
 }
 
@@ -7927,6 +8134,267 @@ fn a_cancelled_message_is_not_taken() {
             "status to A",
             "turn_ended [] dropped [B]"
         ]
+    );
+}
+
+/// The CLI's answer to our `cancel_async_message` `request_id`.
+fn cancel_answer(request_id: &str, cancelled: bool) -> String {
+    json!({"type": "control_response", "response": {"subtype": "success",
+        "request_id": request_id, "response": {"cancelled": cancelled}}})
+    .to_string()
+}
+
+/// The `request_id` of the `cancel_async_message` asked for the message with `uuid`, after
+/// checking what it asks.
+fn cancel_request(core: &mut Core, event_id: Uuid, uuid: &str) -> String {
+    let (action, request_id) = core.withdraw(event_id).expect("the CLI has not taken it");
+    let Action::Write(v) = action else {
+        panic!("not a write");
+    };
+    assert_eq!(v["type"], "control_request");
+    assert_eq!(v["request_id"], request_id);
+    assert_eq!(
+        v["request"],
+        json!({"subtype": "cancel_async_message", "message_uuid": uuid})
+    );
+    request_id
+}
+
+/// SPEC 0.219: an input the hub marks `human` (what the owner typed) goes to the CLI with
+/// `origin: {kind: "human"}`, which its strict `isHuman()` gates ask for; one it does not mark
+/// (a message of another session, a run of a schedule, a room's input, a note of the hub's own)
+/// has none. Send now adds `priority: "now"`, which nothing else carries.
+#[test]
+fn a_persons_input_is_human_and_send_now_has_priority_now() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(sid, "first");
+    let first = writes(&core.input(&a));
+    assert_eq!(first[0]["origin"], json!({"kind": "human"}));
+    assert!(first[0].get("priority").is_none(), "{first:?}");
+    let b = user_input(sid, "now");
+    let now = writes(
+        &core
+            .inject_now_with_images(&b, vec![])
+            .expect("a turn runs"),
+    );
+    assert_eq!(now[0]["origin"], json!({"kind": "human"}));
+    assert_eq!(now[0]["priority"], "now");
+    assert_eq!(now[0]["message"]["content"], "now");
+    // The mark is the hub's word alone: `peer` and `schedule_id` set no origin of their own, and
+    // an input without them, which the hub did not mark, has none (the runtime's `peer` is
+    // consumed into the text before this, so no input of another session shows it).
+    let mut unmarked = user_input(sid, "from a session");
+    unmarked.human = false;
+    let from_peer = writes(
+        &core
+            .inject_with_images(&unmarked, vec![])
+            .expect("a turn runs"),
+    );
+    assert!(from_peer[0].get("origin").is_none(), "{from_peer:?}");
+    // Send now only goes into a turn that runs.
+    let mut idle = Core::new(sid, false);
+    assert!(idle.inject_now_with_images(&b, vec![]).is_none());
+}
+
+/// SPEC 0.219: a message the CLI holds in its queue is taken back with `cancel_async_message`.
+/// The CLI's `cancelled` for it is no drop of a turn's end and its answer `cancelled: true` is
+/// told once; the message is never accepted, and the turn goes on as if it had not been written.
+#[test]
+fn a_withdrawn_message_is_never_accepted_or_dropped() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b) = (user_input(sid, "first"), user_input(sid, "second"));
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ub, "queued"));
+    let rid = cancel_request(&mut core, b.event_id, &ub);
+    assert!(
+        core.withdraw(b.event_id).is_none(),
+        "the CLI is asked already"
+    );
+    let mut out = play(&mut core, &lifecycle(&ub, "cancelled"));
+    out.extend(play(&mut core, &cancel_answer(&rid, true)));
+    assert_eq!(core.withdraw_answer(&rid), Some(true));
+    assert_eq!(core.withdraw_answer(&rid), None, "told once");
+    assert!(core.withdraw(b.event_id).is_none(), "it is gone");
+    out.extend(play(
+        &mut core,
+        &lines_of(&[tool_result("toolu_1"), reply("DONE"), result("success")]),
+    ));
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        ["message \"DONE\" to A", "status to A", "turn_ended []"]
+    );
+}
+
+/// A message the CLI took (`started`, or echoed) is not taken back: no request is written.
+/// One it did not cancel (`cancelled: false`) stays, and its echo is its acceptance.
+#[test]
+fn a_message_the_cli_took_is_not_withdrawn() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b, d) = (
+        user_input(sid, "first"),
+        user_input(sid, "second"),
+        user_input(sid, "third"),
+    );
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    assert!(core.withdraw(a.event_id).is_none(), "echoed");
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    let ud = line_uuid(&core.inject_with_images(&d, vec![]).expect("a turn runs"));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "queued"),
+            lifecycle(&ud, "queued"),
+            lifecycle(&ub, "started"),
+        ]),
+    );
+    assert!(core.withdraw(b.event_id).is_none(), "started");
+    // The CLI took D between the request and its answer: `cancelled: false`, D stays written.
+    let rid = cancel_request(&mut core, d.event_id, &ud);
+    let mut out = play(&mut core, &cancel_answer(&rid, false));
+    assert_eq!(core.withdraw_answer(&rid), Some(false));
+    out.extend(play(
+        &mut core,
+        &lines_of(&[echo(&ub, "second"), echo(&ud, "third")]),
+    ));
+    let names = [(a.event_id, "A"), (b.event_id, "B"), (d.event_id, "D")];
+    assert_eq!(trace(&out, &names), ["accepted B", "accepted D"]);
+}
+
+/// A message withdrawn after the `result` carried it: the CLI's own `cancelled` for it is no
+/// drop, and its answer ends the turn it kept running, with nothing dropped and no `result` to
+/// come (the supervisor has it out of its books and goes on with its queue).
+#[test]
+fn withdrawing_a_carried_message_ends_the_turn_it_kept_running() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b, d) = (
+        user_input(sid, "first"),
+        user_input(sid, "second"),
+        user_input(sid, "third"),
+    );
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 15"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    let ud = line_uuid(&core.inject_with_images(&d, vec![]).expect("a turn runs"));
+    core.interrupt().expect("a turn runs");
+    let mut out = play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "queued"),
+            lifecycle(&ud, "queued"),
+            tool_result("toolu_1"),
+            result("error_during_execution"),
+            lifecycle(&ua, "cancelled"),
+        ]),
+    );
+    assert!(core.can_inject(), "the carried inputs' turn runs");
+    let rid = cancel_request(&mut core, b.event_id, &ub);
+    out.extend(play(&mut core, &lifecycle(&ub, "cancelled")));
+    assert!(core.can_inject(), "D is still carried");
+    out.extend(play(&mut core, &cancel_answer(&rid, true)));
+    assert_eq!(core.withdraw_answer(&rid), Some(true));
+    assert!(core.can_inject(), "D is still carried");
+    let rid = cancel_request(&mut core, d.event_id, &ud);
+    out.extend(play(&mut core, &lifecycle(&ud, "cancelled")));
+    out.extend(play(&mut core, &cancel_answer(&rid, true)));
+    assert!(!core.can_inject(), "nothing runs");
+    assert!(core.interrupt().is_none(), "nothing to interrupt");
+    let names = [(a.event_id, "A"), (b.event_id, "B"), (d.event_id, "D")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "status to A",
+            "turn_ended [B, D]",
+            "turn_ended [D]",
+            "turn_ended []"
+        ]
+    );
+}
+
+/// A message that begins the turn, withdrawn before the CLI starts it: no turn runs after, and
+/// a `result` that ends the CLI's own turn first does not drop it.
+#[test]
+fn withdrawing_the_message_that_began_the_turn_ends_it() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(sid, "first");
+    let ua = line_uuid(&core.input(&a));
+    play(&mut core, &lifecycle(&ua, "queued"));
+    assert!(core.can_inject());
+    let rid = cancel_request(&mut core, a.event_id, &ua);
+    let mut out = play(&mut core, &lifecycle(&ua, "cancelled"));
+    out.extend(play(&mut core, &cancel_answer(&rid, true)));
+    assert_eq!(core.withdraw_answer(&rid), Some(true));
+    assert!(!core.can_inject(), "no turn runs");
+    assert_eq!(trace(&out, &[(a.event_id, "A")]), ["turn_ended []"]);
+}
+
+/// The CLI's `cancelled` for a message being withdrawn, then the `result` of the turn it was
+/// written in before the answer: nothing is dropped.
+#[test]
+fn a_result_between_the_cancel_and_its_answer_drops_nothing() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b) = (user_input(sid, "first"), user_input(sid, "second"));
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ub, "queued"));
+    let rid = cancel_request(&mut core, b.event_id, &ub);
+    let mut out = play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "cancelled"),
+            tool_result("toolu_1"),
+            reply("DONE"),
+            result("success"),
+        ]),
+    );
+    out.extend(play(&mut core, &cancel_answer(&rid, true)));
+    assert_eq!(core.withdraw_answer(&rid), Some(true));
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        ["message \"DONE\" to A", "status to A", "turn_ended []"]
     );
 }
 
@@ -9886,6 +10354,7 @@ async fn after_clear_the_process_writes_the_new_transcript() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     };
     a.input(&input("x")).await.unwrap();
     let mut titles = Vec::new();
@@ -9970,6 +10439,7 @@ async fn a_cleared_folder_is_marked_until_init() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     })
     .await
     .unwrap();
@@ -10175,6 +10645,7 @@ async fn a_title_written_during_a_turn_is_reported_before_its_end() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();

@@ -665,8 +665,17 @@ async fn read_session(app: &AppState, caller: &SessionRow, a: ReadArgs) -> ToolR
     let forward = a.after_seq.is_some();
     let limit = READ_EVENTS as i64;
     let rows = match a.after_seq {
-        Some(n) => db::events_after(&app.db, s.id, n, limit).await,
-        None => db::events_before(&app.db, s.id, a.before_seq.unwrap_or(i64::MAX), limit).await,
+        Some(n) => db::events_after(&app.db, s.id, n, limit, db::Withdrawn::Excluded).await,
+        None => {
+            db::events_before(
+                &app.db,
+                s.id,
+                a.before_seq.unwrap_or(i64::MAX),
+                limit,
+                db::Withdrawn::Excluded,
+            )
+            .await
+        }
     }
     .map_err(internal)?;
     let mut events = db::events_for_clients(&app.db, &rows)
@@ -695,7 +704,7 @@ async fn read_session(app: &AppState, caller: &SessionRow, a: ReadArgs) -> ToolR
         "last_seq": s.last_seq.max(0),
     });
     if let Some(first) = first {
-        if !db::events_before(&app.db, s.id, first, 1)
+        if !db::events_before(&app.db, s.id, first, 1, db::Withdrawn::Excluded)
             .await
             .map_err(internal)?
             .is_empty()
@@ -704,7 +713,7 @@ async fn read_session(app: &AppState, caller: &SessionRow, a: ReadArgs) -> ToolR
         }
     }
     if let Some(last) = last {
-        if !db::events_after(&app.db, s.id, last, 1)
+        if !db::events_after(&app.db, s.id, last, 1, db::Withdrawn::Excluded)
             .await
             .map_err(internal)?
             .is_empty()

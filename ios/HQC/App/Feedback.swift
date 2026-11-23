@@ -257,7 +257,7 @@ nonisolated struct CueSpec {
 
 /// Pitches of A major's pentatonic scale and a few below, so cues sound like one family.
 nonisolated private enum Pitch {
-    static let a3 = 220.0, d4 = 293.66, e4 = 329.63, f4 = 349.23
+    static let d3 = 146.83, a3 = 220.0, cs4 = 277.18, d4 = 293.66, e4 = 329.63, f4 = 349.23
     static let a4 = 440.0, cs5 = 554.37, d5 = 587.33, e5 = 659.25, fs5 = 739.99
     static let a5 = 880.0, b5 = 987.77, cs6 = 1108.73, e6 = 1318.51
     static let scale = [a4, cs5, e5, fs5, a5, b5, cs6, e6]
@@ -311,20 +311,20 @@ extension Feedback {
                                    Note(at: 0.045, freq: Pitch.e6, length: 0.12, gain: 0.14)],
                            volume: 0.28, minInterval: 0.35)
         case .limitFiveHour:
-            // The session's window is used up: a falling triad that settles, with a swell under
-            // it, clear enough to notice and calm enough to hear twice.
-            return CueSpec(notes: [Note(at: 0, freq: Pitch.e5, length: 0.3, gain: 0.6),
-                                   Note(at: 0.14, freq: Pitch.cs5, length: 0.3, gain: 0.6),
-                                   Note(at: 0.28, freq: Pitch.a4, length: 0.8, gain: 0.7)],
-                           extraHaptics: [swell(0.28, 0.35, intensity: 0.4, sharpness: 0.25)],
-                           volume: 0.85, minInterval: 30)
+            // The session's window is used up: a low falling triad that settles, an octave and
+            // more under the question's bright rising notes, slow, with a swell under it.
+            return CueSpec(notes: [Note(at: 0, freq: Pitch.e4, length: 0.4, gain: 0.75),
+                                   Note(at: 0.2, freq: Pitch.cs4, length: 0.4, gain: 0.75),
+                                   Note(at: 0.4, freq: Pitch.a3, length: 1.0, gain: 0.85)],
+                           extraHaptics: [swell(0.4, 0.4, intensity: 0.45, sharpness: 0.15)],
+                           volume: 0.95, minInterval: 30)
         case .limitWeekly:
-            // The week is used up: lower and longer, a repeated note that falls a fifth.
-            return CueSpec(notes: [Note(at: 0, freq: Pitch.a4, length: 0.28, gain: 0.65),
-                                   Note(at: 0.16, freq: Pitch.a4, length: 0.28, gain: 0.65),
-                                   Note(at: 0.34, freq: Pitch.d4, length: 1.0, gain: 0.8)],
-                           extraHaptics: [swell(0.34, 0.5, intensity: 0.5, sharpness: 0.15)],
-                           volume: 0.9, minInterval: 30)
+            // The week is used up: lower still and longer, a repeated low note that falls a fifth.
+            return CueSpec(notes: [Note(at: 0, freq: Pitch.a3, length: 0.35, gain: 0.8),
+                                   Note(at: 0.22, freq: Pitch.a3, length: 0.35, gain: 0.8),
+                                   Note(at: 0.46, freq: Pitch.d3, length: 1.3, gain: 0.95)],
+                           extraHaptics: [swell(0.46, 0.6, intensity: 0.55, sharpness: 0.05)],
+                           volume: 1, minInterval: 30)
         case .toolFailed:
             return CueSpec(
                 notes: [Note(at: 0, freq: Pitch.f4, length: 0.18, gain: 0.45),

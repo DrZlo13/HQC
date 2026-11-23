@@ -9,7 +9,7 @@
 import type { SecretFields } from '../api';
 import { Fragment, type ComponentChildren, type RefObject } from 'preact';
 import { useContext, useMemo, useRef, useState } from 'preact/hooks';
-import type { Activity, ClarifyAction, ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, ModelProvider, SessionState } from '../proto';
+import type { Activity, ClarifyAction, ClarifyAnswer, ClarifyQuestion, EventOf, GoalNote, HqcEvent, ModelProvider, SessionState } from '../proto';
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import type { ArtifactStore } from '../artifacts';
 import type { WebSearch } from '../websearch';
@@ -564,6 +564,7 @@ function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => numb
       </Line>
     );
   }
+  if (p.code === 'goal' && p.goal) return <GoalLine text={p.text} goal={p.goal} />;
   const caption = SYSTEM_CODE_LABELS[p.code];
   const warning = SYSTEM_WARNING_CODES.has(p.code);
   const kind = `system line-system-${p.code}${warning ? ' line-warning' : ''}`;
@@ -600,6 +601,45 @@ function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => numb
       <Markdown text={p.text} />
     </Line>
   );
+}
+
+/** What a goal's end says it took, `55s · 3 checks · 918 tokens`: only what the runtime told. */
+export function goalNote(g: GoalNote): string {
+  const parts: string[] = [];
+  if (g.duration_ms !== undefined) parts.push(elapsed(g.duration_ms));
+  if (g.checks !== undefined) parts.push(count(g.checks, 'check'));
+  if (g.tokens !== undefined) parts.push(`${formatTokens(g.tokens)} tokens`);
+  return parts.join(' · ');
+}
+
+/** The runtime's own lines about a `/goal` (SPEC 0.218): achieved, with what it took; each check
+ *  that said "not yet", dim; given up, as a warning with the reason under it. A goal set or
+ *  cleared has no line (feed.ts). */
+function GoalLine({ text, goal }: { text: string; goal: GoalNote }) {
+  const note = goalNote(goal);
+  const dim = note ? <span class="goal-note"> ({note})</span> : null;
+  switch (goal.state) {
+    case 'met':
+      return (
+        <Line kind="system line-system-goal line-goal-met">
+          <b>{text || 'Goal achieved'}</b>
+          {dim}
+        </Line>
+      );
+    case 'failed':
+      return (
+        <Line kind="system line-system-goal line-warning line-goal-failed">
+          <span class="warn-icon" role="img" aria-label="Warning">
+            <IconWarn />
+          </span>
+          {text || 'Goal could not be achieved'}
+          {dim}
+          {goal.reason && <span class="goal-reason">{goal.reason}</span>}
+        </Line>
+      );
+    default:
+      return <Line kind="system line-system-goal line-goal-unmet">{text || 'Goal not yet met… continuing'}</Line>;
+  }
 }
 
 /** How a background task ended, in its line's label (SPEC §6, since 0.181): `status` as the

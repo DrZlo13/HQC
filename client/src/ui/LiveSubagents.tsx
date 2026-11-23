@@ -9,7 +9,8 @@
 // "in 12m 34s" instead, counting down to "due"; a scheduled message opens the schedules of the
 // chat. The main agent's row ("Main agent:", `lead`) stands first, while a turn is on or input
 // waits. A `stoppable` line ends with a stop button. A subagent's line opens what it has done
-// under it, drawn as the feed draws the agent's own steps.
+// under it, drawn as the feed draws the agent's own steps. The session's goal (`/goal`, SPEC
+// 0.218) is the block's first row: the condition, the checks so far, and what it expands to.
 
 import type { ComponentChildren } from 'preact';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
@@ -18,7 +19,7 @@ import { Timeline, type Item } from '../timeline';
 import { FeedBlocks, type ChatActions } from './cards';
 import { buildFeed } from './feed';
 import { useNow } from './hooks';
-import { IconStop } from './icons';
+import { IconChevronDown, IconChevronUp, IconStop, IconTarget, IconTrash } from './icons';
 import { count, retryLabel } from './labels';
 import { Loading } from './Loading';
 
@@ -61,7 +62,19 @@ interface Row {
   stop?: string;
 }
 
-/** `agents`: the latest list, which came at `receivedAt` (`Date.now()`); `schedules`: the
+/** The session's goal as its banner row shows it (SPEC 0.218): `checks` and `reason` of the
+ *  last "not met" as the timeline folds them; `onClear` (only where the chat takes input) clears
+ *  it, `running` says the turn is stopped first. */
+export interface GoalBanner {
+  condition: string;
+  checks: number;
+  reason?: string;
+  running: boolean;
+  onClear?: () => Promise<void>;
+}
+
+/** `goal`: the row that stands before all the others and alone makes the block show.
+ *  `agents`: the latest list, which came at `receivedAt` (`Date.now()`); `schedules`: the
  *  latest `schedules.live`, which came at `schedulesAt`; `onSchedules` opens the schedules;
  *  `asking`: the `task_id`s an open permission request names (since 0.181), whose row says it
  *  waits for it instead of what it does; `history`: the lines that open what their subagent has
@@ -72,6 +85,7 @@ interface Row {
  *  (the main agent's, cards.tsx `ActivityLine`), each one drawn; the block shows with only
  *  those. */
 export function LiveSubagents({
+  goal,
   lead,
   agents,
   receivedAt,
@@ -83,6 +97,7 @@ export function LiveSubagents({
   now,
   onStop,
 }: {
+  goal?: GoalBanner;
   lead?: ComponentChildren[];
   agents: LiveSubagent[];
   receivedAt: number;
@@ -111,7 +126,7 @@ export function LiveSubagents({
   useEffect(() => {
     if (open !== null && shown === null) setOpen(null);
   }, [open, shown]);
-  if (!rows.length && !lead?.length) return null;
+  if (!rows.length && !lead?.length && !goal) return null;
   const stop = (id: string) => {
     setStopping((s) => new Set(s).add(id));
     void onStop!(id).finally(() =>
@@ -125,6 +140,7 @@ export function LiveSubagents({
   return (
     <section class="live-agents" aria-label="What the agent, its subagents and commands do now, and timers">
       <ul class={shown ? 'live-agents-list live-agents-list-open' : 'live-agents-list'}>
+        {goal && <GoalRow goal={goal} />}
         {lead}
         {rows.map((r) => {
           const line = (
@@ -179,6 +195,59 @@ export function LiveSubagents({
         })}
       </ul>
     </section>
+  );
+}
+
+/** The goal's row: a target, "Goal:" and the condition on one line, the checks so far, a
+ *  chevron that opens the whole condition and the reason of the last "not met", and Clear. */
+function GoalRow({ goal }: { goal: GoalBanner }) {
+  const [open, setOpen] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const clear = () => {
+    setClearing(true);
+    void goal.onClear!().finally(() => setClearing(false));
+  };
+  return (
+    <li class="live-goal">
+      <div class="live-agents-row live-goal-row">
+        <span class="live-goal-icon" aria-hidden="true">
+          <IconTarget size={13} />
+        </span>
+        <span class="live-agents-what">
+          <span class="live-agents-kind">Goal: </span>
+          <span class="live-agents-task">{goal.condition}</span>
+        </span>
+        {goal.checks > 0 && <span class="live-agents-stats">{count(goal.checks, 'check')}</span>}
+        <button
+          type="button"
+          class="icon-btn live-agents-stop"
+          aria-label="Show the whole goal"
+          aria-expanded={open}
+          title={open ? 'Hide the whole goal' : 'Show the whole goal'}
+          onClick={() => setOpen(!open)}
+        >
+          {open ? <IconChevronUp size={12} /> : <IconChevronDown size={12} />}
+        </button>
+        {goal.onClear && (
+          <button
+            type="button"
+            class="icon-btn live-agents-stop"
+            aria-label="Clear goal"
+            title={goal.running ? 'Stop the turn and clear the goal' : 'Clear the goal'}
+            disabled={clearing}
+            onClick={clear}
+          >
+            <IconTrash size={12} />
+          </button>
+        )}
+      </div>
+      {open && (
+        <div class="live-goal-detail">
+          <p>{goal.condition}</p>
+          {goal.reason && <p class="live-goal-reason">Last check: {goal.reason}</p>}
+        </div>
+      )}
+    </li>
   );
 }
 

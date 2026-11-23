@@ -465,6 +465,31 @@ export class Timeline {
     return { model, cost: runtime ?? sum };
   }
 
+  /** The goal of the session while one is set (SPEC 0.218), from the stored `system goal`
+   *  events: set starts it, each "not met" is a check and keeps the runtime's reason; met,
+   *  failed and cleared end it, and so does `/clear`, whose new conversation has none. A
+   *  compaction makes the CLI write the active goal's `set` again: a `set` of the condition
+   *  already active keeps its checks. */
+  goal(): { condition: string; checks: number; reason?: string } | null {
+    let goal = null as { condition: string; checks: number; reason?: string } | null;
+    for (const e of this.events()) {
+      if (e.type !== "system") continue;
+      if (e.payload.code === "conversation_cleared") {
+        goal = null;
+        continue;
+      }
+      const g = e.payload.code === "goal" ? e.payload.goal : undefined;
+      if (!g) continue;
+      if (g.state === "set") {
+        if (goal?.condition !== g.condition) goal = { condition: g.condition, checks: 0 };
+      } else if (g.state === "unmet") {
+        // A check whose `set` is on a page not loaded still shows the goal, from its own condition.
+        goal = { condition: g.condition, checks: (goal?.checks ?? 0) + 1, reason: g.reason };
+      } else if (g.state === "met" || g.state === "failed" || g.state === "cleared") goal = null;
+    }
+    return goal;
+  }
+
   /** The call of a result: results whose call is in the timeline are shown with it. */
   callFor(callId: string): EventOf<"tool.call"> | undefined {
     return this.calls.get(callId);
@@ -648,11 +673,11 @@ function mayWait(e: EventOf<"user.message" | "peer.message">): boolean {
 }
 
 /** An event of the agent's work in a turn: `status running`, `system context_compacted` (a
- *  `/compact` starts its turn with it), or what its runtime wrote but an input and the turn's
- *  `usage`. */
+ *  `/compact` starts its turn with it), `system command_output` (a slash command's turn starts
+ *  with its output, SPEC 0.218), or what its runtime wrote but an input and the turn's `usage`. */
 function agentWork(e: HqcEvent): boolean {
   if (e.type === "status") return e.payload.state === "running";
-  if (e.type === "system" && e.payload.code === "context_compacted") return true;
+  if (e.type === "system" && (e.payload.code === "context_compacted" || e.payload.code === "command_output")) return true;
   return e.author.kind === "agent" && e.type !== "peer.message" && e.type !== "usage";
 }
 

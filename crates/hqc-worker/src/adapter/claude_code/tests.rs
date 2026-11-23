@@ -440,6 +440,38 @@ async fn ai_title_is_reported_at_turn_end() {
     assert_eq!(titles_in(&evs), ["Touch a file"]);
 }
 
+/// SPEC 0.218: before a `result` line the adapter reads the goal records the transcript holds,
+/// so the check of the turn's last text is sent with the turn, not up to a tick later, after
+/// whatever follows the turn at once. The meter's next tick is 2 s away: without the read the
+/// record is not sent before `TurnEnded`.
+#[tokio::test]
+async fn a_goal_record_is_read_before_the_result() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start(fx.stream, fx.claude_session()).await;
+    let (work, config) = &h._dirs;
+    let transcript = super::paths::transcript_path(
+        config.path(),
+        &work.path().canonicalize().unwrap(),
+        &fx.claude_session(),
+    );
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let goal = json!({"type": "attachment", "uuid": "00000000-0000-4000-8000-0000000000aa",
+        "timestamp": "2099-01-01T00:00:00.000Z",
+        "attachment": {"type": "goal_status", "met": false, "condition": "C", "reason": "R"}});
+    std::fs::write(&transcript, format!("{}{goal}\n", fx.transcript)).unwrap();
+
+    let evs = h
+        .turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
+        .await;
+    assert!(
+        events(&evs).iter().any(
+            |e| matches!(&e.kind, EventKind::System { goal: Some(g), .. } if g.state == "unmet")
+        ),
+        "{:?}",
+        shape(&evs)
+    );
+}
+
 /// The titles among `evs`.
 fn titles_in(evs: &[AdapterEvent]) -> Vec<&str> {
     evs.iter()
@@ -6744,6 +6776,7 @@ fn a_refused_model_switch_is_a_line_and_the_kept_model() {
             fork: None,
             compaction: None,
             model: Some("claude-opus-5-5".into()),
+            goal: None,
         }
     );
 }
@@ -7099,6 +7132,342 @@ fn synthetic_refusal_is_a_refusal_agent_message() {
             refusal: true,
         }]
     );
+}
+
+/// SPEC 0.218: a slash command's output (`<synthetic>` with `local_command_source`, as 2.1.312
+/// writes the reply to `/goal`, with `local_command_run` or, as for "/config opens an
+/// interactive panel…", without) is `system command_output` with the record's id, after the
+/// text held before it; a `<synthetic>` message without `local_command_source` (an API error)
+/// stays a runtime `agent.message`. Cut at 4096 bytes.
+#[test]
+fn a_slash_commands_output_is_a_system_line() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let u: Uuid = "1d2f3a4b-5c6d-4e7f-8a9b-0c1d2e3f4a5b".parse().unwrap();
+    let line = |text: &str, extra: &str| {
+        format!(
+            r#"{{"type":"assistant","message":{{"model":"<synthetic>","stop_reason":"end_turn","content":[{{"type":"text","text":"{text}"}}]}},"uuid":"{u}"{extra}}}"#
+        )
+    };
+    let source = |text: &str| {
+        format!(r#","local_command_source":"<local-command-stdout>{text}</local-command-stdout>""#)
+    };
+    let held = r#"{"type":"assistant","message":{"model":"claude-haiku-5-5","content":[{"type":"text","text":"Before"}]},"parent_tool_use_id":null,"uuid":"6a0f4a45-3f09-4c09-b2b7-7d3a0d7e1f10"}"#;
+    let run = r#","local_command_run":{"command":"goal","args":"clear"}"#;
+    let mut evs = emitted(core.on_line(held));
+    evs.extend(emitted(core.on_line(&line(
+        "Goal cleared: C",
+        &(source("Goal cleared: C") + run),
+    ))));
+    let shown: Vec<(&str, Option<&str>)> = events(&evs)
+        .into_iter()
+        .map(|e| match &e.kind {
+            EventKind::AgentMessage { text, runtime, .. } => {
+                (text.as_str(), runtime.then_some("runtime"))
+            }
+            EventKind::System { code, text, .. } => (text.as_str(), Some(code.as_str())),
+            k => panic!("{k:?}"),
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("Before", None),
+            ("Goal cleared: C", Some("command_output"))
+        ]
+    );
+    assert_eq!(events(&evs)[1].event_id, record_event_id(&u, 0));
+    assert_eq!(events(&evs)[1].author, Author::System);
+
+    // Without `local_command_run` it is still a command's output.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let panel = "/config opens an interactive panel and isn't available in this environment";
+    let evs = emitted(core.on_line(&line(panel, &source(panel))));
+    let shown = events(&evs);
+    assert_eq!(shown.len(), 1);
+    assert!(matches!(&shown[0].kind, EventKind::System { code, .. } if code == "command_output"));
+
+    // Without `local_command_source` it is the CLI's reply to the turn, held until the turn ends.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    assert!(emitted(core.on_line(&line("API Error", ""))).is_empty());
+    let evs = emitted(core.on_line(r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#));
+    assert!(events(&evs).iter().any(|e| matches!(
+        &e.kind,
+        EventKind::AgentMessage { text, runtime: true, r#final: true, .. } if text == "API Error"
+    )));
+
+    // A long output is cut.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let long = "x".repeat(5000);
+    let evs = emitted(core.on_line(&line(&long, &source("x"))));
+    let EventKind::System { text, .. } = &events(&evs)[0].kind else {
+        panic!("{evs:?}");
+    };
+    assert_eq!(text.len(), 4096);
+}
+
+/// SPEC 0.218: `system goal` for a goal record of the transcript: the text in Claude Code's
+/// words, the goal as a nested object, the id from the record's `uuid`, the condition and
+/// the reason cut at 4096 bytes.
+#[test]
+fn a_goal_record_is_a_goal_line() {
+    use hqc_claude_jsonl::{GoalRecord, GoalState};
+    let uuid: Uuid = "36c72c19-b4ad-4d95-a482-ce4e281952cb".parse().unwrap();
+    let record = |state, reason: Option<&str>| GoalRecord {
+        uuid,
+        timestamp: None,
+        condition: "C".into(),
+        state,
+        reason: reason.map(str::to_owned),
+        checks: Some(2),
+        duration_ms: Some(10),
+        tokens: Some(3),
+    };
+    let sid = Uuid::now_v7();
+    let line = |g: &GoalRecord| {
+        let e = super::engine::goal_event(sid, g);
+        assert_eq!(e.event_id, Event::id_from_claude_record(&uuid));
+        assert_eq!(e.author, Author::System);
+        let EventKind::System {
+            text, code, goal, ..
+        } = e.kind
+        else {
+            panic!("not system");
+        };
+        assert_eq!(code, "goal");
+        (text, goal.unwrap())
+    };
+    let texts: Vec<String> = [
+        GoalState::Set,
+        GoalState::Unmet,
+        GoalState::Met,
+        GoalState::Failed,
+        GoalState::Cleared,
+    ]
+    .into_iter()
+    .map(|s| line(&record(s, None)).0)
+    .collect();
+    assert_eq!(
+        texts,
+        [
+            "Goal set: C",
+            "Goal not yet met… continuing",
+            "Goal achieved",
+            "Goal could not be achieved",
+            "Goal cleared: C"
+        ]
+    );
+    let (_, goal) = line(&record(GoalState::Met, Some("R")));
+    assert_eq!(
+        goal,
+        hqc_proto::event::GoalStatus {
+            condition: "C".into(),
+            state: "met".into(),
+            reason: Some("R".into()),
+            checks: Some(2),
+            duration_ms: Some(10),
+            tokens: Some(3),
+        }
+    );
+    let mut long = record(GoalState::Unmet, Some(&"r".repeat(5000)));
+    long.condition = "é".repeat(3000);
+    let (_, goal) = line(&long);
+    assert_eq!(goal.condition.len(), 4096);
+    assert_eq!(goal.reason.unwrap().len(), 4096);
+}
+
+/// A goal record of the transcript written at `ts`.
+fn goal_at(ts: Option<&str>, state: hqc_claude_jsonl::GoalState) -> hqc_claude_jsonl::GoalRecord {
+    hqc_claude_jsonl::GoalRecord {
+        uuid: Uuid::new_v4(),
+        timestamp: ts.map(str::to_owned),
+        condition: "C".into(),
+        state,
+        reason: Some("R".into()),
+        checks: Some(1),
+        duration_ms: None,
+        tokens: None,
+    }
+}
+
+/// An assistant text record of the main chain.
+fn text_line(u: Uuid, text: &str) -> String {
+    json!({"type": "assistant", "parent_tool_use_id": null, "uuid": u,
+        "message": {"model": "claude-opus-5-5", "role": "assistant",
+            "content": [{"type": "text", "text": text}]}})
+    .to_string()
+}
+
+/// What the actions emit, one word each: `text:<t>:<final>` or `goal:<state>`.
+fn goal_shape(actions: Vec<Action>) -> Vec<String> {
+    emitted(actions)
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Event(e) => Some(match &e.kind {
+                EventKind::AgentMessage { text, r#final, .. } => format!("text:{text}:{final}"),
+                EventKind::System { goal: Some(g), .. } => format!("goal:{}", g.state),
+                EventKind::ToolCall { tool, .. } => format!("call:{tool}"),
+                EventKind::Retraction { .. } => "retraction".into(),
+                EventKind::Usage { .. } => "usage".into(),
+                _ => return None,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+const LATER: &str = "2099-01-01T00:00:00.000Z";
+const EARLIER: &str = "2000-01-01T00:00:00.000Z";
+
+/// SPEC 0.218: a goal record read while the text it judged is still held (the meter reads the
+/// transcript on its own clock, stdout waits for the next element) goes out behind that text,
+/// not above it; the text is not flushed for it.
+#[test]
+fn a_goal_record_read_before_the_text_it_judged_waits_behind_it() {
+    use hqc_claude_jsonl::GoalState;
+    let sid = Uuid::now_v7();
+    let tool = json!({"type": "assistant", "parent_tool_use_id": null, "uuid": Uuid::new_v4(),
+        "message": {"model": "claude-opus-5-5", "role": "assistant", "content":
+            [{"type": "tool_use", "id": "toolu_g", "name": "Bash", "input": {}}]}})
+    .to_string();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    assert!(emitted(core.on_line(&text_line(Uuid::new_v4(), "Done."))).is_empty());
+    assert!(core
+        .on_goal(&goal_at(Some(LATER), GoalState::Unmet))
+        .is_empty());
+    assert_eq!(
+        goal_shape(core.on_line(&tool)),
+        ["text:Done.:false", "goal:unmet", "call:Bash"]
+    );
+
+    // The turn's last text keeps `final`; the goal line follows the turn's `usage`, which the
+    // feed draws with that text.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&text_line(Uuid::new_v4(), "Done."));
+    assert!(core.on_goal(&goal_at(None, GoalState::Unmet)).is_empty());
+    let result = r#"{"type":"result","subtype":"success","is_error":false,"result":"Done.","total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5}}"#;
+    assert_eq!(
+        goal_shape(core.on_line(result)),
+        ["text:Done.:true", "usage", "goal:unmet"]
+    );
+
+    // Nothing held: sent at once. One written before the held text: sent at once, which is
+    // above it.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    assert_eq!(
+        goal_shape(core.on_goal(&goal_at(Some(LATER), GoalState::Set))),
+        ["goal:set"]
+    );
+    core.on_line(&text_line(Uuid::new_v4(), "Done."));
+    assert_eq!(
+        goal_shape(core.on_goal(&goal_at(Some(EARLIER), GoalState::Unmet))),
+        ["goal:unmet"]
+    );
+    assert_eq!(goal_shape(core.on_exit()), ["text:Done.:false"]);
+}
+
+/// SPEC 0.218: where the held text is dropped, not sent, the goal events behind it are not
+/// lost: a retraction of the text, an input written into a turn the CLI began by itself, the
+/// process ending with nothing held.
+#[test]
+fn a_goal_behind_a_dropped_text_is_still_sent() {
+    use hqc_claude_jsonl::GoalState;
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let h = Uuid::new_v4();
+    core.on_line(&text_line(h, "I can't help with that."));
+    assert!(core
+        .on_goal(&goal_at(Some(LATER), GoalState::Unmet))
+        .is_empty());
+    let fallback = json!({"type": "system", "subtype": "model_refusal_fallback",
+        "trigger": "refusal", "direction": "retry", "original_model": "claude-opus-5-5",
+        "fallback_model": "claude-sonnet-5", "request_id": null,
+        "retracted_message_uuids": [h],
+        "content": "Opus 5.5 declined. This response was generated by Sonnet 5 instead."})
+    .to_string();
+    let got = goal_shape(core.on_line(&fallback));
+    assert_eq!(&got[..2], ["goal:unmet", "retraction"], "{got:?}");
+    assert!(!got.iter().any(|g| g.starts_with("text:")), "{got:?}");
+
+    // An input written while a text is held drops it; the goal comes out with that call.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&text_line(Uuid::new_v4(), "Done."));
+    assert!(core
+        .on_goal(&goal_at(Some(LATER), GoalState::Met))
+        .is_empty());
+    let input = SessionInput {
+        session_id: sid,
+        event_id: Uuid::now_v7(),
+        text: "next".into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+        schedule_id: None,
+    };
+    assert_eq!(goal_shape(core.input(&input)), ["goal:met"]);
+    assert!(core.on_exit().is_empty(), "nothing left behind");
+}
+
+/// SPEC 0.218: a resume tells the transcript's last goal record, whatever its state, with the
+/// record's id; a transcript with none tells nothing.
+#[tokio::test]
+async fn a_resume_tells_the_goal_the_transcript_holds() {
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let claude_session = Uuid::new_v4();
+    let s = spec(Uuid::now_v7(), work.path(), claude_session);
+    let (tx, mut rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    let t = super::paths::transcript_path(config.path(), &s.workdir, &claude_session);
+    std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+    let at = |u: &str, a: Value| {
+        json!({"type": "attachment", "uuid": u, "timestamp": "2026-11-22T19:33:57.895Z", "attachment": a})
+            .to_string()
+    };
+    let set = at(
+        "00000000-0000-4000-8000-000000000001",
+        json!({"type": "goal_status", "met": false, "sentinel": true, "condition": "C"}),
+    );
+    let met = at(
+        "00000000-0000-4000-8000-000000000002",
+        json!({"type": "goal_status", "met": true, "condition": "C", "reason": "R", "iterations": 1}),
+    );
+    std::fs::write(&t, format!("{set}\n{met}\n")).unwrap();
+    a.resume(&s).await.unwrap();
+    let Ok(AdapterEvent::Event(ev)) = rx.try_recv() else {
+        panic!("no goal line");
+    };
+    let EventKind::System {
+        code, text, goal, ..
+    } = &ev.kind
+    else {
+        panic!("{ev:?}");
+    };
+    assert_eq!((code.as_str(), text.as_str()), ("goal", "Goal achieved"));
+    assert_eq!(goal.as_ref().unwrap().state, "met");
+    assert_eq!(
+        ev.event_id,
+        Event::id_from_claude_record(&"00000000-0000-4000-8000-000000000002".parse().unwrap())
+    );
+    assert!(rx.try_recv().is_err());
+    a.kill().await.unwrap();
+
+    std::fs::write(&t, "").unwrap();
+    a.resume(&s).await.unwrap();
+    assert!(rx.try_recv().is_err());
+    a.kill().await.unwrap();
 }
 
 // ---- SPEC §17.2: a message during a turn, and the subagents running ------------------------
@@ -9926,6 +10295,7 @@ async fn a_title_read_before_the_switch_does_not_stop_the_new_ones() {
         title: std::sync::Mutex::new(None),
         runtime: std::sync::Mutex::new(old),
         own: options(dir.path()).own_records,
+        goals: tokio::sync::Mutex::new(super::rate::GoalTail::start(None).await),
     };
     io.report_title(None).await;
     assert!(matches!(events.try_recv(), Ok(AdapterEvent::Title(t)) if t == "Before"));

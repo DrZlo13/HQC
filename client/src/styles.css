@@ -3542,6 +3542,19 @@ button.btn-mode-pill.perm-allow-all:hover,
   background: var(--permission-border);
 }
 
+/* The lines about a goal (SPEC 0.218): what it took, dim after "Goal achieved"; the reason of a
+   goal given up, under the line. */
+.goal-note {
+  font-weight: 400;
+  opacity: 0.8;
+}
+.goal-reason {
+  flex-basis: 100%;
+}
+.line-goal-unmet {
+  opacity: 0.75;
+}
+
 .warn-icon {
   align-self: center;
   color: var(--waiting);
@@ -4966,6 +4979,30 @@ a.relay-peer {
   max-width: none;
   gap: 12px;
 }
+/* The goal's row (SPEC 0.218): a target in the dot's place, the condition cut at the line's end;
+   the chevron opens it whole under the row with the reason of the last check. */
+.live-goal-icon {
+  flex: none;
+  align-self: center;
+  margin-right: -4px;
+  color: var(--accent-text);
+}
+.live-goal-detail {
+  margin: 2px 0 6px 20px;
+  color: var(--text2);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.live-goal-detail p {
+  margin: 0 0 2px;
+}
+.live-goal-detail .live-goal-reason {
+  color: var(--muted);
+}
+:root.feed-column .chat:not(.chat-phone) .live-goal-icon {
+  margin-left: 6px;
+}
+
 .live-agents-note {
   margin-bottom: 8px;
   color: var(--muted);

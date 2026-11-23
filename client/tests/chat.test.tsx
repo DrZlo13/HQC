@@ -4010,3 +4010,96 @@ describe('picked files', () => {
     }
   });
 });
+
+// The goal's row first in the block above the input (SPEC 0.218).
+describe('goal banner', () => {
+  const goalEv = (seq: number, state: string, extra: Record<string, unknown> = {}) =>
+    ev('event.system.goal', seq, (e) => {
+      e.event_id = `0199f3a2-7c10-7000-8000-0000000005${String(seq).padStart(2, '0')}`;
+      e.payload = { text: 'x', code: 'goal', goal: { condition: 'all tests in packages/api pass', state, ...extra } };
+    });
+  const withGoal = (state: SessionState) => {
+    const ctx = setup(state, {
+      history: [goalEv(1, 'set'), goalEv(2, 'unmet', { reason: 'The suite has 2 failing tests.' }), goalEv(3, 'unmet', { reason: 'One test still fails.' })],
+    });
+    Object.assign(ctx.api, { input: vi.fn(() => new Promise(() => {})) });
+    return ctx as typeof ctx & { api: { input: ReturnType<typeof vi.fn> } };
+  };
+
+  it('shows the goal as the first row while the session idles: the condition, the checks, the chevron opens it whole with the last reason', async () => {
+    const { app } = withGoal('idle');
+    await mount(app);
+    const row = $('.live-goal .live-agents-row')!;
+    expect($('.live-agents + .composer-wrap')).not.toBeNull();
+    expect(row.querySelector('.live-agents-what')!.textContent).toBe('Goal: all tests in packages/api pass');
+    expect(row.querySelector('.live-agents-stats')!.textContent).toBe('2 checks');
+    expect($('.live-goal-detail')).toBeNull();
+    const chevron = row.querySelector<HTMLButtonElement>('button[aria-expanded]')!;
+    await act(async () => chevron.click());
+    expect(chevron.getAttribute('aria-expanded')).toBe('true');
+    expect($('.live-goal-detail')!.textContent).toBe('all tests in packages/api passLast check: One test still fails.');
+    await act(async () => chevron.click());
+    expect($('.live-goal-detail')).toBeNull();
+  });
+
+  it('is the first row before the main agent\'s, and goes with the goal\'s end', async () => {
+    const { app } = withGoal('running');
+    await mount(app);
+    const rows = [...root.querySelectorAll('.live-agents-list > li')];
+    expect(rows[0].classList.contains('live-goal')).toBe(true);
+    expect(rows[1].textContent).toContain('Main agent:');
+    await act(async () => subscriber!.onEvent(goalEv(4, 'met', { checks: 3 })));
+    expect($('.live-goal')).toBeNull();
+  });
+
+  it('has no checks word before the first check, and no goal row in a service session', async () => {
+    const { app } = setup('idle', { history: [goalEv(1, 'set')] });
+    await mount(app);
+    expect($('.live-goal')).not.toBeNull();
+    expect($('.live-goal .live-agents-stats')).toBeNull();
+    render(null, root);
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    await act(async () => {
+      render(<Chat app={app} sessionId="sys" phone={false} />, root);
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect($('.live-goal')).toBeNull();
+  });
+
+  it('Clear while a turn runs stops it first, then sends /goal clear', async () => {
+    const { api, app } = withGoal('running');
+    await mount(app);
+    const clear = $('button[aria-label="Clear goal"]') as HTMLButtonElement;
+    expect(clear.title).toBe('Stop the turn and clear the goal');
+    await act(async () => clear.click());
+    await vi.waitFor(() => expect(api.input).toHaveBeenCalledTimes(1));
+    expect(api.stop).toHaveBeenCalledWith('s1');
+    expect(api.input).toHaveBeenCalledWith('s1', '/goal clear', expect.any(String), []);
+    expect(api.stop.mock.invocationCallOrder[0]).toBeLessThan(api.input.mock.invocationCallOrder[0]);
+  });
+
+  it('Clear while idle only sends /goal clear', async () => {
+    const { api, app } = withGoal('idle');
+    await mount(app);
+    const clear = $('button[aria-label="Clear goal"]') as HTMLButtonElement;
+    expect(clear.title).toBe('Clear the goal');
+    await act(async () => clear.click());
+    await vi.waitFor(() => expect(api.input).toHaveBeenCalledWith('s1', '/goal clear', expect.any(String), []));
+    expect(api.stop).not.toHaveBeenCalled();
+  });
+
+  it('a failed stop leaves the goal and says so; no Clear where the composer is not shown', async () => {
+    const { api, app } = withGoal('running');
+    api.stop.mockRejectedValueOnce(new Error('offline'));
+    await mount(app);
+    await act(async () => ($('button[aria-label="Clear goal"]') as HTMLButtonElement).click());
+    await vi.waitFor(() => expect($('.notice')!.textContent).toBe('Goal not cleared: offline'));
+    expect(api.input).not.toHaveBeenCalled();
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true });
+    render(null, root);
+    await mount(app);
+    expect($('.live-goal')).not.toBeNull();
+    expect($('button[aria-label="Clear goal"]')).toBeNull();
+  });
+});

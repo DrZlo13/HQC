@@ -223,6 +223,22 @@ describe('examples/wire', () => {
     expect(retry.type === 'subagents.live' && retry.payload.agents[0].retry).toEqual({ attempt: 2, max_retries: 10, retry_delay_ms: 4000 });
     const kept = parseEvent(load('event.system.model_not_switched.json'));
     expect(kept.type === 'system' && kept.payload.model).toBe('claude-opus-5-5');
+    // SPEC 0.218: the goal of a `/goal`, with what its end says it took.
+    const goal = parseEvent(load('event.system.goal.json'));
+    expect(goal.type === 'system' && goal.payload.goal).toEqual({
+      condition: 'all tests in packages/api pass',
+      state: 'met',
+      reason: 'The last run of npm test in packages/api passed all 214 tests.',
+      checks: 3,
+      duration_ms: 54786,
+      tokens: 918,
+    });
+    const odd = load('event.system.goal.json') as any;
+    odd.payload.goal = { condition: 'c', state: 'paused' };
+    expect(parseEvent(odd).type === 'system' && (parseEvent(odd) as any).payload.goal).toEqual({
+      condition: 'c',
+      state: 'unknown',
+    });
     const retraction = parseEvent(load('event.retraction.json'));
     expect(retraction.type === 'retraction' && retraction.payload.event_ids).toEqual([
       '0199f3a2-7c10-7000-8000-000000000113',

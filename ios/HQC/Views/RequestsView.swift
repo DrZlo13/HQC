@@ -11,9 +11,7 @@ struct RequestsView: View {
             LazyVStack(spacing: 16) {
                 ForEach(app.requests) { request in
                     VStack(alignment: .leading, spacing: 8) {
-                        NavigationLink {
-                            ChatView(sessionID: request.session_id, title: request.title)
-                        } label: {
+                        RequestHeaderLink(request: request) {
                             HStack(spacing: 6) {
                                 if let p = app.project(forAddress: request.address) {
                                     ProjectTile(project: p, size: 20)
@@ -53,7 +51,7 @@ struct RequestsView: View {
             .animation(.spring, value: app.requests.map(\.id))
         }
         .navigationTitle("Requests")
-        .paletteBackground()
+        .paletteBackground(app.isRegular ? \.side : \.bg)
         .refreshable { await app.refresh() }
         .overlay {
             if app.requests.isEmpty {
@@ -74,6 +72,22 @@ extension AppModel {
     func project(forAddress address: String) -> Project? {
         guard let slug = address.split(separator: "/").first else { return nil }
         return projects.first { $0.slug == slug }
+    }
+}
+
+/// The request's session: pushed in a phone's Requests tab, opened in the chat column on the
+/// desktop layout, where the requests list stays beside it.
+private struct RequestHeaderLink<Label: View>: View {
+    @Environment(AppModel.self) private var app
+    let request: OpenRequest
+    @ViewBuilder let label: Label
+
+    var body: some View {
+        if app.isRegular {
+            Button { app.open(sessionID: request.session_id, title: request.title) } label: { label.contentShape(.rect) }
+        } else {
+            NavigationLink { ChatView(sessionID: request.session_id, title: request.title) } label: { label }
+        }
     }
 }
 

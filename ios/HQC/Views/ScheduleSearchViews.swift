@@ -155,7 +155,13 @@ struct NewScheduleSheet: View {
 /// Search across every session (SPEC §15): messages, commands, output and answers.
 struct SearchView: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.palette) private var palette
+    /// Put the cursor in the field on appear (the desktop layout's search pane).
+    var autofocus = false
+    @FocusState private var fieldFocused: Bool
     @State private var query = ""
+    /// The hit last opened, marked while its chat shows beside the list.
+    @State private var openedHit: SearchHit.ID?
     @State private var results: [SearchHit] = []
     @State private var next: String?
     @State private var searching = false
@@ -165,6 +171,8 @@ struct SearchView: View {
         List {
             ForEach(results) { hit in
                 Button {
+                    openedHit = hit.id
+                    fieldFocused = false
                     app.open(sessionID: hit.session_id, title: hit.title)
                 } label: {
                     VStack(alignment: .leading, spacing: 4) {
@@ -184,14 +192,24 @@ struct SearchView: View {
                     }
                 }
                 .foregroundStyle(.primary)
+                .listRowInsets(EdgeInsets(top: 10, leading: 20, bottom: 10, trailing: 20))
+                .listRowBackground(
+                    autofocus && openedHit == hit.id && app.selectedSessionID == hit.session_id
+                        ? RoundedRectangle(cornerRadius: 12).fill(Color.accentColor.opacity(0.16))
+                            .padding(.horizontal, 8).padding(.vertical, 2)
+                        : nil
+                )
             }
             if next != nil {
                 Button("More results") { Task { await search(more: true) } }
             }
         }
         .navigationTitle("Search")
-        .paletteBackground()
-        .searchable(text: $query, prompt: "Messages, commands, output")
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .paletteBackground(app.isRegular ? \.side : \.bg)
+        .modifier(SearchField(inline: autofocus, query: $query, focused: $fieldFocused))
+        .onAppear { if autofocus { fieldFocused = true } }
         .onSubmit(of: .search) { Task { await search() } }
         .task(id: query) {
             try? await Task.sleep(for: .milliseconds(350))
@@ -244,6 +262,50 @@ struct SearchView: View {
         } catch {
             self.error = error.localizedDescription
             if !more { results = [] }
+        }
+    }
+}
+
+/// The search field: the system's search bar in the phone's Search tab; in the desktop layout's
+/// side pane a field at the top of the pane, so it does not drop to the bottom across the rail.
+private struct SearchField: ViewModifier {
+    @Environment(\.palette) private var palette
+    let inline: Bool
+    @Binding var query: String
+    var focused: FocusState<Bool>.Binding
+
+    func body(content: Content) -> some View {
+        if inline {
+            content
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass").foregroundStyle(palette.muted)
+                        TextField("Messages, commands, output", text: $query)
+                            .focused(focused)
+                            .submitLabel(.search)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                        if !query.isEmpty {
+                            Button {
+                                query = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill").foregroundStyle(palette.muted)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Clear")
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .glassEffect(.regular.interactive(), in: .capsule)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                    .padding(.bottom, 6)
+                }
+        } else {
+            content
+                .searchable(text: $query, prompt: "Messages, commands, output")
+                .searchFocused(focused)
         }
     }
 }

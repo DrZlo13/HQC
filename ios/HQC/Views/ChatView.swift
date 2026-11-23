@@ -13,6 +13,18 @@ struct ChatView: View {
     @State private var renaming = false
     @State private var newTitle = ""
     @State private var confirmDelete = false
+    /// Where the feed is scrolled, to jump to the newest message.
+    @State private var position = ScrollPosition(idType: String.self)
+    /// The feed follows new output: true until the user scrolls up, and again once they
+    /// scroll back down or tap the jump button.
+    @State private var following = true
+    /// The user's finger (or its fling) moves the feed.
+    @State private var userScrolling = false
+    /// Far enough up that the jump button shows.
+    @State private var farFromBottom = false
+    /// Something arrived while the user read further up.
+    @State private var unseen = false
+    @State private var sent = 0
     let title: String
 
     init(sessionID: String, title: String) {
@@ -50,6 +62,9 @@ struct ChatView: View {
                 if model.state.isBusy && model.streaming.isEmpty && model.thinking.isEmpty {
                     WorkingIndicator()
                 }
+                if model.items.isEmpty && !model.loading && !model.state.isBusy && model.streaming.isEmpty {
+                    EmptyChat(canType: canType)
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -57,9 +72,29 @@ struct ChatView: View {
             .frame(maxWidth: .infinity)
             .scrollTargetLayout()
         }
-        // The newest message stays in view when the history arrives and while answers grow.
+        .scrollPosition($position)
+        // The newest message stays in view when the history arrives and while answers grow,
+        // unless the user scrolled up to read: then the text stays where it is.
         .defaultScrollAnchor(.bottom, for: .initialOffset)
-        .defaultScrollAnchor(.bottom, for: .sizeChanges)
+        .onScrollPhaseChange { _, phase in
+            userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
+        }
+        .onScrollGeometryChange(for: FeedMetrics.self) { g in
+            FeedMetrics(height: g.contentSize.height,
+                        distance: g.contentSize.height + g.contentInsets.bottom - g.contentOffset.y - g.containerSize.height)
+        } action: { old, new in
+            if userScrolling {
+                following = new.distance < 80
+            } else if following && new.height != old.height && new.distance > 1 {
+                position.scrollTo(edge: .bottom)
+            }
+            if following { unseen = false }
+            let far = new.distance > 360 && !following
+            if far != farFromBottom { withAnimation(.snappy) { farFromBottom = far } }
+        }
+        .onChange(of: model.items.count) { old, new in
+            if new > old && !following { unseen = true }
+        }
         .paletteBackground()
         .scrollDismissesKeyboard(.interactively)
         .overlay {
@@ -67,6 +102,10 @@ struct ChatView: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             ComposerArea {
+                if farFromBottom {
+                    JumpToLatest(unseen: unseen) { scrollToBottom() }
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
                 if !model.live.isEmpty {
                     LiveTasksBar(tasks: model.live) { t in Task { await model.stopTask(t) } }
                 }
@@ -117,7 +156,7 @@ struct ChatView: View {
             Button("Delete", role: .destructive) {
                 Task {
                     try? await app.client?.deleteSession(model.sessionID)
-                    dismiss()
+                    close()
                 }
             }
         }
@@ -136,7 +175,9 @@ struct ChatView: View {
                 }
             }
         }
-        .sensoryFeedback(.success, trigger: model.items.count)
+        .sensoryFeedback(.impact(weight: .light), trigger: sent)
+        // A soft tap when the agent finishes its turn while the chat is open.
+        .sensoryFeedback(.success, trigger: model.state.isBusy) { was, now in was && !now }
     }
 
     private var subtitle: String {
@@ -209,7 +250,7 @@ struct ChatView: View {
                         Button("Archive", systemImage: "archivebox") {
                             Task {
                                 await model.act("archive")
-                                dismiss()
+                                close()
                             }
                         }
                     }
@@ -226,7 +267,25 @@ struct ChatView: View {
         let ready = attachments.compactMap(\.artifact)
         draft = ""
         attachments = []
+        scrollToBottom()
+        sent += 1
         Task { await model.send(text, artifacts: ready) }
+    }
+
+    private func scrollToBottom() {
+        unseen = false
+        following = true
+        withAnimation(.smooth(duration: 0.35)) { position.scrollTo(edge: .bottom) }
+    }
+
+    /// Leaves the chat after it was archived or deleted: on the desktop layout the chat is the
+    /// detail column's root, so the selection goes, not a navigation level.
+    private func close() {
+        if app.isRegular && app.selectedSessionID == model.sessionID && app.detailPath.isEmpty {
+            app.selectedSessionID = nil
+        } else {
+            dismiss()
+        }
     }
 }
 
@@ -347,6 +406,7 @@ struct Composer: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(!canSend)
+                        .keyboardShortcut(.return, modifiers: .command)
                         .glassEffectID("action", in: glass)
                         .accessibilityLabel("Send")
                     }
@@ -565,6 +625,66 @@ struct InfoBar: View {
             .padding(.vertical, 12)
             .glassEffect(.regular, in: .rect(cornerRadius: 20))
             .padding(12)
+    }
+}
+
+/// The feed's height and how far its end is below the visible part.
+struct FeedMetrics: Equatable {
+    var height: CGFloat
+    var distance: CGFloat
+}
+
+/// The round arrow above the input that jumps to the newest message, as the Claude app has it,
+/// with a dot when something arrived while the user read further up.
+struct JumpToLatest: View {
+    @Environment(\.palette) private var palette
+    let unseen: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.down")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(palette.text)
+                .frame(width: 38, height: 38)
+                .glassEffect(.regular.interactive(), in: .circle)
+                .overlay(alignment: .topTrailing) {
+                    if unseen {
+                        Circle().fill(Color.accentColor).frame(width: 10, height: 10)
+                            .overlay(Circle().stroke(palette.bg, lineWidth: 2))
+                            .offset(x: 1, y: -1)
+                            .transition(.scale)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .sensoryFeedback(.impact(weight: .light), trigger: unseen) { _, new in new }
+        .accessibilityLabel(unseen ? "New messages, scroll to the latest" : "Scroll to the latest message")
+        .padding(.bottom, 2)
+    }
+}
+
+/// A session without messages yet.
+struct EmptyChat: View {
+    @Environment(\.palette) private var palette
+    let canType: Bool
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 34, weight: .medium))
+                .foregroundStyle(.tint)
+            Text("Nothing here yet").font(.title3.weight(.semibold))
+            if canType {
+                Text("Tell the agent what to do. It works on your machine and asks before anything risky.")
+                    .font(.subheadline)
+                    .foregroundStyle(palette.text2)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .frame(maxWidth: 320)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 120)
     }
 }
 

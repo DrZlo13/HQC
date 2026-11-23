@@ -15,7 +15,9 @@ browser and Apple push (SPEC 0.214).
   its thinking, tool calls folded with their results, images and files, system lines; retracted
   events hidden. The composer is a glass capsule: attach photos or files (uploaded at once,
   `POST /api/artifacts`), complete `/` commands, and the send button turns into Stop while the
-  agent works. What the agent runs in the background (subagents, commands, wakeups) sits above
+  agent works. The feed follows new output until you scroll up; a round arrow above the input
+  jumps back to the newest message, with a dot when something arrived meanwhile. Answers have
+  copy and share, and ⌘↩ sends from a keyboard. What the agent runs in the background (subagents, commands, wakeups) sits above
   the input, each with Stop where the runtime allows it. Images show inline; any artifact opens
   in QuickLook; a published page opens at its public link.
 - **Session controls.** Permission mode, model, schedules, pause and resume, restart, retry,
@@ -41,7 +43,9 @@ The app follows the space it has, not the device. With compact width (an iPhone,
 outer display, a narrow Split View) it has tabs: Projects, Requests, Settings and Search; on
 iPhone Duo's outer display the system lays the tab bar vertically along the side. With regular
 width (iPhone Duo's inner display, an iPad) it takes the web client's desktop layout: the project
-rail, the project's sessions and the chat side by side. When iPhone Duo is half folded, the column
+rail, the project's sessions and the chat side by side. Search (⌘F) and Requests open in the
+column beside the rail, not in a sheet: a result or a request opens its chat on the right and
+the list stays for the next one; tapping the rail button again goes back to the sessions. When iPhone Duo is half folded, the column
 edge moves onto the fold (the active division `ReservedRegion`, iOS 27.1), so the list and the
 chat each own one half and nothing sits in the curve.
 

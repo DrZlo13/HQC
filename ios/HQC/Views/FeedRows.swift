@@ -147,18 +147,50 @@ struct AgentMessage: View {
                     Text("interrupted").font(.caption2).foregroundStyle(palette.muted)
                 }
                 Spacer()
-                Button {
-                    UIPasteboard.general.string = event.text
-                } label: {
-                    Image(systemName: "doc.on.doc").font(.caption)
+                CopyButton(text: event.text, label: "Copy answer")
+                ShareLink(item: event.text) {
+                    Image(systemName: "square.and.arrow.up").font(.caption)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(palette.muted)
-                .accessibilityLabel("Copy answer")
+                .accessibilityLabel("Share answer")
                 EventTime(event: event)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .contextMenu {
+            Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = event.text }
+            ShareLink("Share", item: event.text)
+        }
+    }
+}
+
+/// Copies the text, then shows a check for a moment, as the Claude app's copy button does.
+struct CopyButton: View {
+    @Environment(\.palette) private var palette
+    let text: String
+    var label = "Copy"
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            UIPasteboard.general.string = text
+            withAnimation(.snappy) { copied = true }
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                withAnimation(.snappy) { copied = false }
+            }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.caption)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 22, height: 22)
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(copied ? palette.text : palette.muted)
+        .sensoryFeedback(.success, trigger: copied) { _, new in new }
+        .accessibilityLabel(copied ? "Copied" : label)
     }
 }
 

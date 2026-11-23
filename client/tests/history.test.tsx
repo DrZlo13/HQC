@@ -542,6 +542,33 @@ describe('the events of a subscription before its `subscribed`', () => {
     socket.stop();
   });
 
+  it('a refused `subscribe` (an `error` naming the session, no `subscribed`) ends the catch-up', async () => {
+    const sockets: { onopen?: () => void; onmessage?: (m: { data: string }) => void }[] = [];
+    class FakeWs {
+      readyState = 1;
+      onopen?: () => void;
+      onmessage?: (m: { data: string }) => void;
+      constructor() {
+        sockets.push(this);
+      }
+      send() {}
+      close() {}
+    }
+    const socket = new HubSocket({ url: 'ws://x/api/ws', WebSocketImpl: FakeWs as never });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const onSubscribed = vi.fn();
+    socket.start();
+    sockets[0].onopen!();
+    socket.subscribe(SID, { afterSeq: () => 0, onEvent() {}, onDelivery() {}, onInvalid() {}, onReset() {}, onSubscribed });
+    // An error that names no session answers no `subscribe`.
+    sockets[0].onmessage!({ data: JSON.stringify({ type: 'error', code: 'invalid_frame', message: 'x' }) });
+    expect(onSubscribed).not.toHaveBeenCalled();
+    sockets[0].onmessage!({ data: JSON.stringify({ type: 'error', code: 'internal', message: 'internal error', session_id: SID }) });
+    expect(onSubscribed).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+    socket.stop();
+  });
+
   it('the `subscribed` of a subscription that was left does not end the catch-up of the next one', async () => {
     const sockets: { onopen?: () => void; onmessage?: (m: { data: string }) => void }[] = [];
     class FakeWs {

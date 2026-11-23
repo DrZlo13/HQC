@@ -269,10 +269,11 @@ impl Client {
             let (rows, events) = match page {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::error!(error = %e, "backfill");
-                    return self
-                        .error("internal", "internal error", Some(session_id))
-                        .await;
+                    // No session in the frame: an error that names one is the client's answer to
+                    // a refused `subscribe` (SPEC §6), and a backfill runs on a gap and after a
+                    // lagged bus too.
+                    tracing::error!(error = %e, %session_id, "backfill");
+                    return self.error("internal", "internal error", None).await;
                 }
             };
             let n = rows.len() as i64;

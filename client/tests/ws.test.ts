@@ -91,6 +91,25 @@ it('reads two frames in a single message', async () => {
   socket.stop();
 });
 
+it('a listener that throws loses its frame, and the next frame of the stream still comes', async () => {
+  const { ws, socket, titles } = connect();
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+  let thrown = false;
+  socket.onSummary(() => {
+    if (thrown) return;
+    thrown = true;
+    throw new Error('a listener failed');
+  });
+  const [a, b] = await packed([summary('one'), summary('two')]);
+  ws.onmessage!({ data: bytes(a) });
+  ws.onmessage!({ data: bytes(b) });
+  await vi.waitFor(() => expect(titles).toEqual(['one', 'two']));
+  expect(ws.closed).toBe(false);
+  expect(error).toHaveBeenCalledTimes(1);
+  error.mockRestore();
+  socket.stop();
+});
+
 it('drops what comes out of the stream after the socket was replaced, and reconnects on a broken stream', async () => {
   const { ws, socket, titles } = connect();
   const [a] = await packed([summary('late')]);

@@ -53,9 +53,9 @@ export class ChatSession {
    *  subscribes with a backfill once more) the events are applied without drawing each. */
   private catchingUp = false;
   /** The draw that is due for the events applied quietly; set exactly while one is waiting.
-   *  The hub always ends the backfill with `subscribed` (after an `error` too), but a long one
-   *  shows as it arrives, not only at its end: a draw is due `CATCH_UP_DRAW_MS` after the first
-   *  event nothing has drawn. */
+   *  The hub answers every `subscribe` (`subscribed`, or an `error` for a refused one), but a
+   *  long backfill shows as it arrives, not only at its end: a draw is due `CATCH_UP_DRAW_MS`
+   *  after the first event nothing has drawn. */
   private drawTimer: ReturnType<typeof setTimeout> | undefined;
   /** The session is deleted (`forget`). */
   private forgotten = false;

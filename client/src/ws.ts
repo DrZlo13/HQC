@@ -27,8 +27,10 @@ export interface SessionSubscriber {
   /** The socket dropped: transport-only state (agent.delta, subagents.live, schedules.live)
    *  is gone. */
   onReset(): void;
-  /** The hub has sent the history after `afterSeq` (frame `subscribed`, sent after the backfill,
-   *  the live text, `subagents.live` and `schedules.live`); the live stream follows. */
+  /** The hub has answered the `subscribe`: the history after `afterSeq` is sent (frame
+   *  `subscribed`, after the backfill, the live text, `subagents.live`, `schedules.live` and
+   *  `tasks`) and the live stream follows, or the subscription was refused (an `error` naming the
+   *  session). */
   onSubscribed?(): void;
 }
 
@@ -93,7 +95,12 @@ class Inflater {
         const line = rest.slice(0, i);
         rest = rest.slice(i + 1);
         if (this.closed) return;
-        this.onLine(line);
+        // A listener that throws loses its frame, as on a text socket; the stream goes on.
+        try {
+          this.onLine(line);
+        } catch (e) {
+          console.error(e);
+        }
       }
     }
   }
@@ -106,9 +113,10 @@ export class HubSocket {
   private readonly summaryListeners = new Set<(s: SessionSummary[], whole: boolean) => void>();
   private readonly requestListeners = new Set<(r: OpenRequest[]) => void>();
   private readonly stateListeners = new Set<(s: ConnState) => void>();
-  /** Per session, the `subscribe` frames sent on this socket whose `subscribed` has not come:
-   *  the hub answers each, also one of a subscription that was left meanwhile, so an old
-   *  `subscribed` must not end the catch-up of the new one. */
+  /** Per session, the `subscribe` frames sent on this socket that the hub has not answered yet:
+   *  it answers each, also one of a subscription that was left meanwhile, so an old answer must
+   *  not end the catch-up of the new one. The answer is `subscribed`, or an `error` naming the
+   *  session for a refused one (`not_found`, a failed lookup). */
   private readonly unanswered = new Map<string, number>();
   private attempt = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -198,6 +206,8 @@ export class HubSocket {
     const ws = new Ctor(url);
     this.ws = ws;
     this.unanswered.clear();
+    this.inflater?.close();
+    this.inflater = null;
     if (inflate) ws.binaryType = 'arraybuffer';
     ws.onopen = () => {
       if (this.ws !== ws) return;
@@ -242,6 +252,16 @@ export class HubSocket {
     }, delay);
   }
 
+  /** The hub answered a `subscribe` of the session; the last answer ends its catch-up. */
+  private answered(id: string): void {
+    const left = (this.unanswered.get(id) ?? 1) - 1;
+    if (left > 0) this.unanswered.set(id, left);
+    else {
+      this.unanswered.delete(id);
+      this.subs.get(id)?.onSubscribed?.();
+    }
+  }
+
   private dispatch(data: unknown): void {
     let json: unknown;
     try {
@@ -278,16 +298,12 @@ export class HubSocket {
         break;
       case 'error':
         console.warn('hub ws error', frame.code, frame.message, frame.session_id ?? '');
+        // Only a refused `subscribe` gets an error naming a session.
+        if (frame.session_id) this.answered(frame.session_id);
         break;
-      case 'subscribed': {
-        const left = (this.unanswered.get(frame.session_id) ?? 1) - 1;
-        if (left > 0) this.unanswered.set(frame.session_id, left);
-        else {
-          this.unanswered.delete(frame.session_id);
-          this.subs.get(frame.session_id)?.onSubscribed?.();
-        }
+      case 'subscribed':
+        this.answered(frame.session_id);
         break;
-      }
       // `pong` and unknown frames need no action.
     }
   }

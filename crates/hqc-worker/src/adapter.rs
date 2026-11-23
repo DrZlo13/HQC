@@ -112,6 +112,14 @@ pub enum AdapterEvent {
         ended_s: u64,
         commands: Vec<hqc_proto::frame::LeftoverCommand>,
     },
+    /// The runtime answered side question `event_id` ([`Adapter::side_question`]): its text, or
+    /// in `error` why there is none (the runtime's error or notice, a null answer). Sent as the
+    /// stored `side.answer`.
+    SideAnswer {
+        event_id: Uuid,
+        text: Option<String>,
+        error: Option<String>,
+    },
     /// The runtime reported its own session id (ACP), or the session goes on under another
     /// one (Claude Code: after `/clear`, the new transcript, SPEC §8.1); sent in
     /// `session.state`, and later starts continue it.
@@ -314,6 +322,19 @@ pub trait Adapter: Send {
     async fn stop_task(&mut self, task_id: &str) -> anyhow::Result<()> {
         let _ = task_id;
         anyhow::bail!("this runtime cannot stop a task alone")
+    }
+    /// Ask the running process side question `event_id` with the earlier ones in `history`: it
+    /// answers outside the conversation, with no turn and no trace in the agent's context, a
+    /// running turn untouched, and the answer comes as [`AdapterEvent::SideAnswer`]. With no
+    /// process, an error: the caller starts it first.
+    async fn side_question(
+        &mut self,
+        event_id: Uuid,
+        question: &str,
+        history: &[hqc_proto::frame::SideExchange],
+    ) -> anyhow::Result<()> {
+        let _ = (event_id, question, history);
+        anyhow::bail!("this runtime cannot answer a side question")
     }
     /// The transcript of subagent `task_id` of [`AdapterEvent::LiveSubagents`], for
     /// `session.subagent_history` (Claude Code: `subagents/agent-<task_id>.jsonl` beside the

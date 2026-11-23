@@ -72,6 +72,8 @@ export class Timeline {
   /** The first `system task_notification` by its `call_id`, and by its `task_id`. */
   private readonly endsByCall = new Map<string, EventOf<"system">>();
   private readonly endsByTask = new Map<string, EventOf<"system">>();
+  /** The `side.answer` with the lowest `seq` of each side question, by the question's `event_id` (SPEC 0.232). */
+  private readonly sideAnswers = new Map<string, EventOf<"side.answer">>();
   /** Event ids a `retraction` took back (SPEC 0.179): not shown, also when they load later. */
   private readonly retracted = new Set<string>();
   private readonly requests = new Map<
@@ -267,6 +269,9 @@ export class Timeline {
           earliest(this.endsByTask, ev.payload.task_id, ev);
         }
         break;
+      case "side.answer":
+        earliest(this.sideAnswers, ev.payload.question, ev);
+        break;
       case "approval.request":
       case "clarify.request":
         this.requests.set(ev.payload.request_id, ev);
@@ -426,6 +431,11 @@ export class Timeline {
     requestId: string,
   ): EventOf<"approval.request" | "clarify.request"> | undefined {
     return this.requests.get(requestId);
+  }
+
+  /** The runtime's answer to side question `eventId`, once it came (SPEC 0.232). */
+  sideAnswerFor(eventId: string): EventOf<"side.answer"> | undefined {
+    return this.sideAnswers.get(eventId);
   }
 
   resultFor(callId: string): EventOf<"tool.result"> | undefined {
@@ -626,6 +636,7 @@ export class Timeline {
     this.calls.clear();
     this.endsByCall.clear();
     this.endsByTask.clear();
+    this.sideAnswers.clear();
     this.retracted.clear();
     this.requests.clear();
     this.keys.clear();
@@ -671,7 +682,8 @@ export class Timeline {
   }
 
   private buildItems(): Item[] {
-    const bySeq: Item[] = this.events().map((e) => ({
+    // A side answer is drawn in its question's block (SPEC 0.232), not as an item of its own.
+    const bySeq: Item[] = this.events().filter((e) => e.type !== "side.answer").map((e) => ({
       kind: "event",
       key: this.keys.get(e.seq!) ?? `e${e.seq}`,
       event: e,
@@ -768,13 +780,13 @@ export class Timeline {
   }
 }
 
-/** A stored input the hub marked as come while the agent's text or thinking was being written
- *  (SPEC §6), unless the agent took it after some of its work (`joined_after`): it stands where
+/** A stored input, or side question (SPEC 0.232), the hub marked as come while the agent's text
+ *  or thinking was being written (SPEC §6), unless the agent took it after some of its work (`joined_after`): it stands where
  *  the agent took it, under the text it came during already. */
 export function duringText(it: Item): boolean {
   return (
     it.kind === "event" &&
-    (it.event.type === "user.message" || it.event.type === "peer.message") &&
+    (it.event.type === "user.message" || it.event.type === "peer.message" || it.event.type === "side.question") &&
     it.event.payload.during_text === true &&
     joinedAfter(it.event) === undefined
   );
@@ -974,7 +986,7 @@ function withFlags(e: HqcEvent, joined: boolean, quiet: boolean, after?: number)
 
 /** `ev` under `key` in `m` unless an earlier one (by `seq`) is there: an older page may load
  *  after it. No key, no entry. */
-function earliest(m: Map<string, EventOf<"system">>, key: string | undefined, ev: EventOf<"system">): void {
+function earliest<T extends HqcEvent>(m: Map<string, T>, key: string | undefined, ev: T): void {
   if (key === undefined) return;
   const had = m.get(key);
   if (!had || had.seq! > ev.seq!) m.set(key, ev);

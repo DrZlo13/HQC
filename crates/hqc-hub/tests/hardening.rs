@@ -142,8 +142,8 @@ async fn reply_to(w: &mut FakeWorker, event: Value) -> Value {
     reply
 }
 
-/// `user.message`, `approval.response`, `clarify.response`, `peer.message` and `schedules.live`
-/// are the hub's events: a worker sending one gets `error invalid_frame`, nothing is stored.
+/// `user.message`, `approval.response`, `clarify.response`, `peer.message`, `schedules.live` and
+/// `side.question` are the hub's events: a worker sending one gets `error invalid_frame`, nothing is stored.
 #[tokio::test]
 async fn worker_cannot_write_hub_events() {
     let hub = TestHub::start().await;
@@ -170,6 +170,7 @@ async fn worker_cannot_write_hub_events() {
             json!({"from_session_id": sid, "text": "hi", "mode": "send"}),
         ),
         ("schedules.live", json!({"schedules": []})),
+        ("side.question", json!({"text": "Why?"})),
     ] {
         let mut ev = agent_event(&sid, ty, payload);
         ev["author"] = json!({"kind": "user", "id": uuid::Uuid::now_v7()});

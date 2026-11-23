@@ -367,6 +367,12 @@ export class ChatSession {
     return op;
   }
 
+  /** Asks the agent a side question (SPEC 0.232): the stored question is shown at once, its
+   *  answer comes over the socket. A refusal is the caller's. */
+  async sideQuestion(question: string): Promise<void> {
+    this.timeline.applyReply(await this.api.sideQuestion(this.id, question));
+  }
+
   /** Same `client_op_id`: if the first POST was stored but its reply lost, the hub can
    *  dedupe instead of running the message twice. */
   resend(clientOpId: string): void {
@@ -509,6 +515,12 @@ function olderFrom(page: EventPage, asked: number): number {
 
 function pendingFiles(files: OutgoingFile[]): PendingAttachment[] {
   return files.map((f) => ({ name: f.name, size: f.file.size, preview: f.preview }));
+}
+
+/** The question of a message `/btw <question>` or `/side <question>` (SPEC 0.232); undefined for
+ *  any other text, `/btw` alone too. */
+export function sideQuestionOf(text: string): string | undefined {
+  return /^\/(?:btw|side)\s+(\S[\s\S]*)$/.exec(text)?.[1].trimEnd();
 }
 
 /** `crypto.randomUUID` needs a secure context; a phone on plain-HTTP LAN does not have one. */

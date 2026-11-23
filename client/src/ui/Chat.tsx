@@ -7,7 +7,7 @@ import { copyText } from '../clipboard';
 import { HEIC_NAME, dataUrl, heicToJpeg } from '../heic';
 import { onBack } from '../nav';
 import { PERMISSION_MODES, type EventOf, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState, type SlashCommand } from '../proto';
-import type { OutgoingFile } from '../session';
+import { sideQuestionOf, type OutgoingFile } from '../session';
 import { duringText, type Timeline } from '../timeline';
 import { ModelName, isTypedModel, type ModelChoice, modelMenuItems } from './agentSettings';
 import { ArtifactViewer, type ViewedArtifact } from './attachments';
@@ -1209,6 +1209,15 @@ export function Chat({
             onRemove={(i) => setFiles((cur) => cur.filter((_, j) => j !== i))}
             onSend={(text) => {
               stick.current = true;
+              // Files cannot go with a side question: such a text goes as any message.
+              const side = files.length === 0 ? sideQuestionOf(text) : undefined;
+              if (side !== undefined) {
+                // Refused: the notice says why, and the Composer puts the text back.
+                return chat.sideQuestion(side).catch((e: Error) => {
+                  setNotice(`Not asked: ${e.message}`);
+                  throw e;
+                });
+              }
               chat.send(text, files);
               setFiles([]);
             }}
@@ -1893,7 +1902,9 @@ export function Composer({
   giveSecret,
   quick,
 }: {
-  onSend: (text: string) => void;
+  /** What is sent. A promise it returns that is rejected puts the text back into the field (a
+   *  side question the hub refused). */
+  onSend: (text: string) => void | Promise<unknown>;
   placeholder?: string;
   phone?: boolean;
   /** The runtime's slash commands: `/` at the start of the text opens a list of them. */
@@ -2034,9 +2045,16 @@ export function Composer({
   };
   const submit = () => {
     if (!canSend) return;
-    onSend(text.trim());
+    const sent = text.trim();
+    const refused = onSend(sent);
     setText('');
     area.current?.focus();
+    refused?.catch(() => {
+      // What was typed since stays, after the text that came back.
+      caretToEnd.current = true;
+      setText((cur) => (cur.trim() ? `${sent}\n${cur}` : sent));
+      area.current?.focus();
+    });
   };
   useLayoutEffect(() => {
     const el = area.current;

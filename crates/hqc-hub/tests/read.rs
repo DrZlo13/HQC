@@ -301,6 +301,60 @@ async fn the_last_events_and_the_pages_around_them() {
     rig.hub.finish().await;
 }
 
+/// SPEC 0.232: `hqc_read` leaves out the side questions and their answers, also in the
+/// caller's own session: the agent never sees them.
+#[tokio::test]
+async fn a_side_question_and_its_answer_are_not_read() {
+    let mut rig = Rig::start().await;
+    let db = rig.hub.app.db.clone();
+    let sid: Uuid = rig.sid.parse().unwrap();
+    let put = |kind: &'static str, payload: Value, n: i64| {
+        let db = db.clone();
+        async move {
+            let e = NewEvent {
+                event_id: Uuid::now_v7(),
+                session_id: sid,
+                ts: t(n),
+                author: json!({"kind": "system"}),
+                kind: kind.into(),
+                payload,
+                chain: None,
+                client_op_id: None,
+                delivery: None,
+                delivered_at: None,
+            };
+            match db::insert_event(&db, &e).await.unwrap() {
+                Inserted::New(r) => r.event_id,
+                other => panic!("{other:?}"),
+            }
+        }
+    };
+    put("agent.message", json!({"text": "m1", "final": true}), 1).await;
+    let q = put("side.question", json!({"text": "Secret?"}), 2).await;
+    put("side.answer", json!({"question": q, "text": "Hidden."}), 3).await;
+    put("agent.message", json!({"text": "m2", "final": true}), 4).await;
+    // By its address and by the caller's own, by pages in both directions.
+    for args in [
+        json!({"session": rig.sid}),
+        json!({"session": rig.sid, "after_seq": 0}),
+        json!({"session": rig.sid, "before_seq": 100}),
+    ] {
+        let r = rig.read(args).await;
+        let types: Vec<&str> = r["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["type"].as_str())
+            .collect();
+        assert!(
+            !types.iter().any(|t| t.starts_with("side.")),
+            "{types:?} {r}"
+        );
+        assert_eq!(types.iter().filter(|t| **t == "agent.message").count(), 2);
+    }
+    rig.hub.finish().await;
+}
+
 #[tokio::test]
 async fn an_archived_session_and_the_caller_itself_are_read() {
     let mut rig = Rig::start().await;

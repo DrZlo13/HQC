@@ -4004,6 +4004,538 @@ async fn a_foreground_call_goes_to_the_background() {
     hub.finish().await;
 }
 
+/// SPEC 0.232, §5.3, §17.5: `POST .../side_question` stores the owner's `side.question` and
+/// sends the worker `session.side_question` with the earlier side questions that got an answer
+/// (not one that got an error) after the owner's last message; the worker's `side.answer` is
+/// stored, and the agent gets none of it as input.
+#[tokio::test]
+async fn a_side_question_is_stored_and_asked_of_the_worker() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Side questions").await;
+    ack_start(&mut w, &sid).await;
+    let path = format!("/api/sessions/{sid}/side_question");
+    let ask = |text: &'static str| {
+        let (hub, path) = (&hub, &path);
+        async move {
+            let (s, r) = hub.post(path, json!({ "text": text })).await;
+            assert_eq!(s, 201, "{r}");
+            assert_eq!(r["event"]["type"], "side.question", "{r}");
+            assert_eq!(r["event"]["author"]["kind"], "user", "{r}");
+            assert_eq!(r["event"]["payload"], json!({ "text": text }), "{r}");
+            r["event"]["event_id"].clone()
+        }
+    };
+
+    let q1 = ask("What now?").await;
+    let f = w.expect("session.side_question").await;
+    assert_eq!(
+        f["payload"],
+        json!({"session_id": sid, "event_id": q1, "question": "What now?"})
+    );
+    w.reply(&f["id"], "ack", json!({})).await;
+    let ack = w
+        .event(agent_event(
+            &sid,
+            "side.answer",
+            json!({"question": q1, "text": "It reads."}),
+        ))
+        .await;
+    assert!(ack["seq"].is_u64(), "{ack}");
+
+    let q2 = ask("And then?").await;
+    let f = w.expect("session.side_question").await;
+    assert_eq!(f["payload"]["event_id"], q2);
+    assert_eq!(
+        f["payload"]["history"],
+        json!([{"question": "What now?", "response": "It reads."}])
+    );
+    w.event(agent_event(
+        &sid,
+        "side.answer",
+        json!({"question": q2, "error": "Side question cancelled"}),
+    ))
+    .await;
+
+    // The failed one is not in the history.
+    ask("Once more?").await;
+    let f = w.expect("session.side_question").await;
+    assert_eq!(
+        f["payload"]["history"],
+        json!([{"question": "What now?", "response": "It reads."}])
+    );
+
+    // A message of the owner starts the history over, and it is the only input the agent gets.
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "go on"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let input = w.expect("session.input").await;
+    assert_eq!(input["payload"]["event_id"], r["event"]["event_id"]);
+    ask("After the message?").await;
+    let f = w.expect("session.side_question").await;
+    assert!(f["payload"].get("history").is_none(), "{f}");
+    hub.finish().await;
+}
+
+/// SPEC 0.232, §5.3, §17.5: a side question for an agent whose process is not started on this
+/// connection (a pause ended it) starts it first, with `session.start`, then asks.
+#[tokio::test]
+async fn a_side_question_starts_an_agent_that_is_not_started() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Side start").await;
+    ack_start(&mut w, &sid).await;
+    let (s, _) = hub
+        .post(&format!("/api/sessions/{sid}/pause"), json!({}))
+        .await;
+    assert_eq!(s, 200);
+    w.expect("session.kill").await;
+    // The pause is lifted behind the hub's back, so that only the missing start remains.
+    sqlx::query("UPDATE sessions SET paused_at = NULL WHERE id = $1")
+        .bind(sid.parse::<Uuid>().unwrap())
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/side_question"),
+            json!({"text": "Still there?"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let start = ack_start(&mut w, &sid).await;
+    assert_eq!(start["payload"]["mode"], "resume");
+    assert_eq!(start["payload"]["no_wait"], true, "{start}");
+    let f = w.expect("session.side_question").await;
+    assert_eq!(f["payload"]["event_id"], r["event"]["event_id"]);
+    hub.finish().await;
+}
+
+/// SPEC 0.232, §5.3: the `session.start` of an ordinary session does not carry `no_wait`.
+#[tokio::test]
+async fn an_ordinary_start_does_not_carry_no_wait() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Ordinary").await;
+    let start = ack_start(&mut w, &sid).await;
+    assert!(start["payload"].get("no_wait").is_none(), "{start}");
+    hub.finish().await;
+}
+
+/// SPEC 0.232, §17.5: an `error` the worker answers `session.side_question` with is stored as
+/// the question's `side.answer {error}`, so the block does not wait for ever.
+#[tokio::test]
+async fn a_side_question_the_worker_refuses_gets_its_error() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Side refused").await;
+    ack_start(&mut w, &sid).await;
+    let q = ask_side(&hub, &sid, "Why?").await;
+    let f = w.expect("session.side_question").await;
+    w.reply(
+        &f["id"],
+        "error",
+        json!({"code": "unknown_session", "message": "session is not started on this worker; send session.start first", "retryable": false}),
+    )
+    .await;
+    let events = hub
+        .wait_events(&sid, "the error answer", |e| {
+            e.iter().any(|e| e["type"] == "side.answer")
+        })
+        .await;
+    let answers: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "side.answer")
+        .collect();
+    assert_eq!(answers.len(), 1, "{events:?}");
+    assert_eq!(
+        answers[0]["payload"],
+        json!({"question": q["event_id"], "error": "session is not started on this worker; send session.start first"})
+    );
+    hub.finish().await;
+}
+
+/// SPEC 0.232, §17.5: when the worker's connection closes, every side question of its sessions
+/// that has no answer gets the error "The worker went offline before the answer"; an answered
+/// one does not.
+#[tokio::test]
+async fn a_side_question_of_a_worker_that_goes_offline_is_answered_with_an_error() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Side offline").await;
+    ack_start(&mut w, &sid).await;
+    let answered = ask_side(&hub, &sid, "Answered?").await;
+    w.expect("session.side_question").await;
+    w.event(agent_event(
+        &sid,
+        "side.answer",
+        json!({"question": answered["event_id"], "text": "Yes."}),
+    ))
+    .await;
+    let open = ask_side(&hub, &sid, "Open?").await;
+    w.expect("session.side_question").await;
+    w.close().await;
+    let events = hub
+        .wait_events(&sid, "the offline answer", |e| {
+            e.iter().filter(|e| e["type"] == "side.answer").count() == 2
+        })
+        .await;
+    let answers: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "side.answer")
+        .map(|e| e["payload"].clone())
+        .collect();
+    assert_eq!(
+        answers,
+        [
+            json!({"question": answered["event_id"], "text": "Yes."}),
+            json!({"question": open["event_id"], "error": "The worker went offline before the answer"}),
+        ]
+    );
+    hub.finish().await;
+}
+
+/// The `side.answer` payloads among `events`.
+fn side_answers(events: &[Value]) -> Vec<Value> {
+    events
+        .iter()
+        .filter(|e| e["type"] == "side.answer")
+        .map(|e| e["payload"].clone())
+        .collect()
+}
+
+/// SPEC 0.232, §17.5: a connection that a second `hello` of the same worker replaces answers
+/// none of its open side questions: each gets the error, as when the connection closes alone.
+#[tokio::test]
+async fn a_side_question_of_a_replaced_connection_is_answered_with_an_error() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w1, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Side replaced").await;
+    ack_start(&mut w1, &sid).await;
+    let q = ask_side(&hub, &sid, "Open?").await;
+    w1.expect("session.side_question").await;
+    // The worker connects again (a network switch): the hub drops the old connection, whose
+    // socket the worker then closes.
+    let (_w2, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    w1.close().await;
+    let events = hub
+        .wait_events(&sid, "the offline answer", |e| {
+            e.iter().any(|e| e["type"] == "side.answer")
+        })
+        .await;
+    assert_eq!(
+        side_answers(&events),
+        [json!({"question": q["event_id"], "error": "The worker went offline before the answer"})]
+    );
+    hub.finish().await;
+}
+
+/// SPEC 0.232, §17.5: the cleanup of a replaced connection leaves alone a question asked
+/// through the new one before the old one closed.
+#[tokio::test]
+async fn a_side_question_of_the_new_connection_is_not_touched_by_the_old_ones_cleanup() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w1, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Side new connection").await;
+    ack_start(&mut w1, &sid).await;
+    let old = ask_side(&hub, &sid, "Old?").await;
+    w1.expect("session.side_question").await;
+    let (mut w2, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    // Asked through the new connection while the old one is still open: a cleanup of every
+    // question of the worker would answer it too.
+    let new = ask_side(&hub, &sid, "New?").await;
+    ack_start(&mut w2, &sid).await;
+    let f = w2.expect("session.side_question").await;
+    assert_eq!(f["payload"]["event_id"], new["event_id"]);
+    w1.close().await;
+    // The old connection's cleanup has run once its question is answered.
+    let events = hub
+        .wait_events(&sid, "the offline answer", |e| {
+            e.iter().any(|e| e["type"] == "side.answer")
+        })
+        .await;
+    assert_eq!(
+        side_answers(&events),
+        [
+            json!({"question": old["event_id"], "error": "The worker went offline before the answer"})
+        ]
+    );
+    // The new connection answers its own question as usual.
+    w2.event(agent_event(
+        &sid,
+        "side.answer",
+        json!({"question": new["event_id"], "text": "Here."}),
+    ))
+    .await;
+    let events = hub
+        .wait_events(&sid, "the answer of the new connection", |e| {
+            e.iter().filter(|e| e["type"] == "side.answer").count() == 2
+        })
+        .await;
+    assert_eq!(
+        side_answers(&events)[1],
+        json!({"question": new["event_id"], "text": "Here."})
+    );
+    hub.finish().await;
+}
+
+/// SPEC 0.232, §5.3, §17.5: a side question is refused for an empty text (400), a room (`409
+/// room`), an archived session, one VS Code holds, a paused one and one whose worker is away;
+/// nothing is stored or sent then.
+#[tokio::test]
+async fn a_side_question_is_refused_where_it_cannot_be_asked() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let pid = hub.personal_project().await;
+    let refused = |sid: String, status: u16, error: &'static str| {
+        let hub = &hub;
+        async move {
+            let (s, r) = hub
+                .post(
+                    &format!("/api/sessions/{sid}/side_question"),
+                    json!({"text": "Why?"}),
+                )
+                .await;
+            assert_eq!((s, r["error"].as_str()), (status, Some(error)), "{r}");
+            let events = hub.events(&sid).await;
+            assert!(
+                events.iter().all(|e| e["type"] != "side.question"),
+                "{events:?}"
+            );
+        }
+    };
+
+    let plain = hub.create_session("Plain").await;
+    ack_start(&mut w, &plain).await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{plain}/side_question"),
+            json!({"text": "  "}),
+        )
+        .await;
+    assert_eq!(s, 400, "{r}");
+
+    let (s, room) = hub
+        .post(
+            &format!("/api/projects/{pid}/rooms"),
+            json!({"mode": "council", "agents": [{"model": "opus"}]}),
+        )
+        .await;
+    assert_eq!(s, 201, "{room}");
+    refused(room["id"].as_str().unwrap().to_string(), 409, "room").await;
+
+    let held = hub.create_session("Held").await;
+    ack_start(&mut w, &held).await;
+    sqlx::query("UPDATE sessions SET locked_by = 'vscode' WHERE id = $1")
+        .bind(held.parse::<Uuid>().unwrap())
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    refused(held, 409, "locked_vscode").await;
+
+    let paused = hub.create_session("Paused").await;
+    ack_start(&mut w, &paused).await;
+    let (s, _) = hub
+        .post(&format!("/api/sessions/{paused}/pause"), json!({}))
+        .await;
+    assert_eq!(s, 200);
+    w.expect("session.kill").await;
+    refused(paused, 409, "paused").await;
+
+    let archived = hub.create_session("Archived").await;
+    ack_start(&mut w, &archived).await;
+    let (s, _) = hub
+        .post(&format!("/api/sessions/{archived}/archive"), json!({}))
+        .await;
+    assert_eq!(s, 200);
+    refused(archived, 409, "archived").await;
+
+    w.close().await;
+    hub.wait_session(&plain, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    refused(plain, 409, "worker_offline").await;
+    hub.finish().await;
+}
+
+/// Asks `text` as a side question of session `sid`; the stored `side.question`.
+async fn ask_side(hub: &TestHub, sid: &str, text: &str) -> Value {
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/side_question"),
+            json!({ "text": text }),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    r["event"].clone()
+}
+
+/// SPEC 0.232, §4, §17.5: the hub stores a worker's `side.answer` only when it names a
+/// `side.question` of the same session that has no answer yet; any other is acknowledged
+/// without a `seq` and not stored.
+#[tokio::test]
+async fn a_side_answer_is_stored_only_for_an_open_question_of_its_session() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Mine").await;
+    ack_start(&mut w, &sid).await;
+    let other = hub.create_session("Other").await;
+    ack_start(&mut w, &other).await;
+    let mine = ask_side(&hub, &sid, "Mine?").await;
+    w.expect("session.side_question").await;
+    let theirs = ask_side(&hub, &other, "Theirs?").await;
+    w.expect("session.side_question").await;
+    let answer = |q: &Value, text: &str| json!({"question": q, "text": text});
+
+    // The other session's question, named in this session's feed, and one that is not there.
+    let ack = w
+        .event(agent_event(
+            &sid,
+            "side.answer",
+            answer(&theirs["event_id"], "Not mine."),
+        ))
+        .await;
+    assert!(ack["seq"].is_null(), "{ack}");
+    let ack = w
+        .event(agent_event(
+            &sid,
+            "side.answer",
+            answer(&json!(Uuid::now_v7()), "No such question."),
+        ))
+        .await;
+    assert!(ack["seq"].is_null(), "{ack}");
+    // A message is no question either.
+    let (_, r) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": "hi"}))
+        .await;
+    w.expect("session.input").await;
+    let ack = w
+        .event(agent_event(
+            &sid,
+            "side.answer",
+            answer(&r["event"]["event_id"], "Not a question."),
+        ))
+        .await;
+    assert!(ack["seq"].is_null(), "{ack}");
+
+    let first = agent_event(&sid, "side.answer", answer(&mine["event_id"], "First."));
+    let ack = w.event(first.clone()).await;
+    assert!(ack["seq"].is_u64(), "{ack}");
+    // The same answer sent again after a lost ack gets its seq; a second one is dropped.
+    let again = w.event(first).await;
+    assert_eq!(again["seq"], ack["seq"], "{again}");
+    let ack = w
+        .event(agent_event(
+            &sid,
+            "side.answer",
+            answer(&mine["event_id"], "Second."),
+        ))
+        .await;
+    assert!(ack["seq"].is_null(), "{ack}");
+
+    let texts = |events: Vec<Value>| -> Vec<Value> {
+        events
+            .iter()
+            .filter(|e| e["type"] == "side.answer")
+            .map(|e| e["payload"]["text"].clone())
+            .collect()
+    };
+    assert_eq!(texts(hub.events(&sid).await), [json!("First.")]);
+    assert!(texts(hub.events(&other).await).is_empty());
+    hub.finish().await;
+}
+
+/// SPEC 0.232, §6: a side question asked while the agent's text is being written is marked
+/// `during_text`, so clients show its block under that text; once the text is stored, the next
+/// has no mark.
+#[tokio::test]
+async fn a_side_question_during_the_answer_text_is_marked() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("during").await;
+    ack_start(&mut w, &sid).await;
+    w.event(agent_event(&sid, "agent.delta", json!({"text": "Writ"})))
+        .await;
+    let during = ask_side(&hub, &sid, "Meanwhile?").await;
+    assert_eq!(during["payload"]["during_text"], true, "{during}");
+    w.expect("session.side_question").await;
+    w.event(agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "Writing", "final": false}),
+    ))
+    .await;
+    let after = ask_side(&hub, &sid, "After?").await;
+    assert!(after["payload"].get("during_text").is_none(), "{after}");
+    hub.finish().await;
+}
+
+/// SPEC 0.232: a side question is refused with `409 not_askable` for a session whose runtime is
+/// not Claude Code, and another owner's session is not found; nothing is stored or sent.
+#[tokio::test]
+async fn a_side_question_is_not_asked_of_another_runtime_or_owner() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Acp").await;
+    ack_start(&mut w, &sid).await;
+    sqlx::query("UPDATE sessions SET runtime = 'acp' WHERE id = $1")
+        .bind(sid.parse::<Uuid>().unwrap())
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    let path = |sid: &str| format!("/api/sessions/{sid}/side_question");
+    let (s, r) = hub.post(&path(&sid), json!({"text": "Why?"})).await;
+    assert_eq!((s, r["error"].as_str()), (409, Some("not_askable")), "{r}");
+    assert!(hub
+        .events(&sid)
+        .await
+        .iter()
+        .all(|e| e["type"] != "side.question"));
+
+    let db = &hub.app.db;
+    let stranger = hqc_hub::db::ensure_user(db, "stranger-side@example.com")
+        .await
+        .unwrap();
+    let project = hqc_hub::db::create_project(db, stranger.id, "Theirs", "")
+        .await
+        .unwrap();
+    let theirs = hqc_hub::db::create_session(
+        db,
+        hqc_hub::db::NewSession {
+            project_id: project.id,
+            owner_id: stranger.id,
+            workspace_id: None,
+            worker_id: None,
+            cwd: ".",
+            title: Some("Theirs"),
+            model: None,
+            auto_approve: false,
+            permission_mode: None,
+        },
+    )
+    .await
+    .unwrap();
+    let (s, _) = hub
+        .post(&path(&theirs.to_string()), json!({"text": "Why?"}))
+        .await;
+    assert_eq!(s, 404);
+    hub.finish().await;
+}
+
 /// SPEC §5.3, §6: `POST .../tasks/{task_id}/stop` reaches the worker as `session.stop_task`; a
 /// `task_id` that is too long or has a NUL is refused, another user's session is not found,
 /// the worker's service session takes none, and with the worker away nothing is sent.

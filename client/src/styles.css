@@ -3686,6 +3686,38 @@ button.btn-mode-pill.perm-allow-all:hover,
   margin: 10px 0 0 18px;
 }
 
+/* A side question and its answer (SPEC 0.232): a grey block among the messages, muted, so it
+   reads as neither a message to the agent nor one from it. */
+.side-question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.side-question-head {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.side-ask {
+  white-space: pre-wrap;
+}
+.side-answer {
+  margin: 0;
+  padding-left: 12px;
+  box-shadow: inset 1px 0 0 var(--border);
+  color: var(--text2);
+}
+.side-wait {
+  font-style: italic;
+  color: var(--muted);
+}
+.side-error {
+  color: var(--danger);
+}
+
 .line-worker-log {
   font-family: var(--mono);
   font-size: 12px;

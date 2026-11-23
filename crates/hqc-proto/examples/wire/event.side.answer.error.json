@@ -1,0 +1,9 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000133",
+  "seq": 54,
+  "ts": "2026-10-22T10:00:14Z",
+  "author": { "kind": "agent", "id": "0199f3a2-7c10-7000-8000-000000000001" },
+  "type": "side.answer",
+  "payload": { "question": "0199f3a2-7c10-7000-8000-000000000131", "error": "Side question cancelled" }
+}

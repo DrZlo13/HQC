@@ -533,6 +533,11 @@ export function EventView({ event, actions, queued }: { event: HqcEvent; actions
       );
     case 'peer.message':
       return <PeerMessageBlock event={event} actions={actions} queued={queued} />;
+    case 'side.question':
+      return <SideQuestion event={event} actions={actions} />;
+    case 'side.answer':
+      // Drawn in its question's block; the timeline gives no item for it.
+      return null;
     case 'usage':
       return (
         <div class="line line-usage">
@@ -558,6 +563,27 @@ export function EventView({ event, actions, queued }: { event: HqcEvent; actions
         </details>
       );
   }
+}
+
+/** A side question the owner asked the agent and its answer (SPEC 0.232): one muted block, no
+ *  message to or from the agent. "Answering…" until the answer comes; the answer as Markdown,
+ *  or the reason there is none. */
+function SideQuestion({ event, actions }: { event: EventOf<'side.question'>; actions: ChatActions }) {
+  const answer = actions.timeline.sideAnswerFor(event.event_id)?.payload;
+  const waiting = !answer;
+  return (
+    <div class="card side-question">
+      <div class="side-question-head">Side question</div>
+      <div class="side-ask">{event.payload.text}</div>
+      {waiting && (
+        <div class="side-answer side-wait" role="status">
+          Answering…
+        </div>
+      )}
+      {answer?.text !== undefined && <Markdown class="side-answer" text={answer.text} />}
+      {answer && answer.text === undefined && <div class="side-answer side-error">{answer.error ?? 'No answer'}</div>}
+    </div>
+  );
 }
 
 /** A service line between hairlines; the creation of the session says when; a warning

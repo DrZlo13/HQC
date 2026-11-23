@@ -658,7 +658,8 @@ fn subagent_page(
 /// `hqc_read(session, before_seq?, after_seq?)` (SPEC §7): the events of one session of the
 /// calling session's owner, as `GET /api/sessions/{id}/events` returns them, in pages of at
 /// most [`READ_EVENTS`] events and [`hqc_proto::mcp::MAX_ARGS`] bytes: `{address, title,
-/// events (oldest first), last_seq, earlier?, later?}`. No side effects.
+/// events (oldest first, side questions and their answers left out), last_seq, earlier?,
+/// later?}`. No side effects.
 async fn read_session(app: &AppState, caller: &SessionRow, a: ReadArgs) -> ToolResult {
     let session = a.session.as_deref().expect("checked");
     let (s, address) = crate::peers::readable(app, caller, session).await?;
@@ -681,6 +682,9 @@ async fn read_session(app: &AppState, caller: &SessionRow, a: ReadArgs) -> ToolR
     let mut events = db::events_for_clients(&app.db, &rows)
         .await
         .map_err(internal)?;
+    // The agent never sees a side question or its answer, not in its own session either
+    // (SPEC 0.232).
+    events.retain(|e| !matches!(e["type"].as_str(), Some("side.question" | "side.answer")));
     // Over the byte budget the far end of the page goes, but one event always stays.
     let sizes = events.iter().map(|e| e.to_string().len());
     let keep = if forward {

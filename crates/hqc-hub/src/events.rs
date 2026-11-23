@@ -60,7 +60,8 @@ pub enum Ingested {
 const MAX_RETRACTED: usize = 1024;
 
 /// Event types only the hub writes (SPEC §4): input of users, answers to requests and
-/// messages between sessions, and `schedules.live`. A worker sending one is refused.
+/// messages between sessions, `schedules.live` and `side.question`. A worker sending one is
+/// refused.
 fn hub_only(kind: &EventKind) -> bool {
     matches!(
         kind,
@@ -69,6 +70,7 @@ fn hub_only(kind: &EventKind) -> bool {
             | EventKind::ClarifyResponse { .. }
             | EventKind::PeerMessage { .. }
             | EventKind::SchedulesLive { .. }
+            | EventKind::SideQuestion { .. }
     )
 }
 
@@ -192,6 +194,14 @@ pub async fn ingest_worker_event(
         }
         payload = json!({ "event_ids": kept });
     }
+    // An answer to a side question of this session that has none yet (SPEC 0.232): the worker
+    // names the question, and is not trusted with another session's or with a second answer.
+    if let EventKind::SideAnswer { question, .. } = &ev.kind {
+        if !db::side_answer_wanted(&app.db, s.id, *question, ev.event_id).await? {
+            tracing::info!(session_id = %s.id, %question, "side.answer for no open side question dropped");
+            return Ok(dropped);
+        }
+    }
     let new = NewEvent {
         event_id: ev.event_id,
         session_id: ev.session_id,
@@ -262,6 +272,9 @@ pub async fn ingest_worker_event(
     match inserted {
         Inserted::New(row) => {
             let seq = row.seq;
+            if let EventKind::SideAnswer { question, .. } = &ev.kind {
+                conn.side_closed(s.id, *question);
+            }
             after_store(app, &s, &row, &ev.kind, Source::Worker).await?;
             // Here rather than in after_store: auto_approve stores an event itself.
             if let EventKind::ApprovalRequest { request_id, .. } = &ev.kind {
@@ -361,8 +374,8 @@ async fn store_hub_event_as(
     hqc_proto::replace_nul_json(&mut payload);
     let client_op_id = client_op_id.map(|c| hqc_proto::replace_nul(&c).into_owned());
     // Clients put an input that came while the agent's text or thinking was being written
-    // under it (SPEC §6).
-    if kind == "user.message" && app.text_open(s.id) {
+    // under it (SPEC §6), and so a side question.
+    if matches!(kind, "user.message" | "side.question") && app.text_open(s.id) {
         payload["during_text"] = json!(true);
     }
     let typed: EventKind = serde_json::from_value(json!({"type": kind, "payload": payload}))?;

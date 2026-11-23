@@ -397,12 +397,13 @@ fn may_wait(m: &db::TurnMark) -> bool {
 }
 
 /// An event of the agent's work in a turn: `status running`, `system context_compacted`, or
-/// what its runtime wrote but an input and the turn's `usage`.
+/// what its runtime wrote but an input, the turn's `usage` and a side answer.
 fn agent_work(m: &db::TurnMark) -> bool {
     match m.kind.as_str() {
         "status" => m.state.as_deref() == Some("running"),
         "system" if m.code.as_deref() == Some("context_compacted") => true,
-        "peer.message" | "usage" => false,
+        // A side question and its answer stand outside the agent's work (SPEC §17.5).
+        "peer.message" | "usage" | "side.question" | "side.answer" => false,
         _ => m.author_kind.as_deref() == Some("agent"),
     }
 }
@@ -457,6 +458,14 @@ mod tests {
 
     fn work(seq: i64) -> db::TurnMark {
         mark(seq, "tool.call", "agent")
+    }
+
+    /// A side answer is written by the agent's session but is no work of its turn (SPEC 0.232).
+    #[test]
+    fn a_side_answer_is_not_the_agents_work() {
+        assert!(agent_work(&work(1)));
+        assert!(!agent_work(&mark(2, "side.answer", "agent")));
+        assert!(!agent_work(&mark(3, "side.question", "user")));
     }
 
     fn answer(seq: i64, to: i64) -> db::TurnMark {

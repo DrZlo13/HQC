@@ -475,6 +475,20 @@ export interface Retraction {
   event_ids: string[];
 }
 
+/** A side question the owner asked the session's agent (SPEC 0.232): the agent never sees it. */
+export interface SideQuestion {
+  text: string;
+  /** As `UserMessage.during_text`. */
+  during_text?: boolean;
+}
+/** The runtime's answer to side question `question` (SPEC 0.232): its text, or `error` why there
+ *  is none; exactly one of them. */
+export interface SideAnswer {
+  question: Uuid;
+  text?: string;
+  error?: string;
+}
+
 export interface PayloadByType {
   'user.message': UserMessage;
   'agent.delta': AgentDelta;
@@ -498,6 +512,8 @@ export interface PayloadByType {
   status: Status;
   system: SystemNote;
   retraction: Retraction;
+  'side.question': SideQuestion;
+  'side.answer': SideAnswer;
 }
 export type EventType = keyof PayloadByType;
 
@@ -792,6 +808,8 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     goal: present(p, 'goal') ? parseGoal(obj(p.goal, 'goal')) : undefined,
   }),
   retraction: (p) => ({ event_ids: strArr(p, 'event_ids') }),
+  'side.question': (p) => ({ text: str(p, 'text'), during_text: optBool(p, 'during_text') }),
+  'side.answer': (p) => ({ question: str(p, 'question'), text: optStr(p, 'text'), error: optStr(p, 'error') }),
 };
 
 function parseApiRetry(o: Obj): ApiRetry {
@@ -1163,6 +1181,11 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'request_id');
     str(p, 'session_id');
     str(p, 'event_id');
+  },
+  'session.side_question': (p) => {
+    str(p, 'session_id');
+    str(p, 'event_id');
+    str(p, 'question');
   },
   'session.subagent_history': (p) => {
     str(p, 'request_id');

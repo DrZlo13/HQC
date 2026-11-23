@@ -315,6 +315,7 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::SubagentLeftovers { .. } => "subagent_leftovers".into(),
             AdapterEvent::QuietTaken { .. } => "quiet_taken".into(),
             AdapterEvent::QuietCancelled { .. } => "quiet_cancelled".into(),
+            AdapterEvent::SideAnswer { .. } => "side_answer".into(),
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -7514,6 +7515,121 @@ fn a_refusal_answered_by_another_model_names_it_in_the_usage() {
     assert_eq!(turn(None).as_deref(), Some("claude-sonnet-5"));
     assert_eq!(turn(Some("session")).as_deref(), Some("claude-sonnet-5"));
     assert_eq!(turn(Some("local")).as_deref(), Some("claude-opus-5-5"));
+}
+
+/// SPEC 0.232, §8.1: a side question is a `control_request` named after the hub's event, with
+/// the earlier ones as `history` when there are any; the CLI's progress line is no event, and
+/// its answer is a `SideAnswer`: the text, a `synthetic` notice and a `null` answer as an
+/// error, an error answer with its text. It opens no turn and writes no event of its own.
+#[test]
+fn a_side_question_is_asked_and_answered_outside_the_conversation() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let event_id = Uuid::now_v7();
+    let Action::Write(v) = core.side_question(event_id, "What now?", &[]) else {
+        panic!("not a write");
+    };
+    assert_eq!(v["type"], "control_request");
+    assert_eq!(v["request_id"], format!("hqc-side-{event_id}"));
+    assert_eq!(
+        v["request"],
+        json!({"subtype": "side_question", "question": "What now?"})
+    );
+    let history = [hqc_proto::frame::SideExchange {
+        question: "Before?".into(),
+        response: "Earlier.".into(),
+    }];
+    let Action::Write(v) = core.side_question(event_id, "And now?", &history) else {
+        panic!("not a write");
+    };
+    assert_eq!(
+        v["request"]["history"],
+        json!([{"question": "Before?", "response": "Earlier."}])
+    );
+    let progress = json!({"type": "system", "subtype": "control_request_progress",
+        "request_id": format!("hqc-side-{event_id}"), "status": "started"});
+    assert!(core.on_line(&progress.to_string()).is_empty());
+    let answer = |core: &mut Core, response: Value| {
+        let a = core.on_line(&response.to_string());
+        match a.as_slice() {
+            [Action::Emit(AdapterEvent::SideAnswer {
+                event_id: e,
+                text,
+                error,
+            })] => {
+                assert_eq!(*e, event_id);
+                (text.clone(), error.clone())
+            }
+            a => panic!("{a:?}"),
+        }
+    };
+    let success = |response: Value| {
+        json!({"type": "control_response", "response": {"subtype": "success",
+            "request_id": format!("hqc-side-{event_id}"), "response": response}})
+    };
+    assert_eq!(
+        answer(
+            &mut core,
+            success(json!({"response": "It reads.", "synthetic": false}))
+        ),
+        (Some("It reads.".into()), None)
+    );
+    assert_eq!(
+        answer(
+            &mut core,
+            success(json!({"response": "Try later.", "synthetic": true}))
+        ),
+        (None, Some("Try later.".into()))
+    );
+    assert_eq!(
+        answer(
+            &mut core,
+            success(json!({"response": null, "synthetic": false}))
+        ),
+        (None, Some("No answer".into()))
+    );
+    assert_eq!(
+        answer(
+            &mut core,
+            json!({"type": "control_response", "response": {"subtype": "error",
+                "request_id": format!("hqc-side-{event_id}"), "error": "Side question cancelled"}})
+        ),
+        (None, Some("Side question cancelled".into()))
+    );
+    // Nothing of it reached the turn machinery.
+    assert!(!core.turn_open());
+}
+
+/// SPEC 0.232, §8.1: a `model_refusal_fallback` of `scope` `local` (a side question's or a
+/// subagent's answer came from the other model) takes back no record of the conversation, though
+/// it names uuids; one for the session still does.
+#[test]
+fn a_local_refusal_fallback_retracts_nothing() {
+    let retractions = |scope: Option<&str>| {
+        let sid = Uuid::now_v7();
+        let mut core = Core::new(sid, false);
+        started(&mut core, sid);
+        let t = Uuid::new_v4();
+        play(
+            &mut core,
+            &json!({"type": "assistant", "parent_tool_use_id": null, "uuid": t,
+                "message": {"model": "claude-opus-5-5", "role": "assistant",
+                    "content": [{"type": "text", "text": "Working."}]}})
+            .to_string(),
+        );
+        let mut fallback = json!({"type": "system", "subtype": "model_refusal_fallback",
+            "trigger": "refusal", "direction": "retry", "original_model": "claude-opus-5-5",
+            "fallback_model": "claude-sonnet-5", "request_id": null,
+            "retracted_message_uuids": [t], "content": "Switched."});
+        if let Some(s) = scope {
+            fallback["scope"] = json!(s);
+        }
+        play(&mut core, &fallback.to_string())
+            .iter()
+            .filter(|a| matches!(a, Action::Emit(AdapterEvent::Event(e)) if matches!(e.kind, EventKind::Retraction { .. })))
+            .count()
+    };
+    assert_eq!(retractions(Some("local")), 0);
+    assert_eq!(retractions(Some("session")), 1);
 }
 
 /// SPEC §4, §8.1: `system/init`'s MCP servers that are not connected (live on 2.1.312, a server

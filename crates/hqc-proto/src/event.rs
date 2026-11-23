@@ -718,6 +718,29 @@ pub enum EventKind {
     /// them. Nothing is deleted.
     #[serde(rename = "retraction")]
     Retraction { event_ids: Vec<Uuid> },
+    /// A side question the owner asked the session's agent (SPEC 0.232, §4): written by the
+    /// hub only. The agent never gets it in its input; the feed shows it with its answer.
+    #[serde(rename = "side.question")]
+    SideQuestion {
+        text: String,
+        /// Set by the hub: the agent's text or thinking was being written when the question
+        /// came, so clients show its block under that text, as an input's (SPEC 0.108);
+        /// absent when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        during_text: bool,
+    },
+    /// What the runtime answered to side question `question` (the `event_id` of its
+    /// `side.question`), written by the worker (SPEC 0.232, §4): the answer in `text`, or in
+    /// `error` why there is none (the runtime's error or notice, a process that ended, no
+    /// answer); exactly one of them is set.
+    #[serde(rename = "side.answer")]
+    SideAnswer {
+        question: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// An event type this build does not know; stored and passed on as is, not rendered.
     /// Never matches a known type: a known type with a bad payload is an error.
     #[serde(untagged)]
@@ -754,6 +777,8 @@ impl EventKind {
         "status",
         "system",
         "retraction",
+        "side.question",
+        "side.answer",
     ];
 }
 
@@ -922,6 +947,8 @@ mod tests {
         "status",
         "system",
         "retraction",
+        "side.question",
+        "side.answer",
     ];
 
     /// Wire examples shared with the TS client (`examples/wire/event.<type>.json`).
@@ -1002,6 +1029,14 @@ mod tests {
             "retraction",
             include_str!("../examples/wire/event.retraction.json"),
         ),
+        (
+            "side.question",
+            include_str!("../examples/wire/event.side.question.json"),
+        ),
+        (
+            "side.answer",
+            include_str!("../examples/wire/event.side.answer.json"),
+        ),
     ];
 
     const UNKNOWN_EXAMPLE: &str = include_str!("../examples/wire/event.unknown.json");
@@ -1031,6 +1066,8 @@ mod tests {
             EventKind::Status { .. } => "status",
             EventKind::System { .. } => "system",
             EventKind::Retraction { .. } => "retraction",
+            EventKind::SideQuestion { .. } => "side.question",
+            EventKind::SideAnswer { .. } => "side.answer",
             EventKind::Unknown { .. } => return None,
         })
     }

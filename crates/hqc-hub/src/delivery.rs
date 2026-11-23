@@ -33,12 +33,25 @@ use crate::{
 /// Move the session's delivery forward on its worker's live connection, if any.
 /// `force_start` sends `session.start` even without pending input (new session).
 pub async fn kick(app: &AppState, session_id: Uuid, force_start: bool) {
-    if let Err(e) = kick_inner(app, session_id, force_start).await {
+    if let Err(e) = kick_inner(app, session_id, force_start, false).await {
         tracing::error!(%session_id, error = %e, "delivery failed");
     }
 }
 
-async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyhow::Result<()> {
+/// [`kick`] with `force_start`, for a side question (SPEC 0.232): the `session.start` it sends
+/// carries `no_wait`, so a worker with no free slot does not queue the session.
+pub async fn kick_for_side_question(app: &AppState, session_id: Uuid) {
+    if let Err(e) = kick_inner(app, session_id, true, true).await {
+        tracing::error!(%session_id, error = %e, "delivery failed");
+    }
+}
+
+async fn kick_inner(
+    app: &AppState,
+    session_id: Uuid,
+    force_start: bool,
+    no_wait: bool,
+) -> anyhow::Result<()> {
     let Some(s) = db::session(&app.db, session_id).await? else {
         return Ok(());
     };
@@ -69,7 +82,8 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
     match sc.start {
         StartState::NotStarted => {
             if force_start || !pending.is_empty() {
-                let frame = build_start(app, &s).await?;
+                let mut frame = build_start(app, &s).await?;
+                frame.no_wait = no_wait;
                 let id = conn.send(HubFrame::SessionStart(frame));
                 sc.start = StartState::Starting;
                 replies.insert(id, Reply::Start { session_id });
@@ -247,6 +261,7 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
         },
         // The worker runs it only if its worker.toml has `browser = true` (SPEC 0.148).
         browser: s.browser,
+        no_wait: false,
     })
 }
 

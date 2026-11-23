@@ -25,7 +25,7 @@ import { ChatItems, type ChatActions } from '../src/ui/cards';
 import { Chat } from '../src/ui/Chat';
 import { tileBackground } from '../src/ui/Appearance';
 import { PhoneHome } from '../src/ui/PhoneHome';
-import { ProjectRail, onMac, runSpeed, runningTitle } from '../src/ui/ProjectRail';
+import { ProjectRail, RailRun, onMac, runSpeed, runningTitle } from '../src/ui/ProjectRail';
 import { ProjectSettings } from '../src/ui/ProjectSettings';
 import { LIST_WIDTH_MAX, LIST_WIDTH_MIN, LIST_WIDTH_STEP, SESSION_DRAG, SessionList, WidthGrip } from '../src/ui/SessionList';
 import { ALLOW_ALL_CONFIRM } from '../src/ui/labels';
@@ -1309,6 +1309,21 @@ describe('ProjectRail', () => {
     // Its hover text: the agents at work and their tokens per second.
     expect(runningTitle('hqc', 1, 0)).toBe('hqc · 1 agent · 0 tokens/s');
     expect(runningTitle('hqc', 3, 120)).toBe('hqc · 3 agents · 120 tokens/s');
+  });
+
+  it("passes the speed to the turn of the stripe's ::before, which only a subtree lookup finds", async () => {
+    const anim = { updatePlaybackRate: vi.fn() };
+    const own = Element.prototype.getAnimations;
+    // As a browser answers: the span itself has no animation, its pseudo-element has the turn.
+    Element.prototype.getAnimations = function (o?: GetAnimationsOptions) {
+      return (o?.subtree ? [anim] : []) as unknown as Animation[];
+    };
+    try {
+      await mount(<RailRun rate={40} />);
+      expect(anim.updatePlaybackRate).toHaveBeenCalledWith(2);
+    } finally {
+      Element.prototype.getAnimations = own;
+    }
   });
 
   it('in the Compact look: the same marks on the icon, an unread project in bold', async () => {

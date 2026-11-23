@@ -43,13 +43,14 @@ export function runningTitle(name: string, agents: number, rate: number): string
 
 /** The stripe around a working project's tile, at [`runSpeed`] of the project's rate. The
  *  speed changes through the playback rate of its CSS animation, so the stripe goes on from
- *  where it is: a new `animation-duration` would make it jump. `quiet` where the row already
- *  says how many sessions run (a phone's project list): no label of its own. */
+ *  where it is: a new `animation-duration` would make it jump. The animation is the turn of
+ *  the span's `::before`, hence `subtree`. `quiet` where the row already says how many
+ *  sessions run (a phone's project list): no label of its own. */
 export function RailRun({ rate, quiet }: { rate: number; quiet?: boolean }) {
   const el = useRef<HTMLSpanElement>(null);
   const k = runSpeed(rate);
   useEffect(() => {
-    for (const a of el.current?.getAnimations() ?? []) a.updatePlaybackRate(k);
+    for (const a of el.current?.getAnimations({ subtree: true }) ?? []) a.updatePlaybackRate(k);
   }, [k]);
   return <span ref={el} class="rail-run" aria-label={quiet ? undefined : 'working'} aria-hidden={quiet ? true : undefined} />;
 }

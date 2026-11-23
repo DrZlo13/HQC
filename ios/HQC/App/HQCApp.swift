@@ -35,7 +35,7 @@ struct RootView: View {
         ZStack {
             content
             if splash {
-                SplashView(ready: app.phase != .connecting) {
+                SplashView {
                     splash = false
                     app.splashDone = true
                 }
@@ -52,10 +52,18 @@ struct RootView: View {
             case .setup:
                 OnboardingView(start: app.hubURL == nil && !app.onboarded ? .welcome : .hub)
             case .connecting:
-                ProgressView()
-                    .controlSize(.large)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(BackdropGradient())
+                // What the splash opens onto when the hub is slow: the same icon, and a spinner.
+                VStack(spacing: 22) {
+                    Image("Logo")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 112, height: 112)
+                        .clipShape(.rect(cornerRadius: 26, style: .continuous))
+                        .shadow(color: .black.opacity(0.18), radius: 20, y: 10)
+                    ProgressView()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .paletteBackground()
             case .signIn:
                 OnboardingView(start: .signIn)
             case .ready:

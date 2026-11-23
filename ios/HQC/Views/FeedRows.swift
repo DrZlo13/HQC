@@ -543,31 +543,101 @@ struct ApprovalCard: View {
     }
 }
 
+/// A permission request's answers. Allow once and Deny side by side, equal and large; the
+/// lasting answers (this session, always, a whole MCP server, always deny) below them as a grid
+/// of equal tiles with an icon each. The answer being sent shows a spinner.
 private struct FlowButtons: View {
+    @Environment(\.palette) private var palette
     let options: [ApprovalOption]
     let busy: Bool
     let onTap: (ApprovalOption) async -> Void
+    @State private var sending: String?
 
-    var body: some View {
-        FlowLayout(spacing: 8) { buttons }
-            .controlSize(.small)
-            .disabled(busy)
+    private var once: ApprovalOption? { options.first { $0.canonical == "once" } }
+    private var deny: ApprovalOption? { options.first { $0.canonical == "deny" } }
+    private var rest: [ApprovalOption] {
+        options.filter { $0.id != once?.id && $0.id != deny?.id }
     }
 
-    @ViewBuilder private var buttons: some View {
-        ForEach(options) { option in
-            if option.isDeny {
-                Button(option.label, role: .destructive) { Task { await onTap(option) } }
-                    .buttonStyle(.bordered)
-                    .tint(.red)
-            } else if option.canonical == "once" {
-                Button(option.label) { Task { await onTap(option) } }
-                    .buttonStyle(.borderedProminent)
-            } else {
-                Button(option.label) { Task { await onTap(option) } }
-                    .buttonStyle(.bordered)
+    var body: some View {
+        VStack(spacing: 8) {
+            if once != nil || deny != nil {
+                HStack(spacing: 8) {
+                    if let once { button(once, style: .primary) }
+                    if let deny { button(deny, style: .danger) }
+                }
+            }
+            if !rest.isEmpty {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], spacing: 8) {
+                    ForEach(rest) { option in
+                        button(option, style: option.isDeny ? .quietDanger : .secondary)
+                    }
+                }
             }
         }
+        .disabled(busy)
+        .animation(.snappy, value: sending)
+    }
+
+    private enum Style { case primary, danger, secondary, quietDanger }
+
+    private func icon(_ o: ApprovalOption) -> String {
+        switch o.canonical {
+        case "once": "checkmark"
+        case "deny": "xmark"
+        case "deny_always": "nosign"
+        case "session": "clock.arrow.circlepath"
+        case "always": "checkmark.seal"
+        default: o.isDeny ? "xmark" : "checkmark.circle"
+        }
+    }
+
+    private func button(_ option: ApprovalOption, style: Style) -> some View {
+        let big = style == .primary || style == .danger
+        let (fg, bg): (Color, Color) = switch style {
+        case .primary: (.white, Color.accentColor)
+        case .danger: (palette.danger, palette.danger.opacity(0.13))
+        case .secondary: (palette.text, palette.text.opacity(0.07))
+        case .quietDanger: (palette.danger, palette.danger.opacity(0.07))
+        }
+        return Button {
+            sending = option.id
+            Task {
+                await onTap(option)
+                sending = nil
+            }
+        } label: {
+            HStack(spacing: 6) {
+                if sending == option.id {
+                    ProgressView().controlSize(.small).tint(fg)
+                } else {
+                    Image(systemName: icon(option))
+                        .font(.system(size: big ? 14 : 12, weight: .semibold))
+                }
+                Text(option.label)
+                    .font(big ? .subheadline.weight(.semibold) : .footnote.weight(.medium))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
+            }
+            .foregroundStyle(fg)
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, minHeight: big ? 44 : 40)
+            .background(bg, in: .rect(cornerRadius: 12, style: .continuous))
+            .contentShape(.rect(cornerRadius: 12))
+        }
+        .buttonStyle(PressScale())
+        .opacity(busy && sending != option.id ? 0.5 : 1)
+        .accessibilityLabel(option.label)
+    }
+}
+
+/// A button that sinks a little while pressed.
+private struct PressScale: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .animation(.spring(duration: 0.2), value: configuration.isPressed)
     }
 }
 

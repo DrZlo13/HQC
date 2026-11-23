@@ -28,8 +28,6 @@ enum Cue: Hashable {
     case error
     /// Copied to the clipboard.
     case copy
-    /// The splash's heartbeat while the app loads.
-    case heartbeat
     /// The splash opens onto the app.
     case arrive
     /// Onboarding moves a step forward.
@@ -200,7 +198,7 @@ struct Note {
 
 struct CueSpec {
     var notes: [Note]
-    /// Taps without a note (heartbeat, ticks), and swells.
+    /// Taps without a note (ticks), and swells.
     var extraHaptics: [CHHapticEvent] = []
     /// Notes that sound but give no tap of their own.
     var silentHapticNotes = false
@@ -304,11 +302,6 @@ extension Feedback {
                 notes: [Note(at: 0, freq: Pitch.d5, length: 0.25, gain: 0.6),
                         Note(at: 0.13, freq: Pitch.a4, length: 0.45, gain: 0.6)],
                 volume: 0.7, minInterval: 1)
-        case .heartbeat:
-            // Lub-dub, felt rather than heard.
-            return CueSpec(notes: [], extraHaptics: [tick(0, intensity: 0.55, sharpness: 0.15),
-                                                     tick(0.13, intensity: 0.35, sharpness: 0.1)],
-                           minInterval: 0.5)
         case .arrive:
             // The app opens: a rising arpeggio and a final bloom.
             let notes = [Pitch.a4, Pitch.cs5, Pitch.e5, Pitch.a5].enumerated().map { i, f in

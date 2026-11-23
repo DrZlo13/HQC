@@ -25,6 +25,7 @@ struct ChatView: View {
     /// Something arrived while the user read further up.
     @State private var unseen = false
     @State private var sent = 0
+    @State private var followTask: Task<Void, Never>?
     let title: String
 
     init(sessionID: String, title: String) {
@@ -70,8 +71,9 @@ struct ChatView: View {
             .padding(.vertical, 12)
             .frame(maxWidth: 780)
             .frame(maxWidth: .infinity)
-            .scrollTargetLayout()
         }
+        // Only scrollTo(edge:) is used: no scroll target layout, so the position does not
+        // track the row in view and the chat is not rebuilt on every frame of a scroll.
         .scrollPosition($position)
         // The newest message stays in view when the history arrives and while answers grow,
         // unless the user scrolled up to read: then the text stays where it is.
@@ -79,24 +81,30 @@ struct ChatView: View {
         .onScrollPhaseChange { _, phase in
             userScrolling = phase == .tracking || phase == .interacting || phase == .decelerating
         }
-        .onScrollGeometryChange(for: FeedMetrics.self) { g in
-            FeedMetrics(height: g.contentSize.height,
-                        distance: g.contentSize.height + g.contentInsets.bottom - g.contentOffset.y - g.containerSize.height)
-        } action: { old, new in
+        // Geometry only reads where the user is; it never scrolls, so layout cannot feed back
+        // into itself (a lazy feed changes its height as rows come into view).
+        .onScrollGeometryChange(for: CGFloat.self) { g in
+            (g.contentSize.height + g.contentInsets.bottom - g.contentOffset.y - g.containerSize.height).rounded()
+        } action: { _, distance in
             if userScrolling {
-                following = new.distance < 80
-            } else if following && new.height != old.height && new.distance > 1 {
-                position.scrollTo(edge: .bottom)
+                let follow = distance < 80
+                if follow != following { following = follow }
             }
-            if following { unseen = false }
-            let far = new.distance > 360 && !following
+            if following && unseen { unseen = false }
+            let far = distance > 360 && !following
             if far != farFromBottom { withAnimation(.snappy) { farFromBottom = far } }
+        }
+        // New output: keep the end in view while following, once per frame at most.
+        .onChange(of: feedVersion) { _, _ in
+            if following { followSoon() }
         }
         .onChange(of: model.items.count) { old, new in
             if new > old && !following { unseen = true }
         }
         .paletteBackground()
         .scrollDismissesKeyboard(.interactively)
+        // A tap in the feed puts the keyboard away (the inner display has no key for it).
+        .simultaneousGesture(TapGesture().onEnded { hideKeyboard() })
         .overlay {
             if model.loading { ProgressView() }
         }
@@ -279,6 +287,23 @@ struct ChatView: View {
         Task { await model.send(text, artifacts: ready) }
     }
 
+    /// Grows with anything that lengthens the feed.
+    private var feedVersion: Int {
+        model.items.count &* 1_000_003 &+ model.streaming.count &+ model.thinking.count &* 7
+            &+ (model.state.isBusy ? 1 : 0)
+    }
+
+    /// Scrolls to the end on the next frame, coalescing a burst of updates into one scroll.
+    private func followSoon() {
+        guard followTask == nil else { return }
+        followTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(16))
+            followTask = nil
+            guard following, !userScrolling else { return }
+            position.scrollTo(edge: .bottom)
+        }
+    }
+
     private func scrollToBottom() {
         unseen = false
         following = true
@@ -312,9 +337,15 @@ struct PendingAttachment: Identifiable {
 
 /// The input at the bottom: attachments, a glass field with slash-command completion, and the
 /// send button that turns into Stop while the agent works.
+@MainActor
+func hideKeyboard() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
+
 struct Composer: View {
     @Environment(AppModel.self) private var app
     @Environment(\.palette) private var palette
+    @Environment(\.horizontalSizeClass) private var width
     /// The height of the field on one line, and the size of the buttons beside it.
     static let control: CGFloat = 36
     @Binding var text: String
@@ -377,6 +408,26 @@ struct Composer: View {
                     .glassEffectID("attach", in: glass)
                     .accessibilityLabel("Attach")
 
+                    // Wide screens (iPhone Duo's inner display, iPad) have no swipe-down
+                    // keyboard and often no hide key: a button puts it away.
+                    if focused && width == .regular {
+                        Button {
+                            focused = false
+                            Feedback.play(.tap)
+                        } label: {
+                            Image(systemName: "keyboard.chevron.compact.down")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(palette.text)
+                                .frame(width: Self.control, height: Self.control)
+                                .glassEffect(.regular.interactive(), in: .circle)
+                        }
+                        .buttonStyle(.plain)
+                        .glassEffectID("hide", in: glass)
+                        .transition(.scale.combined(with: .opacity))
+                        .keyboardShortcut(.escape, modifiers: [])
+                        .accessibilityLabel("Hide keyboard")
+                    }
+
                     TextField("Message", text: $text, axis: .vertical)
                         .lineLimit(1...8)
                         .focused($focused)
@@ -419,6 +470,7 @@ struct Composer: View {
                     }
                 }
                 .animation(.spring(duration: 0.35), value: busy && empty)
+                .animation(.spring(duration: 0.3), value: focused)
             }
             .padding(.horizontal, 12)
         }
@@ -633,12 +685,6 @@ struct InfoBar: View {
             .glassEffect(.regular, in: .rect(cornerRadius: 20))
             .padding(12)
     }
-}
-
-/// The feed's height and how far its end is below the visible part.
-struct FeedMetrics: Equatable {
-    var height: CGFloat
-    var distance: CGFloat
 }
 
 /// The round arrow above the input that jumps to the newest message, as the Claude app has it,

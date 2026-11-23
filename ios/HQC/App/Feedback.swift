@@ -12,6 +12,8 @@ nonisolated enum Cue: Hashable, Sendable {
     case send
     /// The agent started a tool call.
     case tool
+    /// A tool call finished well.
+    case toolDone
     /// A tool call failed.
     case toolFailed
     /// The agent asks for permission.
@@ -26,6 +28,10 @@ nonisolated enum Cue: Hashable, Sendable {
     case done
     /// The turn failed.
     case error
+    /// The Claude subscription's 5-hour window is used up.
+    case limitFiveHour
+    /// The weekly window is used up.
+    case limitWeekly
     /// Copied to the clipboard.
     case copy
     /// The splash opens onto the app.
@@ -235,11 +241,11 @@ nonisolated struct CueSpec {
         var events = extraHaptics
         if !silentHapticNotes {
             for n in notes {
-                let sharp = Float(min(1, max(0.1, (n.freq - 200) / 1200)))
+                let sharp = Float(min(1, max(0.15, (n.freq - 200) / 1100 + 0.08)))
                 events.append(CHHapticEvent(
                     eventType: .hapticTransient,
                     parameters: [
-                        CHHapticEventParameter(parameterID: .hapticIntensity, value: Float(min(1, 0.25 + n.gain * 0.8))),
+                        CHHapticEventParameter(parameterID: .hapticIntensity, value: Float(min(1, 0.42 + n.gain * 0.75))),
                         CHHapticEventParameter(parameterID: .hapticSharpness, value: sharp),
                     ],
                     relativeTime: n.at))
@@ -257,16 +263,20 @@ nonisolated private enum Pitch {
     static let scale = [a4, cs5, e5, fs5, a5, b5, cs6, e6]
 }
 
+/// Every tap and swell a step firmer than its design value, so cues are felt through a pocket
+/// or a case, without turning into buzzes: about a quarter more, capped at full.
+nonisolated private func punch(_ x: Float) -> Float { min(1, x * 1.25 + 0.06) }
+
 nonisolated private func tick(_ at: TimeInterval, intensity: Float, sharpness: Float) -> CHHapticEvent {
     CHHapticEvent(eventType: .hapticTransient,
-                  parameters: [CHHapticEventParameter(parameterID: .hapticIntensity, value: intensity),
+                  parameters: [CHHapticEventParameter(parameterID: .hapticIntensity, value: punch(intensity)),
                                CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpness)],
                   relativeTime: at)
 }
 
 nonisolated private func swell(_ at: TimeInterval, _ duration: TimeInterval, intensity: Float, sharpness: Float) -> CHHapticEvent {
     CHHapticEvent(eventType: .hapticContinuous,
-                  parameters: [CHHapticEventParameter(parameterID: .hapticIntensity, value: intensity),
+                  parameters: [CHHapticEventParameter(parameterID: .hapticIntensity, value: punch(intensity)),
                                CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpness),
                                CHHapticEventParameter(parameterID: .attackTime, value: 0.02),
                                CHHapticEventParameter(parameterID: .decayTime, value: Float(duration)),
@@ -294,6 +304,27 @@ extension Feedback {
             // The quietest cue: a glassy click, at most a few a second.
             return CueSpec(notes: [Note(at: 0, freq: Pitch.e6, length: 0.07, gain: 0.15)],
                            volume: 0.35, minInterval: 0.3)
+        case .toolDone:
+            // A tool call came back fine: two tiny rising notes under the start click, quieter
+            // than everything else, and folded when results arrive in a burst.
+            return CueSpec(notes: [Note(at: 0, freq: Pitch.a5, length: 0.07, gain: 0.1),
+                                   Note(at: 0.045, freq: Pitch.e6, length: 0.12, gain: 0.14)],
+                           volume: 0.28, minInterval: 0.35)
+        case .limitFiveHour:
+            // The session's window is used up: a falling triad that settles, with a swell under
+            // it, clear enough to notice and calm enough to hear twice.
+            return CueSpec(notes: [Note(at: 0, freq: Pitch.e5, length: 0.3, gain: 0.6),
+                                   Note(at: 0.14, freq: Pitch.cs5, length: 0.3, gain: 0.6),
+                                   Note(at: 0.28, freq: Pitch.a4, length: 0.8, gain: 0.7)],
+                           extraHaptics: [swell(0.28, 0.35, intensity: 0.4, sharpness: 0.25)],
+                           volume: 0.85, minInterval: 30)
+        case .limitWeekly:
+            // The week is used up: lower and longer, a repeated note that falls a fifth.
+            return CueSpec(notes: [Note(at: 0, freq: Pitch.a4, length: 0.28, gain: 0.65),
+                                   Note(at: 0.16, freq: Pitch.a4, length: 0.28, gain: 0.65),
+                                   Note(at: 0.34, freq: Pitch.d4, length: 1.0, gain: 0.8)],
+                           extraHaptics: [swell(0.34, 0.5, intensity: 0.5, sharpness: 0.15)],
+                           volume: 0.9, minInterval: 30)
         case .toolFailed:
             return CueSpec(
                 notes: [Note(at: 0, freq: Pitch.f4, length: 0.18, gain: 0.45),

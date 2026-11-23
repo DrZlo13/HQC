@@ -155,6 +155,9 @@ struct SettingsView: View {
                         Button("Question") { Feedback.play(.question) }
                         Button("Answer finished") { Feedback.play(.done) }
                         Button("Turn failed") { Feedback.play(.error) }
+                        Button("Tool call done") { Feedback.play(.toolDone) }
+                        Button("5-hour limit reached") { Feedback.play(.limitFiveHour) }
+                        Button("Weekly limit reached") { Feedback.play(.limitWeekly) }
                     } label: {
                         Label("Try them", systemImage: "play.circle")
                     }

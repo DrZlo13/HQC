@@ -64,7 +64,26 @@ final class ChatModel {
 
     func loadWorker() async {
         guard let id = info?.worker_id, let client = app?.client else { return }
-        worker = try? await client.workers().first { $0.id == id }
+        guard let w = try? await client.workers().first(where: { $0.id == id }) else { return }
+        let before = worker?.limits
+        worker = w
+        if before != nil || limitsSeen { cueLimits(from: before, to: w.limits) }
+        limitsSeen = true
+    }
+
+    /// The first load only learns where the limits stand; later ones cue a window used up.
+    private var limitsSeen = false
+
+    /// A cue when a usage window is used up since the last look: the 5-hour one, or the week.
+    private func cueLimits(from old: WorkerLimits?, to new: WorkerLimits?) {
+        guard let new else { return }
+        func used(_ w: LimitWindow?) -> Bool { (w?.utilization ?? 0) >= 100 }
+        let rejected = new.status == "rejected" && old?.status != "rejected"
+        if (used(new.seven_day) && !used(old?.seven_day)) || (rejected && new.rate_limit_type?.contains("seven") == true) {
+            Feedback.play(.limitWeekly)
+        } else if (used(new.five_hour) && !used(old?.five_hour)) || rejected {
+            Feedback.play(.limitFiveHour)
+        }
     }
 
     /// The agent's tool calls running in the foreground, which can go to the background.
@@ -281,6 +300,7 @@ final class ChatModel {
         switch ev.type {
         case "tool.call": Feedback.play(.tool)
         case "tool.result" where ev.payload["error"]?.bool == true: Feedback.play(.toolFailed)
+        case "tool.result": Feedback.play(.toolDone)
         case "approval.request": Feedback.play(.approval)
         case "clarify.request": Feedback.play(.question)
         case "peer.message": Feedback.play(.peer)

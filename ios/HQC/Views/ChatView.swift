@@ -236,6 +236,15 @@ struct ChatView: View {
             } else if old.isBusy && new == .idle {
                 Feedback.play(.done)
             }
+            // A turn's end is when a usage window most often fills up.
+            if old.isBusy && !new.isBusy { Task { await model.loadWorker() } }
+        }
+        // And every minute while the chat is open.
+        .task(id: model.sessionID) {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                await model.loadWorker()
+            }
         }
     }
 

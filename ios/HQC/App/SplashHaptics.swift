@@ -218,11 +218,11 @@ nonisolated final class SplashHaptics: @unchecked Sendable {
             parameterID: .hapticIntensityControl,
             controlPoints: [
                 .init(relativeTime: 0.00, value: 0.00),
-                .init(relativeTime: 0.30, value: 0.13),
-                .init(relativeTime: 0.62, value: 0.36),
-                .init(relativeTime: 0.90, value: 0.45),
-                .init(relativeTime: 1.18, value: 0.33),
-                .init(relativeTime: 1.50, value: 0.10),
+                .init(relativeTime: 0.30, value: 0.18),
+                .init(relativeTime: 0.62, value: 0.46),
+                .init(relativeTime: 0.90, value: 0.58),
+                .init(relativeTime: 1.18, value: 0.42),
+                .init(relativeTime: 1.50, value: 0.14),
                 .init(relativeTime: 1.80, value: 0.00),
             ],
             relativeTime: 0)
@@ -244,16 +244,16 @@ nonisolated final class SplashHaptics: @unchecked Sendable {
     private static func resolvedPattern() throws -> CHHapticPattern {
         let events = [
             CHHapticEvent(eventType: .hapticTransient, parameters: [
-                CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.55),
-                CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.30),
+                CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.7),
+                CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.38),
             ], relativeTime: 0),
             CHHapticEvent(eventType: .hapticTransient, parameters: [
                 CHHapticEventParameter(parameterID: .hapticIntensity, value: 1),
                 CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.60),
             ], relativeTime: 0.09),
             CHHapticEvent(eventType: .hapticContinuous, parameters: [
-                CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.38),
-                CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.25),
+                CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.5),
+                CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.3),
             ], relativeTime: 0.09, duration: 0.26),
         ]
 

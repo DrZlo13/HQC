@@ -115,7 +115,11 @@
 //!   preview and the result's images go with it to be uploaded ([`AdapterEvent::ToolResult`]);
 //!   `user` with `isReplay: true` → input accepted;
 //!   every user message written to stdin gets a fresh v4 `uuid`, which its echo and its
-//!   `command_lifecycle` lines name (2.1.312);
+//!   `command_lifecycle` lines name (2.1.312); a quiet line (`shouldQuery: false`, written after
+//!   a Stop, [`Core::input_quiet_with_images`]) has its `init` and echo ignored and is taken by
+//!   the `result` with `num_turns: 0` that lists its `uuid` in `user_message_uuids` →
+//!   [`AdapterEvent::QuietTaken`], and nothing else: no status, message, `usage` or end of turn;
+//!   its `command_lifecycle` `cancelled` → [`AdapterEvent::QuietCancelled`];
 //! - `result` → `usage` (one with no tokens and no `compact_boundary` in it gives none, or,
 //!   when the total grew, one with no tokens, no `cost_usd` and the total),
 //!   then `system turn_interrupted` for a `terminal_reason` `aborted_*`, or `system
@@ -423,6 +427,16 @@ struct Written {
     withdrawing: Option<String>,
 }
 
+/// An input written as a quiet line ([`Core::input_quiet_with_images`]), until the `result` that
+/// names it.
+#[derive(Debug)]
+struct QuietInput {
+    event_id: Uuid,
+    /// Its `command_lifecycle` said `started`: the `system/init` that follows is its own and no
+    /// turn of the CLI's.
+    started: bool,
+}
+
 /// A subagent of [`Core::live`], a command or a Monitor of [`Core::live_commands`], the wakeup
 /// of [`Core::wakeup_row`], or a job of [`Core::cron_jobs`].
 #[derive(Debug)]
@@ -523,6 +537,11 @@ pub struct Core {
     last_input: Option<Uuid>,
     /// Inputs written to stdin whose echo has not come yet, in the order written.
     awaiting_echo: VecDeque<Written>,
+    /// Inputs written as quiet lines (`shouldQuery: false`, SPEC 0.231) by the `uuid` of the
+    /// line, until the `result` of the CLI's turn of no model call that lists it in
+    /// `user_message_uuids`. None is in [`Core::awaiting_echo`]: no echo or lifecycle line of
+    /// one is an input taken, and the `result` is what says so.
+    quiet: HashMap<Uuid, QuietInput>,
     /// An input was written to this process.
     wrote: bool,
     /// The CLI sends `command_lifecycle` lines (2.1.312).
@@ -739,6 +758,7 @@ impl Core {
             activity_at: None,
             last_input: None,
             awaiting_echo: VecDeque::new(),
+            quiet: HashMap::new(),
             wrote: false,
             lifecycle: false,
             subagents: HashSet::new(),
@@ -1026,12 +1046,9 @@ impl Core {
         Some(vec![self.write(input, images, true, true)])
     }
 
-    /// The user message of stream-json, with a fresh `uuid` its echo and `command_lifecycle`
-    /// will name. `now`: `priority: "now"`. What the owner typed (`input.human`, which the hub
-    /// sets for no message of another session, room input, schedule run or note of its own)
-    /// carries `origin: {kind: "human"}`, without which the CLI takes the line as unattributed
-    /// and its strict `isHuman()` gates refuse it (2.1.312). Every input is a line of its own:
-    /// the worker joins no two, so no line mixes a human's text with another's.
+    /// The user message of stream-json ([`user_line`]), with a fresh `uuid` its echo and
+    /// `command_lifecycle` will name. `now`: `priority: "now"`. Every input is a line of its
+    /// own: the worker joins no two, so no line mixes a human's text with another's.
     fn write(
         &mut self,
         input: &SessionInput,
@@ -1039,7 +1056,6 @@ impl Core {
         mid_turn: bool,
         now: bool,
     ) -> Action {
-        // `peer_prefix` and `peer` are in `text` already (crate::peer, SPEC §7.1).
         let uuid = Uuid::new_v4();
         self.wrote = true;
         self.awaiting_echo.push_back(Written {
@@ -1050,35 +1066,51 @@ impl Core {
             carried: false,
             withdrawing: None,
         });
-        let content = if images.is_empty() {
-            json!(input.text)
-        } else {
-            let mut blocks = vec![json!({"type": "text", "text": input.text})];
-            blocks.extend(images);
-            Value::Array(blocks)
-        };
-        let mut line = json!({
-            "type": "user",
-            "uuid": uuid,
-            "message": {"role": "user", "content": content},
-        });
-        if input.human {
-            line["origin"] = json!({"kind": "human"});
-        }
+        let mut line = user_line(uuid, input, images);
         if now {
             line["priority"] = json!("now");
         }
         Action::Write(line)
     }
 
+    /// [`Core::input_with_images`] as a quiet line (SPEC 0.231): `shouldQuery: false`, which the
+    /// CLI writes into the conversation without calling the model, so the agent knows the
+    /// text next time and does not act on it now, and `priority: "later"`, which keeps the
+    /// CLI from folding the line into a turn that runs (it folds lines of priority "next" or
+    /// above into a running turn, without looking at `shouldQuery`): not into one of ours, not
+    /// into one it started by itself after a task notification either. The CLI takes a "later"
+    /// line when it is idle, after that turn's `result`. It answers the line with a
+    /// `system/init`, its echo and a `result` with `num_turns: 0` that lists the line's `uuid`
+    /// in `user_message_uuids`, and takes lines written back to back together (one echo, one
+    /// `result`, 2.1.312): that `result` is [`AdapterEvent::QuietTaken`], and no turn of ours
+    /// opens, so no `status running`, agent message, `usage` or turn's end comes of it. The CLI
+    /// batches only lines of the same `shouldQuery`, so a normal line written after quiet ones
+    /// is a turn of its own. Quiet lines are not in [`Core::awaiting_echo`]: a Stop's
+    /// [`Core::cancel_unstarted`] never cancels one.
+    pub fn input_quiet_with_images(&mut self, input: &SessionInput, images: Vec<Value>) -> Action {
+        let uuid = Uuid::new_v4();
+        self.quiet.insert(
+            uuid,
+            QuietInput {
+                event_id: input.event_id,
+                started: false,
+            },
+        );
+        let mut line = user_line(uuid, input, images);
+        line["shouldQuery"] = json!(false);
+        line["priority"] = json!("later");
+        Action::Write(line)
+    }
+
     /// `control_request` `cancel_async_message` for the input `event_id` the CLI has not taken
     /// (SPEC 0.219), with the request's id ([`Core::withdraw_answer`]); `None` when no such
     /// input waits: it was echoed, or its `command_lifecycle` says the CLI started it, or the
-    /// CLI is already asked. On `cancelled: true` the CLI drops the line (`command_lifecycle`
+    /// CLI is already asked; one the CLI cancelled already (a Stop's) is withdrawn at once, with no
+    /// request to write. On `cancelled: true` the CLI drops the line (`command_lifecycle`
     /// `cancelled`, 2.1.312), which then never reaches the model and is no `dropped` input of
     /// a turn's end; the input is gone from [`Core::awaiting_echo`] and, when it was what kept
     /// a turn running, that turn is over ([`Core::carried_gone`]).
-    pub fn withdraw(&mut self, event_id: Uuid) -> Option<(Action, String)> {
+    pub fn withdraw(&mut self, event_id: Uuid) -> Option<(Vec<Action>, String)> {
         let w = self.awaiting_echo.iter_mut().find(|w| {
             w.event_id == event_id
                 && w.withdrawing.is_none()
@@ -1086,12 +1118,18 @@ impl Core {
         })?;
         let request_id = format!("{CANCEL_REQUEST}{}", Uuid::now_v7());
         w.withdrawing = Some(request_id.clone());
+        if w.state.as_deref() == Some("cancelled") {
+            // The CLI dropped it already (a Stop's `cancel_async_message`): nothing to ask, it
+            // is withdrawn at once, and the turn's end leaves it out of `dropped`.
+            self.cancel_answers.insert(request_id.clone(), true);
+            return Some((vec![], request_id));
+        }
         let req = json!({
             "type": "control_request",
             "request_id": request_id,
             "request": {"subtype": "cancel_async_message", "message_uuid": w.uuid},
         });
-        Some((Action::Write(req), request_id))
+        Some((vec![Action::Write(req)], request_id))
     }
 
     /// Whether the CLI dropped the message of the `cancel_async_message` with this id, once
@@ -1132,7 +1170,10 @@ impl Core {
 
     /// `control_request` `interrupt` for the running turn, also one the CLI started by
     /// itself, with the turn's number and the request's id ([`Core::interrupt_answered`]);
-    /// `None` if no turn runs.
+    /// `None` if no turn runs. Plain, without `cancel_queued`: that one also dequeues the CLI's
+    /// own lines that carry no `uuid` (the task notifications of background subagents and tasks,
+    /// cron and `/loop` triggers), which hqc cannot write back; the lines hqc wrote are
+    /// cancelled one by one before it ([`Core::cancel_unstarted`], SPEC 0.231).
     pub fn interrupt(&mut self) -> Option<(Action, u64, String)> {
         if !self.turn_open() {
             return None;
@@ -1145,6 +1186,38 @@ impl Core {
             "request": {"subtype": "interrupt"},
         });
         Some((Action::Write(req), self.turn, request_id))
+    }
+
+    /// The `cancel_async_message` requests of a Stop (SPEC 0.231), to be written before its
+    /// [`Core::interrupt`]: one for every line hqc wrote that the CLI has not taken (its
+    /// `command_lifecycle` is not `started`, `completed` or `cancelled`) and is not being
+    /// withdrawn. The CLI answers with `command_lifecycle` `cancelled` for each it drops, before
+    /// the turn's `result`: they come out as `dropped` of its end, unlike a withdrawn input
+    /// ([`Core::withdraw`]), and the worker writes them quiet. A line the CLI refuses to cancel
+    /// (taken or folded into the turn meanwhile) is simply taken. A quiet line is never one of
+    /// them: it is the record of an earlier Stop ([`Core::input_quiet_with_images`]). None while
+    /// no turn runs.
+    pub fn cancel_unstarted(&mut self) -> Vec<Action> {
+        if !self.turn_open() {
+            return vec![];
+        }
+        self.awaiting_echo
+            .iter()
+            .filter(|w| {
+                w.withdrawing.is_none()
+                    && !matches!(
+                        w.state.as_deref(),
+                        Some("started" | "completed" | "cancelled")
+                    )
+            })
+            .map(|w| {
+                Action::Write(json!({
+                    "type": "control_request",
+                    "request_id": format!("{CANCEL_REQUEST}{}", Uuid::now_v7()),
+                    "request": {"subtype": "cancel_async_message", "message_uuid": w.uuid},
+                }))
+            })
+            .collect()
     }
 
     /// Whether the CLI answered the `interrupt` with this id; the answer is taken out of
@@ -1387,6 +1460,7 @@ impl Core {
     pub fn on_exit(&mut self) -> Vec<Action> {
         self.pending.clear();
         self.awaiting_echo.clear();
+        self.quiet.clear();
         self.in_turn = false;
         self.self_turn = false;
         self.stopping = false;
@@ -1520,7 +1594,9 @@ impl Core {
                     // The CLI sends `init` before every turn; one without ours is its own, and
                     // `status running` opens it on the hub, which saw no input start it
                     // (SPEC §17.1).
-                    self.self_turn = !self.in_turn;
+                    // The `init` of a quiet line is no turn of the CLI's.
+                    let quiet = self.quiet.values().any(|q| q.started);
+                    self.self_turn = !self.in_turn && !quiet;
                     let mut out = Vec::new();
                     if self.self_turn {
                         out.push(self.emit_new(EventKind::Status {
@@ -2234,6 +2310,10 @@ impl Core {
     /// here as by its `started`: taken into a turn the CLI began by itself, the echo comes
     /// first and `started` finds nothing left.
     fn on_echo(&mut self, v: &Value) -> Vec<Action> {
+        // A quiet line's: the `result` that names it takes it.
+        if record_uuid(v).is_some_and(|u| self.quiet.contains_key(&u)) {
+            return vec![];
+        }
         let at = record_uuid(v)
             .and_then(|u| self.awaiting_echo.iter().position(|w| w.uuid == u))
             .or_else(|| (!self.lifecycle && !self.awaiting_echo.is_empty()).then_some(0));
@@ -2284,17 +2364,35 @@ impl Core {
         else {
             return vec![];
         };
+        if let Some(q) = self.quiet.get_mut(&uuid) {
+            // The CLI failed to process the line (2.1.312 answers `cancelled` for a line it
+            // could not run): it is not in the history. The worker writes it again.
+            if v["state"] == "cancelled" {
+                let event_id = q.event_id;
+                self.quiet.remove(&uuid);
+                tracing::info!(session_id = %self.session_id, %event_id, "quiet input cancelled by the CLI");
+                return vec![Action::Emit(AdapterEvent::QuietCancelled { event_id })];
+            }
+            q.started |= v["state"] == "started";
+            return vec![];
+        }
         let Some(i) = self.awaiting_echo.iter().position(|w| w.uuid == uuid) else {
             return vec![];
         };
+        let own_turn = self.self_turn;
         let w = &mut self.awaiting_echo[i];
         let state = v["state"].as_str().unwrap_or_default();
         if state == "started" && (!w.mid_turn || w.carried) {
             self.last_input = Some(w.event_id);
         }
         w.state = Some(state.to_owned());
+        // What keeps a turn running: a carried input, or the one that began it (written when
+        // none ran), which the CLI cancelled before it started it (a Stop in the moments a
+        // process comes up): no `result` will come for that turn. Not during a turn the CLI
+        // started by itself: that one ends with its own `result`.
+        let keeps_turn = w.carried || (!w.mid_turn && !own_turn);
         // A withdrawn input is no one's drop: its `cancel_async_message` answer closes it.
-        if !(w.carried && state == "cancelled") || w.withdrawing.is_some() {
+        if !(keeps_turn && state == "cancelled") || w.withdrawing.is_some() {
             return vec![];
         }
         let Some(w) = self.awaiting_echo.remove(i) else {
@@ -2954,7 +3052,33 @@ impl Core {
         out
     }
 
+    /// The quiet inputs a `result` lists in `user_message_uuids`: [`AdapterEvent::QuietTaken`]
+    /// with them, each once whether the CLI took it alone or together with others; `None` when
+    /// it lists none.
+    fn quiet_result(&mut self, v: &Value) -> Option<Vec<Action>> {
+        let event_ids: Vec<Uuid> = v["user_message_uuids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|u| u.as_str()?.parse::<Uuid>().ok())
+            .filter_map(|u| self.quiet.remove(&u))
+            .map(|q| q.event_id)
+            .collect();
+        (!event_ids.is_empty()).then(|| vec![Action::Emit(AdapterEvent::QuietTaken { event_ids })])
+    }
+
     fn on_result(&mut self, v: &Value) -> Vec<Action> {
+        // A `result` that lists quiet lines is theirs alone: they are "later" lines, which the
+        // CLI never folds into a turn (`num_turns: 0`), and no turn runs meanwhile.
+        let Some(out) = self.quiet_result(v) else {
+            return self.end_of_turn(v);
+        };
+        tracing::info!(session_id = %self.session_id, "quiet inputs taken");
+        out
+    }
+
+    /// The end of a turn: its `result`.
+    fn end_of_turn(&mut self, v: &Value) -> Vec<Action> {
         self.self_turn = false;
         self.stopping = false;
         // The turn of `/clear` ended without an `init` naming the new transcript: the folder is
@@ -3880,6 +4004,31 @@ fn turn_end_line(v: &Value) -> Option<(&'static str, String)> {
 
 pub fn record_event_id(uuid: &Uuid, index: usize) -> Uuid {
     Event::id_from_claude_block(uuid, index)
+}
+
+/// The user message of stream-json: the text, or with images a content array of a text block
+/// followed by `images` (image blocks of the Messages API, SPEC §8.1). `peer_prefix` and `peer`
+/// are in `input.text` already (crate::peer, SPEC §7.1). What the owner typed (`input.human`,
+/// which the hub sets for no message of another session, room input, schedule run or note of
+/// its own) carries `origin: {kind: "human"}`, without which the CLI takes the line as
+/// unattributed and its strict `isHuman()` gates refuse it (2.1.312).
+fn user_line(uuid: Uuid, input: &SessionInput, images: Vec<Value>) -> Value {
+    let content = if images.is_empty() {
+        json!(input.text)
+    } else {
+        let mut blocks = vec![json!({"type": "text", "text": input.text})];
+        blocks.extend(images);
+        Value::Array(blocks)
+    };
+    let mut line = json!({
+        "type": "user",
+        "uuid": uuid,
+        "message": {"role": "user", "content": content},
+    });
+    if input.human {
+        line["origin"] = json!({"kind": "human"});
+    }
+    line
 }
 
 fn record_uuid(v: &Value) -> Option<Uuid> {

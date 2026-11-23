@@ -3100,34 +3100,40 @@ pub async fn pending_inputs(db: &PgPool, session_id: Uuid) -> sqlx::Result<Vec<I
 /// `joined`: the worker took the input into the turn already running (SPEC §17.2). Kept on
 /// the message as `payload.joined`, only on an input that may join (SPEC §17.2): a person's
 /// message (a `user.message` that is not a run of a schedule), a room's input and a `send` of
-/// another session (a `peer.message` of mode `send`, no schedule). With it the message gets
-/// `payload.joined_after`: the greatest `seq` of the session's events that are not inputs, when
-/// it is past the message's own. The worker sends the ack after the session's own records
-/// written before it, so that event is the last one the agent made before it took the input
-/// (SPEC §6).
+/// another session (a `peer.message` of mode `send`, no schedule). `quiet`: the worker wrote it
+/// into the agent's history without a turn, at a Stop (SPEC 0.231); kept as `payload.quiet` on
+/// any input. A joined or a quiet message gets `payload.joined_after`: the greatest `seq` of the
+/// session's events that are not inputs, when it is past the message's own. The worker sends the
+/// ack after the session's own records written before it, so that event is the last one the agent
+/// made before it took the input, or Claude Code recorded the quiet line (SPEC §6).
 pub async fn mark_delivered(
     db: &PgPool,
     event_id: Uuid,
     joined: bool,
+    quiet: bool,
 ) -> sqlx::Result<Option<EventRow>> {
+    // An input that may join (SPEC §17.2).
+    const MAY_JOIN: &str = "((type = 'user.message' AND payload->'schedule_id' IS NULL)
+                            OR (type = 'peer.message' AND (payload ? 'room'
+                                OR (payload->>'mode' = 'send' AND payload->'schedule_id' IS NULL))))";
     sqlx::query_as(&format!(
         "UPDATE events SET delivery = 'delivered', delivered_at = now(),
-           payload = CASE WHEN $2 AND ((type = 'user.message' AND payload->'schedule_id' IS NULL)
-                                       OR (type = 'peer.message' AND (payload ? 'room'
-                                           OR (payload->>'mode' = 'send'
-                                               AND payload->'schedule_id' IS NULL))))
-                          THEN jsonb_set(payload, '{{joined}}', 'true')
-                               || COALESCE((SELECT jsonb_build_object('joined_after', max(e.seq))
-                                            FROM events e
-                                            WHERE e.session_id = events.session_id
-                                              AND e.type NOT IN ('user.message', 'peer.message')
-                                              AND e.seq > events.seq
-                                            HAVING max(e.seq) IS NOT NULL), '{{}}'::jsonb)
-                          ELSE payload END
+           payload = CASE WHEN $2 AND {MAY_JOIN}
+                          THEN jsonb_set(payload, '{{joined}}', 'true') ELSE payload END
+             || CASE WHEN $3 THEN '{{\"quiet\": true}}'::jsonb ELSE '{{}}'::jsonb END
+             || CASE WHEN $3 OR ($2 AND {MAY_JOIN})
+                     THEN COALESCE((SELECT jsonb_build_object('joined_after', max(e.seq))
+                                    FROM events e
+                                    WHERE e.session_id = events.session_id
+                                      AND e.type NOT IN ('user.message', 'peer.message')
+                                      AND e.seq > events.seq
+                                    HAVING max(e.seq) IS NOT NULL), '{{}}'::jsonb)
+                     ELSE '{{}}'::jsonb END
          WHERE event_id = $1 AND delivery = 'pending' RETURNING {EVENT_COLS}"
     ))
     .bind(event_id)
     .bind(joined)
+    .bind(quiet)
     .fetch_optional(db)
     .await
 }
@@ -3651,16 +3657,16 @@ pub async fn fork_cut_before_input(
 /// stands for: the id it got from the runtime and the transcript it was written in, a copy's
 /// origin (`events.origin_*`), else its own id in `runtime`, the session's transcript. Only
 /// those after the last `/clear` before `seq` (`system conversation_cleared`, the session's own
-/// or copied): the conversation before it is not the agent's any more.
+/// or copied): the conversation before it is not the agent's any more. The third is its `seq`.
 pub async fn agent_messages_before(
     db: &PgPool,
     id: Uuid,
     seq: i64,
     limit: i64,
     runtime: &str,
-) -> sqlx::Result<Vec<(Uuid, String)>> {
+) -> sqlx::Result<Vec<(Uuid, String, i64)>> {
     sqlx::query_as(
-        "SELECT COALESCE(origin_id, event_id), COALESCE(origin_runtime, $4) FROM events
+        "SELECT COALESCE(origin_id, event_id), COALESCE(origin_runtime, $4), seq FROM events
          WHERE session_id = $1 AND seq < $2 AND type = 'agent.message'
            AND author ->> 'kind' = 'agent'
            AND seq > COALESCE((SELECT max(seq) FROM events
@@ -3730,6 +3736,10 @@ pub struct TurnMark {
     pub code: Option<String>,
     pub in_reply_to: Option<String>,
     pub joined: bool,
+    /// Written into the agent's history without a turn at a Stop (SPEC 0.231).
+    pub quiet: bool,
+    /// `payload.joined_after` (SPEC §6).
+    pub joined_after: Option<i64>,
     pub delivery: Option<String>,
     pub delivered_at: Option<DateTime<Utc>>,
 }
@@ -3742,6 +3752,8 @@ pub async fn turn_marks(db: &PgPool, id: Uuid) -> sqlx::Result<Vec<TurnMark>> {
                   payload ->> 'state' AS state, payload ->> 'code' AS code,
                   payload ->> 'in_reply_to' AS in_reply_to,
                   COALESCE(payload @> '{"joined": true}', false) AS joined,
+                  COALESCE(payload @> '{"quiet": true}', false) AS quiet,
+                  (payload ->> 'joined_after')::bigint AS joined_after,
                   delivery, delivered_at
            FROM events WHERE session_id = $1 AND delivery IS DISTINCT FROM 'withdrawn'
            ORDER BY seq"#,
@@ -3751,29 +3763,37 @@ pub async fn turn_marks(db: &PgPool, id: Uuid) -> sqlx::Result<Vec<TurnMark>> {
     .await
 }
 
+/// What a fork's copy takes of the events of its source: those before `seq` and, of those after
+/// it, the ones before `until` that are no input; not those at the `seq`s in `skip`.
+pub struct ForkCut<'a> {
+    pub seq: i64,
+    pub until: Option<i64>,
+    pub skip: &'a [i64],
+}
+
 /// The events of session `from` before `seq` (and those after it and before `until` that are no
 /// input) whose type is in `types`, copied in order into the empty session `to` under new ids,
 /// at `seq` 1.. (SPEC §6 fork): what its feed shows of the conversation it forks. Each keeps its
 /// origin: a copy's, else its own id in `runtime`, the transcript of `from`. Copied inputs are no
-/// inputs to deliver; events a `retraction` of `from` names are left out (SPEC 0.179). A copied
-/// input's `joined_after` is carried into the copy's own `seq`: the last copied event that is no
-/// input and stood at or before it, dropped when that is not past the input (SPEC 0.221). The
-/// number copied.
+/// inputs to deliver; events a `retraction` of `from` names are left out (SPEC 0.179), and so are
+/// those at the `seq`s in `skip`. A copied input's `joined_after` is carried into the copy's own
+/// `seq`: the last copied event that is no input and stood at or before it, dropped when that is
+/// not past the input (SPEC 0.221). The number copied.
 pub async fn copy_events(
     db: &PgPool,
     from: Uuid,
     to: Uuid,
-    seq: i64,
-    until: Option<i64>,
+    cut: &ForkCut<'_>,
     types: &[&str],
     runtime: &str,
 ) -> sqlx::Result<i64> {
+    let ForkCut { seq, until, skip } = *cut;
     let mut tx = db.begin().await?;
     let n = sqlx::query(
         "WITH keep AS (
            SELECT e.event_id, e.seq, e.type, row_number() OVER (ORDER BY seq) AS nseq
            FROM events e WHERE session_id = $1 AND type = ANY($4)
-             AND delivery IS DISTINCT FROM 'withdrawn'
+             AND delivery IS DISTINCT FROM 'withdrawn' AND NOT (seq = ANY($7))
              AND (seq < $3 OR (seq > $3 AND seq < $6
                                AND type NOT IN ('user.message', 'peer.message')))
              AND NOT EXISTS (SELECT 1 FROM events r WHERE r.session_id = $1
@@ -3798,6 +3818,7 @@ pub async fn copy_events(
     .bind(types)
     .bind(runtime)
     .bind(until)
+    .bind(skip)
     .execute(&mut *tx)
     .await?
     .rows_affected() as i64;

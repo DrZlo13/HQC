@@ -74,9 +74,12 @@ function delivered(raw: Raw, d: DeliveryChange): Raw | undefined {
   const next: Raw = { ...raw, delivery: d.delivery, delivered_at: d.delivered_at };
   if (d.delivered_at === undefined) delete next.delivered_at;
   const payload = raw.payload;
-  if (d.joined === true && payload && typeof payload === 'object') {
-    next.payload =
-      d.joined_after === undefined ? { ...payload, joined: true } : { ...payload, joined: true, joined_after: d.joined_after };
+  if ((d.joined === true || d.quiet === true) && payload && typeof payload === 'object') {
+    const flags: Raw = {};
+    if (d.joined === true) flags.joined = true;
+    if (d.quiet === true) flags.quiet = true;
+    if (d.joined_after !== undefined) flags.joined_after = d.joined_after;
+    next.payload = { ...payload, ...flags };
   }
   return next;
 }

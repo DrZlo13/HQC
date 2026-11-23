@@ -146,8 +146,11 @@ pub enum Notice {
         delivered_at: Option<chrono::DateTime<chrono::Utc>>,
         /// The input went into the turn already running (SPEC §17.2).
         joined: bool,
-        /// `payload.joined_after` of the message (SPEC §6).
+        /// `payload.joined_after` of the message, set on a joined or a quiet one (SPEC §6).
         joined_after: Option<i64>,
+        /// The input was written into the agent's history without a turn, at a Stop (SPEC
+        /// 0.231).
+        quiet: bool,
     },
     /// Something that feeds `state`, `queue_len` or unread changed (SPEC §6 `subscribe_summary`).
     SessionChanged { session_id: Uuid },

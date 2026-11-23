@@ -2218,7 +2218,7 @@ pub async fn stop(
     let sent = if s.room_mode.is_some() {
         stop_room(&app, &s).await?
     } else {
-        stop_session(&app, &s).await?
+        stop_session(&app, &s, true).await?
     };
     Ok(Json(json!({ "sent": sent })))
 }
@@ -2226,14 +2226,23 @@ pub async fn stop(
 /// Stop of session `s`: its open requests other than the runtime's cancelled with `stopped`,
 /// `session.stop` to its worker, and the runtime's approvals and questions cancelled too only
 /// when the worker is not connected (a connected worker keeps those of background subagents
-/// open, SPEC §10.1); `true` when the frame went out.
-pub(crate) async fn stop_session(app: &AppState, s: &SessionRow) -> ApiResult<bool> {
+/// open, SPEC §10.1); `true` when the frame went out. `quiet` (the owner's own Stop, since 0.231)
+/// asks the worker to write what waited into the agent's history without a turn; a pause's stop
+/// does not.
+pub(crate) async fn stop_session(app: &AppState, s: &SessionRow, quiet: bool) -> ApiResult<bool> {
     let open = db::open_requests_of_session(&app.db, s.id).await?;
     let runtimes = |kind: &str| matches!(kind, "approval" | "clarify");
     for p in open.iter().filter(|p| !runtimes(&p.kind)) {
         requests::cancel(app, p, CancelReason::Stopped).await?;
     }
-    let sent = send_to_worker(app, s, HubFrame::SessionStop { session_id: s.id });
+    let sent = send_to_worker(
+        app,
+        s,
+        HubFrame::SessionStop {
+            session_id: s.id,
+            quiet,
+        },
+    );
     if !sent {
         for p in open.iter().filter(|p| runtimes(&p.kind)) {
             requests::cancel(app, p, CancelReason::Stopped).await?;
@@ -2247,13 +2256,14 @@ pub(crate) async fn stop_session(app: &AppState, s: &SessionRow) -> ApiResult<bo
 /// the senders' notice ([`crate::rooms::round_ended`]); `true` when a frame went out.
 async fn stop_room(app: &AppState, room: &SessionRow) -> ApiResult<bool> {
     let _room = crate::rooms::lock(app, room.id).await;
-    // The agents' inputs stay as they are: the worker keeps the ones it has after a stop. A final
-    // message on an input whose message is from before this line, the part of the turn the stop
-    // cut included, posts nothing and wakes nobody (`rooms::on_final`).
+    // The agents' inputs are not failed: the worker of an agent whose turn runs at the stop
+    // writes what waited into its history without a turn and acks each `quiet` (SPEC 0.231).
+    // A final message on an input whose message is from before this line, the part of the
+    // turn the stop cut included, posts nothing and wakes nobody (`rooms::on_final`).
     events::system(app, room, crate::rooms::ROOM_STOPPED, crate::rooms::STOPPED).await?;
     let mut sent = false;
     for m in db::room_members(&app.db, room.id).await? {
-        sent |= stop_session(app, &m).await?;
+        sent |= stop_session(app, &m, true).await?;
         app.session_changed(m.id);
     }
     // After the agents are stopped: the senders of the room's messages are told how it ended, and

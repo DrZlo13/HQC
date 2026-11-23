@@ -86,7 +86,8 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
     // whose text was being written when a message that did not join came above it: the fork
     // keeps that answer. Only inputs like the message lie between them. The fork also keeps the
     // events after the message and before `until` that are no input.
-    let waited = waited_place(&db::turn_marks(&app.db, s.id).await?, at.seq);
+    let marks = db::turn_marks(&app.db, s.id).await?;
+    let waited = waited_place(&marks, at.seq);
     let until = match at.payload["joined_after"].as_i64().filter(|&a| a > at.seq) {
         Some(a) => {
             let taken = db::last_agent_message_between(&app.db, s.id, at.seq, a)
@@ -108,12 +109,17 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
     // message: a fork before the first answer after it starts a new conversation.
     let bound = until.unwrap_or(at.seq);
     let records = db::agent_messages_before(&app.db, s.id, bound, CUTS, &runtime).await?;
-    let source = records.first().map(|(_, r)| r.clone());
+    let source = records.first().map(|(_, r, _)| r.clone());
     let cuts: Vec<Uuid> = records
         .iter()
-        .filter(|(_, r)| Some(r) == source.as_ref())
-        .map(|(e, _)| *e)
+        .filter(|(_, r, _)| Some(r) == source.as_ref())
+        .map(|(e, _, _)| *e)
         .collect();
+    // The copy's conversation is cut at the newest of them. A message written quiet after that
+    // record is in no transcript the copy has: its agent never got it, so the copy leaves it out.
+    let skip = records
+        .first()
+        .map_or_else(Vec::new, |(_, _, cut)| quiet_after(&marks, *cut));
     let title: String = format!("{} (fork)", s.title)
         .chars()
         .take(crate::api::MAX_TITLE)
@@ -139,7 +145,19 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
     if let Some(source) = source {
         let f = json!({"runtime_session_id": source, "at_event_ids": cuts});
         db::set_session_fork(&app.db, id, &f).await?;
-        let n = db::copy_events(&app.db, s.id, id, at.seq, until, COPIED, &runtime).await?;
+        let n = db::copy_events(
+            &app.db,
+            s.id,
+            id,
+            &db::ForkCut {
+                seq: at.seq,
+                until,
+                skip: &skip,
+            },
+            COPIED,
+            &runtime,
+        )
+        .await?;
         // The copy's search words, without the answer waiting for them (SPEC §15): written
         // with the copy, those of a long session kept the user waiting for seconds.
         let pool = app.db.clone();
@@ -183,6 +201,20 @@ pub async fn note(
         "[hqc fork] {from}. The conversation above was copied from that session; this session \
          is {own}, separate from it from here on."
     )))
+}
+
+/// The `seq`s of the quiet inputs (SPEC 0.231) that Claude Code recorded at or after its record at
+/// `cut`: those whose `joined_after`, the last event stored before the worker's ack, is not
+/// before it. The copied agent never got them. Without a `joined_after` (no event after it) the
+/// input's own `seq` stands for it.
+pub fn quiet_after(marks: &[db::TurnMark], cut: i64) -> Vec<i64> {
+    marks
+        .iter()
+        // A copy's inputs have no `delivery`: only the payload says what they are.
+        .filter(|m| matches!(m.kind.as_str(), "user.message" | "peer.message") && m.quiet)
+        .filter(|m| m.joined_after.unwrap_or(m.seq) >= cut)
+        .map(|m| m.seq)
+        .collect()
 }
 
 /// The agent's `agent.message` the client shows above `at`, an input that came while the
@@ -242,6 +274,14 @@ pub fn waited_place(marks: &[db::TurnMark], seq: i64) -> Option<i64> {
     let mut open = false;
     for (i, m) in marks.iter().enumerate() {
         if is_input(m) {
+            // A quiet input (SPEC 0.231) waits for nothing and opens no turn: it stands at its
+            // own place, or where `joined_after` puts it.
+            if m.quiet && m.delivery.as_deref() != Some("failed") {
+                if m.seq == seq {
+                    return None;
+                }
+                continue;
+            }
             if joined(m) && !waiting.is_empty() {
                 // Behind the last waiting input delivered before it (and the inputs that
                 // joined behind that one); it went past those delivered after it or still
@@ -392,6 +432,8 @@ mod tests {
             code: None,
             in_reply_to: None,
             joined: false,
+            quiet: false,
+            joined_after: None,
             delivery: None,
             delivered_at: None,
         }
@@ -467,6 +509,78 @@ mod tests {
             answer(4, 1),
         ];
         assert_eq!(waited_place(&m, 3), None);
+    }
+
+    /// A quiet input (SPEC 0.231) delivered at `delivered`; `after` is its `joined_after`.
+    fn quiet(seq: i64, delivered: f64, after: Option<i64>) -> db::TurnMark {
+        db::TurnMark {
+            quiet: true,
+            joined_after: after,
+            ..input(seq, Some(delivered))
+        }
+    }
+
+    /// SPEC 0.231: a quiet input waits for nothing and opens no turn, whatever the turns around
+    /// it: it stands at its own place (the client moves it by `joined_after`), and an input that
+    /// waits is placed as if it were not there.
+    #[test]
+    fn a_quiet_input_is_no_waiting_input_and_opens_no_turn() {
+        let m = [
+            input(1, Some(1.2)),
+            work(2),
+            quiet(3, 7.1, Some(7)),
+            input(4, Some(6.1)),
+            mark(5, "tool.result", "agent"),
+            answer(6, 1),
+            idle(7, 1),
+            work(8),
+        ];
+        assert_eq!(waited_place(&m, 3), None);
+        // The input that waited is the same as without the quiet one.
+        assert_eq!(waited_place(&m, 4), Some(8));
+        // With no turn running it opens none: the next input is not behind one.
+        let m = [quiet(1, 1.0, Some(2)), system(2, "note"), input(3, None)];
+        assert_eq!(waited_place(&m, 3), None);
+    }
+
+    /// SPEC 0.231: a fork's copy leaves out the quiet inputs Claude Code recorded at or after the
+    /// record where its conversation is cut (`joined_after` is not before it), and keeps those
+    /// recorded before it.
+    #[test]
+    fn the_quiet_inputs_after_a_cut_are_the_ones_the_copied_agent_never_got() {
+        let m = [
+            input(1, Some(1.2)),
+            work(2),
+            quiet(3, 7.1, Some(7)),
+            quiet(4, 7.2, Some(7)),
+            mark(5, "tool.result", "agent"),
+            answer(6, 1),
+            idle(7, 1),
+            input(8, Some(7.3)),
+            answer(9, 8),
+            idle(10, 8),
+            input(11, Some(12.0)),
+        ];
+        // Cut at the stopped turn's last answer: both were recorded after it.
+        assert_eq!(quiet_after(&m, 6), [3, 4]);
+        // Cut at the answer of the turn after it: both were recorded before it.
+        assert!(quiet_after(&m, 9).is_empty());
+        // Recorded right at the cut record (the last event before the ack is it): after it.
+        assert_eq!(quiet_after(&[quiet(1, 1.0, Some(6))], 6), [1]);
+        // The CLI ran a turn of its own (its answer is 9) before the ack: the cut at that answer
+        // still leaves the quiet input out, the cut at the stopped turn's answer too.
+        let own = [
+            input(1, Some(1.2)),
+            quiet(2, 2.0, Some(10)),
+            answer(6, 1),
+            idle(7, 1),
+            answer(9, 0),
+            idle(10, 0),
+        ];
+        assert_eq!(quiet_after(&own, 9), [2]);
+        assert_eq!(quiet_after(&own, 6), [2]);
+        // Nothing quiet: nothing to leave out.
+        assert!(quiet_after(&m[..2], 2).is_empty());
     }
 
     #[test]

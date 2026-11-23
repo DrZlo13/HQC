@@ -32,12 +32,19 @@ pub enum FakeCall {
         session_id: Uuid,
         event_id: Uuid,
     },
+    /// An input written as a quiet line (SPEC 0.231).
+    InputQuiet {
+        session_id: Uuid,
+        event_id: Uuid,
+    },
     /// An input taken back from the runtime (SPEC 0.219).
     Withdraw {
         session_id: Uuid,
         event_id: Uuid,
     },
     Stop(Uuid),
+    /// The owner's Stop of a running turn (SPEC 0.231).
+    StopQuiet(Uuid),
     Kill(Uuid),
     /// A process with nothing running ended through [`Adapter::close`].
     Close(Uuid),
@@ -187,6 +194,18 @@ impl FakeAdapters {
             .await;
     }
 
+    /// The runtime dropped the quiet line of an input it had not taken.
+    pub async fn quiet_cancelled(&self, session_id: Uuid, event_id: Uuid) {
+        self.emit(session_id, AdapterEvent::QuietCancelled { event_id })
+            .await;
+    }
+
+    /// The runtime has written the inputs into the history without a turn.
+    pub async fn quiet_taken(&self, session_id: Uuid, event_ids: Vec<Uuid>) {
+        self.emit(session_id, AdapterEvent::QuietTaken { event_ids })
+            .await;
+    }
+
     pub async fn end_turn(&self, session_id: Uuid) {
         self.end_turn_carrying(session_id, vec![], vec![]).await;
     }
@@ -313,6 +332,22 @@ impl Adapter for FakeAdapter {
         Ok(())
     }
 
+    async fn input_quiet_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<()> {
+        self.shared
+            .lock()
+            .inputs
+            .push((input.clone(), files.to_vec()));
+        self.record(FakeCall::InputQuiet {
+            session_id: self.session_id,
+            event_id: input.event_id,
+        });
+        Ok(())
+    }
+
     fn can_inject(&self) -> bool {
         self.shared.lock().injectable
     }
@@ -369,6 +404,11 @@ impl Adapter for FakeAdapter {
 
     async fn stop(&mut self) -> anyhow::Result<()> {
         self.record(FakeCall::Stop(self.session_id));
+        Ok(())
+    }
+
+    async fn stop_quiet(&mut self) -> anyhow::Result<()> {
+        self.record(FakeCall::StopQuiet(self.session_id));
         Ok(())
     }
 

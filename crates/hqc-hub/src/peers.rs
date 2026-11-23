@@ -1363,6 +1363,16 @@ pub async fn turn_stopped(app: &AppState, s: &SessionRow, input: Uuid) -> anyhow
     .await
 }
 
+/// The input `input` of session `s` was written into its agent's history without a turn, at a
+/// Stop (SPEC 0.231): an ask it carried gets no answer, and fails now. There was no turn to say
+/// it ended, so the asker is told what happened.
+pub async fn quiet_stopped(app: &AppState, s: &SessionRow, input: Uuid) -> anyhow::Result<()> {
+    fail_turn(app, s, Some(input), "stopped before the question", |to| {
+        format!("{to} was stopped before it took the question")
+    })
+    .await
+}
+
 /// Fails the open asks that input `input` of session `s` carried (`None`: its last delivered
 /// input, by delivery time as [`last_delivered`]), with `unavailable` and `message(to)`.
 async fn fail_turn(

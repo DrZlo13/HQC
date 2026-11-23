@@ -421,6 +421,11 @@ pub enum EventKind {
         /// when the worker acks the input `joined`. Absent when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         joined: bool,
+        /// The runtime wrote it into the agent's history without a turn when the owner pressed
+        /// Stop (SPEC 0.231): the hub sets it when the worker acks the input `quiet`. Absent
+        /// when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        quiet: bool,
     },
     /// Transport only, never stored (SPEC §4, §5.2).
     #[serde(rename = "agent.delta")]
@@ -1281,6 +1286,22 @@ mod tests {
         ));
         assert!(serde_json::to_value(&plain).unwrap()["payload"]
             .get("joined")
+            .is_none());
+    }
+
+    /// SPEC 0.231: a message written into the history at a Stop carries `quiet: true`; any other
+    /// leaves it out.
+    #[test]
+    fn a_quiet_user_message_roundtrips() {
+        let src = include_str!("../examples/wire/event.user.message.quiet.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(e.kind, EventKind::UserMessage { quiet: true, .. }));
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.user.message.json")).unwrap();
+        assert!(serde_json::to_value(&plain).unwrap()["payload"]
+            .get("quiet")
             .is_none());
     }
 

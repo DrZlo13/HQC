@@ -313,6 +313,8 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             // `a_task_end_carries_its_usage_and_output` looks at it.
             AdapterEvent::TaskOutput(_) => continue,
             AdapterEvent::SubagentLeftovers { .. } => "subagent_leftovers".into(),
+            AdapterEvent::QuietTaken { .. } => "quiet_taken".into(),
+            AdapterEvent::QuietCancelled { .. } => "quiet_cancelled".into(),
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -8596,9 +8598,9 @@ fn cancel_answer(request_id: &str, cancelled: bool) -> String {
 /// The `request_id` of the `cancel_async_message` asked for the message with `uuid`, after
 /// checking what it asks.
 fn cancel_request(core: &mut Core, event_id: Uuid, uuid: &str) -> String {
-    let (action, request_id) = core.withdraw(event_id).expect("the CLI has not taken it");
-    let Action::Write(v) = action else {
-        panic!("not a write");
+    let (actions, request_id) = core.withdraw(event_id).expect("the CLI has not taken it");
+    let [Action::Write(v)] = &actions[..] else {
+        panic!("not one write");
     };
     assert_eq!(v["type"], "control_request");
     assert_eq!(v["request_id"], request_id);
@@ -12344,4 +12346,411 @@ fn grant_rules_past_the_cap_say_how_many_more() {
     assert_eq!(shown.len(), 10);
     assert_eq!(shown[..9], twelve[..9]);
     assert_eq!(shown[9], "… 3 more");
+}
+
+/// SPEC 0.231: Stop's `interrupt` is plain: `cancel_queued` would also dequeue the CLI's own
+/// lines that carry no `uuid` (task notifications, cron, `/loop`), which hqc cannot write back.
+#[test]
+fn an_interrupt_does_not_cancel_the_queue_wholesale() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let (req, _, _) = core.interrupt().expect("a turn runs");
+    assert_eq!(
+        writes(&[req])[0]["request"],
+        json!({"subtype": "interrupt"})
+    );
+}
+
+/// SPEC 0.231: a Stop cancels, one by one, the lines hqc wrote that the CLI has not taken: the
+/// queued one and the one it has not answered yet, not the one it started, one being withdrawn
+/// or a line it already cancelled. The CLI's `cancelled` for them comes out as `dropped` of the
+/// turn's end, unlike a withdrawn input's.
+#[test]
+fn a_stop_cancels_the_lines_the_cli_has_not_taken() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b, c, d) = (
+        user_input(sid, "first"),
+        user_input(sid, "second"),
+        user_input(sid, "third"),
+        user_input(sid, "fourth"),
+    );
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ub, "queued"));
+    let uc = line_uuid(&core.inject_with_images(&c, vec![]).expect("a turn runs"));
+    // `d` is queued and being withdrawn: a Stop leaves it alone.
+    let ud = line_uuid(&core.inject_with_images(&d, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ud, "queued"));
+    let _ = cancel_request(&mut core, d.event_id, &ud);
+    let asked: Vec<String> = writes(&core.cancel_unstarted())
+        .iter()
+        .map(|v| {
+            assert_eq!(v["type"], "control_request");
+            assert!(v["request_id"].as_str().unwrap().starts_with("hqc-cancel-"));
+            assert_eq!(v["request"]["subtype"], "cancel_async_message");
+            v["request"]["message_uuid"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(asked, [ub.clone(), uc.clone()]);
+    // What the CLI answers with `cancelled` ends up in `dropped`.
+    let mut out = play(&mut core, &lifecycle(&ub, "cancelled"));
+    out.extend(play(&mut core, &lifecycle(&uc, "cancelled")));
+    out.extend(play(&mut core, &lifecycle(&ud, "cancelled")));
+    out.extend(play(
+        &mut core,
+        &lines_of(&[tool_result("toolu_1"), reply("DONE"), result("success")]),
+    ));
+    let names = [
+        (a.event_id, "A"),
+        (b.event_id, "B"),
+        (c.event_id, "C"),
+        (d.event_id, "D"),
+    ];
+    let t = trace(&out, &names);
+    assert_eq!(
+        t.iter()
+            .filter(|l| l.starts_with("turn_ended"))
+            .collect::<Vec<_>>(),
+        ["turn_ended [] dropped [B, C]"],
+        "{t:?}"
+    );
+    // Nothing runs: nothing to cancel.
+    let mut idle = Core::new(sid, false);
+    assert!(idle.cancel_unstarted().is_empty());
+}
+
+/// SPEC 0.231: a Stop's `cancel_async_message` can reach the turn's own head line before the CLI
+/// started it (cold start): the CLI answers `cancelled` and then no `result` comes for it. That
+/// line comes back as dropped, so the supervisor writes it quiet; in the turn the runtime
+/// started by itself the head line is not what keeps the turn open and stays as it is.
+#[test]
+fn a_head_line_the_cli_cancels_before_it_started_comes_back_dropped() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(sid, "first");
+    let ua = line_uuid(&core.input(&a));
+    let asked = writes(&core.cancel_unstarted());
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0]["request"]["message_uuid"], json!(ua));
+    let out = play(&mut core, &lifecycle(&ua, "cancelled"));
+    let t = trace(&out, &[(a.event_id, "A")]);
+    assert_eq!(t, ["turn_ended [] dropped [A]"], "{t:?}");
+    assert!(!core.turn_open());
+
+    // In a turn the runtime started by itself the head line is not what keeps the turn open:
+    // its `cancelled` ends nothing, and the turn's own `result` brings it back as dropped.
+    let mut core = Core::new(sid, false);
+    play(&mut core, &sonnet_init_line());
+    assert!(core.runs_own_turn());
+    let ua = line_uuid(&core.input(&a));
+    assert_eq!(writes(&core.cancel_unstarted()).len(), 1);
+    let out = play(&mut core, &lifecycle(&ua, "cancelled"));
+    let t = trace(&out, &[(a.event_id, "A")]);
+    assert!(!t.iter().any(|l| l.starts_with("turn_ended")), "{t:?}");
+    assert!(core.turn_open());
+    let out = play(&mut core, &result("success"));
+    let t = trace(&out, &[(a.event_id, "A")]);
+    assert!(t.iter().any(|l| l == "turn_ended [] dropped [A]"), "{t:?}");
+}
+
+/// SPEC 0.231: a take-back of a line the CLI already cancelled (a Stop's) is answered at once,
+/// without asking the CLI again, and the turn's end leaves it out of `dropped`; after the
+/// turn's end it is no longer here to withdraw.
+#[test]
+fn a_line_a_stop_cancelled_is_withdrawn_at_once() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b) = (user_input(sid, "first"), user_input(sid, "second"));
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ub, "queued"));
+    assert_eq!(writes(&core.cancel_unstarted()).len(), 1);
+    play(&mut core, &lifecycle(&ub, "cancelled"));
+    let (actions, request_id) = core.withdraw(b.event_id).expect("it is still here");
+    assert!(
+        actions.is_empty(),
+        "nothing is asked of the CLI: {actions:?}"
+    );
+    assert_eq!(core.withdraw_answer(&request_id), Some(true));
+    let out = play(
+        &mut core,
+        &lines_of(&[tool_result("toolu_1"), reply("DONE"), result("success")]),
+    );
+    let t = trace(&out, &[(a.event_id, "A"), (b.event_id, "B")]);
+    assert_eq!(
+        t.iter()
+            .filter(|l| l.starts_with("turn_ended"))
+            .collect::<Vec<_>>(),
+        ["turn_ended []"],
+        "{t:?}"
+    );
+    // The other order: the turn ended first, B came back dropped, there is nothing to withdraw.
+    let mut core = Core::new(sid, false);
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ub, "queued"));
+    core.cancel_unstarted();
+    play(&mut core, &lifecycle(&ub, "cancelled"));
+    let out = play(&mut core, &lines_of(&[reply("DONE"), result("success")]));
+    let t = trace(&out, &[(a.event_id, "A"), (b.event_id, "B")]);
+    assert!(t.iter().any(|l| l == "turn_ended [] dropped [B]"), "{t:?}");
+    assert!(core.withdraw(b.event_id).is_none());
+}
+
+/// SPEC 0.231: a quiet line is the record of an earlier Stop, so a Stop never cancels it, also
+/// when it waits in the CLI's queue behind a turn.
+#[test]
+fn a_stop_never_cancels_a_quiet_line() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(sid, "first");
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    let q = user_input(sid, "stopped earlier");
+    let uq = line_uuid(&[core.input_quiet_with_images(&q, vec![])]);
+    play(&mut core, &lifecycle(&uq, "queued"));
+    let b = user_input(sid, "second");
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ub, "queued"));
+    let asked: Vec<String> = writes(&core.cancel_unstarted())
+        .iter()
+        .map(|v| v["request"]["message_uuid"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(asked, [ub]);
+}
+
+fn quiet_result(taken: &[&str]) -> String {
+    json!({"type": "result", "subtype": "success", "is_error": false, "duration_api_ms": 0,
+        "num_turns": 0, "stop_reason": null, "total_cost_usd": 0.153686,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "session_id": CLI_SESSION, "user_message_uuids": taken})
+    .to_string()
+}
+
+fn sonnet_init_line() -> String {
+    json!({"type": "system", "subtype": "init", "model": "claude-sonnet-5-5",
+        "permissionMode": "default", "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+    .to_string()
+}
+
+/// SPEC 0.231, the capture after Stop (2.1.312): a line written with `shouldQuery: false` gets
+/// `queued`, `started`, an `init`, its echo, a `result` with `num_turns: 0` and `completed`. The
+/// engine sends one event for it, naming the input, and nothing a turn would: no `status
+/// running` for that `init`, no accepted input at the echo, no `usage`, `status idle` or end of
+/// turn at the `result`; no turn of the CLI's own runs meanwhile.
+#[test]
+fn a_quiet_line_is_taken_by_its_result_and_makes_no_turn() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let input = user_input(sid, "Also remember: the code word is OTTER-42.");
+    let action = core.input_quiet_with_images(&input, vec![]);
+    let line = &writes(&[action])[0];
+    assert_eq!(line["shouldQuery"], false);
+    // "later": the CLI folds only "next" and above into a running turn, a turn it started by
+    // itself too (SPEC 0.231); a line without `priority` is "next".
+    assert_eq!(line["priority"], "later");
+    assert_eq!(line["origin"], json!({"kind": "human"}));
+    assert_eq!(line["message"]["content"], input.text);
+    let u = line["uuid"].as_str().unwrap().to_owned();
+    assert!(!core.turn_open());
+
+    let mut got = vec![];
+    for l in [
+        lifecycle(&u, "queued"),
+        lifecycle(&u, "started"),
+        sonnet_init_line(),
+    ] {
+        got.extend(emitted(core.on_line(&l)));
+        assert!(!core.turn_open() && !core.runs_own_turn(), "after {l}");
+    }
+    got.extend(emitted(core.on_line(&echo(&u, &input.text))));
+    got.extend(emitted(core.on_line(&quiet_result(&[&u]))));
+    got.extend(emitted(core.on_line(&lifecycle(&u, "completed"))));
+    assert!(!core.turn_open());
+    assert_eq!(
+        got.iter()
+            .filter(|e| !matches!(
+                e,
+                AdapterEvent::Commands(_) | AdapterEvent::PermissionMode(_)
+            ))
+            .collect::<Vec<_>>(),
+        [&AdapterEvent::QuietTaken {
+            event_ids: vec![input.event_id]
+        }],
+        "{got:?}"
+    );
+
+    // A quiet line of a message that is no person's has no `origin`.
+    let mut other = user_input(sid, "FYI");
+    other.human = false;
+    let action = core.input_quiet_with_images(&other, vec![]);
+    assert!(writes(&[action])[0].get("origin").is_none());
+}
+
+/// SPEC 0.231, the second capture: three quiet lines written back to back. The CLI takes the
+/// first alone, the second and third together (one `init`, one echo with the third's `uuid` and
+/// both texts, one `result` listing both): each input is named exactly once.
+#[test]
+fn quiet_lines_taken_together_are_each_named_once() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let inputs: Vec<SessionInput> = ["first", "second", "third"]
+        .into_iter()
+        .map(|t| user_input(sid, &format!("Remember the {t} code word.")))
+        .collect();
+    let u: Vec<String> = inputs
+        .iter()
+        .map(|i| line_uuid(&[core.input_quiet_with_images(i, vec![])]))
+        .collect();
+    let both = format!("{}\n{}", inputs[1].text, inputs[2].text);
+    let mut got = vec![];
+    for l in [
+        lifecycle(&u[0], "queued"),
+        lifecycle(&u[1], "queued"),
+        lifecycle(&u[2], "queued"),
+        lifecycle(&u[0], "started"),
+        sonnet_init_line(),
+        echo(&u[0], &inputs[0].text),
+        quiet_result(&[&u[0]]),
+        lifecycle(&u[0], "completed"),
+        // The second is echoed on its own before the `init` of the pair.
+        echo(&u[1], &inputs[1].text),
+        lifecycle(&u[1], "started"),
+        lifecycle(&u[2], "started"),
+        sonnet_init_line(),
+        echo(&u[2], &both),
+        quiet_result(&[&u[1], &u[2]]),
+        lifecycle(&u[1], "completed"),
+        lifecycle(&u[2], "completed"),
+    ] {
+        got.extend(emitted(core.on_line(&l)));
+        assert!(!core.turn_open(), "after {l}");
+    }
+    assert_eq!(
+        got.iter()
+            .filter(|e| !matches!(
+                e,
+                AdapterEvent::Commands(_) | AdapterEvent::PermissionMode(_)
+            ))
+            .collect::<Vec<_>>(),
+        [
+            &AdapterEvent::QuietTaken {
+                event_ids: vec![inputs[0].event_id]
+            },
+            &AdapterEvent::QuietTaken {
+                event_ids: vec![inputs[1].event_id, inputs[2].event_id]
+            },
+        ],
+        "{got:?}"
+    );
+}
+
+/// SPEC 0.231: a quiet line the CLI drops (`command_lifecycle` `cancelled`: it failed to process
+/// the line) is told once as `QuietCancelled`, naming the input; it is not taken, and a `result`
+/// listing none of it names nothing.
+#[test]
+fn a_quiet_line_the_cli_drops_is_told_cancelled() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let input = user_input(sid, "Remember OTTER-42.");
+    let q = line_uuid(&[core.input_quiet_with_images(&input, vec![])]);
+    let mut got = emitted(core.on_line(&lifecycle(&q, "queued")));
+    got.extend(emitted(core.on_line(&lifecycle(&q, "cancelled"))));
+    got.extend(emitted(core.on_line(&lifecycle(&q, "cancelled"))));
+    assert_eq!(
+        got.iter()
+            .filter(|e| !matches!(e, AdapterEvent::Commands(_)))
+            .collect::<Vec<_>>(),
+        [&AdapterEvent::QuietCancelled {
+            event_id: input.event_id
+        }],
+        "{got:?}"
+    );
+    let after = emitted(core.on_line(&quiet_result(&[])));
+    assert!(
+        !after
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::QuietTaken { .. })),
+        "{after:?}"
+    );
+}
+
+/// After quiet lines the next input is an ordinary turn: its `init` is `status running` of no
+/// one's, its echo accepts it and its `result` ends the turn, and a `result` that lists none of
+/// the quiet lines is that turn's.
+#[test]
+fn a_turn_after_a_quiet_line_is_an_ordinary_turn() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let quiet = user_input(sid, "Remember OTTER-42.");
+    let q = line_uuid(&[core.input_quiet_with_images(&quiet, vec![])]);
+    for l in [
+        lifecycle(&q, "started"),
+        sonnet_init_line(),
+        echo(&q, &quiet.text),
+        quiet_result(&[&q]),
+    ] {
+        core.on_line(&l);
+    }
+    let next = user_input(sid, "What code word did I give you?");
+    let u = line_uuid(&core.input(&next));
+    let out = emitted(play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&u, "started"),
+            sonnet_init_line(),
+            echo(&u, &next.text),
+            reply("OTTER-42"),
+            result("success"),
+        ]),
+    ));
+    let names = [(next.event_id, "N")];
+    assert_eq!(
+        trace(
+            &out.into_iter().map(Action::Emit).collect::<Vec<_>>(),
+            &names
+        ),
+        [
+            "accepted N",
+            "message \"OTTER-42\" to N",
+            "status to N",
+            "turn_ended []"
+        ]
+    );
 }

@@ -48,6 +48,15 @@ pub enum AdapterEvent {
         carried: Vec<Uuid>,
         dropped: Vec<Uuid>,
     },
+    /// The runtime took the inputs written with [`Adapter::input_quiet_with`] into the agent's
+    /// history, without a turn (Claude Code: the `result` with `num_turns: 0` that lists them
+    /// in `user_message_uuids`, also when it took several at once), each once, in the order the
+    /// runtime lists them. The hub gets `ack {quiet}` for each (SPEC §5.2, 0.231).
+    QuietTaken { event_ids: Vec<Uuid> },
+    /// The runtime dropped a quiet line it had not taken (Claude Code: `command_lifecycle`
+    /// `cancelled`: on 2.1.312 the CLI answers that for a line it failed to process): the input
+    /// is not in the agent's history, and the worker writes it again at once.
+    QuietCancelled { event_id: Uuid },
     /// How many subagents the runtime runs now (Claude Code: `system/task_started` with
     /// `task_type: local_agent` until the task ends, and while a background task the CLI
     /// lists belongs to it); sent as `session.state.subagents`. Reported when it changes.
@@ -191,6 +200,21 @@ pub trait Adapter: Send {
         let _ = files;
         self.input(input).await
     }
+    /// Writes `input` into the agent's history without starting a turn (SPEC 0.231; Claude
+    /// Code: a line with `shouldQuery: false`), for an input that waited when the owner pressed
+    /// Stop: the agent knows it next time and does not act on it now. Called with no turn of
+    /// ours running (one the runtime started by itself may run: Claude Code takes the line
+    /// after it, see `priority: "later"`), and no [`Adapter::input_with`] before the runtime has
+    /// taken the last one; the runtime's word is [`AdapterEvent::QuietTaken`], not
+    /// [`AdapterEvent::InputAccepted`].
+    async fn input_quiet_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<()> {
+        let _ = (input, files);
+        anyhow::bail!("this runtime cannot take input without a turn")
+    }
     /// Whether an input that may join (a person's input or a `send` of another session, SPEC
     /// §17.2) can go into the running turn now (Claude Code: a turn runs and no permission
     /// request or question is open). By default never: input waits for the end of the turn.
@@ -237,6 +261,13 @@ pub trait Adapter: Send {
     }
     /// Abort the current turn; the process stays.
     async fn stop(&mut self) -> anyhow::Result<()>;
+    /// [`Adapter::stop`] for the owner's own Stop of a turn that runs (SPEC 0.231): the inputs
+    /// written that the runtime has not taken are cancelled first (Claude Code:
+    /// `cancel_async_message`), so they come out as `dropped` of the turn's end, to be written
+    /// into the agent's history. By default a plain stop.
+    async fn stop_quiet(&mut self) -> anyhow::Result<()> {
+        self.stop().await
+    }
     /// Terminate the process. Returns when it is gone.
     async fn kill(&mut self) -> anyhow::Result<()>;
     /// Ends the process of a session with nothing running, letting it exit by itself where

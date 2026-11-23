@@ -3379,11 +3379,29 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
     expect(line({ kind: "compacting" })).toBe("Main agent: Compacting the conversation…");
     expect(line({ kind: "thinking", estimated_tokens: 12340 })).toBe("Main agent: Thinking · 12.34k tokens");
     expect(line({ kind: "thinking", estimated_tokens: 840 })).toBe("Main agent: Thinking · 840 tokens");
-    // A running command keeps its own line; other states keep theirs.
+    // A running command keeps its own line; an approval waited for keeps its own.
     const t = new Timeline();
     t.apply(call(1, "b", "Bash", { command: "sleep 30" }));
     expect(line({ kind: "compacting" }, "running", t)).toContain("sleep 30");
-    expect(line({ kind: "compacting" }, "queued")).toBe("Main agent: Input queued");
+    expect(line({ kind: "compacting" }, "waiting")).toBe("Main agent: Waiting for approval");
+  });
+
+  it("queued with an activity (SPEC 0.233): what the agent does, as a running row", () => {
+    // Claude Code takes the input only after the auto-compaction it runs first: the input waits,
+    // no turn is open, and the agent compacts.
+    root = document.createElement("div");
+    document.body.appendChild(root);
+    act(() => render(<ActivityLine state="queued" timeline={new Timeline()} now={() => NOW} activity={{ kind: "compacting" }} />, root));
+    const row = root.querySelector(".live-agents-row")!;
+    expect(row.textContent).toBe("Main agent: Compacting the conversation…");
+    expect(row.querySelector(".live-agents-dot-still")).toBeNull();
+    expect(row.querySelector(".live-agents-lead-queued")).toBeNull();
+    // Without one it is the waiting input's muted row.
+    act(() => render(<ActivityLine state="queued" timeline={new Timeline()} now={() => NOW} />, root));
+    const still = root.querySelector(".live-agents-row")!;
+    expect(still.textContent).toBe("Main agent: Input queued");
+    expect(still.querySelector(".live-agents-dot-still")).not.toBeNull();
+    expect(still.querySelector(".live-agents-lead-queued")).not.toBeNull();
   });
 
   it("the thinking estimate runs up between the worker's reports, as in the VS Code tab", () => {

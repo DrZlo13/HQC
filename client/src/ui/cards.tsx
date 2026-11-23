@@ -378,8 +378,9 @@ export function activityShown(state: SessionState, timeline: Timeline): boolean 
  *  <tool>"); a command or subagent the runtime runs in the foreground (`foreground`, the
  *  session's `foreground_calls`) gets "Run in background", which calls `onBackground` with its
  *  `call_id`. With no command running, what the agent waits on (`activity`, the session's)
- *  stands instead of "Working". In a room each working agent has a row of its own, led by its
- *  `name` in place of "Main agent: ". It is a list item of `LiveSubagents`' list. */
+ *  stands instead of "Working", and instead of "Input queued" too. In a room each working agent
+ *  has a row of its own, led by its `name` in place of "Main agent: ". It is a list item of
+ *  `LiveSubagents`' list. */
 export function ActivityLine({
   state,
   timeline,
@@ -402,15 +403,19 @@ export function ActivityLine({
 }) {
   const call = state === 'running' ? timeline.runningCall() : undefined;
   const t = useNow(1000, !!call, now);
+  // Input waits while the agent is busy before it takes it: Claude Code echoes an input only
+  // after the auto-compaction it runs first, so no turn is open yet (SPEC §17.1). The row then
+  // says what the agent does, as a running one.
+  const busy = state === 'running' || (state === 'queued' && !!activity);
   // The thinking estimate comes every couple of seconds; it runs up between them (SPEC §17.1).
-  const thinking = useRunUp(state === 'running' && activity?.kind === 'thinking' ? activity.estimated_tokens : undefined, now);
+  const thinking = useRunUp(busy && activity?.kind === 'thinking' ? activity.estimated_tokens : undefined, now);
   if (!activityShown(state, timeline)) return null;
   const who = name ? <span class="live-agents-kind">{name} · </span> : undefined;
   const lead = who ?? <span class="live-agents-kind">Main agent: </span>;
   let body: ComponentChildren;
   let right = '';
   let callId: string | undefined;
-  const tone = state === 'running' ? '' : ` live-agents-lead-${state}`;
+  const tone = busy ? '' : ` live-agents-lead-${state}`;
   if (call && t - timeline.runSince(call) >= CALL_SHOWN_AFTER_MS) {
     const asked = askTarget(call.payload.tool, call.payload.args_preview);
     right = elapsed(t - Date.parse(call.ts));
@@ -442,8 +447,7 @@ export function ActivityLine({
     }
   } else {
     const shown = activity?.kind === 'thinking' && thinking !== undefined ? { ...activity, estimated_tokens: thinking } : activity;
-    const label =
-      state === 'running' ? (shown ? activityLabel(shown) : 'Working') : state === 'queued' ? 'Input queued' : 'Waiting for approval';
+    const label = busy ? (shown ? activityLabel(shown) : 'Working') : state === 'queued' ? 'Input queued' : 'Waiting for approval';
     body = (
       <>
         {lead}
@@ -454,7 +458,7 @@ export function ActivityLine({
   return (
     <li>
       <div class="live-agents-row" role="status" aria-live="polite">
-        <span class={`pulse-dot live-agents-dot ${state === 'running' ? '' : 'live-agents-dot-still'}`} aria-hidden="true" />
+        <span class={`pulse-dot live-agents-dot ${busy ? '' : 'live-agents-dot-still'}`} aria-hidden="true" />
         <span class={`live-agents-what${tone}`}>{body}</span>
         <span class="live-agents-stats">{right}</span>
         {onBackground && callId && foreground?.includes(callId) && (

@@ -720,13 +720,18 @@ pub struct AddWorkspaceRules {
 /// `POST /api/sessions/{id}/secrets` (since SPEC 0.147, §6): a secret or an ssh key for the
 /// session's running agent, passed to its worker in `secret.put` and kept by the hub nowhere.
 /// `request_id` answers the agent's `hqc_secret` (its `kind` and `name` must be the
-/// request's). Unknown fields are refused, so a misspelt `remember` is not a silent no.
+/// request's). Exactly one of `value` and `vault` (the Vaultwarden entry the worker reads the
+/// value from). Unknown fields are refused, so a misspelt `remember` is not a
+/// silent no.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretRequest {
     pub kind: crate::frame::SecretKind,
     pub name: String,
-    pub value: crate::frame::SecretValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<crate::frame::SecretValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passphrase: Option<crate::frame::SecretValue>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -741,6 +746,7 @@ impl std::fmt::Debug for SecretRequest {
             .field("kind", &self.kind)
             .field("name", &self.name)
             .field("value", &self.value)
+            .field("vault", &self.vault)
             .field("remember", &self.remember)
             .field("request_id", &self.request_id)
             .finish_non_exhaustive()
@@ -1510,6 +1516,11 @@ mod tests {
             serde_json::json!({"kind": "secret", "name": "a", "value": "b", "remeber": true})
         )
         .is_err());
+        let sv: SecretRequest = serde_json::from_value(
+            serde_json::json!({"kind": "secret", "name": "a", "vault": "home-wifi"}),
+        )
+        .unwrap();
+        assert!(sv.value.is_none() && sv.vault.as_deref() == Some("home-wifi"));
         let g: SecretGiven = roundtrip(include_str!("../examples/wire/api.secret.json"));
         assert!(g.note.contains("$HQC_SECRETS/WIFI_PASS") && !g.remembered);
         roundtrip::<WorkspaceKeyList>(include_str!("../examples/wire/api.workspace.keys.json"));

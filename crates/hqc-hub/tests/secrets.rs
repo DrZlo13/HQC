@@ -14,12 +14,30 @@ const VALUE: &str = "hunter2-wifi-value";
 /// A worker whose `hello` has `session_secrets: secrets`, a session in its workspace started
 /// (`session.start` acked): `(worker, session id, session token, workspace id)`.
 async fn session(hub: &TestHub, secrets: bool) -> (FakeWorker, String, String, String) {
+    session_with(hub, secrets, false).await
+}
+
+/// [`session`] with `capabilities.vault: vault` in the worker's `hello` (a worker that reads
+/// Vaultwarden through `rbw`).
+async fn session_with(
+    hub: &TestHub,
+    secrets: bool,
+    vault: bool,
+) -> (FakeWorker, String, String, String) {
     let (_, token) = hub.enroll("home-mac").await;
     let mut w = FakeWorker::connect(hub, &token)
         .await
         .expect("worker connect");
-    w.hello_with(WS_PATH, hub.boot_id, json!({ "session_secrets": secrets }))
-        .await;
+    let mut capabilities = json!({"claude_code": {"version": "2.1.307"}, "acp_agents": []});
+    if vault {
+        capabilities["vault"] = json!(true);
+    }
+    w.hello_with(
+        WS_PATH,
+        hub.boot_id,
+        json!({ "session_secrets": secrets, "capabilities": capabilities }),
+    )
+    .await;
     let pid = hub.personal_project().await;
     let (s, ws) = hub.add_workspace(&mut w, &pid, WS_PATH).await;
     assert_eq!(s, 201, "{ws}");
@@ -376,6 +394,170 @@ async fn hqc_secret_waits_for_the_owner() {
         )
         .await;
     assert_eq!(s, 409, "a worker's request is not one for a secret");
+    hub.finish().await;
+}
+
+/// The vault: the agent names an entry, the card shows it only where the worker reads
+/// Vaultwarden, the owner gives the entry (never a value) and the worker reads it.
+#[tokio::test]
+async fn a_secret_is_read_from_the_vault_by_the_worker() {
+    // A worker that reads the vault: the card carries the entry, the give passes it on.
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, _) = session_with(&hub, true, true).await;
+    let call = |rid: &str, args: Value| json!({"request_id": rid, "session_token": token, "tool": "hqc_secret", "args": args});
+    let id = w
+        .send(
+            "mcp.call",
+            call(
+                "r-bad",
+                json!({"name": "A", "purpose": "the router", "vault": "a\nb"}),
+            ),
+        )
+        .await;
+    let r = next_of(&mut w, "mcp.result").await;
+    assert_eq!(
+        (r["id"].as_str(), r["payload"]["error"]["code"].as_str()),
+        (Some(id.as_str()), Some("invalid_args"))
+    );
+    let rid = Uuid::now_v7().to_string();
+    w.send(
+        "mcp.call",
+        call(
+            &rid,
+            json!({"name": "WIFI_PASS", "purpose": "the camera's Wi-Fi", "vault": "home-wifi"}),
+        ),
+    )
+    .await;
+    w.expect("ack").await;
+    let evs = hub
+        .wait_events(&sid, "the card", |e| {
+            e.iter().any(|e| e["type"] == "approval.request")
+        })
+        .await;
+    let card = evs
+        .iter()
+        .find(|e| e["type"] == "approval.request")
+        .unwrap();
+    assert_eq!(
+        card["payload"]["secret"],
+        json!({"name": "WIFI_PASS", "kind": "secret", "vault": "home-wifi"})
+    );
+
+    let url = format!("/api/sessions/{sid}/secrets");
+    // Both or neither of value and vault, a bad entry: 400 before the worker.
+    for bad in [
+        json!({"kind": "secret", "name": "WIFI_PASS", "value": VALUE, "vault": "home-wifi", "request_id": rid}),
+        json!({"kind": "secret", "name": "WIFI_PASS", "request_id": rid}),
+        json!({"kind": "secret", "name": "WIFI_PASS", "vault": "", "request_id": rid}),
+        json!({"kind": "secret", "name": "WIFI_PASS", "vault": "a\u{202E}b", "request_id": rid}),
+        json!({"kind": "secret", "name": "WIFI_PASS", "vault": "x".repeat(201), "request_id": rid}),
+    ] {
+        let (s, v) = hub.post(&url, bad.clone()).await;
+        assert_eq!(s, 400, "{bad}: {v}");
+    }
+    w.expect_silence(std::time::Duration::from_millis(200))
+        .await;
+
+    // The worker refuses (locked vault): 422 with its reason, the request stays open.
+    let locked = json!({"code": "invalid_frame", "retryable": false, "message": "Vaultwarden is locked on this machine: unlock rbw here, or type the value"});
+    let (s, v) = {
+        let req = hub.post(
+            &url,
+            json!({"kind": "secret", "name": "WIFI_PASS", "vault": "home-wifi", "request_id": rid}),
+        );
+        tokio::pin!(req);
+        let f = tokio::select! {
+            _ = &mut req => panic!("answered before secret.put"),
+            f = next_of(&mut w, "secret.put") => f,
+        };
+        w.reply(&f["id"], "error", locked).await;
+        req.await
+    };
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (422, Some("secret_refused")),
+        "{v}"
+    );
+    assert!(v["message"].as_str().unwrap().contains("locked"), "{v}");
+    let (_, open) = hub.get("/api/requests").await;
+    assert!(open.to_string().contains(&rid), "still open: {open}");
+
+    // Given: the worker got the entry and no value, the feed names the entry, the call closes.
+    let ((s, v), f) = while_answering(
+        &mut w,
+        "secret.put",
+        outcome(true),
+        hub.post(
+            &url,
+            json!({"kind": "secret", "name": "WIFI_PASS", "vault": "home-wifi", "request_id": rid}),
+        ),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(f["payload"]["vault"], "home-wifi", "{f}");
+    assert!(f["payload"].get("value").is_none(), "{f}");
+    let r = next_of(&mut w, "mcp.result").await;
+    assert_eq!(r["payload"]["request_id"], rid.as_str());
+    assert_eq!(
+        r["payload"]["result"]["path"], "$HQC_SECRETS/WIFI_PASS",
+        "{r}"
+    );
+    w.reply(&r["id"], "ack", json!({})).await;
+    let given = hub
+        .wait_events(&sid, "secret_given", |e| {
+            e.iter().any(|e| e["payload"]["code"] == "secret_given")
+        })
+        .await;
+    let line = given
+        .iter()
+        .find(|e| e["payload"]["code"] == "secret_given")
+        .unwrap();
+    assert_eq!(
+        line["payload"]["text"],
+        "Secret WIFI_PASS given from Vaultwarden entry home-wifi"
+    );
+    let (_, open) = hub.get("/api/requests").await;
+    assert!(!open.to_string().contains(&rid), "closed: {open}");
+    hub.finish().await;
+
+    // A worker that does not read the vault: the entry is dropped from the card, a give with
+    // one is 409 and sends nothing, a typed value goes as before.
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, _) = session_with(&hub, true, false).await;
+    let rid = Uuid::now_v7().to_string();
+    w.send(
+        "mcp.call",
+        json!({"request_id": rid, "session_token": token, "tool": "hqc_secret",
+               "args": {"name": "WIFI_PASS", "purpose": "the camera's Wi-Fi", "vault": "home-wifi"}}),
+    )
+    .await;
+    w.expect("ack").await;
+    let evs = hub
+        .wait_events(&sid, "the card", |e| {
+            e.iter().any(|e| e["type"] == "approval.request")
+        })
+        .await;
+    let card = evs
+        .iter()
+        .find(|e| e["type"] == "approval.request")
+        .unwrap();
+    assert_eq!(
+        card["payload"]["secret"],
+        json!({"name": "WIFI_PASS", "kind": "secret"})
+    );
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{sid}/secrets"),
+            json!({"kind": "secret", "name": "WIFI_PASS", "vault": "home-wifi", "request_id": rid}),
+        )
+        .await;
+    assert_eq!((s, v["error"].as_str()), (409, Some("unavailable")), "{v}");
+    assert!(
+        v["message"].as_str().unwrap().contains("Vaultwarden"),
+        "{v}"
+    );
+    w.expect_silence(std::time::Duration::from_millis(200))
+        .await;
     hub.finish().await;
 }
 

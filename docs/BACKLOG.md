@@ -61,8 +61,6 @@ First:
 - How full the context window is, before the auto-compaction (T3 Code, Orca; Claude Code:
   `get_context_usage`).
 - The prompt-cache timer: how long until Claude's cache of the session expires (Orca).
-- A secret from Bitwarden (Vaultwarden): the `hqc_secret` card (SPEC 0.147) takes the secret from
-  Bitwarden instead of a typed value, as T3 Code's card takes a 1Password reference.
 - "Send now" (Claude Code: `priority: "now"` with `origin: {kind: "human"}`): the CLI moves the
   running Bash, MCP call or subagent to the background and takes the message into the same turn,
   without waiting for the call to end. `origin` matters by itself too: without it the message is

@@ -8242,6 +8242,8 @@ button.ps-look {
 }
 .secret-card .secret-form {
   margin-top: 10px;
+  /* Inset as the card's head is (.perm-head), not flush with its border. */
+  padding: 0 16px 14px;
 }
 .secret-row {
   display: flex;
@@ -8252,6 +8254,11 @@ button.ps-look {
 .secret-kind {
   flex: none;
   width: 180px;
+}
+.secret-source {
+  align-self: flex-start;
+  width: 220px;
+  max-width: 100%;
 }
 .secret-name {
   flex: 1 1 140px;

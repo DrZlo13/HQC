@@ -967,6 +967,14 @@ device's `authorized_keys`). Only sessions of the worker's owner that are not re
 - The hub passes a secret through and stores it nowhere. What the agent does with a secret it
   has is up to it: give one only to a session you see asking for a reason you know.
 - Off (the default): the button is not shown, and the worker refuses `secret.put`.
+- A secret from Vaultwarden (since 0.216): with `vault = true` beside `session_secrets` and
+  [`rbw`](https://github.com/doy/rbw) 1.15 or newer (`rbw --version`) on the worker's `PATH`,
+  signed in and unlocked, an agent that knows the entry names it in `hqc_secret` (its exact name
+  or its id); the card shows it, you confirm or change it, and the worker reads the value with
+  `rbw` itself — it never passes the hub. The worker reads what that `rbw` account can, and
+  while `rbw` is unlocked the agents' own commands on that machine can read it as well, without
+  a card. When it is locked the card says so and stays open: unlock `rbw` on that machine, or
+  type the value.
 
 **The browser in a session** (SPEC §14, since 0.148). To let an agent look through pages in
 your accounts (listings on eBay, Amazon, AliExpress) in this machine's Chrome:

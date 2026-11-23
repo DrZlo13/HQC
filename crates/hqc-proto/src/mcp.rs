@@ -512,7 +512,11 @@ pub const TOOLS: &[Tool] = &[
             for as long as your process runs: use it inside a command, as \
             \"$(cat \"$HQC_SECRETS/<name>\")\", never print it, echo it or write it into a reply \
             or a file of the repository. A key is loaded into your ssh-agent (ssh and git use \
-            it); the user may keep it for this workspace. Returns `{note, path?, fingerprint?}`. \
+            it); the user may keep it for this workspace. Where the worker reads Vaultwarden \
+            (Bitwarden) and you know the entry that holds it, pass it as `vault`: the card shows \
+            it for the user to confirm or change and the worker reads the value itself; \
+            elsewhere `vault` is dropped and the user types the value. \
+            Returns `{note, path?, fingerprint?}`. \
             Ask only for what the task needs, once: a secret you were given is still there.",
         input_schema: || {
             json!({
@@ -530,6 +534,10 @@ pub const TOOLS: &[Tool] = &[
                         "type": "string",
                         "enum": ["secret", "ssh_key"],
                         "description": "secret (a password, a token) or ssh_key (a private key); secret when absent."
+                    },
+                    "vault": {
+                        "type": "string",
+                        "description": "The Vaultwarden (Bitwarden) entry that holds it: its exact name or its id."
                     }
                 },
                 "required": ["name", "purpose"],

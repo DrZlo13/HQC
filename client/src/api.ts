@@ -198,7 +198,10 @@ export interface ClaudeLoginDone {
 export interface SecretFields {
   kind: 'secret' | 'ssh_key';
   name: string;
-  value: string;
+  /** The value typed, or: */
+  value?: string;
+  /** the Vaultwarden entry the worker reads it from itself (exactly one of the two). */
+  vault?: string;
   passphrase?: string;
   remember?: boolean;
 }
@@ -729,7 +732,9 @@ export class Api {
   /** A secret or an ssh key for the session's running agent (SPEC 0.147); `requestId`
    *  answers the agent's `hqc_secret`. Only the fields go: the hub refuses others. */
   async giveSecret(sessionId: string, f: SecretFields, requestId?: string): Promise<SecretGiven> {
-    const body: Record<string, unknown> = { kind: f.kind, name: f.name, value: f.value };
+    const body: Record<string, unknown> = { kind: f.kind, name: f.name };
+    if (f.value !== undefined) body.value = f.value;
+    if (f.vault !== undefined) body.vault = f.vault;
     if (f.kind === 'ssh_key') {
       if (f.passphrase) body.passphrase = f.passphrase;
       if (f.remember) body.remember = true;

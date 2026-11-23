@@ -287,6 +287,9 @@ export interface ApprovalRequest {
 export interface SecretAsked {
   name: string;
   kind: 'secret' | 'ssh_key';
+  /** The Vaultwarden entry the agent proposes; only where the worker reads Vaultwarden. The
+   *  owner confirms or changes it on the card. */
+  vault?: string;
 }
 /** The subagent that asks: its `task_id`, as `subagents.live` names it, and its task. */
 export interface RequestSubagent {
@@ -967,7 +970,10 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     const kind = strictEnum(p, 'kind', SECRET_PUT_KINDS);
     str(p, 'name');
     if (kind === 'ssh_keygen') {
-      if (present(p, 'value')) throw new ProtoError('secret.put: ssh_keygen takes no value');
+      if (present(p, 'value') || present(p, 'vault')) throw new ProtoError('secret.put: ssh_keygen takes no value');
+    } else if (present(p, 'vault')) {
+      if (present(p, 'value')) throw new ProtoError('secret.put: a value or a vault entry, not both');
+      str(p, 'vault');
     } else str(p, 'value');
     optStr(p, 'passphrase');
     optBool(p, 'remember');
@@ -1809,7 +1815,7 @@ export function parseWorkspaceRuleList(v: unknown): WorkspaceRule[] {
 }
 
 function parseSecretAsked(o: Obj): SecretAsked {
-  return { name: str(o, 'name'), kind: strictEnum(o, 'kind', ['secret', 'ssh_key'] as const) };
+  return { name: str(o, 'name'), kind: strictEnum(o, 'kind', ['secret', 'ssh_key'] as const), vault: optStr(o, 'vault') };
 }
 
 function parseSuggestions(o: Obj, key: string): RuleSuggestion[] {

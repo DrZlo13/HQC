@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.214, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.215, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -3352,12 +3352,13 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   path must lie inside the session's workspace and `allowed_roots`, as for `hqc_attach`; a folder
   is walked with its names sorted, every entry's canonical path must stay inside the folder and
   `allowed_roots` (a link pointing out is `invalid_args` naming it; a link to a folder up the
-  tree is skipped), only regular files and folders, at most 10 000 files of at most 500 MiB
-  together, each path at most 512 bytes (the hub's limits, §20); a folder without `index.html`
-  is `invalid_args`. One file becomes the archive of that file under its name. The zip is
-  deterministic — entries by path, deflated, one fixed time, mode 0644 — written to an unlinked
-  temporary file of mode 0600 and cut at the artifact limit (100 MB) while it is written
-  (`invalid_args`). The daemon uploads it (`PUT /worker/artifacts`, `kind: site`, §5.4) and only
+  tree is skipped), an entry named `.git` or `.hqc` (a folder or a file) is never packed, at any
+  depth inside the folder (the published path itself is not checked), only regular files and
+  folders, at most 10 000 files of at most 500 MiB together, each path at most 512 bytes (the
+  hub's limits, §20); a folder without `index.html` is `invalid_args`. One file becomes the
+  archive of that file under its name. The zip is deterministic — entries by path, deflated, one
+  fixed time, mode 0644 — written to an unlinked temporary file of mode 0600 and cut at the
+  artifact limit (100 MB) while it is written (`invalid_args`). The daemon uploads it (`PUT /worker/artifacts`, `kind: site`, §5.4) and only
   then sends the `mcp.call` with `{artifact_id, path, caption?}`
   (`hqc_proto::mcp::PublishCall`), `path` — the canonical path it packed. Without
   `HQC_PUBLISH_BASE` (§12) the hub answers `unavailable` before anything else. It accepts only an
@@ -3369,11 +3370,16 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   session's feed (§10.1), `author {kind: system}`, `tool: hqc_publish`, the description "The
   agent asks to publish <path> at a public link: anyone who has the link can open it, without
   signing in to hqc, until you unpublish it or delete this session." and on the next lines the
-  number of files and their size unpacked, then the first 50 names that are not hidden, every
-  hidden file (a name starting with `.`), every hidden folder as one line `<folder>/ (N
-  files)`, and "and N more" for the rest (`event.approval.request.publish.json`); options
-  `once` ("Publish") / `deny` ("Deny"). A session has at most one such request open: while that
-  of another call waits, the call is `unavailable` ("a publication already waits for the user's
+  number of files and their size unpacked, then the files in three groups, each in the
+  archive's order: every file whose last component looks like a secret, wherever it is, also
+  inside a hidden folder (case-insensitively: starting with `.env`, `credentials`, `id_rsa`,
+  `id_dsa`, `id_ecdsa` or `id_ed25519`, or ending with `.pem`, `.key`, `.p12` or `.pfx`); every
+  other hidden file (a name starting with `.`) and every hidden folder as one line `<folder>/ (N
+  files)`, a secret in it counted there too; the first 50 of the other files; and "and N more"
+  for the files on no line (`event.approval.request.publish.json`). What matters most comes
+  first, also where the card is cut to a few lines (the macOS app's notification, which keeps
+  this order). Options `once` ("Publish") / `deny` ("Deny"). A session has at most one such
+  request open: while that of another call waits, the call is `unavailable` ("a publication already waits for the user's
   answer"). The call is deferred as that of `hqc_move`: `ack` now, the `mcp.result` a frame of
   its own later, kept in the request until the worker acknowledges it; the runtime's tool
   timeout, `mcp.cancel`, stop, archiving, the agent stopping and a worker restart cancel it as a
@@ -7153,7 +7159,7 @@ send from a session in a lower mode (§7.1).
   | `files` of `hqc_send`/`hqc_ask` (§7, since 0.46) | at most 32; each path by the rules of `hqc_attach` (above), on the sender's worker | `error invalid_args` / `not_found` from the worker, no call is sent |
   | `artifact_ids` of `hqc_send`/`hqc_ask` on the hub | at most 32, each an artifact of the owner linked to the calling session | `error invalid_args` / `not_found`, nothing is stored |
   | files of an `hqc_ask` reply (§7.1) | at most 32, artifacts of the target's owner only; downloaded by the asking worker with the limits of an input (100 MB each, 500 MB per reply) | the rest left out (warn in the hub's log) / that file reported with an `error` |
-  | `hqc_publish` packing on the worker (§7, since 0.209) | at most 10 000 files, 500 MiB together, paths up to 512 bytes, only regular files and folders, every entry inside the folder and `allowed_roots` after resolving symlinks; the zip up to 100 MB | `error invalid_args`, nothing is uploaded |
+  | `hqc_publish` packing on the worker (§7, since 0.209) | at most 10 000 files, 500 MiB together, paths up to 512 bytes, only regular files and folders (entries named `.git` or `.hqc` are left out), every entry inside the folder and `allowed_roots` after resolving symlinks; the zip up to 100 MB | `error invalid_args`, nothing is uploaded |
   | `hqc_publish` archive on the hub (`hqc_proto::mcp::MAX_SITE_*`) | the file ends with its end record (no comment, not zip64) right after its central directory, whose records the hub walks itself before the zip reader opens it (and the reader must open that directory): at most 10 000, names up to 512 bytes, no extra field, no comment, stored or deflated; 500 MiB unpacked by the sizes the entries declare; names relative, without an empty, `.` or `..` component, a control character or a bidirectional control, each once (the records walked against the names the reader keeps); not encrypted, no links; `index.html` at the top or a single file; `path` 1–4096 bytes, showable | `error invalid_args`, no card |
   | open `hqc_publish` requests per session | 1 | `error unavailable` |
   | a published entry served (§12) | no more than the size its archive declares | the rest is not sent |
@@ -7222,6 +7228,19 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.214 → 0.215 (.git and .hqc are never published; the card names secrets first)
+§7, §20: the card of a publication could understate what goes public: it named the first 50
+files that are not hidden, so an `id_rsa` or a `credentials.json` past them was only in "and N
+more", and showed a hidden folder as one line, so a token in `.git/config` went unseen. The
+worker no longer packs an entry named `.git` or `.hqc`, at any depth inside a published folder
+(the published path itself is not checked); the tool's description says so. The card always
+names a file whose last component looks like a secret (`.env*`, `credentials*`, `id_rsa*`,
+`id_dsa*`, `id_ecdsa*`, `id_ed25519*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, any case), also past
+the first 50 and inside a hidden folder, and lists the files in three groups, each in the
+archive's order: the secrets, the other hidden files and the hidden folders, the first 50
+others. The macOS app's notification of a publication keeps this order instead of putting the
+hidden lines first.
 
 ### 0.213 → 0.214 (a move or a publication after a restart only on the owner's mark)
 §3 `move`, `publish`: a hub that stopped while it carried out an allowed move or publication

@@ -57,7 +57,8 @@ use crate::{
 pub const KIND: &str = "publish";
 /// The page a published folder opens with, and a path ending in `/` names.
 pub const INDEX: &str = "index.html";
-/// Files the owner's card names; the rest are counted.
+/// How many of the files that are neither hidden nor look like a secret the owner's card names;
+/// the rest are counted.
 pub const MAX_LISTED: usize = 50;
 /// Longest `path` of the call shown on the card, in bytes.
 const MAX_PATH: usize = 4096;
@@ -391,10 +392,32 @@ fn hidden_dir(name: &str) -> Option<&str> {
     None
 }
 
-/// The owner's card (SPEC §10.1): what is published, that the link is public, the files: the
-/// first [`MAX_LISTED`] that are not hidden, every hidden file (a name starting with `.`), and
-/// every hidden folder as one line with its count, so that a `.env` cannot hide in the count of
-/// the rest and a `.git` does not fill the card.
+/// Whether the last component of a path looks like a secret ([`card`] always names such a
+/// file): `.env*` (environment files), `credentials*` (credential files), `id_rsa*`, `id_dsa*`,
+/// `id_ecdsa*`, `id_ed25519*` (ssh private keys and their `.pub`), `*.pem`, `*.key` (keys and
+/// certificates), `*.p12`, `*.pfx` (key bundles); the case does not matter.
+fn looks_secret(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    const PREFIXES: [&str; 6] = [
+        ".env",
+        "credentials",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+    ];
+    const SUFFIXES: [&str; 4] = [".pem", ".key", ".p12", ".pfx"];
+    PREFIXES.iter().any(|p| name.starts_with(p)) || SUFFIXES.iter().any(|x| name.ends_with(x))
+}
+
+/// The owner's card (SPEC §10.1): what is published, that the link is public, the files, in
+/// three groups each in the archive's order: every file whose name looks like a secret
+/// ([`looks_secret`]), wherever it is, also inside a hidden folder; every other hidden file (a
+/// name starting with `.`) and every hidden folder as one line with its count (a secret in it
+/// counted there too); the first [`MAX_LISTED`] of the other files. A key cannot hide in the
+/// count of the rest, a `.git` does not fill the card, and what matters most comes first, also
+/// where the card is cut to a few lines (the macOS app's notification). "and N more" counts the
+/// files on no line.
 pub fn card(path: &str, site: &Site) -> String {
     let n = site.files.len();
     let mut d = format!(
@@ -404,35 +427,41 @@ pub fn card(path: &str, site: &Site) -> String {
         if n == 1 { "file" } else { "files" },
         size_text(site.unpacked)
     );
-    // A line per named file or per hidden folder (an index into `dirs`), in the archive's order.
+    // A line per named file or per hidden folder (an index into `dirs`).
     enum Line<'a> {
         File(&'a str),
         Dir(usize),
     }
-    let mut lines = Vec::new();
+    let (mut secrets, mut hidden, mut regular) = (Vec::new(), Vec::new(), Vec::new());
     let mut dirs: Vec<(&str, usize)> = Vec::new();
     let mut dir_line: HashMap<&str, usize> = HashMap::new();
-    let (mut regular, mut shown) = (0, 0);
+    let mut shown = 0;
     for (name, _) in &site.files {
         let name = name.as_str();
+        let last = name.rsplit('/').next().unwrap_or(name);
+        let secret = looks_secret(last);
+        if secret {
+            secrets.push(Line::File(name));
+        }
         if let Some(dir) = hidden_dir(name) {
             let i = *dir_line.entry(dir).or_insert_with(|| {
-                lines.push(Line::Dir(dirs.len()));
+                hidden.push(Line::Dir(dirs.len()));
                 dirs.push((dir, 0));
                 dirs.len() - 1
             });
             dirs[i].1 += 1;
-        } else if name.rsplit('/').next().is_some_and(|f| f.starts_with('.')) {
-            lines.push(Line::File(name));
-        } else if regular < MAX_LISTED {
-            regular += 1;
-            lines.push(Line::File(name));
+        } else if secret {
+            // Named among the secrets.
+        } else if last.starts_with('.') {
+            hidden.push(Line::File(name));
+        } else if regular.len() < MAX_LISTED {
+            regular.push(Line::File(name));
         } else {
             continue;
         }
         shown += 1;
     }
-    for line in &lines {
+    for line in secrets.iter().chain(&hidden).chain(&regular) {
         d.push('\n');
         match line {
             Line::File(name) => d.push_str(name),
@@ -1054,7 +1083,8 @@ mod tests {
         assert!(d.contains("\nf49.html\nand 10 more"), "{d}");
         assert!(!d.contains("f50.html"), "{d}");
         // Hidden files are named wherever they are, a hidden folder is one line with its count,
-        // and neither is counted in the rest.
+        // and neither is counted in the rest; a secret (`.env`) comes first, the hidden ones
+        // next, then the other files.
         let mut hidden = many.clone();
         hidden.files[3].0 = ".htaccess".into();
         hidden.files[55].0 = ".env".into();
@@ -1062,18 +1092,69 @@ mod tests {
         hidden.files[58].0 = "assets/.git/config".into();
         let d = card("/w/site", &hidden);
         assert!(
-            d.contains("\nf50.html\n.env\nassets/.git/ (2 files)\nand 6 more"),
+            d.contains(":\n.env\n.htaccess\nassets/.git/ (2 files)\nf0.html\n"),
             "{d}"
         );
-        assert!(
-            d.contains("\n.htaccess\n") && !d.contains("f55.html") && !d.contains("config"),
-            "{d}"
-        );
+        assert!(d.ends_with("\nf50.html\nand 6 more"), "{d}");
+        assert!(!d.contains("f55.html") && !d.contains("config"), "{d}");
         assert_eq!(hidden_dir("a/.b/.c"), Some("a/.b"));
         assert_eq!(hidden_dir("assets/.htaccess"), None);
         assert!(!card("/w/site", &many).contains(".env"));
         assert_eq!(size_text(1023), "1023 B");
         assert_eq!(size_text(1536), "1.5 KB");
+    }
+
+    #[test]
+    fn the_card_always_names_what_looks_like_a_secret() {
+        // Sixty regular files, then the secrets past the fiftieth name, one of them in a hidden
+        // folder of its own and one in a hidden folder next to another file.
+        let mut files: Vec<(String, u64)> = (0..60).map(|i| (format!("f{i:02}.html"), 1)).collect();
+        for name in [
+            "id_rsa",
+            "deploy/credentials.json",
+            "certs/server.PEM",
+            ".ssh/id_ed25519",
+            ".config/.env.local",
+            ".config/plain.txt",
+        ] {
+            files.push((name.into(), 1));
+        }
+        let site = Site {
+            files,
+            unpacked: 66,
+            entry: None,
+        };
+        let d = card("/w/site", &site);
+        // The secrets first, in the archive's order, then the hidden folders, then the first 50
+        // other files.
+        assert!(
+            d.contains(
+                "66 files, 66 B:\nid_rsa\ndeploy/credentials.json\ncerts/server.PEM\n\
+                 .ssh/id_ed25519\n.config/.env.local\n.ssh/ (1 file)\n.config/ (2 files)\n\
+                 f00.html\n"
+            ),
+            "{d}"
+        );
+        // Not named, not in a folder's line: f50..f59.
+        assert!(d.ends_with("\nf49.html\nand 10 more"), "{d}");
+        for (name, secret) in [
+            (".env", true),
+            (".ENV.production", true),
+            ("Credentials.JSON", true),
+            ("id_rsa.pub", true),
+            ("id_dsa", true),
+            ("id_ecdsa", true),
+            ("server.pem", true),
+            ("a.key", true),
+            ("a.p12", true),
+            ("a.pfx", true),
+            ("index.html", false),
+            ("keyboard.js", false),
+            ("environment.txt", false),
+            ("my_credentials", false),
+        ] {
+            assert_eq!(looks_secret(name), secret, "{name}");
+        }
     }
 
     #[test]

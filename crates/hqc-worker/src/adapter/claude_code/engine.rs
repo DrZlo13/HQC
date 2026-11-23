@@ -2985,6 +2985,7 @@ impl Core {
                 .map(|s| preview(s, limit))
         };
         let call_args = args_preview(&tool, &input);
+        let reason = field("decision_reason", REASON_LIMIT).or_else(|| ask_rule_reason(req, &tool));
         tracing::info!(session_id = %self.session_id, %tool, human_only, "approval requested");
         self.pending.insert(
             request_id.clone(),
@@ -3006,7 +3007,7 @@ impl Core {
             policy_hint,
             rule_suggestions,
             secret: None,
-            reason: field("decision_reason", REASON_LIMIT),
+            reason,
             display_name: field("display_name", DISPLAY_NAME_LIMIT),
             human_only,
             subagent: self.subagent_of(req),
@@ -3728,6 +3729,49 @@ fn describe(req: &Value, input: &Value, tool: &str) -> String {
         return preview(&format!("{tool} {}", compact(input)), ERROR_TEXT_LIMIT);
     }
     preview(&parts.join("\n"), PREVIEW_LIMIT)
+}
+
+/// Why the CLI asks when a `permissions.ask` rule caught the call (SPEC §8.1, since 0.217).
+/// Claude Code sends no `decision_reason` text for a rule, only `decision_reason_type: "rule"`
+/// and the rule's `decision_reason_rule_source` (checked live on 2.1.329, also in
+/// `bypassPermissions`); `matched_ask_rule`, when it comes, names the rule itself. `None` when
+/// no rule caught the call.
+fn ask_rule_reason(req: &Value, tool: &str) -> Option<String> {
+    let matched = &req["matched_ask_rule"];
+    if req["decision_reason_type"] != "rule" && !matched.is_object() {
+        return None;
+    }
+    // The CLI's own names of the sources; the settings files are named as well, so the owner
+    // knows where the rule lives.
+    let place = match matched["source"]
+        .as_str()
+        .or_else(|| req["decision_reason_rule_source"].as_str())
+    {
+        Some("userSettings") => "user settings (~/.claude/settings.json)",
+        Some("projectSettings") => "shared project settings (.claude/settings.json)",
+        Some("localSettings") => "project local settings (.claude/settings.local.json)",
+        Some("policySettings") => "enterprise managed settings",
+        Some("flagSettings") => "command line arguments",
+        Some("cliArg") => "a CLI argument",
+        Some("command") => "command configuration",
+        Some("session") => "the current session",
+        Some("toolsNarrowing") => "CLI tool narrowing",
+        Some("mcpServerPolicy") => "MCP server policy",
+        Some("hostCredential") => "cloud-session credential guard",
+        Some("mcpMount") => "Remote Control server mount",
+        Some(other) => other,
+        None => "Claude Code's settings",
+    };
+    let text = match matched["tool_name"].as_str() {
+        Some(name) => match matched["rule_content"].as_str() {
+            Some(content) => {
+                format!("The ask rule {name}({content}) in {place} requires approval for this call")
+            }
+            None => format!("The ask rule {name} in {place} requires approval for this call"),
+        },
+        None => format!("An ask rule for {tool} in {place} requires approval for this call"),
+    };
+    Some(preview(&text, REASON_LIMIT))
 }
 
 pub(crate) fn parse_questions(input: &Value) -> Option<(Vec<ClarifyQuestion>, Vec<String>)> {

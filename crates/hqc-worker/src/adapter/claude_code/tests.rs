@@ -2728,8 +2728,10 @@ fn approval_errors_and_restricted_always() {
     assert_eq!(ids, ["once", "session", "deny"]);
     assert!(core.answer_approval("r1", "bogus", None).is_err());
     assert!(core.answer_approval("nope", "once", None).is_err());
-    // `always` in restricted mode behaves as `session`: no updatedPermissions.
-    let w = writes(&core.answer_approval("r1", "always", None).unwrap());
+    // `always`, not offered in restricted mode, is refused and the request stays open.
+    assert!(core.answer_approval("r1", "always", None).is_err());
+    assert_eq!(core.session_rules(), 0);
+    let w = writes(&core.answer_approval("r1", "session", None).unwrap());
     assert!(w[0]["response"]["response"]
         .get("updatedPermissions")
         .is_none());
@@ -2967,6 +2969,24 @@ fn an_mcp_server_is_allowed_whole() {
         "requires_user_interaction": true}})
     .to_string();
     assert_eq!(approval_of(&core.on_line(&line)).0, ["once", "deny"]);
+    // An option the card did not offer is refused and the request stays open.
+    for option in ["session", "server_session", "server_always", "always"] {
+        assert!(core.answer_approval("h", option, None).is_err(), "{option}");
+    }
+    assert_eq!(core.session_rules(), 0);
+    assert!(core.answer_approval("h", "once", None).is_ok());
+    let mut core = with_folder(true);
+    ids(&mut core, "mcp__srv__one");
+    assert!(core.answer_approval("r", "server_always", None).is_err());
+    assert!(core.answer_approval("r", "server_session", None).is_ok());
+    // A name another server's tool could share (`hqc_`'s `x`, `a__b`'s `x`) offers no
+    // answer for the whole server.
+    let mut core = with_folder(false);
+    for tool in ["mcp__hqc___x", "mcp___a__x", "mcp__a__b__x"] {
+        assert_eq!(ids(&mut core, tool), ["once", "session", "deny"], "{tool}");
+        assert!(core.answer_approval("r", "server_session", None).is_err());
+        assert!(core.answer_approval("r", "deny", None).is_ok());
+    }
 
     let mut core = with_folder(false);
     ids(&mut core, "mcp__srv__one");

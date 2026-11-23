@@ -375,6 +375,8 @@ enum Pending {
         local_rules: Vec<Value>,
         /// Every `rules[]` entry of every `addRules` suggestion, for `session`.
         suggested: Vec<Value>,
+        /// The ids of the options the card offered: an answer with another one is refused.
+        offered: Vec<String>,
         /// The subagent that asked ([`agent_of`]); `None`: the main agent.
         agent_id: Option<String>,
     },
@@ -1224,14 +1226,21 @@ impl Core {
             .pending
             .remove(request_id)
             .ok_or_else(|| anyhow!("no open approval request {request_id}"))?;
-        let (tool, input, local_rules, suggested, agent_id) = match p {
+        let (tool, input, local_rules, suggested, offered, agent_id) = match p {
+            // Only an option the card offered: the hub checks the same against its stored
+            // payload, the worker does not rely on that.
+            Pending::Approval { ref offered, .. } if !offered.iter().any(|o| o == option_id) => {
+                self.pending.insert(request_id.into(), p);
+                bail!("approval option {option_id:?} was not offered");
+            }
             Pending::Approval {
                 tool,
                 input,
                 local_rules,
                 suggested,
+                offered,
                 agent_id,
-            } => (tool, input, local_rules, suggested, agent_id),
+            } => (tool, input, local_rules, suggested, offered, agent_id),
             Pending::Clarify { .. } if option_id == "deny" => {
                 return Ok(vec![Action::Write(deny(
                     request_id,
@@ -1246,7 +1255,7 @@ impl Core {
         // A background subagent's request outlives the main turn's `result` (`on_result`): its
         // "No" must not interrupt a turn that runs by then for something else.
         let foreground = ends_with_main_turn(&self.quiet_tasks, agent_id.as_deref());
-        let server = hqc_proto::rules::mcp_server(&tool).map(String::from);
+        let server = hqc_proto::rules::unambiguous_mcp_server(&tool).map(String::from);
         let resp = match option_id {
             "once" => allow(request_id, &input, None),
             // As the VS Code tab: "No" stops the turn, a text answer lets it go on.
@@ -1257,12 +1266,9 @@ impl Core {
                     deny_with(request_id, DENY_MESSAGE, foreground)
                 }
             },
-            "always" if !self.restricted && !local_rules.is_empty() => {
-                allow(request_id, &input, Some(local_rules))
-            }
-            // `always` without a local rule to write, or in restricted mode, is `session`
-            // (SPEC §8.1).
-            "session" | "always" => {
+            // Offered only with a local rule to write and not in restricted mode.
+            "always" => allow(request_id, &input, Some(local_rules)),
+            "session" => {
                 self.rules.add(&tool, &input, &suggested);
                 allow(request_id, &input, None)
             }
@@ -1285,6 +1291,7 @@ impl Core {
                         input,
                         local_rules,
                         suggested,
+                        offered,
                         agent_id,
                     },
                 );
@@ -3276,7 +3283,10 @@ impl Core {
                 ..option("always", "Always allow", ApprovalCanonical::Always)
             });
         }
-        if let Some(server) = hqc_proto::rules::mcp_server(&tool).filter(|_| !human_only) {
+        // Not for a server name another server's tools could share: the rule would cover both.
+        if let Some(server) =
+            hqc_proto::rules::unambiguous_mcp_server(&tool).filter(|_| !human_only)
+        {
             options.push(option(
                 OPTION_SERVER_SESSION,
                 &format!("Allow all {server} tools for this session"),
@@ -3309,6 +3319,7 @@ impl Core {
                 input,
                 local_rules,
                 suggested,
+                offered: options.iter().map(|o| o.id.clone()).collect(),
                 agent_id: agent_of(req),
             },
         );

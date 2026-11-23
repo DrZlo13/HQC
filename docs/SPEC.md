@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.213, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.214, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -526,13 +526,14 @@ turn}` (the folder, the call's `project`, the chain of the call's turn, §7.1), 
 `result` — the `mcp.result` frame once the move was carried out or refused, the owner denied it
 or the hub cancelled the request. An allowed move closes the row first, without a `result`, and
 fills it in when the move is done. On start, before it serves anything, the hub finds every
-such row closed without a `result` whose session's feed has the owner's `approval.response`
-with `once` (the previous process stopped while it carried the move out; a row a cancellation
-closed without a frame has no such answer), keeps them in memory by the row's `worker_id`, and
-carries each out once that worker sends `hello`, when the move can be done; rows of this
-process are never among them. A hub that failed to store the result carries the move out again
-at once. Either way a move already done answers as a repeat, and the input after it is stored
-once (§7).
+such row closed without a `result` that carries the owner's mark (the previous process stopped
+while it carried the move out; the owner's `once` closes the row and puts `allowed_by`, the
+owner's id, into its `payload`, and a row a cancellation closed without a frame has no mark; the
+session's feed is not consulted, a worker's own approval may reuse the request id), keeps them
+in memory by the row's `worker_id`, and carries each out once that worker sends `hello`, when
+the move can be done; rows of this process are never among them. A hub that failed to store the
+result carries the move out again at once. Either way a move already done answers as a repeat,
+and the input after it is stored once (§7).
 
 A `follow` (since 0.95) is a row of the session whose transcript is continued in a workspace of
 another environment, waiting for the owner's answer (§9.2, §10.1): `request_id` — derived from
@@ -558,9 +559,9 @@ session's worker, `payload` — the hub's `approval.request` plus `publish: {art
 entry}` (`entry` — the name of the one file of an archive of a file, else null), no
 `expires_at`, `result` — the `mcp.result` frame. An allowed publication closes the row first,
 without a `result`, and fills it in once published. On start, before it serves anything, the
-hub carries out at once every such row closed without a `result` whose session's feed has the
-owner's `once` (a publication needs no worker); the result goes to the worker when it is
-connected, or after its `hello`. A publication done before the stop answers from its
+hub carries out at once every such row closed without a `result` that carries the owner's mark
+`allowed_by`, as a `move` does (a publication needs no worker); the result goes to the worker
+when it is connected, or after its `hello`. A publication done before the stop answers from its
 `attachment` with the link the artifact has then.
 
 ### ScheduledMessage
@@ -7221,6 +7222,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.213 → 0.214 (a move or a publication after a restart only on the owner's mark)
+§3 `move`, `publish`: a hub that stopped while it carried out an allowed move or publication
+took, on start, any `approval.response` of the session with the call's `request_id` and `once`
+as the owner's leave, the hub's own `by: auto` included; a worker that reused the call's request
+id for an approval of its own and then cancelled the call had it carried out at the next start.
+The owner's `once` now closes the row and puts `allowed_by` (the owner's id) into its `payload`
+in one update, and only rows with the mark are carried out after a restart; the feed is not
+consulted. A row an older hub closed allowed has no mark and is not carried out after the
+upgrade.
 
 ### 0.212 → 0.213 (all tools of an MCP server in one answer)
 §10.1, §8.1, §4: the card of an MCP tool call offers "Allow all <server> tools for this session"

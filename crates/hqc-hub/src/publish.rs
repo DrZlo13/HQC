@@ -548,9 +548,10 @@ pub fn allowed(app: &AppState, p: PendingRow) {
 }
 
 /// On hub start, before it serves anything (SPEC §3 PendingRequest): the publications the owner
-/// allowed whose result the previous process did not store are carried out again at once
-/// ([`allowed`]); one done before the stop answers as a repeat. The result reaches the worker
-/// when it is connected, or after its `hello`.
+/// allowed (the request carries the owner's mark, [`db::close_allowed`]) whose result the
+/// previous process did not store are carried out again at once ([`allowed`]); one done before
+/// the stop answers as a repeat. The result reaches the worker when it is connected, or after
+/// its `hello`.
 pub async fn left_on_start(app: &AppState) {
     let rows = match db::allowed_without_result(&app.db, KIND).await {
         Ok(rows) => rows,

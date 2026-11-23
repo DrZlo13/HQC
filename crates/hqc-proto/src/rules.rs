@@ -30,6 +30,15 @@ pub enum AllowRule {
     BashPrefix(Vec<String>),
 }
 
+/// The server of an MCP tool `mcp__<server>__<tool>`: the part between `mcp__` and the next
+/// `__`.
+pub fn mcp_server(tool: &str) -> Option<&str> {
+    tool.strip_prefix("mcp__")?
+        .split_once("__")
+        .map(|(server, _)| server)
+        .filter(|s| !s.is_empty())
+}
+
 fn word_char(c: char) -> bool {
     c.is_alphanumeric() || "-_./=+,@%:~".contains(c)
 }
@@ -47,7 +56,9 @@ pub fn parse_allow_rule(rule: &str) -> Result<AllowRule, String> {
     }
     let Some((name, rest)) = rule.split_once('(') else {
         if !rule.starts_with(|c: char| c.is_ascii_alphabetic())
-            || !rule.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !rule
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         {
             return Err(
                 "not a valid rule: use Bash(command *), a tool name like Edit, or mcp__server"
@@ -115,6 +126,11 @@ mod tests {
             parse_allow_rule("mcp__hqc"),
             Ok(AllowRule::Tool("mcp__hqc".into()))
         );
+        // Claude Code's server names are letters, digits, `_` and `-`.
+        assert_eq!(
+            parse_allow_rule("mcp__claude-in-chrome"),
+            Ok(AllowRule::Tool("mcp__claude-in-chrome".into()))
+        );
         assert!(parse_allow_rule("Bash(./tools/conv.py --out=x *)").is_ok());
         for bad in [
             "",
@@ -137,7 +153,7 @@ mod tests {
             "WebFetch(domain:x)",
             " Edit",
             "1Tool",
-            "mcp__srv-x",
+            "mcp__srv.x",
         ] {
             assert!(parse_allow_rule(bad).is_err(), "{bad:?}");
         }

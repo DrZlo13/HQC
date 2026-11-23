@@ -3,7 +3,7 @@
 A native iPhone and iPad client for the hub, in Swift and SwiftUI with the iOS 26 Liquid Glass
 design. It covers what you do with hqc day to day, against the hub's REST API and `/api/ws` as
 the web client does (SPEC §6), plus two hub routes made for it: sign-in through the system
-browser and Apple push (SPEC 0.214).
+browser and Apple push (SPEC 0.215).
 
 ## What it does
 

@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::Utc;
 use hqc_proto::{
     api::{OpenRequest, WaitingSession},
-    event::{ApprovalOption, CancelReason, ClarifyAction, ClarifyAnswer},
+    event::{ApprovalOption, CancelReason, ClarifyAction, ClarifyAnswer, OPTION_SERVER_ALWAYS},
     frame::{worker_approval, WorkerApprovalRequest},
 };
 use serde::Deserialize;
@@ -136,10 +136,17 @@ pub async fn answer(
                     "unknown option `{option_id}`"
                 )));
             };
+            let message = answer_message(body.message, &option)?;
+            // The folder rule is stored before the answer goes on: a rule the hub did not
+            // store would leave the owner asked again.
+            if option_id == OPTION_SERVER_ALWAYS {
+                let tool = p.payload["tool"].as_str().unwrap_or_default();
+                crate::rules::allow_server(app, user, s, tool).await?;
+            }
             let mut frame =
                 json!({"session_id": s.id, "request_id": request_id, "option_id": option_id});
             let mut event = json!({"request_id": request_id, "option_id": option_id, "by": user.id.to_string()});
-            if let Some(m) = answer_message(body.message, &option)? {
+            if let Some(m) = message {
                 frame["message"] = json!(m);
                 event["message"] = json!(m);
             }

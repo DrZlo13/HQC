@@ -184,6 +184,7 @@ use hqc_proto::event::{
     AnswerInput, ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
     ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, GrantPlace, LiveKind,
     LiveSubagent, OptionGrant, RequestSubagent, SessionState, TaskUsage, MODEL_NOT_SWITCHED,
+    OPTION_SERVER_ALWAYS, OPTION_SERVER_SESSION,
 };
 use hqc_proto::frame::{Activity, LeftoverCommand, PermissionMode, SessionInput, SlashCommand};
 use serde_json::{json, Value};
@@ -1081,6 +1082,7 @@ impl Core {
         // A background subagent's request outlives the main turn's `result` (`on_result`): its
         // "No" must not interrupt a turn that runs by then for something else.
         let foreground = ends_with_main_turn(&self.quiet_tasks, agent_id.as_deref());
+        let server = hqc_proto::rules::mcp_server(&tool).map(String::from);
         let resp = match option_id {
             "once" => allow(request_id, &input, None),
             // As the VS Code tab: "No" stops the turn, a text answer lets it go on.
@@ -1098,6 +1100,17 @@ impl Core {
             // (SPEC §8.1).
             "session" | "always" => {
                 self.rules.add(&tool, &input, &suggested);
+                allow(request_id, &input, None)
+            }
+            // All tools of the call's MCP server; for `server_always` the hub adds the
+            // folder rule `mcp__<server>` before it forwards the answer, and the session
+            // rule covers the calls until the worker has that list. The session rule lives
+            // as long as the process: a folder rule deleted later still allows the server
+            // in this session until it restarts.
+            OPTION_SERVER_SESSION | OPTION_SERVER_ALWAYS if server.is_some() => {
+                if let Some(server) = &server {
+                    self.rules.add_server(server);
+                }
                 allow(request_id, &input, None)
             }
             other => {
@@ -2947,6 +2960,20 @@ impl Core {
                 }),
                 ..option("always", "Always allow", ApprovalCanonical::Always)
             });
+        }
+        if let Some(server) = hqc_proto::rules::mcp_server(&tool).filter(|_| !human_only) {
+            options.push(option(
+                OPTION_SERVER_SESSION,
+                &format!("Allow all {server} tools for this session"),
+                ApprovalCanonical::Session,
+            ));
+            if self.folder.is_some() && !self.restricted {
+                options.push(option(
+                    OPTION_SERVER_ALWAYS,
+                    &format!("Always allow all {server} tools in this folder"),
+                    ApprovalCanonical::Always,
+                ));
+            }
         }
         options.push(option("deny", "Deny", ApprovalCanonical::Deny));
 

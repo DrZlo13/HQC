@@ -121,7 +121,9 @@ function plain(tokens: Token[] | undefined, sep: string): string {
     .join(sep);
 }
 
-export function Markdown({ text, class: cls }: { text: string; class?: string }) {
+/** `tail` (a message's buttons) ends the text: inside its last block that holds a line of text,
+ *  so that it stands at the end of the last line, else on a line of its own after the blocks. */
+export function Markdown({ text, class: cls, tail }: { text: string; class?: string; tail?: ComponentChildren }) {
   const tokens = useMemo(() => {
     try {
       return parseMarkdown(text);
@@ -131,8 +133,14 @@ export function Markdown({ text, class: cls }: { text: string; class?: string })
   }, [text]);
   const name = cls ? `md ${cls}` : 'md';
   // The lexer never failed on any input tried, but a chat must not break on one message.
-  if (!tokens) return <div class={`${name} md-plain`}>{text}</div>;
-  return <div class={name}>{blocks(tokens)}</div>;
+  if (!tokens)
+    return (
+      <div class={`${name} md-plain`}>
+        {text}
+        {tail}
+      </div>
+    );
+  return <div class={name}>{blocks(tokens, tail)}</div>;
 }
 
 const SAFE_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
@@ -147,24 +155,59 @@ export function safeHref(href: string): string | null {
   }
 }
 
-function blocks(tokens: Token[]): ComponentChildren[] {
-  return tokens.map((t, i) => (isMath(t) ? <TeX key={i} token={t} /> : block(t as MarkedToken, i)));
+/** Blocks that end in a line of text: `tail` goes into the last of them. */
+const TAILED = new Set(['paragraph', 'heading', 'text', 'list']);
+
+/** The blocks of `tokens`. `tail` is put at the end of the last block that holds a line of text
+ *  (a paragraph, a heading, a list's last item, recursively); when the last block is something
+ *  else (a code block, a table, a rule, a quote, a formula) or there is none, on a line of its
+ *  own after the blocks. */
+function blocks(tokens: Token[], tail?: ComponentChildren): ComponentChildren[] {
+  // A `def` shows nothing, as a blank line.
+  let last = tail ? tokens.length - 1 : -1;
+  while (last >= 0 && (tokens[last].type === 'space' || tokens[last].type === 'def')) last--;
+  const out = tokens.map((t, i) =>
+    isMath(t) ? <TeX key={i} token={t} /> : block(t as MarkedToken, i, i === last ? tail : undefined),
+  );
+  if (tail && (last < 0 || isMath(tokens[last]) || !TAILED.has(tokens[last].type))) {
+    out.push(
+      <div key="tail" class="msg-tail-line">
+        {tail}
+      </div>,
+    );
+  }
+  return out;
 }
 
-function block(t: MarkedToken, key: number): ComponentChildren {
+function block(t: MarkedToken, key: number, tail?: ComponentChildren): ComponentChildren {
   switch (t.type) {
     case 'space':
     case 'def':
       return null;
     case 'heading': {
       const H = `h${Math.min(Math.max(t.depth, 1), 6)}` as 'h1';
-      return <H key={key}>{inline(t.tokens)}</H>;
+      return (
+        <H key={key}>
+          {inline(t.tokens)}
+          {tail}
+        </H>
+      );
     }
     case 'paragraph':
-      return <p key={key}>{inline(t.tokens)}</p>;
+      return (
+        <p key={key}>
+          {inline(t.tokens)}
+          {tail}
+        </p>
+      );
     case 'text':
       // Block text of a tight list item.
-      return <span key={key}>{t.tokens ? inline(t.tokens) : decodeEntities(t.text)}</span>;
+      return (
+        <span key={key}>
+          {t.tokens ? inline(t.tokens) : decodeEntities(t.text)}
+          {tail}
+        </span>
+      );
     case 'code':
       return <CodeBlock key={key} code={t.text} lang={t.lang?.trim().split(/\s+/)[0] ?? ''} />;
     case 'blockquote':
@@ -172,7 +215,7 @@ function block(t: MarkedToken, key: number): ComponentChildren {
     case 'list': {
       const items = t.items.map((it, i) => (
         <li key={i} class={it.task ? 'md-task' : undefined}>
-          {blocks(it.tokens)}
+          {blocks(it.tokens, i === t.items.length - 1 ? tail : undefined)}
         </li>
       ));
       if (!t.ordered) return <ul key={key}>{items}</ul>;

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // The feed's look (SPEC §6, the feed): a message's time at the right end of its first line,
-// inside a bubble or a plate; its search, copy, quote and fork buttons, always shown, left of
-// the time; "joined the turn" on a message that went into the turn already running; the marks
+// inside a bubble or a plate; its search, copy, quote and fork buttons, always shown, at its
+// bottom right: the end of its usage line, else of its text's last line; "joined the turn" on a message that went into the turn already running; the marks
 // of the one-column gutter ("Settings" → "Feed" → "One column").
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -218,6 +218,30 @@ describe('the text of a clipped selection', () => {
     expect(got).toBe('Opening');
   });
 
+  it('takes exactly the text of a selection that runs to the end of a message, the buttons at the end of its last line left out', async () => {
+    const got = await quoted(
+      [agent(1, 'Para one.\n\nPara two.', 0, true), user(2, 'next')],
+      (r) => [textOf(r, 'Para two.'), 5],
+      (r) => [r.querySelector('.msg-user')!, 0],
+    );
+    expect(got).toBe('two.');
+    // Inside the last paragraph, up to the strip: the browser's own text (happy-dom joins the
+    // paragraphs without a break).
+    const inside = await quoted(
+      [agent(1, 'Para one.\n\nPara two.', 0, true)],
+      (r) => [textOf(r, 'Para one.'), 0],
+      (r) => [r.querySelector('.msg-agent p:last-child')!, 1],
+    );
+    expect(inside).toBe('Para one.Para two.');
+    // A list: the strip is in the last item.
+    const list = await quoted(
+      [agent(1, '- one\n- two', 0, true), user(2, 'next')],
+      (r) => [textOf(r, 'one'), 0],
+      (r) => [r.querySelector('.msg-user')!, 0],
+    );
+    expect(list).toBe('one\ntwo');
+  });
+
   it('keeps the Search slot in place, hidden, until the message holds a selection, then shows it', async () => {
     const timeline = new Timeline();
     timeline.apply(agent(1, 'All tests pass.', 0, true));
@@ -337,48 +361,126 @@ describe('the message buttons', () => {
     });
   const search = { webSearch: WEB_SEARCHES[0] };
 
-  it("are Search, Copy, Quote and the user's Fork in the time's line of a message, left of the time", async () => {
-    const fork = vi.fn();
-    show([user(1, 'Run the tests'), agent(2, 'All tests pass.', 1, true), answer(3)], { fork, quote: vi.fn(), ...search });
-    const strip = (sel: string) => root.querySelector(`${sel} > .msg-time`)!.firstElementChild!;
-    const mine = strip('.msg-user:not(.msg-answer) .msg-bubble');
-    expect(mine.className).toBe('msg-buttons');
-    expect(mine.nextElementSibling!.tagName).toBe('TIME');
-    expect(labels(mine)).toEqual(['Search in Google', 'Copy', 'Quote', 'Fork from here']);
-    const its = strip('.msg-agent');
-    expect(its.className).toBe('msg-buttons');
-    expect(its.nextElementSibling!.tagName).toBe('TIME');
-    expect(labels(its)).toEqual(['Search in Google', 'Copy', 'Quote']);
-    expect(labels(strip('.msg-answer .msg-bubble'))).toEqual(['Search in Google', 'Copy', 'Quote']);
-    expect(root.querySelector('.msg-actions')).toBeNull();
-    await act(async () => mine.querySelector<HTMLButtonElement>('.btn-fork')!.click());
-    expect(fork).toHaveBeenCalledWith(expect.objectContaining({ seq: 1 }));
+  for (const phone of [false, true]) {
+    const where = phone ? 'on a phone' : 'on a computer';
+    const maybePhone = () => phone && phoneMedia();
+
+    it(`are at the end of the text's last line of a message, not by its time, ${where}`, async () => {
+      maybePhone();
+      const fork = vi.fn();
+      show([user(1, 'Run the tests'), agent(2, 'All tests pass.', 1, true), answer(3)], { fork, quote: vi.fn(), ...search });
+      const mine = root.querySelector('.msg-user:not(.msg-answer) .msg-bubble > .msg-text')!.lastElementChild!;
+      expect(mine.className).toBe('msg-buttons msg-tail');
+      expect(labels(mine)).toEqual(['Search in Google', 'Copy', 'Quote', 'Fork from here']);
+      const its = root.querySelector('.msg-agent .md > p')!.lastElementChild!;
+      expect(its.className).toBe('msg-buttons msg-tail');
+      expect(labels(its)).toEqual(['Search in Google', 'Copy', 'Quote']);
+      expect(labels(root.querySelector('.msg-answer .msg-bubble > .msg-text')!.lastElementChild!)).toEqual(['Search in Google', 'Copy', 'Quote']);
+      // None by the time, nor under the message.
+      expect(root.querySelector('.msg-time .msg-buttons')).toBeNull();
+      expect(root.querySelector('.msg-actions')).toBeNull();
+      await act(async () => mine.querySelector<HTMLButtonElement>('.btn-fork')!.click());
+      expect(fork).toHaveBeenCalledWith(expect.objectContaining({ seq: 1 }));
+    });
+
+    it(`are at the right end of the usage line of an agent message that has one, ${where}`, () => {
+      maybePhone();
+      show([user(1, 'Run the tests'), agent(2, 'All tests pass.', 1, true), usage(3)], { quote: vi.fn(), ...search });
+      const meta = root.querySelector('.msg-agent > .meta')!;
+      expect(meta.lastElementChild!.className).toBe('msg-buttons');
+      expect(labels(meta.lastElementChild!)).toEqual(['Search in Google', 'Copy', 'Quote']);
+      // Not also at the end of the text, nor by the time.
+      expect(root.querySelectorAll('.msg-agent .msg-buttons')).toHaveLength(1);
+      expect(root.querySelector('.msg-agent .msg-time .msg-buttons')).toBeNull();
+      expect(root.querySelector('.msg-agent .msg-tail')).toBeNull();
+    });
+
+    it(`are by the time of a bubble that has no text, ${where}`, () => {
+      maybePhone();
+      show([user(1, '', (e) => (e.payload.artifact_ids = [id(50)]))], { fork: vi.fn(), ...search });
+      expect(root.querySelectorAll('.msg-buttons'), 'one strip, not wrapped twice').toHaveLength(1);
+      const strip = root.querySelector('.msg-bubble > .msg-time > .msg-buttons')!;
+      expect(strip.className).toBe('msg-buttons');
+      expect(strip.nextElementSibling!.tagName).toBe('TIME');
+      expect(root.querySelector('.msg-tail')).toBeNull();
+    });
+
+    it(`are at the end of the text of a message from another session and of a room post, none in their heads, ${where}`, () => {
+      maybePhone();
+      const peer = ev('event.peer.message', (e) => {
+        e.seq = 1;
+        e.event_id = id(1);
+        e.ts = at(1);
+        e.payload = { ...e.payload, text: 'Is the build green?' };
+      });
+      const room = ev('event.peer.message', (e) => {
+        e.seq = 2;
+        e.event_id = id(2);
+        e.ts = at(2);
+        e.payload = { ...e.payload, from_session_id: id(77), text: 'Opening.' };
+      });
+      show([peer, room], { quote: vi.fn(), ...search, roomAgent: (sid: string) => (sid === id(77) ? { index: 0, name: 'Optimist' } : undefined) });
+      for (const sel of ['.relay .md > p', '.room-post .md > p']) {
+        const tail = root.querySelector(sel)!.lastElementChild!;
+        expect(tail.className, sel).toBe('msg-buttons msg-tail');
+        expect(labels(tail), sel).toEqual(['Search in Google', 'Copy', 'Quote']);
+      }
+      expect(root.querySelector('.relay-head .msg-buttons, .room-post-head .msg-buttons')).toBeNull();
+    });
+  }
+
+  it('are at the end of an interim agent message\'s last line, inside the last list item, or on a line after a code block or a table', () => {
+    show([agent(1, 'Steps:\n\n- one\n- two', 0), agent(2, 'Run:\n\n```sh\nls\n```', 0), agent(3, 'Table:\n\n| a |\n|---|\n| 1 |', 0)], { quote: vi.fn(), ...search });
+    const [list, code, table] = [...root.querySelectorAll('.msg-agent')];
+    expect(list.querySelector('.md > ul > li:last-child')!.lastElementChild!.lastElementChild!.className).toBe('msg-buttons msg-tail');
+    expect(list.querySelectorAll('.msg-buttons')).toHaveLength(1);
+    for (const m of [code, table]) {
+      const line = m.querySelector('.md')!.lastElementChild!;
+      expect(line.className).toBe('msg-tail-line');
+      expect(line.firstElementChild!.className).toBe('msg-buttons msg-tail');
+      expect(m.querySelectorAll('.msg-buttons')).toHaveLength(1);
+    }
   });
 
-  it('are in the head of a message from another session, a reply to one and a room post, the same on a phone', () => {
-    const peer = ev('event.peer.message', (e) => {
-      e.seq = 1;
-      e.event_id = id(1);
-      e.ts = at(1);
-    });
-    const room = ev('event.peer.message', (e) => {
-      e.seq = 2;
-      e.event_id = id(2);
-      e.ts = at(2);
-      e.payload = { ...e.payload, from_session_id: id(77), text: 'Opening.' };
-    });
-    const strips = () => [...root.querySelectorAll('.relay-when .msg-buttons, .room-post-when .msg-buttons')].map(labels);
-    const over = { quote: vi.fn(), ...search, roomAgent: (sid: string) => (sid === id(77) ? { index: 0, name: 'Optimist' } : undefined) };
-    show([peer, room], over);
-    expect(strips()).toEqual([['Search in Google', 'Copy', 'Quote'], ['Search in Google', 'Copy', 'Quote']]);
-    phoneMedia();
-    try {
-      show([peer, room], over);
-      expect(strips()).toHaveLength(2);
-      expect(root.querySelector('.msg-actions')).toBeNull();
-    } finally {
-      vi.unstubAllGlobals();
+  it("are in a reasoning's summary while it is folded and at the end of its text, the summary's hidden by the CSS when it is open", () => {
+    show([
+      ev('event.agent.thinking', (e) => {
+        e.seq = 1;
+        e.event_id = id(1);
+        e.ts = at(1);
+        e.payload = { text: 'Idea one.' };
+      }),
+    ], { quote: vi.fn(), ...search });
+    const summary = root.querySelector('.thinking > summary')!;
+    expect(summary.lastElementChild!.className).toBe('msg-buttons');
+    const text = root.querySelector('.thinking-text')!;
+    expect(text.lastElementChild!.className).toBe('msg-buttons msg-tail');
+    expect(labels(text.lastElementChild!)).toEqual(['Search in Google', 'Copy', 'Quote']);
+  });
+
+  it("stand on the last line of a reasoning or a user's text that ends in blank lines, not below them", async () => {
+    const copied = vi.fn(async (_: string) => {});
+    vi.stubGlobal('isSecureContext', true);
+    Object.defineProperty(window.navigator, 'clipboard', { value: { writeText: copied }, configurable: true });
+    show([
+      user(1, 'Run the tests\n\n'),
+      ev('event.agent.thinking', (e) => {
+        e.seq = 2;
+        e.event_id = id(2);
+        e.ts = at(2);
+        e.payload = { text: 'Idea one.\n\n' };
+      }),
+    ], { quote: vi.fn(), ...search });
+    for (const sel of ['.msg-text', '.thinking-text']) {
+      const tail = root.querySelector(`${sel} > .msg-tail`)!;
+      expect(tail.previousSibling!.textContent, sel).toMatch(/\S$/);
     }
+    // Copy still gives the text as it came.
+    await act(async () => {
+      root.querySelector<HTMLButtonElement>('.msg-text button[aria-label="Copy"]')!.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(copied).toHaveBeenCalledWith('Run the tests\n\n');
   });
 
   it('are Copy alone where the chat has no input and no search', () => {
@@ -402,8 +504,25 @@ describe('the message buttons', () => {
     expect(CSS).toMatch(/\.thinking\[open\] summary > \.icon \{/);
     expect(CSS).not.toMatch(/\.thinking\[open\] summary \.icon/);
     expect(rule('.chat:not(.chat-phone) .msg-buttons .btn-copy-idle')).toMatch(/height: 18px;/);
-    expect(rule('.msg-agent > .meta .msg-buttons,\n.thinking summary .msg-buttons')).toMatch(/margin-left: auto;/);
+    expect(rule('.msg-agent > .meta .msg-buttons,\n.relay > .meta .msg-buttons,\n.thinking summary .msg-buttons')).toMatch(/margin-left: auto;/);
     expect(rule('.btn-msg-search-idle')).toMatch(/visibility: hidden;/);
+  });
+
+  it('styles.css floats the buttons at the end of the text to the right, a pixel less than a text line, in message roots that hold floats and text blocks that do not', () => {
+    const tail = rule('.msg-tail');
+    expect(tail).toMatch(/float: right;/);
+    expect(tail).toMatch(/height: calc\(var\(--feed-line\) - 1px\);/);
+    expect(tail).toMatch(/align-items: center;/);
+    expect(tail).toMatch(/margin: 0 0 0 12px;/);
+    // The roots hold the tail a full last line pushed down; the text blocks must not, or their
+    // first line would not wrap around the time.
+    expect(rule('.msg-agent,\n.msg-bubble,\n.thinking-text')).toMatch(/display: flow-root;/);
+    expect(CSS.match(/display: flow-root;/g), 'no other rule makes a block a formatting context of its own').toHaveLength(1);
+    // What follows a text starts under that tail; a bubble of attachments only is not moved.
+    expect(rule('.msg-text ~ .attachments,\n.msg-agent > .md ~ .relay-files')).toMatch(/clear: right;/);
+    expect(rule('.msg-tail-line')).toMatch(/justify-content: flex-end;/);
+    // A reasoning's summary holds them while folded, its text when open.
+    expect(rule('.thinking[open] summary .msg-buttons')).toMatch(/display: none;/);
   });
 
   it('leave no hover rules, no phone row, no margin column and no panel background behind', () => {
@@ -415,34 +534,6 @@ describe('the message buttons', () => {
     expect(CSS).not.toMatch(/\.btn-quote \{/);
     expect(rule('.msg-bubble > .msg-time')).not.toMatch(/position: relative;/);
     expect(CSS).not.toMatch(/\.msg-agent > \.msg-time \{/);
-  });
-
-  it("on a phone are at the end of the agent message's usage line, and not in its time line", () => {
-    phoneMedia();
-    try {
-      show([user(1, 'Run the tests'), agent(2, 'All tests pass.', 1, true), usage(3)], { quote: vi.fn(), ...search });
-      expect(root.querySelector('.msg-agent .msg-time .msg-buttons')).toBeNull();
-      const inUsage = root.querySelector('.msg-agent > .meta')!;
-      expect(labels(inUsage.querySelector('.msg-buttons')!)).toEqual(['Search in Google', 'Copy', 'Quote']);
-      expect(inUsage.lastElementChild!.className).toBe('msg-buttons');
-      expect(root.querySelector('.msg-agent > .msg-actions')).toBeNull();
-      // The user's message keeps them by its time.
-      expect(root.querySelector('.msg-user .msg-time .msg-buttons')).not.toBeNull();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it('on a phone are by the time of a message without a usage line, and of the user\'s and the answer', () => {
-    phoneMedia();
-    try {
-      show([user(1, 'Run the tests'), agent(2, 'All tests pass.', 1, true), answer(3)], { fork: vi.fn(), quote: vi.fn(), ...search });
-      for (const sel of ['.msg-user:not(.msg-answer) .msg-bubble', '.msg-agent', '.msg-answer .msg-bubble'])
-        expect(root.querySelector(`${sel} > .msg-time .msg-buttons`), sel).not.toBeNull();
-      expect(root.querySelector('.msg-actions')).toBeNull();
-    } finally {
-      vi.unstubAllGlobals();
-    }
   });
 
   it('add to quick messages where fork is: not on a message waiting for delivery or not delivered', () => {

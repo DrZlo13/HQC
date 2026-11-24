@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/ho
 import { ApiError, type SecretFields, type SecretGiven, type SessionPatch, type WorkerLimits } from '../api';
 import type { AppState } from '../app';
 import { ArtifactStore, formatSize, type LinkCache } from '../artifacts';
+import { copyText } from '../clipboard';
 import { HEIC_NAME, dataUrl, heicToJpeg } from '../heic';
 import { onBack } from '../nav';
 import { PERMISSION_MODES, type EventOf, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState, type SlashCommand } from '../proto';
@@ -22,6 +23,7 @@ import {
   IconAttach,
   IconBolt,
   IconChevronDown,
+  IconCopy,
   IconKey,
   IconBack,
   IconCode,
@@ -30,7 +32,9 @@ import {
   IconPanel,
   IconPause,
   IconPlay,
+  IconQuote,
   IconRename,
+  IconSearch,
   IconSend,
   IconStop,
 } from './icons';
@@ -38,7 +42,7 @@ import { MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatCost, f
 import { hasOpenTasks, LiveSubagents } from './LiveSubagents';
 import { Loading } from './Loading';
 import { CopyButton } from './Markdown';
-import { SelectionContext, useChatSelection } from './selection';
+import { SelectionContext, selectedText, useChatSelection } from './selection';
 import { PermissionBlock, SECRET_GIVEN } from './permission';
 import { MoveSession } from './ProjectSettings';
 import { WaitedRequests } from './requests';
@@ -625,6 +629,10 @@ export function Chat({
   // The buttons of a message (Copy, Quote, Search) take the text selected in it, in the feed and in a subagent's history alike (selection.ts).
   const section = useRef<HTMLElement>(null);
   const selection = useChatSelection(section);
+  const pressed = useRef<Range | null>(null);
+  // A right click on selected text (a computer's; a phone has its own menu for it): Quote, Copy
+  // and Search in one place, besides the message's buttons.
+  const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const insertQuote = useRef<((text: string) => void) | null>(null);
   const insertText = useRef<((text: string) => void) | null>(null);
   // The jump to a search hit: the event is there once `lastSeq` reaches it and the older
@@ -966,6 +974,38 @@ export function Chat({
     <SelectionContext.Provider value={selection}>
       <section
         ref={section}
+        // On a Mac a right click outside the selection selects the word or link under the pointer
+        // before `contextmenu`: the selection as it was at the press tells whether the click is on
+        // selected text.
+        onPointerDownCapture={() => {
+          const sel = document.getSelection();
+          pressed.current = sel && !sel.isCollapsed && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+        }}
+        onContextMenu={(e) => {
+          // Our menu is the feed's and a subagent's history's, on a click on text selected before
+          // it (still selected, or cleared by the press and selected again); elsewhere (the head,
+          // the composer and its buttons, the rows above it), with nothing selected and on a click
+          // outside the selection the browser's menu stays.
+          const was = pressed.current;
+          const sel = document.getSelection();
+          if (phone || !was || !sel || !(e.target as Element).closest('.feed')) return;
+          // A click outside the selection: on an image or a margin, or on any text where the
+          // browser does not select the word under the pointer (not a Mac).
+          const at = document.caretRangeFromPoint?.(e.clientX, e.clientY);
+          if (at && !was.isPointInRange(at.startContainer, at.startOffset)) return;
+          const now = sel.rangeCount ? sel.getRangeAt(0) : null;
+          if (!now || now.collapsed) {
+            // WebKit off a Mac clears the selection on the press: a click inside it gets it back.
+            // Where the point cannot be found (Firefox), inside cannot be told.
+            if (!at) return;
+            sel.removeAllRanges();
+            sel.addRange(was);
+          } else if (was.compareBoundaryPoints(Range.START_TO_START, now) !== 0 || was.compareBoundaryPoints(Range.END_TO_END, now) !== 0) return;
+          const text = selectedText(section.current);
+          if (!text) return;
+          e.preventDefault();
+          setSelectionMenu({ x: e.clientX, y: e.clientY, text });
+        }}
         class={`chat ${dragging ? 'chat-dragging' : ''} ${phone ? 'chat-phone' : ''} ${archived ? 'chat-archived' : ''}`}
         onDragOver={(e) => {
           if (disabled || !e.dataTransfer?.types.includes('Files')) return;
@@ -1172,6 +1212,36 @@ export function Chat({
             phone={phone}
             onClose={() => setViewing(null)}
             onDownload={() => actions.openArtifact(viewing.id, true)}
+          />
+        )}
+        {selectionMenu && (
+          <ContextMenu
+            x={selectionMenu.x}
+            y={selectionMenu.y}
+            label="Selected text"
+            items={[
+              ...(actions.quote
+                ? [
+                    {
+                      label: 'Quote',
+                      icon: <IconQuote />,
+                      cls: 'menu-quote',
+                      onSelect: () => {
+                        actions.quote!(selectionMenu.text);
+                        document.getSelection()?.removeAllRanges();
+                      },
+                    },
+                  ]
+                : []),
+              { label: 'Copy', icon: <IconCopy size={16} />, cls: 'btn-copy-selection', onSelect: () => void copyText(selectionMenu.text).catch(() => {}) },
+              {
+                label: `Search in ${app.webSearch.label}`,
+                icon: <IconSearch size={16} />,
+                cls: 'menu-web-search',
+                onSelect: () => void window.open(app.webSearch.url(selectionMenu.text), '_blank', 'noopener'),
+              },
+            ]}
+            onClose={() => setSelectionMenu(null)}
           />
         )}
       </section>

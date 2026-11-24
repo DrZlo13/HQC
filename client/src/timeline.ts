@@ -206,13 +206,15 @@ export class Timeline {
             seen.delivered_at !== ev.delivered_at ||
             seen.reply_delivered_at !== replyAt ||
             joined(seen) !== joined(ev) ||
-            joinedAfter(seen) !== joinedAfter(ev))
+            joinedAfter(seen) !== joinedAfter(ev) ||
+            quiet(seen) !== quiet(ev))
         ) {
           this.bySeq.set(
             ev.seq,
-            withJoined(
+            withFlags(
               { ...seen, delivery: ev.delivery, delivered_at: ev.delivered_at, reply_delivered_at: replyAt },
               joined(ev),
+              quiet(ev),
               joinedAfter(ev),
             ),
           );
@@ -313,7 +315,12 @@ export class Timeline {
     if (!ev || ev.event_id !== d.event_id) return;
     this.bySeq.set(
       d.seq,
-      withJoined({ ...ev, delivery: d.delivery, delivered_at: d.delivered_at }, d.joined === true, d.joined_after),
+      withFlags(
+        { ...ev, delivery: d.delivery, delivered_at: d.delivered_at },
+        d.joined === true,
+        d.quiet === true,
+        d.joined_after,
+      ),
     );
     this.sorted = null;
     this.revision++;
@@ -336,14 +343,16 @@ export class Timeline {
         seen.delivered_at === ev.delivered_at &&
         seen.reply_delivered_at === replyAt &&
         joined(seen) === joined(ev) &&
-        joinedAfter(seen) === joinedAfter(ev)
+        joinedAfter(seen) === joinedAfter(ev) &&
+        quiet(seen) === quiet(ev)
       )
         continue;
       this.bySeq.set(
         ev.seq!,
-        withJoined(
+        withFlags(
           { ...seen, delivery: ev.delivery, delivered_at: ev.delivered_at, reply_delivered_at: replyAt },
           joined(ev),
+          quiet(ev),
           joinedAfter(ev),
         ),
       );
@@ -840,7 +849,10 @@ function agentWork(e: HqcEvent): boolean {
  *  not its own. A `joined` input behind waiting ones went into one of the later turns after the
  *  last of them that was delivered before it: it stays right behind that one; if each was still
  *  pending when it was delivered it went past them all, into the turn running then, and stands
- *  at its own `seq`. */
+ *  at its own `seq`. A `quiet` input (the hub keeps it as `payload.quiet`: written into the
+ *  history as a Stop ended the turn that ran then, no turn of its own) never waits and opens no
+ *  turn: it stays at its own `seq` until the `joined_after` pass of `items` moves it behind the
+ *  last event of the agent stored before it was written. */
 function placeQueued(items: Item[]): Item[] {
   const nextEnd: (HqcEvent | undefined)[] = [];
   let end: HqcEvent | undefined;
@@ -862,6 +874,10 @@ function placeQueued(items: Item[]): Item[] {
     if (it.kind !== "event") return void out.push(it);
     const e = it.event;
     if (isInput(e)) {
+      if (quiet(e) && e.delivery !== "failed") {
+        out.push(it);
+        return;
+      }
       if (joined(e) && waiting.length > 0) {
         // Behind the last waiting input delivered before it (and the inputs that joined behind
         // that one); it went past those delivered after it or still pending.
@@ -929,20 +945,31 @@ function joined(e: HqcEvent): boolean {
   return (e.type === "user.message" || e.type === "peer.message") && e.payload.joined === true;
 }
 
-/** `payload.joined_after` of a joined input (SPEC §6): the `seq` of the last event of the agent
- *  stored before the hub took the runtime's ack, when it is past the input's own; none for an
- *  input joined before 0.221. */
+/** `payload.quiet` of an input: the hub sets it when the runtime wrote the message into the
+ *  agent's history without a turn, at a Stop (SPEC 0.231). */
+function quiet(e: HqcEvent): boolean {
+  return (e.type === "user.message" || e.type === "peer.message") && e.payload.quiet === true;
+}
+
+/** `payload.joined_after` of a joined or a quiet input (SPEC §6): the `seq` of the last event of
+ *  the agent stored before the hub took the runtime's ack, when it is past the input's own; none
+ *  for an input joined before 0.221. */
 function joinedAfter(e: HqcEvent): number | undefined {
-  if (!joined(e)) return undefined;
+  if (!joined(e) && !quiet(e)) return undefined;
   const a = (e.payload as { joined_after?: number }).joined_after;
   return typeof a === "number" && a > e.seq! ? a : undefined;
 }
 
-/** `e` with `payload.joined` (and `joined_after`) set when `on`; it is never taken back. */
-function withJoined(e: HqcEvent, on: boolean, after?: number): HqcEvent {
-  if (!on || (e.type !== "user.message" && e.type !== "peer.message")) return e;
-  if (e.payload.joined && (after === undefined || e.payload.joined_after === after)) return e;
-  return { ...e, payload: { ...e.payload, joined: true, joined_after: after ?? e.payload.joined_after } } as HqcEvent;
+/** `e` with `payload.joined`, `payload.quiet` and `joined_after` set when `joined`, `quiet` and
+ *  `after` say so; none of them is taken back. */
+function withFlags(e: HqcEvent, joined: boolean, quiet: boolean, after?: number): HqcEvent {
+  if ((e.type !== "user.message" && e.type !== "peer.message") || (!joined && !quiet)) return e;
+  const add: { joined?: true; quiet?: true; joined_after?: number } = {};
+  if (joined && !e.payload.joined) add.joined = true;
+  if (quiet && !e.payload.quiet) add.quiet = true;
+  if (after !== undefined && e.payload.joined_after !== after) add.joined_after = after;
+  if (Object.keys(add).length === 0) return e;
+  return { ...e, payload: { ...e.payload, ...add } } as HqcEvent;
 }
 
 /** `ev` under `key` in `m` unless an earlier one (by `seq`) is there: an older page may load

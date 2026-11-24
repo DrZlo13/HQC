@@ -27,6 +27,17 @@
 //!   adapter reports [`AdapterEvent::InputAccepted`] (SPEC §5.2). The queue lives in memory:
 //!   the hub's `pending` inputs are the source of truth and come again after `hello`, so an
 //!   input already queued or delivered is recognised by `event_id` and not run twice.
+//! - The owner's Stop (`session.stop {quiet: true}`, SPEC 0.231) with a turn running (also one
+//!   the runtime started by itself) marks what waits at that moment (the queue, a capped input
+//!   waiting for its mode) and, when the turn ends, what the runtime dropped from it, to be
+//!   written into the agent's history without a turn ([`Adapter::input_quiet_with`], in
+//!   `event_id` order); a slash command among them fails with "cancelled by Stop". Until the
+//!   turn ends nothing new goes into it; what comes after the Stop is never marked. A quiet
+//!   input's acceptance is `ack {event_id, quiet: true}` ([`AdapterEvent::QuietTaken`]), also
+//!   when it is resent. A quiet line the runtime drops ([`AdapterEvent::QuietCancelled`]) is
+//!   written again. A normal input waits for their acks (the CLI takes a "next" line before a
+//!   "later" one), as do the idle unload and a move. A pause's stop (no `quiet`), a Stop with no
+//!   turn running and a `session.kill` mark and write nothing.
 //! - While a turn runs, the first waiting input that may join goes into it when the runtime
 //!   can take it ([`Adapter::can_inject`]) and the turn's own input is no `hqc_ask`: a
 //!   person's input (no `peer`, no `schedule_id`) that is no slash command and has no cap,
@@ -193,6 +204,7 @@ fn ack(event_id: Option<Uuid>) -> WorkerFrame {
         event_id,
         seq: None,
         joined: false,
+        quiet: false,
     })
 }
 
@@ -202,7 +214,40 @@ fn joined_ack(event_id: Uuid) -> WorkerFrame {
         event_id: Some(event_id),
         seq: None,
         joined: true,
+        quiet: false,
     })
+}
+
+/// `ack {event_id, quiet: true}`: the input was written into the agent's history on a Stop,
+/// without a turn.
+fn quiet_ack(event_id: Uuid) -> WorkerFrame {
+    WorkerFrame::Ack(Ack {
+        event_id: Some(event_id),
+        seq: None,
+        joined: false,
+        quiet: true,
+    })
+}
+
+/// How the runtime took a delivered input, which a resent input is acked again with.
+#[derive(Clone, Copy)]
+enum Taken {
+    /// Into a turn of its own: a plain `ack`.
+    Turn,
+    /// Into the turn already running: `joined`.
+    Joined,
+    /// Into the history on a Stop: `quiet`.
+    Quiet,
+}
+
+impl Taken {
+    fn ack(self, event_id: Uuid) -> WorkerFrame {
+        match self {
+            Taken::Turn => ack(Some(event_id)),
+            Taken::Joined => joined_ack(event_id),
+            Taken::Quiet => quiet_ack(event_id),
+        }
+    }
 }
 
 pub struct Supervisor {
@@ -271,6 +316,8 @@ enum Cmd {
     },
     Stop {
         id: String,
+        /// The owner's own Stop (SPEC 0.231).
+        quiet: bool,
     },
     /// Move the agent's running call `call_id` to the background.
     Background {
@@ -539,7 +586,7 @@ impl Supervisor {
                 )
             }
             HubFrame::SessionInput(input) => (input.session_id, Cmd::Input { id, input }),
-            HubFrame::SessionStop { session_id } => (session_id, Cmd::Stop { id }),
+            HubFrame::SessionStop { session_id, quiet } => (session_id, Cmd::Stop { id, quiet }),
             HubFrame::SessionBackground {
                 session_id,
                 call_id,
@@ -1172,6 +1219,8 @@ impl Supervisor {
             activity: None,
             stop_asked: false,
             stopped_by_move: 0,
+            quiet_out: Vec::new(),
+            stop_quiet: false,
             delivered: VecDeque::new(),
             last_activity: Instant::now(),
         };
@@ -1187,7 +1236,7 @@ fn id_of(c: &Cmd) -> String {
     match c {
         Cmd::Start { id, .. }
         | Cmd::Input { id, .. }
-        | Cmd::Stop { id }
+        | Cmd::Stop { id, .. }
         | Cmd::Background { id, .. }
         | Cmd::StopTask { id, .. }
         | Cmd::SubagentHistory { id, .. }
@@ -1275,6 +1324,9 @@ struct Queued {
     input: SessionInput,
     /// Times this input ended a turn without being taken and went back to the queue.
     requeued: u8,
+    /// A Stop came while it waited: it is written into the agent's history without a turn
+    /// ([`Session::write_quiet`]), never as an input of a turn.
+    quiet: bool,
 }
 
 struct Turn {
@@ -1383,8 +1435,13 @@ struct Session {
     /// The background tasks a move stopped with the process; told to the agent with its input
     /// until the runtime takes one ([`Session::prepared`]).
     stopped_by_move: u32,
-    /// Inputs the runtime took, with whether it took them into a running turn (`joined`).
-    delivered: VecDeque<(Uuid, bool)>,
+    /// Inputs written quiet ([`Session::write_quiet`]) that the runtime has not taken yet.
+    quiet_out: Vec<Queued>,
+    /// The owner's Stop is ending the turn that ran (SPEC 0.231): nothing new goes into it, and
+    /// what the runtime drops from it is written quiet at its end ([`Session::end_turn`]).
+    stop_quiet: bool,
+    /// Inputs the runtime took, with how.
+    delivered: VecDeque<(Uuid, Taken)>,
     last_activity: Instant,
 }
 
@@ -1454,6 +1511,7 @@ impl Session {
             && self.turn.is_none()
             && !self.adapter.runs_own_turn()
             && self.injected.is_empty()
+            && self.quiet_out.is_empty()
             && self.lowering.is_none()
             && self.queue.is_empty()
             && self.subagents == 0
@@ -1518,18 +1576,39 @@ impl Session {
                 }
             }
             Cmd::Input { id, input } => self.on_input(id, input).await,
-            Cmd::Stop { id } => {
+            Cmd::Stop { id, quiet } => {
                 // Also with no turn of ours: the runtime may run one it started by itself
                 // (Claude Code after a background task's end); the adapter knows.
+                let turn = self.turn.is_some() || self.adapter.runs_own_turn();
                 if self.state == ProcessState::Running {
-                    self.stop_asked = true;
-                    if let Err(e) = self.adapter.stop().await {
+                    // The owner's Stop of a turn writes what waits into the history (SPEC
+                    // 0.231); any other stop is the plain one.
+                    let quiet = quiet && turn;
+                    // With no turn the flag would outlive the Stop and make the end of a later
+                    // turn treat its dropped inputs as cancelled.
+                    self.stop_asked = turn;
+                    let r = if quiet {
+                        self.adapter.stop_quiet().await
+                    } else {
+                        self.adapter.stop().await
+                    };
+                    if let Err(e) = r {
                         tracing::warn!(session_id = %self.id, "stop failed: {e:#}");
                         self.link.reply(
                             &id,
                             wire_error(error_code::INTERNAL, format!("{e:#}"), true),
                         );
                         return;
+                    }
+                    if quiet {
+                        // What waits now is what the Stop is for; what comes later is not.
+                        self.stop_quiet = true;
+                        for q in std::mem::take(&mut self.queue) {
+                            self.mark_quiet(q);
+                        }
+                        if let Some(l) = self.lowering.take() {
+                            self.mark_quiet(l.q);
+                        }
                     }
                 }
                 self.link.reply(&id, ack(None));
@@ -1945,6 +2024,7 @@ impl Session {
             || self.adapter.runs_own_turn()
             || self.subagents > 0
             || !self.injected.is_empty()
+            || !self.quiet_out.is_empty()
             || self.lowering.is_some()
         {
             return;
@@ -2085,15 +2165,10 @@ impl Session {
             );
             return;
         }
-        if let Some(&(_, joined)) = self.delivered.iter().find(|(e, _)| *e == eid) {
-            // The same ack again: a plain one for a joined input would open a turn in the hub
-            // that nothing closes.
-            let a = if joined {
-                joined_ack(eid)
-            } else {
-                ack(Some(eid))
-            };
-            self.reply_input(&id, a);
+        if let Some(&(_, taken)) = self.delivered.iter().find(|(e, _)| *e == eid) {
+            // The same ack again: a plain one for a joined or a quiet input would open a turn
+            // in the hub that nothing closes.
+            self.reply_input(&id, taken.ack(eid));
             return;
         }
         if let Some(t) = self.turn.as_mut().filter(|t| t.input.event_id == eid) {
@@ -2109,6 +2184,10 @@ impl Session {
             q.frame_id = id;
             return;
         }
+        if let Some(q) = self.quiet_out.iter_mut().find(|q| q.input.event_id == eid) {
+            q.frame_id = id;
+            return;
+        }
         if let Some(q) = self.queue.iter_mut().find(|q| q.input.event_id == eid) {
             q.frame_id = id;
             // The hub's latest frame: its `peer_prefix` is what the hub clears on the ack.
@@ -2119,6 +2198,7 @@ impl Session {
             frame_id: id,
             input,
             requeued: 0,
+            quiet: false,
         });
         if self.state == ProcessState::Stopped {
             if let Err(e) = self.ensure_running().await {
@@ -2140,6 +2220,11 @@ impl Session {
     /// uncapped one runs in the session's own mode.
     async fn pump(&mut self) {
         while self.lowering.is_none() && self.state == ProcessState::Running {
+            // The stopped turn has not ended: what the owner's Stop marks is not complete yet,
+            // and nothing new goes into that turn (SPEC 0.231).
+            if self.stop_quiet {
+                return;
+            }
             if self.turn.is_some() {
                 if !self.inject_next().await {
                     return;
@@ -2155,6 +2240,19 @@ impl Session {
                     return;
                 }
                 continue;
+            }
+            // What waited at a Stop goes first, also while the runtime runs a turn of its own:
+            // a quiet line is written with `priority: "later"`, which the CLI never folds into a
+            // running turn.
+            if self.write_quiet().await {
+                continue;
+            }
+            // The CLI takes a "next" line before a "later" one that is in its queue too, so a
+            // normal input written now would run before the quiet lines (the agent would answer
+            // it unaware of them): it waits for their acks, which pump again. So no turn of
+            // ours runs while quiet lines are out.
+            if !self.quiet_out.is_empty() {
+                return;
             }
             let Some(q) = self.queue.pop_front() else {
                 return;
@@ -2189,6 +2287,40 @@ impl Session {
             }
             self.hand(q, input, files).await;
         }
+    }
+
+    /// Writes the inputs a Stop marked into the agent's history without a turn, in `event_id`
+    /// order (the hub's creation order), to wait in [`Session::quiet_out`] for the runtime to
+    /// take them; one whose attachments or write fail gets the error as any input. `true`: there
+    /// were some.
+    async fn write_quiet(&mut self) -> bool {
+        let (mut marked, rest): (Vec<Queued>, Vec<Queued>) = std::mem::take(&mut self.queue)
+            .into_iter()
+            .partition(|q| q.quiet);
+        self.queue = rest.into();
+        if marked.is_empty() {
+            return false;
+        }
+        marked.sort_by_key(|q| q.input.event_id);
+        for q in marked {
+            let Some((input, files)) = self.prepared(&q).await else {
+                continue;
+            };
+            match self.adapter.input_quiet_with(&input, &files).await {
+                Ok(()) => {
+                    tracing::info!(session_id = %self.id, event_id = %q.input.event_id, "input written without a turn (stopped)");
+                    self.quiet_out.push(q);
+                }
+                Err(e) => {
+                    tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, "input failed: {e:#}");
+                    self.reply_input(
+                        &q.frame_id,
+                        wire_error(error_code::INTERNAL, format!("{e:#}"), true),
+                    );
+                }
+            }
+        }
+        true
     }
 
     /// Input `q` as the runtime gets it: attachments in `.hqc/inbox` and their paths in the
@@ -2270,7 +2402,8 @@ impl Session {
         let mut at = None;
         for (i, q) in self.queue.iter().enumerate() {
             let input = &q.input;
-            if input.schedule_id.is_some() {
+            // Stopped: goes into the history, not into a turn.
+            if q.quiet || input.schedule_id.is_some() {
                 continue;
             }
             match &input.peer {
@@ -2359,7 +2492,9 @@ impl Session {
             self.pump().await;
             return Ok(true);
         }
-        if self.delivered.iter().any(|(e, _)| *e == event_id) {
+        if self.delivered.iter().any(|(e, _)| *e == event_id)
+            || self.quiet_out.iter().any(|q| q.input.event_id == event_id)
+        {
             return Ok(false);
         }
         if let Some(i) = self
@@ -2404,7 +2539,10 @@ impl Session {
                 && !i.text.trim_start().starts_with('/')
                 && !capped(i)
         };
+        // Not into the turn the owner's Stop is ending: what came after it goes after the quiet
+        // lines (SPEC 0.231).
         let turn_takes = self.turn.is_some()
+            && !self.stop_quiet
             && self.moving.is_none()
             && !self.turn.as_ref().is_some_and(|t| {
                 t.input
@@ -2642,10 +2780,44 @@ impl Session {
                 if !slash {
                     self.stopped_by_move = 0;
                 }
-                self.delivered.push_back((event_id, joined));
-                if self.delivered.len() > DELIVERED_MEMORY {
-                    self.delivered.pop_front();
+                self.remember_delivered(event_id, if joined { Taken::Joined } else { Taken::Turn });
+            }
+            AdapterEvent::QuietTaken { event_ids } => {
+                for event_id in event_ids {
+                    let Some(i) = self
+                        .quiet_out
+                        .iter()
+                        .position(|q| q.input.event_id == event_id)
+                    else {
+                        tracing::warn!(session_id = %self.id, %event_id, "adapter took a quiet input that is not in flight");
+                        continue;
+                    };
+                    let q = self.quiet_out.remove(i);
+                    self.reply_input(&q.frame_id, quiet_ack(event_id));
+                    // It carried the note of a move that stopped background tasks (`prepared`).
+                    self.stopped_by_move = 0;
+                    self.remember_delivered(event_id, Taken::Quiet);
                 }
+                if self.quiet_out.is_empty() {
+                    // A move that waited for the acks goes, and what came meanwhile runs.
+                    self.restart_for_move().await;
+                    self.pump().await;
+                }
+            }
+            AdapterEvent::QuietCancelled { event_id } => {
+                let Some(i) = self
+                    .quiet_out
+                    .iter()
+                    .position(|q| q.input.event_id == event_id)
+                else {
+                    tracing::warn!(session_id = %self.id, %event_id, "adapter dropped a quiet input that is not in flight");
+                    return;
+                };
+                // Still marked quiet: it is written again (up to the limit of any input the
+                // runtime ends turns without taking).
+                let q = self.quiet_out.remove(i);
+                self.requeue(q);
+                self.pump().await;
             }
             AdapterEvent::TurnEnded { carried, dropped } => {
                 let before = self.turn.as_ref().map(|t| (t.input.event_id, t.capped));
@@ -2800,6 +2972,10 @@ impl Session {
                 tracing::warn!(session_id = %self.id, ?error, in_turn, "agent process exited");
                 // Nothing written to the gone process is on its way any more.
                 let lost: Vec<Uuid> = self.injected.iter().map(|q| q.input.event_id).collect();
+                // The Stop that wrote them still holds: the next process gets them quiet.
+                for q in std::mem::take(&mut self.quiet_out).into_iter().rev() {
+                    self.queue.push_front(q);
+                }
                 self.end_turn(&[], &lost);
                 if let Some(l) = self.lowering.take() {
                     // It never reached the runtime; the next process starts in its mode.
@@ -2831,30 +3007,41 @@ impl Session {
     /// neither accepted nor carried goes back to the head of the queue, as does a written one
     /// in `dropped` (the runtime will not take it), in the order they were written (an input
     /// written past a waiting one stands before it), unless a Stop came since the last end
-    /// (then it fails: the person cancelled it). Any other written input
-    /// stays written: it went into the turn the runtime runs next before this end reached
-    /// the session.
+    /// (then it fails: the person cancelled it; after the owner's Stop (SPEC 0.231) it goes
+    /// into the agent's history without a turn instead, [`Session::stopped_input`]). Any other
+    /// written input stays written: it went into the turn the runtime runs next before this
+    /// end reached the session.
     fn end_turn(&mut self, carried: &[Uuid], dropped: &[Uuid]) {
         let stopped = std::mem::take(&mut self.stop_asked);
+        let quiet = std::mem::take(&mut self.stop_quiet);
         let mut back = Vec::new();
         let mut next = None;
         if let Some(t) = self.turn.take() {
             if !t.accepted && carried.contains(&t.input.event_id) {
                 next = Some(t);
             } else if !t.accepted && stopped && dropped.contains(&t.input.event_id) {
-                self.cancelled_by_stop(&t.frame_id, t.input.event_id);
+                self.stopped_input(
+                    quiet,
+                    Queued {
+                        frame_id: t.frame_id,
+                        input: t.input,
+                        requeued: t.requeued,
+                        quiet: false,
+                    },
+                );
             } else if !t.accepted {
                 back.push(Queued {
                     frame_id: t.frame_id,
                     input: t.input,
                     requeued: t.requeued,
+                    quiet: false,
                 });
             }
         }
         let mut still = Vec::new();
         for q in std::mem::take(&mut self.injected) {
             if dropped.contains(&q.input.event_id) && stopped {
-                self.cancelled_by_stop(&q.frame_id, q.input.event_id);
+                self.stopped_input(quiet, q);
             } else if dropped.contains(&q.input.event_id) {
                 back.push(q);
             } else if !carried.contains(&q.input.event_id) {
@@ -2882,8 +3069,47 @@ impl Session {
         }
     }
 
-    /// An input the runtime cancelled on the person's Stop (SPEC §17.2): it fails instead of
-    /// running again, since they wanted it gone.
+    /// An input the runtime cancelled on a Stop (SPEC §17.2): after the owner's Stop (`quiet`,
+    /// SPEC 0.231) it is written into the agent's history without a turn
+    /// ([`Session::mark_quiet`]), after any other it fails instead of running again.
+    fn stopped_input(&mut self, quiet: bool, q: Queued) {
+        if quiet {
+            self.mark_quiet(q);
+        } else {
+            self.cancelled_by_stop(&q.frame_id, q.input.event_id);
+        }
+    }
+
+    /// Marks input `q` of the owner's Stop (SPEC 0.231) to be written into the agent's history
+    /// without a turn ([`Session::write_quiet`], in `event_id` order): the agent knows it next
+    /// time and does not act on it now. A slash command fails: it runs or it does not, it is not
+    /// text for the history.
+    fn mark_quiet(&mut self, mut q: Queued) {
+        // What the runtime gets decides: a message of another session that starts with a path
+        // carries a header first and is no command.
+        if crate::peer::runtime_input(&q.input)
+            .text
+            .trim_start()
+            .starts_with('/')
+        {
+            self.cancelled_by_stop(&q.frame_id, q.input.event_id);
+        } else {
+            q.quiet = true;
+            self.queue.push_back(q);
+        }
+    }
+
+    /// Remembers that the runtime took input `event_id` as `taken`, to ack it again as it
+    /// was when the hub resends it.
+    fn remember_delivered(&mut self, event_id: Uuid, taken: Taken) {
+        self.delivered.push_back((event_id, taken));
+        if self.delivered.len() > DELIVERED_MEMORY {
+            self.delivered.pop_front();
+        }
+    }
+
+    /// A slash command that waited when the person pressed Stop (SPEC §17.2, 0.231): it fails
+    /// instead of running later, since they wanted it gone.
     fn cancelled_by_stop(&self, frame_id: &str, event_id: Uuid) {
         tracing::info!(session_id = %self.id, %event_id, "input cancelled by stop");
         self.reply_input(
@@ -3051,6 +3277,10 @@ impl Session {
         // them again.
         self.lowering = None;
         self.injected.clear();
+        self.quiet_out.clear();
+        // The turn a Stop was meant for ended with the process.
+        self.stop_asked = false;
+        self.stop_quiet = false;
         self.set_state(ProcessState::Stopped);
     }
 

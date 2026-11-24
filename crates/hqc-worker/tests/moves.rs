@@ -909,6 +909,7 @@ async fn the_answer_goes_before_the_next_inputs_ack() {
                 event_id: Some(Uuid::now_v7()),
                 seq: None,
                 joined: false,
+                quiet: false,
             }),
         );
         let mut answered = false;
@@ -990,6 +991,7 @@ async fn another_sessions_entries_do_not_hold_an_inputs_ack() {
             event_id: Some(Uuid::now_v7()),
             seq: None,
             joined: false,
+            quiet: false,
         }),
     );
     // The hub acks no event: the busy session's entries all wait while the `ack` arrives.

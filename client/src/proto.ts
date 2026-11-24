@@ -131,10 +131,13 @@ export interface UserMessage {
   /** The runtime took it into the turn already running (SPEC §17.2); the hub sets it on
    *  delivery. */
   joined?: boolean;
+  /** The runtime wrote it into the agent's history without a turn when the owner pressed Stop
+   *  (SPEC 0.231); the hub sets it on delivery. */
+  quiet?: boolean;
   /** The user typed it in the input route (SPEC 0.219): the only kind of message that can be
    *  taken back or sent now; the hub's own notes and a schedule's runs do not have it. */
   human?: boolean;
-  /** Since SPEC 0.221, with `joined`: the `seq` of the last event that is no input, stored before
+  /** Since SPEC 0.221, with `joined` or `quiet`: the `seq` of the last event that is no input, stored before
    *  the hub took the runtime's ack: where the agent took the message (SPEC §6). Absent on a message
    *  joined before. */
   joined_after?: number;
@@ -381,6 +384,8 @@ export interface PeerMessage {
   joined?: boolean;
   /** As `UserMessage.joined_after`. */
   joined_after?: number;
+  /** As `UserMessage.quiet` (SPEC 0.231). */
+  quiet?: boolean;
 }
 export const TASK_STATUSES = ['pending', 'in_progress', 'completed'] as const;
 /** How far a task of the agent's task list is (SPEC §4, since 0.223). */
@@ -609,6 +614,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     schedule_id: optStr(p, 'schedule_id'),
     during_text: optBool(p, 'during_text'),
     joined: optBool(p, 'joined'),
+    quiet: optBool(p, 'quiet'),
     human: optBool(p, 'human'),
     joined_after: optNum(p, 'joined_after'),
   }),
@@ -741,6 +747,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     during_text: optBool(p, 'during_text'),
     joined: optBool(p, 'joined'),
     joined_after: optNum(p, 'joined_after'),
+    quiet: optBool(p, 'quiet'),
   }),
   usage: (p) => ({
     input_tokens: num(p, 'input_tokens'),
@@ -1357,8 +1364,11 @@ export interface DeliveryChange {
   delivered_at?: string;
   /** The input went into the turn already running (SPEC §17.2): `payload.joined` with it. */
   joined?: boolean;
-  /** With `joined`: `payload.joined_after` (SPEC §6). */
+  /** With `joined` or `quiet`: `payload.joined_after` (SPEC §6). */
   joined_after?: number;
+  /** The input was written into the agent's history without a turn, at a Stop (SPEC 0.231):
+   *  `payload.quiet` with it. */
+  quiet?: boolean;
 }
 
 export type ServerFrame =
@@ -1415,6 +1425,7 @@ export function parseDelivery(v: unknown): DeliveryChange {
     delivered_at: optStr(d, 'delivered_at'),
     joined: optBool(d, 'joined'),
     joined_after: optNum(d, 'joined_after'),
+    quiet: optBool(d, 'quiet'),
   };
 }
 

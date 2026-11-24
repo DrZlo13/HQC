@@ -710,7 +710,10 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
         }
         // So is the stop of a turn a pause cut: the turn's end then brings the kill.
         for session_id in db::paused_turns_to_stop(&app.db, conn.worker_id).await? {
-            conn.send(HubFrame::SessionStop { session_id });
+            conn.send(HubFrame::SessionStop {
+                session_id,
+                quiet: false,
+            });
         }
         for sid in db::sessions_to_restart(&app.db, conn.worker_id).await? {
             delivery::kick(app, sid, true).await;
@@ -977,7 +980,7 @@ async fn on_ack(app: &AppState, conn: &Arc<WorkerConn>, id: &str, a: Ack) -> any
             if a.event_id.is_some_and(|e| e != event_id) {
                 tracing::warn!(%session_id, "input ack carries a different event_id");
             }
-            delivery::on_input_ack(app, conn, session_id, event_id, a.joined).await
+            delivery::on_input_ack(app, conn, session_id, event_id, a.joined, a.quiet).await
         }
         Some(Reply::Result { pending_id }) => crate::peers::result_acked(app, pending_id).await,
         // The outcome comes as `workspace.created`.

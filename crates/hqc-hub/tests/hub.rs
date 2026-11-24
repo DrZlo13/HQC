@@ -2873,6 +2873,54 @@ async fn paused_during_a_turn(
     (hub, w, token, sid)
 }
 
+/// SPEC 0.231: the owner's own Stop asks the worker to write what waited into the agent's history
+/// (`quiet: true`); the stop of a pause does not (the waiting messages wait for the resume).
+#[tokio::test]
+async fn the_owners_stop_is_quiet_and_the_stop_of_a_pause_is_not() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let mut sessions = vec![];
+    for name in ["stop-quiet-owner", "stop-quiet-pause"] {
+        let sid = hub.create_session(name).await;
+        ack_start(&mut w, &sid).await;
+        let (s, r) = hub
+            .post(&format!("/api/sessions/{sid}/input"), json!({"text": "go"}))
+            .await;
+        assert_eq!(s, 201, "{r}");
+        let si = w.expect("session.input").await;
+        w.reply(
+            &si["id"],
+            "ack",
+            json!({"event_id": r["event"]["event_id"]}),
+        )
+        .await;
+        hub.wait_session(&sid, "running", |v| v["state"] == "running")
+            .await;
+        sessions.push(sid);
+    }
+    let (owner, paused) = (&sessions[0], &sessions[1]);
+
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{owner}/stop"), json!({}))
+        .await;
+    assert_eq!(s, 200, "{r}");
+    let stop = w.expect("session.stop").await;
+    assert_eq!(
+        stop["payload"],
+        json!({"session_id": owner, "quiet": true}),
+        "{stop}"
+    );
+
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{paused}/pause"), json!({}))
+        .await;
+    assert_eq!(s, 200, "{r}");
+    let stop = w.expect("session.stop").await;
+    assert_eq!(stop["payload"], json!({"session_id": paused}), "{stop}");
+    hub.finish().await;
+}
+
 /// Paused during a turn that asks for permission, its worker away while the user answers
 /// (SPEC §17.3): a reconnect with the same `boot_id` (the process lives) sends the answer, though
 /// the paused session gets no `session.start`, and not the input held during the pause.
@@ -3436,6 +3484,80 @@ async fn a_joined_ack_keeps_the_last_event_of_the_agent_before_it() {
         .unwrap()["payload"]
         .clone();
     assert!(c_payload.get("joined_after").is_none(), "{c_payload}");
+    hub.finish().await;
+}
+
+/// SPEC 0.231: an input the worker reports `quiet` was written into the agent's history on a
+/// Stop, without a turn. It is delivered, not kept as joined, and opens no turn: the session
+/// stays idle.
+#[tokio::test]
+async fn a_quiet_ack_delivers_the_input_and_opens_no_turn() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("quiet").await;
+    ack_start(&mut w, &sid).await;
+    let mut c = FakeClient::connect(&hub).await;
+    c.subscribe(&sid, 0).await;
+    let (_, r) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": "A"}))
+        .await;
+    let a = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    // The agent's turn that the Stop ended: its answer is stored before the worker acks.
+    let stopped = w
+        .event(agent_event(
+            &sid,
+            "agent.message",
+            json!({"text": "Stopped.", "final": true}),
+        ))
+        .await;
+    w.reply(&si["id"], "ack", json!({"event_id": a, "quiet": true}))
+        .await;
+    let d = c.until("delivery").await;
+    assert_eq!((&d["event_id"], &d["delivery"]), (&a, &json!("delivered")));
+    assert!(d.get("joined").is_none(), "{d}");
+    // The delivery notice says so, and so does the stored message (the feed places it by it).
+    assert_eq!(d["quiet"], true, "{d}");
+    // With the place Claude Code recorded it: the last event stored before the ack.
+    assert_eq!(d["joined_after"], stopped["seq"], "{d}");
+    // The hub reads a worker's frames in order: once this one is acked, so is the ack.
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "running", "locked_by": "hqc"}),
+    )
+    .await;
+    w.expect("ack").await;
+    let v = hub.session(&sid).await;
+    assert_eq!(
+        (v["queue_len"].as_u64(), v["state"].as_str()),
+        (Some(0), Some("idle")),
+        "{v}"
+    );
+    let events = hub.events(&sid).await;
+    let stored = events.iter().find(|e| e["event_id"] == a).unwrap();
+    assert_eq!(stored["delivery"], "delivered");
+    assert!(stored["payload"].get("joined").is_none(), "{stored}");
+    assert_eq!(stored["payload"]["quiet"], true, "{stored}");
+    assert_eq!(
+        stored["payload"]["joined_after"], stopped["seq"],
+        "{stored}"
+    );
+    // A plain ack keeps none of them.
+    let (_, r) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": "B"}))
+        .await;
+    let b = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    w.reply(&si["id"], "ack", json!({"event_id": b})).await;
+    let d = c.until("delivery").await;
+    assert_eq!(&d["event_id"], &b);
+    assert!(d.get("quiet").is_none(), "{d}");
+    let events = hub.events(&sid).await;
+    let stored = events.iter().find(|e| e["event_id"] == b).unwrap();
+    assert!(stored["payload"].get("quiet").is_none(), "{stored}");
+    assert!(d.get("joined_after").is_none(), "{d}");
+    assert!(stored["payload"].get("joined_after").is_none(), "{stored}");
     hub.finish().await;
 }
 

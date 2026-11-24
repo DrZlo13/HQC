@@ -488,6 +488,7 @@ fn user_message(t: &str) -> EventKind {
         schedule_id: None,
         during_text: false,
         joined: false,
+        quiet: false,
     }
 }
 

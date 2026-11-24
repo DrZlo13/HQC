@@ -44,6 +44,8 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::ToolResult { .. } => "tool.result".into(),
         AdapterEvent::InputAccepted { .. } => "accepted".into(),
         AdapterEvent::TurnEnded { .. } => "turn_ended".into(),
+        AdapterEvent::QuietTaken { event_ids } => format!("quiet_taken:{}", event_ids.len()),
+        AdapterEvent::QuietCancelled { .. } => "quiet_cancelled".into(),
         AdapterEvent::Exited { error } => format!("exited:{error:?}"),
         AdapterEvent::RuntimeSessionId(s) => format!("runtime_session_id:{s}"),
         AdapterEvent::Title(t) => format!("title:{t}"),

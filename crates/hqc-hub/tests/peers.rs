@@ -539,6 +539,44 @@ async fn a_lost_turn_of_an_ask_run_after_a_bypass_fails_it() {
     hub.finish().await;
 }
 
+/// SPEC 0.231: an `hqc_ask` written into the history on a Stop (`ack {quiet}`) gets no turn and
+/// so no answer: the ask fails at once, saying the target was stopped (there was no turn that
+/// ended), not at its timeout.
+#[tokio::test]
+async fn a_quiet_ack_fails_the_ask_it_carried() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (_, ta) = started(&hub, &mut w, "Asker", None).await;
+    let (_b, _) = started(&hub, &mut w, "Helper", None).await;
+
+    let (rid, input) = ask_same_worker(
+        &mut w,
+        &ta,
+        json!({"text": "deploy?", "session": "personal/helper"}),
+    )
+    .await;
+    w.reply(
+        &input["id"],
+        "ack",
+        json!({"event_id": input["payload"]["event_id"], "quiet": true}),
+    )
+    .await;
+    let r = loop {
+        let f = w.recv().await;
+        if f["type"] == "mcp.result" {
+            break f;
+        }
+    };
+    assert_eq!(r["payload"]["request_id"], rid.as_str());
+    assert_eq!(r["payload"]["error"]["code"], "unavailable", "{r}");
+    assert_eq!(
+        r["payload"]["error"]["message"],
+        "personal/helper was stopped before it took the question"
+    );
+    hub.finish().await;
+}
+
 #[tokio::test]
 async fn sends_wait_in_the_buffer_for_the_next_input() {
     let hub = TestHub::start().await;

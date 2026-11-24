@@ -577,6 +577,86 @@ describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
     expect(queued.map((i) => i.key)).toEqual(["e3", "e4"]);
   });
 
+  it("a quiet input, written into the history as the turn was stopped, stands after that turn and never waits", () => {
+    // SPEC 0.231: E3 and E4 were typed during the turn of E1; Stop ended it and the worker wrote
+    // them into the agent's history without a turn: delivered after its end, `quiet`. The waiting
+    // one, E8, was typed after Stop and has the turn of its own. The hub gives each
+    // `joined_after`: the last event stored before the worker's ack, the `status idle` (E7).
+    const quietly = (e: any) => ((e.payload.quiet = true), (e.payload.joined_after = 7));
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 7.1, quietly),
+      input(4, 7.2, quietly),
+      result(5, "a"),
+      final(6, 1),
+      idle(7, 1),
+      input(8, 7.3),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e7", "e3", "e4", "e8"]);
+    expect(t.items().filter((i) => i.kind === "event" && i.queued)).toEqual([]);
+    show(t);
+    expect(time(3)).toBe(formatTime(at(3)));
+    // The same through a `delivery` frame: it waits until the hub says it was written quiet.
+    const live = new Timeline();
+    live.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3),
+      result(4, "a"),
+      final(5, 1),
+      idle(6, 1),
+    ]);
+    expect(order(live)).toEqual(["e1", "e2", "e4", "e5", "e6", "e3"]);
+    live.applyDelivery({
+      session_id: "s",
+      event_id: id(3),
+      seq: 3,
+      delivery: "delivered",
+      delivered_at: at(7.1),
+      quiet: true,
+      joined_after: 6,
+    });
+    expect(order(live)).toEqual(["e1", "e2", "e4", "e5", "e6", "e3"]);
+    expect(live.items().filter((i) => i.kind === "event" && i.queued)).toEqual([]);
+    // Delivered, not quiet, it stands as it did.
+    const plain = new Timeline();
+    plain.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 7.1),
+      result(4, "a"),
+      final(5, 1),
+      idle(6, 1),
+      call(7, "b", "Bash", { command: "ls" }),
+    ]);
+    expect(order(plain)).toEqual(["e1", "e2", "e4", "e5", "e6", "e3", "e7"]);
+    expect(plain.items().find((i) => i.key === "e3")).toMatchObject({ queued: true });
+  });
+
+  it("a quiet input stands after the turn that was stopped, not the one it was typed in", () => {
+    // SPEC 0.231: T1 answers an `hqc_ask`, nothing is injected into it. A (3) and Q (4) are typed
+    // meanwhile; A runs as T2 (delivered at 6.5), Q is injected into T2 and the Stop cancels it:
+    // delivered quiet at 9.1. The agent's history has A, then Q.
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 6.5),
+      input(4, 9.1, (e) => ((e.payload.quiet = true), (e.payload.joined_after = 11))),
+      result(5, "a"),
+      final(6, 1),
+      idle(7, 1),
+      call(8, "b", "Bash", { command: "ls" }),
+      result(9, "b"),
+      final(10, 3),
+      idle(11, 3),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e7", "e3", "e8", "e9", "e10", "e11", "e4"]);
+    expect(t.items().filter((i) => i.kind === "event" && i.key === "e4" && i.queued)).toEqual([]);
+  });
+
   it("a joined input behind a waiting one stays behind it: two inputs carried past a final answer", () => {
     // Both written during the thinking of a turn with no calls (DrZlo13/hqc#42): the CLI runs
     // the first as the next turn, the second joins that turn.

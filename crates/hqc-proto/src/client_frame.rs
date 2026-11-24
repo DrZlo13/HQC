@@ -57,10 +57,14 @@ pub enum ServerFrame {
         /// `payload.joined` with this change. Sent only when true.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         joined: bool,
-        /// With `joined`: `payload.joined_after`, the last event of the agent stored before the
-        /// hub took the ack (SPEC §6). Sent only when set.
+        /// With `joined` or `quiet`: `payload.joined_after`, the last event of the agent stored
+        /// before the hub took the ack (SPEC §6). Sent only when set.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         joined_after: Option<i64>,
+        /// The input was written into the agent's history without a turn when the owner pressed
+        /// Stop (SPEC 0.231): the stored message got `payload.quiet`. Sent only when true.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        quiet: bool,
     },
     /// Reply to `subscribe_summary`: every session of the user.
     #[serde(rename = "summary")]
@@ -177,6 +181,10 @@ mod tests {
         (
             "delivery",
             include_str!("../examples/wire/client.delivery.joined.json"),
+        ),
+        (
+            "delivery",
+            include_str!("../examples/wire/client.delivery.quiet.json"),
         ),
         (
             "delivery",

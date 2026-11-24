@@ -71,6 +71,10 @@ describe.each(histories)('HistoryCache, %s', (_name, make) => {
     await c.patch(SID, { session_id: SID, event_id: 'e1', seq: 1, delivery: 'delivered', delivered_at: 'now', joined: true, joined_after: 3 });
     const [one] = (await c.read(SID, 1, 1)) as { payload: { joined: boolean; joined_after: number } }[];
     expect([one.payload.joined, one.payload.joined_after]).toEqual([true, 3]);
+    // A message written quiet at a Stop (SPEC 0.231) keeps `quiet` and its place the same way.
+    await c.patch(SID, { session_id: SID, event_id: 'e3', seq: 3, delivery: 'delivered', delivered_at: 'now', quiet: true, joined_after: 5 });
+    const [q] = (await c.read(SID, 3, 3)) as { payload: { quiet: boolean; joined_after: number; joined?: boolean } }[];
+    expect([q.payload.quiet, q.payload.joined_after, q.payload.joined]).toEqual([true, 5, undefined]);
     await c.patch(SID, { session_id: SID, event_id: 'other', seq: 2, delivery: 'failed' });
     await c.patch(SID, { session_id: SID, event_id: 'e9', seq: 9, delivery: 'failed' });
     expect(((await c.read(SID, 2, 2)) as { delivery: string }[])[0].delivery).toBe('delivered');

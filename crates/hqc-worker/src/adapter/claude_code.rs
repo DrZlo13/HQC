@@ -1342,110 +1342,31 @@ pub async fn image_blocks(files: &[InboxFile]) -> Vec<serde_json::Value> {
     out
 }
 
-#[async_trait]
-impl Adapter for ClaudeCodeAdapter {
-    async fn start(&mut self, spec: &StartSpec) -> anyhow::Result<()> {
-        self.spawn(spec, "start").await
-    }
-
-    async fn resume(&mut self, spec: &StartSpec) -> anyhow::Result<()> {
-        self.spawn(spec, "resume").await
-    }
-
-    async fn input(&mut self, input: &SessionInput) -> anyhow::Result<()> {
-        self.input_with(input, &[]).await
-    }
-
-    async fn input_with(
-        &mut self,
-        input: &SessionInput,
-        files: &[InboxFile],
-    ) -> anyhow::Result<()> {
-        let images = image_blocks(files).await;
-        let p = self.running()?;
-        let actions = lock(&p.core).input_with_images(input, images);
-        // Before the write: the mirror may read the prompt's record before its echo.
-        p.io.own.sent(p.io.runtime(), &input.text);
-        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude");
-        p.io.run(actions).await
-    }
-
-    fn can_inject(&self) -> bool {
-        self.running().is_ok_and(|p| lock(&p.core).can_inject())
-    }
-
-    fn runs_own_turn(&self) -> bool {
-        self.running().is_ok_and(|p| lock(&p.core).runs_own_turn())
-    }
-
-    async fn inject_with(
-        &mut self,
-        input: &SessionInput,
-        files: &[InboxFile],
-    ) -> anyhow::Result<bool> {
-        let images = image_blocks(files).await;
-        let p = self.running()?;
-        let Some(actions) = lock(&p.core).inject_with_images(input, images) else {
-            return Ok(false);
-        };
-        p.io.own.sent(p.io.runtime(), &input.text);
-        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude during the turn");
-        p.io.run(actions).await?;
-        Ok(true)
-    }
-
-    async fn inject_now_with(
-        &mut self,
-        input: &SessionInput,
-        files: &[InboxFile],
-    ) -> anyhow::Result<bool> {
-        let images = image_blocks(files).await;
-        let p = self.running()?;
-        let Some(actions) = lock(&p.core).inject_now_with_images(input, images) else {
-            return Ok(false);
-        };
-        p.io.own.sent(p.io.runtime(), &input.text);
-        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude during the turn, priority now");
-        p.io.run(actions).await?;
-        Ok(true)
-    }
-
-    async fn withdraw_input(&mut self, event_id: Uuid) -> anyhow::Result<bool> {
-        let Ok(p) = self.running() else {
-            return Ok(false);
-        };
-        let Some((req, request_id)) = lock(&p.core).withdraw(event_id) else {
-            return Ok(false);
-        };
-        tracing::info!(session_id = %self.session_id, %event_id, "asking claude to drop a message it has not taken");
-        p.io.run(vec![req]).await?;
-        // The CLI answers at once; one that does not is hung (as for `interrupt`).
-        let deadline = tokio::time::Instant::now() + self.opts.interrupt_answer;
-        let mut exited = p.exited.clone();
-        loop {
-            if let Some(cancelled) = lock(&p.core).withdraw_answer(&request_id) {
-                return Ok(cancelled);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                lock(&p.core).withdraw_unanswered(&request_id);
-                anyhow::bail!("claude did not answer cancel_async_message");
-            }
-            tokio::select! {
-                _ = tokio::time::sleep(INTERRUPT_POLL) => {}
-                _ = exited.wait_for(Option::is_some) => anyhow::bail!("claude exited"),
-            }
-        }
-    }
-
-    async fn stop(&mut self) -> anyhow::Result<()> {
+impl ClaudeCodeAdapter {
+    /// The plain interrupt of the running turn; with `cancel_unstarted` the lines hqc wrote and
+    /// the CLI has not taken are cancelled first (SPEC 0.231, the owner's Stop). The CLI's own
+    /// queue is left alone.
+    async fn interrupt_turn(&mut self, cancel_unstarted: bool) -> anyhow::Result<()> {
         let Ok(p) = self.running() else {
             return Ok(());
         };
-        let Some((req, turn, request_id)) = lock(&p.core).interrupt() else {
+        let (mut actions, interrupt) = {
+            let mut core = lock(&p.core);
+            (
+                if cancel_unstarted {
+                    core.cancel_unstarted()
+                } else {
+                    vec![]
+                },
+                core.interrupt(),
+            )
+        };
+        let Some((req, turn, request_id)) = interrupt else {
             return Ok(());
         };
-        tracing::info!(session_id = %self.session_id, "interrupting the turn");
-        p.io.run(vec![req]).await?;
+        tracing::info!(session_id = %self.session_id, cancelled = actions.len(), "interrupting the turn");
+        actions.push(req);
+        p.io.run(actions).await?;
         let (core, io, grace) = (p.core.clone(), p.io.clone(), self.opts.stop_grace);
         let answer_within = self.opts.interrupt_answer;
         let mut exited = p.exited.clone();
@@ -1495,6 +1416,128 @@ impl Adapter for ClaudeCodeAdapter {
             }
         });
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Adapter for ClaudeCodeAdapter {
+    async fn start(&mut self, spec: &StartSpec) -> anyhow::Result<()> {
+        self.spawn(spec, "start").await
+    }
+
+    async fn resume(&mut self, spec: &StartSpec) -> anyhow::Result<()> {
+        self.spawn(spec, "resume").await
+    }
+
+    async fn input(&mut self, input: &SessionInput) -> anyhow::Result<()> {
+        self.input_with(input, &[]).await
+    }
+
+    async fn input_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<()> {
+        let images = image_blocks(files).await;
+        let p = self.running()?;
+        let actions = lock(&p.core).input_with_images(input, images);
+        // Before the write: the mirror may read the prompt's record before its echo.
+        p.io.own.sent(p.io.runtime(), &input.text);
+        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude");
+        p.io.run(actions).await
+    }
+
+    async fn input_quiet_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<()> {
+        let images = image_blocks(files).await;
+        let p = self.running()?;
+        let action = lock(&p.core).input_quiet_with_images(input, images);
+        // As for any input: the mirror may read the prompt's record before its echo.
+        p.io.own.sent(p.io.runtime(), &input.text);
+        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude without a turn");
+        p.io.run(vec![action]).await
+    }
+
+    fn can_inject(&self) -> bool {
+        self.running().is_ok_and(|p| lock(&p.core).can_inject())
+    }
+
+    fn runs_own_turn(&self) -> bool {
+        self.running().is_ok_and(|p| lock(&p.core).runs_own_turn())
+    }
+
+    async fn inject_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<bool> {
+        let images = image_blocks(files).await;
+        let p = self.running()?;
+        let Some(actions) = lock(&p.core).inject_with_images(input, images) else {
+            return Ok(false);
+        };
+        p.io.own.sent(p.io.runtime(), &input.text);
+        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude during the turn");
+        p.io.run(actions).await?;
+        Ok(true)
+    }
+
+    async fn inject_now_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<bool> {
+        let images = image_blocks(files).await;
+        let p = self.running()?;
+        let Some(actions) = lock(&p.core).inject_now_with_images(input, images) else {
+            return Ok(false);
+        };
+        p.io.own.sent(p.io.runtime(), &input.text);
+        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude during the turn, priority now");
+        p.io.run(actions).await?;
+        Ok(true)
+    }
+
+    async fn withdraw_input(&mut self, event_id: Uuid) -> anyhow::Result<bool> {
+        let Ok(p) = self.running() else {
+            return Ok(false);
+        };
+        let Some((actions, request_id)) = lock(&p.core).withdraw(event_id) else {
+            return Ok(false);
+        };
+        if actions.is_empty() {
+            tracing::info!(session_id = %self.session_id, %event_id, "withdrawn: the CLI cancelled it already");
+        } else {
+            tracing::info!(session_id = %self.session_id, %event_id, "asking claude to drop a message it has not taken");
+        }
+        p.io.run(actions).await?;
+        // The CLI answers at once; one that does not is hung (as for `interrupt`).
+        let deadline = tokio::time::Instant::now() + self.opts.interrupt_answer;
+        let mut exited = p.exited.clone();
+        loop {
+            if let Some(cancelled) = lock(&p.core).withdraw_answer(&request_id) {
+                return Ok(cancelled);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                lock(&p.core).withdraw_unanswered(&request_id);
+                anyhow::bail!("claude did not answer cancel_async_message");
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(INTERRUPT_POLL) => {}
+                _ = exited.wait_for(Option::is_some) => anyhow::bail!("claude exited"),
+            }
+        }
+    }
+
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        self.interrupt_turn(false).await
+    }
+
+    async fn stop_quiet(&mut self) -> anyhow::Result<()> {
+        self.interrupt_turn(true).await
     }
 
     fn pid(&self) -> Option<u32> {

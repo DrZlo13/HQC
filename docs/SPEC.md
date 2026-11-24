@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.230, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.231, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -609,7 +609,7 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `joined_after?` (since 0.221, with `joined`, set by the hub in the same write: the `seq` of the last event of the session that is no `user.message` or `peer.message`, stored before the hub took the ack, when it is past the message's own; absent when there is none and on a message joined before 0.221; §6), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise), `human?` (since 0.219: `true` on a message the owner typed in `POST /api/sessions/{id}/input` (§6), written there and nowhere else, so it is absent on a hub's own note (a resume, `hqc_move`, subagent leftovers), a run of a schedule, a room's post to its agent and a message from the Claude Code transcript; it is what Take back and Send now require (§6, §17.2) and what the worker writes Claude Code's `origin: human` for (§5.3, §8.1)) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.203: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
+| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `quiet?` (since 0.231: `true` once the worker wrote the message into the agent's history without a turn at the owner's Stop, set by the hub on `ack {quiet: true}`, §5.2, §17.2; absent when false; the feed stands it behind its `joined_after`, where Claude Code recorded it, §6), `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `joined_after?` (since 0.221, with `joined` or (since 0.231) `quiet`, set by the hub in the same write: the `seq` of the last event of the session that is no `user.message` or `peer.message`, stored before the hub took the ack, when it is past the message's own; absent when there is none and on a message joined before 0.221; §6), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise), `human?` (since 0.219: `true` on a message the owner typed in `POST /api/sessions/{id}/input` (§6), written there and nowhere else, so it is absent on a hub's own note (a resume, `hqc_move`, subagent leftovers), a run of a schedule, a room's post to its agent and a message from the Claude Code transcript; it is what Take back and Send now require (§6, §17.2) and what the worker writes Claude Code's `origin: human` for (§5.3, §8.1)) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.203: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text`, `reset?` (since 0.161: `true` when the runtime abandoned the attempt that wrote the text so far, which the hub and the client drop, and (since 0.208) the thinking being written with it, §6, §8.1; `text` is then empty; absent when false), `thinking?` (since 0.208: `true` for a piece of the agent's thinking being written, not of its answer; absent when false; §6, §8.1) | adapter; transport only, not written to the database |
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?, due_in_ms?, retry?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands and (since 0.169) Monitor watchers, in the order they became rows, then (since 0.169) the wakeup the agent armed and its cron jobs, empty when none (§8.1); since 0.181 a task the CLI marks `ambient` is no row, and the commands and subagents it starts are rows as the agent's own (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.161; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row, a command's and (since 0.169) a Monitor's say, `retry` (since 0.179) `{attempt, max_retries, retry_delay_ms, error_status?}` while its request to the model API failed and waits to be retried (`error_status` absent: the attempt got no response; §8.1), `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row, `command` for a command's and, since 0.169, `monitor` for a Monitor's, `wakeup` for the agent's wakeup and `cron` for one of its cron jobs; a command's or a Monitor's row carries only `task_id`, `description` (its Bash call's description, or the command; the Monitor's description), `duration_ms`, `call_id?`, `kind` and `stoppable`; a wakeup's and a job's row also `due_in_ms` (since 0.169), the milliseconds until it fires when the list was sent, by the worker's clock, 0 once due, absent on a job whose next fire is not known |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops, and (since 0.179) again, unchanged, at each heartbeat of a long call of the main agent (§8.1, §17.3) |
@@ -625,7 +625,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`), `action?` (since 0.180, only for a request with `server`: `accept` — the answers, also none, are the input; `decline` — the person declined, `answers` empty; the client shows "Declined") | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; since 0.181 also the worker after a background task's end, the task's output file (§8.1), with the same `author`, `kind: text`; since 0.209 also a publication the owner allowed (`hqc_publish`, §7), with `kind: site` (`event.attachment.site.json`); the user's files go into `user.message.artifact_ids` (rule below) |
-| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `joined_after?` (since 0.221, with `joined`: as on a `user.message`), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
+| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `joined_after?` (since 0.221, with `joined` or (since 0.231) `quiet`: as on a `user.message`), `quiet?` (since 0.231: as on a `user.message`), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `session_tokens?`, `model?`, `context_tokens?`, `context_limit?`, `cache_ttl_s?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost. Since 0.229 `session_tokens` is the runtime's cumulative tokens of the whole runtime session after the turn — input, output, cache reads and cache writes summed (Claude Code: `result.modelUsage` summed over its models), on every `usage` the adapter sends (the turn's, the compaction's and the total-only one) whose `result` has a `modelUsage`, absent otherwise; the client's header shows the latest one plus the last one before each `system conversation_cleared`, as it does the cost, but with no fallback to summing turns (§6). Since 0.222 a `usage` that carries tokens (not the one with the total only) also says how full the main agent's context is and how long its prompt cache lives: `context_tokens` is the context after the turn's last API response of the main agent (§8.1), `context_limit` the tokens it may hold before the runtime compacts it by itself, `cache_ttl_s` the seconds the session's cache has left when the turn ends, counted from the request of the response (3600 or 300, less the seconds since the response started, 0 at the least); each is absent when the runtime does not say it. `context_limit` is the threshold of the model's window; an override of the auto-compaction window or a disabled auto-compaction is not seen in the stream (§8.1). The client's header shows them (§6) |
 | `tasks` | `items[{subject, status, active_form?}]` | Claude Code adapter (since 0.223), stored: the agent's task list after a change, the whole list each time, empty when it has none. `status` is `pending`, `in_progress` or `completed` (another value reads as "unknown", shown as pending); `subject` and `active_form` are at most 512 bytes and the list at most 200 tasks; `active_form` is what the agent is doing while the task is in progress, as the runtime names it (Claude Code: `activeForm`), absent when it names none. The latest one is the list, the client shows it as a row above the input (§6), never as a feed item; the adapter sends one only when the list changed (§8.1) |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.161 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
@@ -735,7 +735,8 @@ Rules:
 - History is never rewritten: besides an input's `delivery` and `delivered_at` (§3 Event), the
 one change of a stored event is `joined` (and, since 0.221, `joined_after`) of a person's
 `user.message` (since 0.112, §17.2), since 0.172 of a room's input to its agent (§7.1.1) and
-since 0.174 of a `send`'s `peer.message`.
+since 0.174 of a `send`'s `peer.message`, and since 0.231 `quiet` (with `joined_after`) of any
+input the worker acks `quiet` (§5.2, §17.2).
 A `retraction` (since 0.179) hides events in clients and deletes none.
   Protection against forged peer-message headers is applied on delivery to the runtime (§7.1).
 
@@ -954,11 +955,20 @@ Hub → worker:
   (§17.2): the hub marks it `delivered` and does not open a turn for it (its `ack` goes after the
   outbox entries of the session written before it, §5.2); since 0.112 it keeps that on the
   message as `payload.joined: true` and sends it to clients with the `delivery` frame (§6).
-  After `hello` the hub sends `session.start` with `mode: resume` to every session of this worker
-  that has a `pending` input, an open `approval`/`clarify` or an answer to a request not yet
-  acknowledged by the worker; after the `ack` to it — the unacknowledged answers, then the
-  `pending` inputs in `seq` order. To an input for a session that has had no `session.start` in
-  its process, the worker answers `error {code: unknown_session, retryable: true}`.
+  Since 0.231 `ack {event_id, quiet: true}` says the input waited when the owner pressed Stop
+  (`session.stop {quiet: true}`, §5.3) and the runtime wrote it into the agent's history without a
+  turn (§8.1, §17.2): the hub
+  marks it `delivered`, tells clients as for any delivery, clears the send buffer it carried
+  and opens no turn; an `hqc_ask` it carried fails with "<address> was stopped before it took the
+  question" (§7.1), and a room's input goes on as for a joined one (§7.1.1). It keeps that on the
+  message as `payload.quiet: true` and sends it with the `delivery` frame (§6). Only a worker that
+  was sent `session.stop {quiet: true}` writes inputs quiet, and only a hub of 0.231 sends that, so
+  an older hub never meets `ack {quiet}`.
+  After `hello` the hub sends `session.start` with `mode: resume` to every session
+  of this worker that has a `pending` input, an open `approval`/`clarify` or an answer to a request
+  not yet acknowledged by the worker; after the `ack` to it — the unacknowledged answers, then the
+  `pending` inputs in `seq` order. To an input for a session that has had no `session.start` in its
+  process, the worker answers `error {code: unknown_session, retryable: true}`.
 - If the agent process fails to start (no binary, profile not configured), the worker
   answers `error {retryable: true}`; after **3 failed starts** in a row the hub sets the
   input's `delivery: failed`, writes a `system` event with the reason, and the session goes to
@@ -1175,7 +1185,10 @@ MCP calls (worker → hub → worker):
   `schedule_id` is not human whatever the frame says. The two exceptions are hqc's own notes that
   stand in front of a human input without taking its mark: a fork's first-input note and the
   worker's note of the background tasks a move stopped.
-- `session.stop` {session_id} — interrupt the current turn.
+- `session.stop` {session_id, quiet?} — interrupt the current turn. With `quiet: true` (since
+  0.231, sent only by the owner's own Stop of a session or room, never by a pause) the worker also
+  writes what waited at the Stop into the agent's history without a turn (§8.1, §17.2); without
+  it, and with no turn running, nothing is marked. A worker older than 0.231 ignores the field.
 - `session.background` {session_id, call_id} → `ack` (since 0.125) — move the agent's
   running call `call_id` to the background: the agent goes on, the call keeps running (Claude
   Code: the `background_tasks` control request, §8.1). The client sends one of the session's
@@ -1942,7 +1955,8 @@ the rest is marked "later"):
   agents (§7.1.1): `system room_stopped` "Stopped" in the room first, then each agent that is
   not archived stopped as its own `/stop` does (its own requests cancelled with `stopped`, the
   runtime's left to a connected worker, §10.1, and `session.stop` to its worker);
-  the agents' inputs stay as they are (`session.stop` interrupts the current turn only, §5.3),
+  the agents' inputs are not failed (since 0.231 the worker of an agent whose turn runs at the
+  Stop writes what waited into its history without a turn, §8.1, §17.2),
   and a turn on a message from before "Stopped" posts nothing unless a later one joined it
   (§7.1.1); `{sent}` is `true` when one went out. Since 0.130 `/restart` ends the agent's
   process and starts it again at once (`session.kill`, then `session.start` with `mode: resume`,
@@ -3074,9 +3088,19 @@ input and is no `status` (a `status` there closes the same turn as the end befor
 `joined` input stored behind waiting ones joined a turn after the last of them that was delivered
 before it (since 0.174 an input may join past a waiting one, §17.2): it stays right behind that
 one and is taken with it; if each of them was still pending when it was delivered (or is now) it
-joined the turn running then and stands at its own `seq` (with `joined_after`, behind that event when it is below, as above). The hub follows this order where it
+joined the turn running then and stands at its own `seq` (with `joined_after`,
+behind that event when it is below, as above).
+A `quiet` input (since 0.231) is never shown as waiting and stands behind its `joined_after` as a
+joined one does (the hub writes it on the `ack {quiet}`): behind the stopped turn, or behind a turn
+the CLI ran by itself before it recorded the line.
+The hub follows this order where it
 cuts by `seq`: a fork before such an input (above) and the files of a reply to a question
-(§7.1). On open
+(§7.1).
+A fork's copy leaves out a quiet input whose `joined_after` is not below the `seq` of the record
+where the copy's conversation is cut, an `agent.message`: Claude Code recorded it after that record,
+so the copied agent never got it; a fork of a copy reads the copy's own `joined_after`, carried into
+its `seq` (above).
+On open
 the chat loads the newest 100 events (`before_seq`), shows them and subscribes. Since 0.220 it
 loads the older history only where it is needed, newest first: a page of 200 events when the user
 scrolls to the top of what is loaded, while the feed is shorter than its window, and by itself
@@ -3162,13 +3186,18 @@ window bar (`macos/`), inflates a compressed socket's messages on a stream of it
   `{type: subscribed, session_id, last_seq}`: the history after `after_seq` has been
   sent (and, since 0.223, the session's latest `tasks` event when it is older than that),
   the live stream follows; `{type: delivery, session_id, event_id, seq, delivery,
-  delivered_at?, joined?, joined_after?}`: the delivery of an input changed; the event itself is not resent, the
+  delivered_at?, joined?, joined_after?, quiet?}`: the delivery of an input changed; the event
+  itself is not resent, the
   client updates `delivery`/`delivered_at` of its event with this `seq`; `joined: true` (since
   0.112, `client.delivery.joined.json`, absent when false) says the input went into the turn
   already running, and the client sets the message's `payload.joined` with it; `joined_after`
-  (since 0.221, with `joined`, `client.delivery.joined.json`, absent when the message has none) is
+  (since 0.221, with `joined` or (since 0.231) `quiet`, `client.delivery.joined.json`, absent when
+  the message has none) is
   the `seq` after which the agent took it, which the client sets as `payload.joined_after` and
   places the message by (above);
+  `quiet: true` (since 0.231, `client.delivery.quiet.json`, absent when false) says the worker
+  wrote it into the agent's history without a turn at the owner's Stop, and the client sets
+  `payload.quiet`;
   `{type: summary, sessions[]}`: the reply to `subscribe_summary`, all of the user's sessions;
   `{type: session.summary, session}`: one session changed; an element is `{session_id,
   project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?,
@@ -3743,7 +3772,10 @@ Delivery:
   (§9.3). Since 0.160 an `ask` to a paused session (§17.3) is refused at once as well, with
   `unavailable` and "<address> is paused; it takes no questions until it is resumed", so it does
   not wait out its timeout; a `send` to it is queued. An `ask` queued before the pause stays
-  queued and its caller waits out its timeout. Since 0.172 another agent of the caller's room is
+  queued and its caller waits out its timeout. Since 0.231 an `ask` whose question the owner's
+  Stop made the worker write into the agent's history without a turn (§17.2) fails at once as
+  well, with `unavailable` and "<address> was stopped before it took the question".
+  Since 0.172 another agent of the caller's room is
   refused at once too (`invalid_args`, §7.1.1). An empty (blank) `text` is `invalid_args`.
 
 Queues (two different ones):
@@ -4082,8 +4114,9 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
 - `POST /stop` of the room (§6), in both modes, writes `system room_stopped` "Stopped" and
   stops every agent as the agent's own Stop does (§8.1: its background subagents spared;
   §10.1: the runtime's open requests left to a connected worker); the agents' inputs are not failed
-  (`session.stop` interrupts the current turn only, and the worker keeps the inputs it has,
-  §5.3). A turn on a message from
+  (since 0.231 the worker of an agent whose turn runs at the Stop writes the inputs it holds into
+  the agent's history without a turn, each acked `quiet`, §8.1, §17.2; the others wait and run).
+  A turn on a message from
   before "Stopped" posts nothing unless a later one joined it (above), and with no speaker no
   turn's end wakes an agent.
 - The hub decides and stores all of this under one lock per room, in the hub's memory (the hub
@@ -5371,8 +5404,15 @@ before the start it works). A file the source lacks is skipped; any other failur
 fork goes on. The CLI writes the switch into the transcript as a typed `/model <name>` record; the
 adapter counts it as its own input (§9.3), so the mirror imports no prompt from it (since 0.77).
 
-Interrupting a turn (`session.stop`): the adapter sends `control_request {subtype:
-"interrupt"}` to stdin; the CLI ends the turn with a `result` record with `subtype:
+Interrupting a turn (`session.stop`): for the owner's own Stop (`quiet: true`, since 0.231) the
+adapter first sends a `cancel_async_message` for every line of hqc's that the CLI has not taken (its
+`command_lifecycle` is not `started` yet; the CLI answers each it drops with `command_lifecycle`
+`cancelled` before the turn's `result`), then `control_request {subtype: "interrupt"}` to stdin. The
+interrupt is plain on purpose: `cancel_queued: true` (checked live on 2.1.312; it answers
+`{still_queued: [], cancelled: [uuid…]}`) also dequeues the CLI's own queued lines that carry no
+`uuid` (the task notifications of background subagents and tasks, cron and `/loop` triggers;
+`cli-2.1.312.pretty.js:110256`), which hqc cannot write back. The CLI ends the turn with a `result`
+record with `subtype:
 error_during_execution`, the partial reply text comes as a separate `assistant` record, and
 the process stays alive (checked on 2.1.308). Since 0.201 the adapter also waits for the CLI's
 `control_response` to the `interrupt` (2.1.312 answers it in its input handler, ahead of the
@@ -5385,6 +5425,30 @@ the next input brings the process up via `--resume`.
 Since 0.143, if the turn still runs 10 s after the SIGINT (a process stuck in a tool call that
 the signal does not end), the group gets SIGTERM, and SIGKILL 5 s later, as a kill does: Stop
 ends a stuck session together with the commands it started.
+Since 0.231 what the owner's Stop (`session.stop {quiet: true}`) cancelled is not lost: the worker
+writes each input it marked into the conversation as a quiet line, a `user` message with
+`shouldQuery: false` (otherwise as any input, `origin` human for the owner's), which the CLI records
+without calling the model. It answers with `command_lifecycle` `queued` and `started`, a
+`system/init`, the line's echo (`isReplay`), a `result` `success` with `num_turns: 0` and
+`user_message_uuids` listing the line, and `completed` (checked live on 2.1.312; the next turn's
+agent remembers the text). Lines written back to back are taken as the CLI pleases: the first alone,
+the next ones together, with one `init`, an echo for each (the first one's own `uuid` and text, then
+the last one's `uuid` with the texts joined by a line break) and one `result` listing all of them.
+The engine takes each quiet line by the `result` that lists its `uuid`, once, and answers it with
+one adapter event naming the inputs; the `init` of a quiet line opens no turn of the CLI's own (no
+`status running`), its echo accepts no input, and its `result` (`num_turns: 0`) gives no `usage`, no
+`status idle`, no end of turn. The line carries `priority: "later"`: the CLI folds a line of
+priority "next" or above into a turn that runs, without looking at `shouldQuery`, and a line with no
+`priority` is "next" (2.1.312). A "later" line never joins a running turn, neither one of ours nor
+one the CLI started by itself on a task notification it kept in its queue; the CLI takes it when it
+is idle, after that turn's `result`. The CLI dequeues "next" before "later", so a normal line
+written while a quiet one still waits in its queue would run first, before the agent has seen the
+stopped text: the worker hands no normal input while quiet lines are out, and writes it after their
+acks. The idle unload and a move wait for the quiet lines to be taken too, since the end of the
+process loses their acks. A quiet line the CLI drops (`command_lifecycle` `cancelled`: on 2.1.312
+the CLI answers that for a line it failed to process) is written again at once, and one whose
+process ends before the CLI took it (not through `session.kill`) goes back to the queue and is
+written quiet into the next process. A `session.kill` is not held for them (§17.2).
 Since 0.161, with `perTaskStopAffordance` in the process's `initialize` (above), the interrupt stops
 only the turn: background subagents and workflows go on, as in the VS Code tab (by the 2.1.312
 binary, "an interrupt on an open-input (interactive stream-json) session spares running background
@@ -7338,7 +7402,39 @@ The same holds for an input sent during a turn the CLI began by itself after a b
 `session.stop` interrupts such
 a turn too (the adapter knows it from the CLI's `system/init` with no input of hqc's). An input
 the CLI cancels after a `session.stop` (a carried input on a second Stop) fails, not retryable,
-instead of going back to the queue: the person cancelled it. The "interrupt and send" button does
+instead of going back to the queue: the person cancelled it. Since 0.231 the owner's own Stop of a
+turn that runs (`session.stop {quiet: true}`: the stop button, a room's Stop; a pause's stop is none
+of these) is "stop the turn, send everything that waited, stop again": when it comes the worker
+marks the inputs it holds (its queue; a capped input waiting for its mode), and when the stopped
+turn ends it marks the inputs the runtime dropped from that turn (cancelled or not taken: they were
+written before the Stop). It writes the marked ones into the agent's history without a turn (§8.1),
+in `event_id` order, the hub's creation order. The agent knows them next time and does not act on
+them now. Each is acked `quiet` when the runtime has taken it, and acked `quiet` again when the hub
+resends it. A slash command among them fails, not retryable ("cancelled by Stop"): it runs or it
+does not, it is no text for the history (what decides is the text the runtime gets: a message of
+another session whose text starts with a path carries a header first and is no command). Until the
+stopped turn ends nothing new goes into it, and what comes after the Stop is never marked: it waits,
+and goes as an ordinary input once the quiet lines are taken (the CLI runs a "next" line before a
+"later" one, and the agent must see the stopped text first). So a message typed after the Stop runs,
+and so does a slash command typed after it (Clear goal is a Stop, then `/goal clear`). The idle
+unload and a move wait for the acks. A Stop with no turn running (idle, no process, the agent waits
+for a slot or a move) and a stop with no `quiet` (a pause's, which keeps the waiting messages for
+the resume) mark nothing and write nothing. The hub keeps `payload.quiet: true` on such a message
+and sends it with the `delivery` frame (§6); the feed stands it behind its `joined_after`, where
+Claude Code recorded it, and never shows it as waiting (§6). An input the hub has not handed to the
+worker yet is not touched. Before 0.231 an input the CLI cancelled after a Stop failed, not
+retryable, and the others waited and ran. Send now (§6) is no way past that hold: while the stopped
+turn ends, an input that came after the Stop is `error not_now`. The runtime's `cancelled` for the
+turn's own first line, which a Stop's cancel can reach before the CLI started it (a cold start),
+makes that input come back as dropped at once, so it is written quiet like the others (not in a turn
+the runtime started by itself, where that line is not what keeps the turn open). Take back of an
+input the Stop marked withdraws it as ever: one still in the worker's queue leaves it, and one the
+CLI already cancelled is withdrawn at once, without asking the CLI again, and is never written
+quiet. One already written as a quiet line is on its way into the history and is `409
+already_taken`. Limitation: a `session.kill` or a worker restart at any time between the Stop and
+the quiet acks (during the stopped turn, and while quiet lines wait behind a turn the CLI started by
+itself) drops the marked inputs at the worker; the hub, which holds them `pending`, sends them to
+the next process as plain inputs, which run as before 0.231. The "interrupt and send" button does
 `session.stop` and then the input. For runtimes with `steer` (Hermes) a "steer" button is
 available: `session.steer` without interrupting. Two users with `write` share the same queue.
 Each turn runs in its own input's mode (since 0.43, T39): a person's input queued behind a
@@ -7736,6 +7832,53 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.230 → 0.231 (the owner's Stop sends what waited without a turn)
+§4, §5.2, §5.3, §6, §7.1, §8.1, §17.2: a Stop used to leave the messages that waited to chance: the
+CLI cancelled the ones written into the turn and they failed, the worker's queue ran after the Stop
+as if nothing had happened. Now the owner's own Stop is "stop the turn, send everything that waited,
+stop again". `session.stop` gets `quiet` (omitted when false); the hub sets it in the owner's Stop
+route and in a room's Stop, never in a pause's stop, which keeps the waiting messages for the
+resume. A worker older than 0.231 ignores the field and stops as before, and only a hub of 0.231
+makes a worker send `ack {quiet}`, so the workers need not be updated after the hub. With a turn
+running (the runtime's own included) a `quiet` stop sends a `cancel_async_message` for each line of
+hqc's the CLI has not taken, then the plain `interrupt` (`cancel_queued` would also dequeue the
+CLI's own lines that carry no `uuid`: task notifications, cron, `/loop`), and marks the inputs the
+worker holds; when the stopped turn ends it marks the inputs the runtime dropped from it, and writes
+the marked ones into the agent's history as quiet lines (`shouldQuery: false`, which Claude Code
+records without calling the model), in the hub's creation order (`event_id`), so the agent knows
+what was written and does not act on it. Until that end nothing new goes into the turn, and what
+comes after the Stop is never marked, so Clear goal (a Stop, then `/goal clear`) still runs `/goal
+clear`. A slash command that waited, judged by the text the runtime gets, fails ("cancelled by
+Stop"). A Stop with no turn running and a stop without `quiet` mark nothing. The engine takes each
+quiet line by the `result` that lists it in `user_message_uuids` (the CLI takes lines written back
+to back together: one `result` for several), with one adapter event and no turn, status, `usage` or
+end of turn. The worker acks each input with the new `ack {quiet: true}`; the idle unload and a move
+wait for those acks, and a quiet line the CLI drops (on 2.1.312 it answers `cancelled` for a line it
+failed to process) or a process that ends first (not through `session.kill`) is written again. The
+quiet line carries `priority: "later"`: the CLI folds a line of priority "next" or above into a turn
+that runs, whatever its `shouldQuery`, a turn it started by itself included, so a "later" line never
+joins one and is taken once the CLI is idle, and the worker writes it at once. A normal input
+written while quiet lines wait would run before them (the CLI dequeues "next" before "later"), so
+the worker hands none until their acks. A Stop never cancels a quiet line. On the `ack {quiet}` the
+hub also writes `payload.joined_after` (0.221), so the feed stands a quiet message where Claude Code
+recorded it: behind the stopped turn, or behind a turn the CLI ran by itself before it took the
+line. The hub marks such an input delivered, keeps `payload.quiet` on it and tells clients with the
+`delivery` frame (never as waiting), opens no turn for it, fails an `hqc_ask` it carried ("<address>
+was stopped before it took the question"), and lets a room go on as for a joined input. Send now
+does not pass the hold of the stopped turn (`not_now`). A `cancelled` for the turn's own first line
+that a Stop's cancel reached before the CLI started it (no `result` follows) makes it come back
+dropped, and so quiet, except in a turn the runtime started by itself. Take back of a marked input
+in the worker's queue leaves it, and of one the CLI already cancelled is answered at once; neither
+is written quiet; one already written as a quiet line is `409 already_taken`. A `session.kill` is
+not held for the acks: a kill or a worker restart at any time between the Stop and the acks (during
+the stopped turn, and while quiet lines wait behind a turn the CLI started by itself) drops the
+marked inputs at the worker, and the hub, which holds them pending, sends them to the next process
+as plain inputs, which run as before 0.231 (§17.2). A Stop no longer leaves its flag set when no
+turn runs or its process ends, which made the end of a later turn treat its dropped inputs as
+cancelled. A fork's copy leaves out a message written quiet whose `joined_after` is not below the
+`seq` of the record where the copy's conversation is cut (Claude Code recorded it after that record,
+so the copied agent never got it); a fork of a copy reads the copy's own `joined_after`.
 
 ### 0.229 → 0.230 (a chat catching up draws a few times, the client socket compressed, one session fetched instead of the list)
 §6: a chat opened after a long absence took long to show the events it had missed: the hub sent

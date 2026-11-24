@@ -49,7 +49,8 @@ impl<T> Envelope<T> {
 /// - to `event`: `{event_id, seq}`; `seq` of the stored event for a duplicate, absent when
 ///   the event was dropped for an unknown session;
 /// - to `session.input`: `{event_id}` of the delivered input, with `joined: true` when the
-///   runtime took it into the turn already running (SPEC §17.2);
+///   runtime took it into the turn already running (SPEC §17.2), or `quiet: true` when it
+///   wrote it into the agent's history without a turn (a Stop, SPEC §8.1);
 /// - otherwise `{}`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ack {
@@ -62,6 +63,12 @@ pub struct Ack {
     /// does). It is delivered but opens no turn. Sent only when true.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub joined: bool,
+    /// To `session.input` (since SPEC 0.231): the input waited when the owner pressed Stop, and
+    /// the runtime wrote it into the agent's history without starting a turn: the agent knows
+    /// it next time and does not act on it now. It is delivered but opens no turn. Sent only
+    /// when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quiet: bool,
 }
 
 /// `skip_serializing_if` of a count whose absence means 0.
@@ -522,9 +529,18 @@ pub enum HubFrame {
     SessionStart(SessionStart),
     #[serde(rename = "session.input")]
     SessionInput(SessionInput),
-    /// Abort the current turn.
+    /// Abort the current turn. With `quiet` (since SPEC 0.231, sent only by the owner's own Stop
+    /// of a session or room, never by a pause) what waited at the Stop (inputs held by the
+    /// worker, and those the runtime dropped from the turn) is written into the agent's history
+    /// without a turn and acked `quiet` ([`Ack::quiet`]); a slash command among them fails with
+    /// "cancelled by Stop". Without it, and with `quiet` but no turn running, nothing is marked.
+    /// A worker older than 0.231 ignores the field and stops as before.
     #[serde(rename = "session.stop")]
-    SessionStop { session_id: Uuid },
+    SessionStop {
+        session_id: Uuid,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        quiet: bool,
+    },
     /// Move the agent's running call `call_id` (the client sends one of
     /// `session.state.foreground_calls`) to the background; the agent goes on (since SPEC
     /// 0.125). Answered with `ack`, also when no agent runs or `call_id` is empty; what the
@@ -1859,6 +1875,10 @@ mod tests {
             include_str!("../examples/wire/hub.session.stop.json"),
         ),
         (
+            "session.stop",
+            include_str!("../examples/wire/hub.session.stop.quiet.json"),
+        ),
+        (
             "session.background",
             include_str!("../examples/wire/hub.session.background.json"),
         ),
@@ -2166,6 +2186,10 @@ mod tests {
             "ack",
             include_str!("../examples/wire/worker.ack.joined.json"),
         ),
+        (
+            "ack",
+            include_str!("../examples/wire/worker.ack.quiet.json"),
+        ),
         ("error", include_str!("../examples/wire/worker.error.json")),
     ];
 
@@ -2431,12 +2455,35 @@ mod tests {
         assert!(serde_json::from_value::<Envelope<WorkerFrame>>(unknown).is_err());
     }
 
+    /// SPEC 0.231: `session.stop` carries `quiet` only for the owner's own Stop; a pause's Stop
+    /// leaves it out, and a frame without it (an older hub) reads as false.
+    #[test]
+    fn a_stop_names_whether_it_is_quiet() {
+        let quiet: Envelope<HubFrame> =
+            serde_json::from_str(include_str!("../examples/wire/hub.session.stop.quiet.json"))
+                .unwrap();
+        assert!(matches!(
+            quiet.body,
+            HubFrame::SessionStop { quiet: true, .. }
+        ));
+        let plain: Envelope<HubFrame> =
+            serde_json::from_str(include_str!("../examples/wire/hub.session.stop.json")).unwrap();
+        assert!(matches!(
+            plain.body,
+            HubFrame::SessionStop { quiet: false, .. }
+        ));
+        assert!(serde_json::to_value(&plain).unwrap()["payload"]
+            .get("quiet")
+            .is_none());
+    }
+
     #[test]
     fn reply_reuses_id() {
         let req = Envelope::new(
             "f-17",
             HubFrame::SessionStop {
                 session_id: Uuid::nil(),
+                quiet: false,
             },
         );
         let ack = req.reply(WorkerFrame::Ack(Ack::default()));
@@ -2462,6 +2509,7 @@ mod tests {
                 event_id: Some(si.event_id),
                 seq: None,
                 joined: false,
+                quiet: false,
             })
         );
         // The same input taken into the turn already running (SPEC §17.2).
@@ -2474,6 +2522,20 @@ mod tests {
                 event_id: Some(si.event_id),
                 seq: None,
                 joined: true,
+                quiet: false,
+            })
+        );
+        // The same input written into the history on a Stop, without a turn (SPEC §8.1).
+        let quiet: Envelope<WorkerFrame> =
+            serde_json::from_str(include_str!("../examples/wire/worker.ack.quiet.json")).unwrap();
+        assert_eq!(quiet.id, input.id);
+        assert_eq!(
+            quiet.body,
+            WorkerFrame::Ack(Ack {
+                event_id: Some(si.event_id),
+                seq: None,
+                joined: false,
+                quiet: true,
             })
         );
 

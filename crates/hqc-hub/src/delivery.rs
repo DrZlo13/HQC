@@ -299,13 +299,16 @@ pub async fn on_start_failed(
     Ok(())
 }
 
-/// `joined`: the runtime took the input into the turn already running (SPEC §17.2).
+/// `joined`: the runtime took the input into the turn already running (SPEC §17.2). `quiet`:
+/// the input waited when the owner pressed Stop, and the runtime wrote it into the agent's
+/// history without a turn (SPEC 0.231).
 pub async fn on_input_ack(
     app: &AppState,
     conn: &Arc<WorkerConn>,
     session_id: Uuid,
     event_id: Uuid,
     joined: bool,
+    quiet: bool,
 ) -> anyhow::Result<()> {
     {
         let mut st = conn.st.lock().await;
@@ -313,7 +316,7 @@ pub async fn on_input_ack(
             sc.inflight.remove(&event_id);
         }
     }
-    if let Some(row) = db::mark_delivered(&app.db, event_id, joined).await? {
+    if let Some(row) = db::mark_delivered(&app.db, event_id, joined, quiet).await? {
         notify_delivery(app, &row);
         // The send buffer it carried reached the agent (SPEC §7.1).
         crate::peers::delivered(app, event_id).await?;
@@ -329,7 +332,15 @@ pub async fn on_input_ack(
         if joined && !kept {
             tracing::warn!(%session_id, %event_id, kind = %row.kind, "a worker joined an input that cannot join a turn; its turn opens");
         }
-        if kept || db::turn_answered(&app.db, session_id, event_id).await? {
+        // A quiet input has no turn at all: an `hqc_ask` it carried gets no answer, and fails
+        // with its own words (SPEC §7.1); a room's input goes on as for one that joined (SPEC
+        // §7.1.1).
+        if quiet {
+            if let Some(s) = db::session(&app.db, session_id).await? {
+                crate::peers::quiet_stopped(app, &s, event_id).await?;
+            }
+        }
+        if quiet || kept || db::turn_answered(&app.db, session_id, event_id).await? {
             // No turn opens: a room's input acked after its turn already ended goes on from
             // that turn's end (SPEC §7.1.1).
             crate::rooms::acked(app, session_id, &row).await?;
@@ -424,12 +435,18 @@ pub fn notify_delivery(app: &AppState, row: &EventRow) {
         delivered_at: row.delivered_at,
         joined: is_joined(row),
         joined_after: row.payload.get("joined_after").and_then(Value::as_i64),
+        quiet: is_quiet(row),
     });
 }
 
 /// `payload.joined` of a stored input: [`db::mark_delivered`] sets it (SPEC §17.2).
 fn is_joined(row: &EventRow) -> bool {
     row.payload.get("joined") == Some(&Value::Bool(true))
+}
+
+/// `payload.quiet` of a stored input: [`db::mark_delivered`] sets it (SPEC 0.231).
+fn is_quiet(row: &EventRow) -> bool {
+    row.payload.get("quiet") == Some(&Value::Bool(true))
 }
 
 /// Client frame for a delivery change (SPEC §6).
@@ -443,6 +460,7 @@ pub fn delivery_frame(n: &Notice) -> Option<ServerFrame> {
             delivered_at,
             joined,
             joined_after,
+            quiet,
         } => Some(ServerFrame::Delivery {
             session_id: *session_id,
             event_id: *event_id,
@@ -451,6 +469,7 @@ pub fn delivery_frame(n: &Notice) -> Option<ServerFrame> {
             delivered_at: *delivered_at,
             joined: *joined,
             joined_after: *joined_after,
+            quiet: *quiet,
         }),
         _ => None,
     }

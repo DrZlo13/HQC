@@ -960,3 +960,241 @@ async fn a_command_or_a_failed_input_leaves_the_note_to_the_next_input() {
     assert!(text.as_str().unwrap().starts_with(note), "{text}");
     hub.finish().await;
 }
+
+/// SPEC 0.231: Q1 was typed during a turn that a Stop ended and Q2 reaches the worker once that
+/// turn is over; the worker acks both `quiet`, written into the agent's history without a turn
+/// after that turn's last answer. A fork's agent never gets them (its transcript is cut at an
+/// `agent.message`), so the copy does not show them: before M, the input typed after them, and
+/// before Q2 itself (Q1 stands after the stopped turn's answer too); a fork cut at the answer of
+/// M's turn keeps both.
+#[tokio::test]
+async fn a_fork_leaves_out_the_quiet_messages_its_agent_never_got() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    let a = input(&hub, &mut w, &sid, "Run the tests.").await;
+    // Q1 is typed during the turn; Q2 goes to the worker after Q1's ack, once the stopped
+    // turn is over.
+    let mut quiet = Vec::new();
+    for text in ["Q1 first", "Q2 second"] {
+        let (s, r) = hub
+            .post(&format!("/api/sessions/{sid}/input"), json!({"text": text}))
+            .await;
+        assert_eq!(s, 201, "{r}");
+        quiet.push(r["event"].clone());
+        if quiet.len() == 1 {
+            // One input is in flight at a time: its ack lets the next one go.
+            let si = w.expect("session.input").await;
+            w.event(agent_event(
+                &sid,
+                "agent.message",
+                json!({"text": "Stopped.", "final": true, "interrupted": true,
+                       "in_reply_to": a["event_id"]}),
+            ))
+            .await;
+            w.event(agent_event(
+                &sid,
+                "status",
+                json!({"state": "idle", "in_reply_to": a["event_id"]}),
+            ))
+            .await;
+            w.reply(
+                &si["id"],
+                "ack",
+                json!({"event_id": quiet[0]["event_id"], "quiet": true}),
+            )
+            .await;
+        }
+    }
+    let si = w.expect("session.input").await;
+    w.reply(
+        &si["id"],
+        "ack",
+        json!({"event_id": quiet[1]["event_id"], "quiet": true}),
+    )
+    .await;
+    let m = input(&hub, &mut w, &sid, "Now M.").await;
+    let am = agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "M done.", "final": true, "in_reply_to": m["event_id"]}),
+    );
+    w.event(am.clone()).await;
+    w.event(agent_event(
+        &sid,
+        "status",
+        json!({"state": "idle", "in_reply_to": m["event_id"]}),
+    ))
+    .await;
+    let n = input(&hub, &mut w, &sid, "Then N.").await;
+
+    let texts = |evs: Vec<Value>| -> Vec<String> {
+        evs.iter()
+            .filter(|e| e["type"] == "user.message")
+            .map(|e| e["payload"]["text"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let f = fork(&hub, &sid, &m).await;
+    ack_start(&mut w, &f).await;
+    assert_eq!(texts(hub.events(&f).await), ["Run the tests."]);
+    let f = fork(&hub, &sid, &quiet[1]).await;
+    ack_start(&mut w, &f).await;
+    assert_eq!(texts(hub.events(&f).await), ["Run the tests."]);
+    let f = fork(&hub, &sid, &n).await;
+    ack_start(&mut w, &f).await;
+    assert_eq!(
+        texts(hub.events(&f).await),
+        ["Run the tests.", "Q1 first", "Q2 second", "Now M."]
+    );
+    hub.finish().await;
+}
+
+/// A turn that a Stop ended, with the messages typed during it written quiet: the input that
+/// started the turn, the quiet ones (acked after `between` ran), the stopped turn's answer.
+/// `between` runs after the stopped turn's end and before the acks of the quiet messages: what the
+/// CLI did meanwhile.
+async fn stopped_turn_with_quiet(
+    hub: &TestHub,
+    w: &mut FakeWorker,
+    sid: &str,
+    texts: &[&str],
+    between: impl AsyncFnOnce(&mut FakeWorker),
+) -> (Value, Vec<Value>, Value) {
+    let a = input(hub, w, sid, "Run the tests.").await;
+    let mut posted = Vec::new();
+    for text in texts {
+        let (st, r) = hub
+            .post(&format!("/api/sessions/{sid}/input"), json!({"text": text}))
+            .await;
+        assert_eq!(st, 201, "{r}");
+        posted.push(r["event"].clone());
+    }
+    // One input is in flight at a time: the first goes out now, the rest after each ack.
+    let mut frame = Some(w.expect("session.input").await);
+    let stopped = agent_event(
+        sid,
+        "agent.message",
+        json!({"text": "Stopped.", "final": true, "interrupted": true,
+               "in_reply_to": a["event_id"]}),
+    );
+    w.event(stopped.clone()).await;
+    // A fork copies no `usage` and no `status`: the numbers of the copy are not the source's.
+    w.event(agent_event(
+        sid,
+        "usage",
+        json!({"input_tokens": 1, "output_tokens": 1}),
+    ))
+    .await;
+    w.event(agent_event(
+        sid,
+        "status",
+        json!({"state": "idle", "in_reply_to": a["event_id"]}),
+    ))
+    .await;
+    between(w).await;
+    for q in &posted {
+        let si = match frame.take() {
+            Some(f) => f,
+            None => w.expect("session.input").await,
+        };
+        w.reply(
+            &si["id"],
+            "ack",
+            json!({"event_id": q["event_id"], "quiet": true}),
+        )
+        .await;
+    }
+    (a, posted, stopped)
+}
+
+fn user_texts(evs: Vec<Value>) -> Vec<String> {
+    evs.iter()
+        .filter(|e| e["type"] == "user.message")
+        .map(|e| e["payload"]["text"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// SPEC 0.231: the CLI ran a turn of its own (a stored `agent.message`) between the stopped
+/// turn's end and the ack of a quiet message: Claude Code recorded the message after that turn's
+/// answer, and a fork before the next message cuts at that answer, so the copy leaves it out
+/// (`joined_after` is the end of the own turn, not the stopped turn's).
+#[tokio::test]
+async fn a_fork_leaves_out_a_quiet_message_recorded_after_a_turn_of_the_cli_s_own() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    let own = agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "A task finished.", "final": true}),
+    );
+    let own2 = own.clone();
+    stopped_turn_with_quiet(&hub, &mut w, &sid, &["Q1 first"], async |w| {
+        w.event(own2).await;
+        w.event(agent_event(&sid, "status", json!({"state": "idle"})))
+            .await;
+    })
+    .await;
+    let m = input(&hub, &mut w, &sid, "Now M.").await;
+    reply(&mut w, &sid, "M done.").await;
+
+    let f = fork(&hub, &sid, &m).await;
+    let fs = ack_start(&mut w, &f).await;
+    assert_eq!(
+        fs["payload"]["fork"]["at_event_ids"][0], own["event_id"],
+        "{fs}"
+    );
+    assert_eq!(user_texts(hub.events(&f).await), ["Run the tests."]);
+    hub.finish().await;
+}
+
+/// SPEC 0.231: a fork of a copy cuts by the copy's own events: `joined_after` of a quiet message
+/// is carried into the copy's `seq` (the copy has no `usage` and no `status`). A fork before a
+/// copied message after the stopped turn's answer leaves it out; one before a later message, which
+/// cuts at an answer after it, keeps it, as the source's numbers alone would not say.
+#[tokio::test]
+async fn a_fork_of_a_copy_leaves_out_a_quiet_message_by_the_copys_own_place() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    stopped_turn_with_quiet(&hub, &mut w, &sid, &["Q1 first"], async |_| {}).await;
+    input(&hub, &mut w, &sid, "Now M.").await;
+    reply(&mut w, &sid, "M done.").await;
+    input(&hub, &mut w, &sid, "Then N.").await;
+    reply(&mut w, &sid, "N done.").await;
+    let p = input(&hub, &mut w, &sid, "Then P.").await;
+
+    // The first fork keeps Q1: it was recorded before the answer where this fork is cut.
+    let f = fork(&hub, &sid, &p).await;
+    ack_start(&mut w, &f).await;
+    let copied = hub.events(&f).await;
+    assert_eq!(
+        user_texts(copied.clone()),
+        ["Run the tests.", "Q1 first", "Now M.", "Then N."]
+    );
+    let copy_of = |text: &str| {
+        copied
+            .iter()
+            .find(|e| e["payload"]["text"] == text)
+            .unwrap()
+            .clone()
+    };
+    // A fork of the copy before the copied M: Q1 stands after the record where it cuts.
+    let ff = fork(&hub, &f, &copy_of("Now M.")).await;
+    ack_start(&mut w, &ff).await;
+    assert_eq!(user_texts(hub.events(&ff).await), ["Run the tests."]);
+    // Before the copied N it cuts at M's answer, after Q1 was recorded: Q1 stays.
+    let ff = fork(&hub, &f, &copy_of("Then N.")).await;
+    ack_start(&mut w, &ff).await;
+    assert_eq!(
+        user_texts(hub.events(&ff).await),
+        ["Run the tests.", "Q1 first", "Now M."]
+    );
+    hub.finish().await;
+}

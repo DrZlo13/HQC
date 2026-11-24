@@ -943,6 +943,23 @@ impl Supervisor {
                 });
                 return;
             }
+            // SPEC 0.236: what a model endpoint lists, for Settings to fill a provider.
+            HubFrame::ProviderProbe(r) => {
+                let (link, cfg) = (self.link.clone(), self.cfg.clone());
+                tokio::spawn(async move {
+                    let provider_probe = crate::provider_probe::probe(&cfg, &r.base_url).await;
+                    link.reply(
+                        &id,
+                        WorkerFrame::Result(RequestResult {
+                            request_id: r.request_id,
+                            body: ResultBody::ProviderProbe(
+                                hqc_proto::frame::ProviderProbeResult { provider_probe },
+                            ),
+                        }),
+                    );
+                });
+                return;
+            }
             HubFrame::ClaudeLogin(r) => {
                 let (link, bin, logins) =
                     (self.link.clone(), self.claude_bin(), self.logins.clone());

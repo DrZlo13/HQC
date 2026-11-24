@@ -22,6 +22,7 @@ pub mod mirror;
 pub mod outbox;
 pub mod peer;
 pub mod permissions;
+pub mod provider_probe;
 pub mod secrets;
 pub mod ssh;
 pub mod supervisor;

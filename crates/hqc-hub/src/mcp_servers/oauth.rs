@@ -446,6 +446,41 @@ async fn discover(app: &AppState, r: &Row) -> Result<Meta, UpErr> {
     })
 }
 
+/// A server that answered `401`: it signs in with OAuth when it names protected-resource
+/// metadata (in `WWW-Authenticate` or at the well-known path) that names an authorization server.
+pub(super) async fn offers_oauth(
+    app: &AppState,
+    url: &str,
+    www_authenticate: Option<&str>,
+) -> bool {
+    let Some((origin, path)) = split(url) else {
+        return false;
+    };
+    let mut candidates: Vec<String> = www_authenticate
+        .and_then(|h| param(h, "resource_metadata"))
+        .into_iter()
+        .collect();
+    candidates.push(format!(
+        "{origin}/.well-known/oauth-protected-resource{path}"
+    ));
+    candidates.push(format!("{origin}/.well-known/oauth-protected-resource"));
+    for c in candidates {
+        if let Some(v) = get_json(app, &c).await {
+            return v
+                .get("authorization_servers")
+                .and_then(Value::as_array)
+                .is_some_and(|a| !a.is_empty());
+        }
+    }
+    // An older server: its own authorization-server metadata at its origin.
+    get_json(
+        app,
+        &format!("{origin}/.well-known/oauth-authorization-server"),
+    )
+    .await
+    .is_some()
+}
+
 /// `name="value"` or `name=value` of a `WWW-Authenticate` header.
 fn param(header: &str, name: &str) -> Option<String> {
     let i = header.find(&format!("{name}="))?;

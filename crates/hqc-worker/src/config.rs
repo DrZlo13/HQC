@@ -36,6 +36,7 @@
 //! ssh_keys = ["infra_ed25519"]   # T44: keys of $HQC_HOME/keys/, an ssh-agent per process
 //! allow_local_mcp = false        # true: the machine's MCP servers too (no --strict-mcp-config)
 //! project_settings = false       # true: the repository's CLAUDE.md and .claude/settings.json too
+//! hub_mcp = false                # true: the remote MCP servers the hub keeps (SPEC 0.235)
 //! [environments.infra.permissions]
 //! unblock = ["Bash(ssh:*)"]      # rules of the worker's deny lifted here only
 //! allow = ["Bash(ssh debian@192.168.1.20:*)"]
@@ -149,6 +150,8 @@ struct RawEnvironment {
     #[serde(default)]
     project_settings: bool,
     #[serde(default)]
+    hub_mcp: bool,
+    #[serde(default)]
     permissions: RawEnvPermissions,
 }
 
@@ -207,6 +210,9 @@ pub struct Environment {
     /// Claude Code reads the project setting source too (`--setting-sources
     /// user,project,local`); worker-local, not in `hello`.
     pub project_settings: bool,
+    /// The sessions get the remote MCP servers the hub keeps for their project, each as a
+    /// stdio relay to the hub (SPEC 0.235); worker-local, not in `hello`.
+    pub hub_mcp: bool,
     /// `[environments.<name>.permissions]` as written.
     pub rules: EnvPermissions,
     /// What its sessions run with ([`Permissions::for_environment`]).
@@ -222,6 +228,7 @@ impl Environment {
             ssh_keys: vec![],
             allow_local_mcp: false,
             project_settings: false,
+            hub_mcp: false,
             rules: EnvPermissions::default(),
             permissions: permissions.clone(),
         }
@@ -322,6 +329,7 @@ fn parse_environment(
         ssh_keys: raw.ssh_keys,
         allow_local_mcp: raw.allow_local_mcp,
         project_settings: raw.project_settings,
+        hub_mcp: raw.hub_mcp,
         permissions: worker.for_environment(&rules)?,
         rules,
     })
@@ -525,6 +533,10 @@ pub struct StartSpec {
     /// Why `session.start.browser` was not run (`system browser_refused`): the session starts
     /// without it.
     pub browser_refused: Option<String>,
+    /// `session.start.mcp_servers` as this worker takes them (SPEC 0.235): only in an
+    /// environment with `hub_mcp`, for an unrestricted Claude Code session of the worker's
+    /// owner, and only valid names.
+    pub mcp_servers: Vec<String>,
 }
 
 impl StartSpec {
@@ -725,6 +737,32 @@ impl Config {
                     .map(|_| self.secrets.workspace(&ws)),
                 rbw: self.vault.then(|| self.rbw_bin.clone()),
             });
+        // SPEC 0.235: the hub's MCP servers, only where `worker.toml` takes them.
+        let mcp_servers = if s.mcp_servers.is_empty() {
+            vec![]
+        } else if !environment.hub_mcp
+            || !s.owner_is_worker_owner
+            || s.restricted
+            || s.runtime != Runtime::ClaudeCode
+        {
+            tracing::info!(
+                session_id = %s.session_id,
+                servers = ?s.mcp_servers,
+                "the hub's MCP servers not taken: hub_mcp is off here or the session is not \
+                 the owner's unrestricted Claude Code session"
+            );
+            vec![]
+        } else {
+            let mut names: Vec<String> = s
+                .mcp_servers
+                .iter()
+                .filter(|n| hqc_proto::mcp::valid_server_name(n))
+                .cloned()
+                .collect();
+            names.sort();
+            names.dedup();
+            names
+        };
         Ok(StartSpec {
             session_id: s.session_id,
             runtime: s.runtime,
@@ -749,6 +787,7 @@ impl Config {
             secrets,
             browser,
             browser_refused,
+            mcp_servers,
         })
     }
 

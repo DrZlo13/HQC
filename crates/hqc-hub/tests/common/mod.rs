@@ -272,6 +272,10 @@ impl TestHub {
             artifacts: art,
             public_origins: vec![],
             client_ip_header: None,
+            mcp: hqc_hub::config::McpConfig {
+                key: Some([7u8; 32]),
+                allow_private: true,
+            },
         };
         configure(&mut config);
         std::fs::create_dir_all(&config.artifacts.dir).unwrap();

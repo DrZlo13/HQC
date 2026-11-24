@@ -42,6 +42,9 @@ enum Cmd {
         /// The daemon's socket; `$HQC_HOME/mcp.sock` by default.
         #[arg(long)]
         socket: Option<std::path::PathBuf>,
+        /// Relay the hub's remote MCP server of this name instead (SPEC 0.235).
+        #[arg(long)]
+        upstream: Option<String>,
     },
     /// List the environments and bindings of worker.toml (SPEC §14); edit them there.
     Env {
@@ -125,15 +128,17 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Run => run(logs).await,
-        Cmd::Mcp { socket } => {
+        Cmd::Mcp { socket, upstream } => {
             let socket = match socket {
                 Some(s) => s,
                 None => hqc_worker::mcp::socket_path(&config::hqc_home()?),
             };
             let token = std::env::var(hqc_worker::mcp::TOKEN_ENV).ok();
-            hqc_worker::mcp::server::McpServer::new(token, socket)
-                .serve(tokio::io::stdin(), tokio::io::stdout())
-                .await
+            let mut server = hqc_worker::mcp::server::McpServer::new(token, socket);
+            if let Some(name) = upstream {
+                server = server.with_upstream(name);
+            }
+            server.serve(tokio::io::stdin(), tokio::io::stdout()).await
         }
         Cmd::Env { cmd } => {
             let load = || Config::load(&config::config_path()?);

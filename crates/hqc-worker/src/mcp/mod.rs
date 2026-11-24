@@ -68,6 +68,16 @@ pub enum ToDaemon {
     Call { id: u64, tool: String, args: Value },
     /// The runtime cancelled call `id` (`notifications/cancelled`).
     Cancel { id: u64 },
+    /// A request of the relay of the hub's remote MCP server `server` (SPEC 0.235): `method` is
+    /// `initialize`, `tools/list` or `tools/call`; answered with [`FromDaemon::Result`] holding
+    /// the server's JSON-RPC result.
+    Upstream {
+        id: u64,
+        server: String,
+        method: String,
+        #[serde(default)]
+        params: Value,
+    },
 }
 
 /// What the daemon answers.
@@ -110,6 +120,8 @@ struct Tokens {
     pid: AgentPid,
     /// The input of the turn the agent runs (or ran last), sent with its calls.
     turn: Option<Uuid>,
+    /// The hub's remote MCP servers the agent was started with (SPEC 0.235).
+    upstreams: Vec<String>,
 }
 
 /// What the daemon knows of a session's agent process.
@@ -125,6 +137,9 @@ pub enum AgentPid {
 struct Open {
     session_id: Uuid,
     tx: oneshot::Sender<Outcome>,
+    /// An `mcp.upstream` request: it fails when the hub connection is lost, as it is never
+    /// sent again (SPEC 0.235).
+    upstream: bool,
 }
 
 impl McpCalls {
@@ -143,8 +158,54 @@ impl McpCalls {
                 folders,
                 pid: AgentPid::Starting,
                 turn: None,
+                upstreams: vec![],
             },
         );
+    }
+
+    /// The hub's remote MCP servers the session's agent was started with (SPEC 0.235).
+    pub fn set_upstreams(&self, session_id: Uuid, names: Vec<String>) {
+        if let Some(t) = self.lock().sessions.get_mut(&session_id) {
+            t.upstreams = names;
+        }
+    }
+
+    /// The session's agent was started with the hub's MCP server `name`.
+    pub fn has_upstream(&self, session_id: Uuid, name: &str) -> bool {
+        self.lock()
+            .sessions
+            .get(&session_id)
+            .is_some_and(|t| t.upstreams.iter().any(|n| n == name))
+    }
+
+    /// A new `mcp.upstream` request of `session_id`; `None` if its agent no longer runs.
+    pub fn open_upstream(&self, session_id: Uuid) -> Option<(Uuid, oneshot::Receiver<Outcome>)> {
+        let (id, rx) = self.open(session_id)?;
+        if let Some(c) = self.lock().calls.get_mut(&id) {
+            c.upstream = true;
+        }
+        Some((id, rx))
+    }
+
+    /// The hub connection was lost: every open `mcp.upstream` request fails, since none is sent
+    /// again (SPEC 0.235).
+    pub fn fail_upstream(&self) {
+        let mut g = self.lock();
+        let ids: Vec<Uuid> = g
+            .calls
+            .iter()
+            .filter(|(_, c)| c.upstream)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            if let Some(c) = g.calls.remove(&id) {
+                let _ = c.tx.send(Err(McpError::new(
+                    error_code::MCP_UNAVAILABLE,
+                    "the worker lost its connection to the hub during the call; it may still \
+                     have been carried out on the server: check before retrying",
+                )));
+            }
+        }
     }
 
     /// The folders of the session whose agent runs.
@@ -225,7 +286,14 @@ impl McpCalls {
         }
         let id = Uuid::now_v7();
         let (tx, rx) = oneshot::channel();
-        g.calls.insert(id, Open { session_id, tx });
+        g.calls.insert(
+            id,
+            Open {
+                session_id,
+                tx,
+                upstream: false,
+            },
+        );
         Some((id, rx))
     }
 

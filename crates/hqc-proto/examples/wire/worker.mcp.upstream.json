@@ -1,0 +1,11 @@
+{
+  "id": "w-33",
+  "type": "mcp.upstream",
+  "payload": {
+    "request_id": "0199f3a2-7c10-7000-8000-0000000000c2",
+    "session_token": "hqcs_example",
+    "server": "github",
+    "method": "tools/call",
+    "params": {"name": "get_me", "arguments": {}}
+  }
+}

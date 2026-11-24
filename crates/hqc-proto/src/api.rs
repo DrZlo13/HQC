@@ -258,6 +258,61 @@ pub struct ProviderRequest {
     pub context_tokens: Option<u32>,
 }
 
+/// A remote MCP server the owner keeps on the hub (SPEC 0.235, iteration 7): `GET
+/// /api/mcp/servers`. Header values are never sent back, only their names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServer {
+    pub id: Uuid,
+    /// The key the agents' CLI names its tools by: `mcp__<name>__<tool>`.
+    pub name: String,
+    pub url: String,
+    pub header_names: Vec<String>,
+    pub timeout_s: u32,
+    /// Every project of the owner gets it; else `project_ids`.
+    pub all_projects: bool,
+    pub project_ids: Vec<Uuid>,
+    /// `ok`, `failing` (see `last_error`) or `unknown` (not reached yet).
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// The names of its tools, as it last listed them.
+    pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServerList {
+    pub servers: Vec<McpServer>,
+}
+
+/// One header of a server, as the owner gives it; the value is write-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpHeader {
+    pub name: String,
+    pub value: String,
+}
+
+/// `POST /api/mcp/servers` and `PATCH /api/mcp/servers/{id}`. In a `PATCH` an absent field
+/// stays as it is, and `headers` replaces all of them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Vec<McpHeader>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all_projects: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_ids: Option<Vec<Uuid>>,
+}
+
 /// `GET /api/projects/{id}/sessions`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionList {

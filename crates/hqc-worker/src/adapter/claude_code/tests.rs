@@ -189,6 +189,7 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         secrets: None,
         browser: false,
         browser_refused: None,
+        mcp_servers: vec![],
         fork: None,
     }
 }

@@ -34,6 +34,8 @@ chrono-tz = "0.10"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 # Published pages are served out of their zip (SPEC §12): deflate only.
 zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# Secrets of the remote MCP servers at rest (SPEC 0.235): XChaCha20-Poly1305 under HQC_MCP_KEY.
+chacha20poly1305 = "0.10"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["multipart"] }

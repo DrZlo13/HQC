@@ -3294,6 +3294,10 @@ impl Session {
                 workdir: self.spec.workdir.clone(),
             },
         );
+        // SPEC 0.235: the relays of the hub's MCP servers may ask for these only.
+        self.link
+            .mcp()
+            .set_upstreams(self.id, self.spec.mcp_servers.clone());
         // `mode: resume` from the hub, or this process ran the agent before (kill, idle
         // timeout, crash). The Claude Code adapter checks for the transcript either way.
         let mode = self.start_mode();

@@ -727,6 +727,32 @@ A debug build from Xcode registers as `sandbox` and is sent through APNs' sandbo
 TestFlight or App Store build through the production host. The hub that holds the key needs
 outbound HTTPS (HTTP/2) to `api.push.apple.com` and `api.sandbox.push.apple.com`.
 
+### 1.11 The demo hub (the iOS app's "Try the demo")
+
+App Review, and anyone who wants to look before setting up a hub, opens the app's "Try the demo",
+which connects to a public demo hub at `https://hqc-demo.drewnja.xyz`. It is the mock hub
+(`client/mock/server.mjs`) in demo mode (`MOCK_DEMO=1`): made-up projects, sessions, workers and
+agent turns that stream, ask for permission and answer questions; it runs no agent, executes
+nothing, needs no sign-in, holds uploads in memory only and starts over with fresh state every
+`MOCK_RESET_HOURS`. On the publisher's server it is one more compose service beside the hub:
+
+```sh
+docker build -f client/mock/Dockerfile.demo -t hqc-demo .
+```
+
+```yaml
+  hqc-demo:
+    image: hqc-demo
+    restart: unless-stopped
+    read_only: true
+    mem_limit: 256m
+```
+
+with an ingress rule `hostname: hqc-demo.drewnja.xyz → http://hqc-demo:8080` in the tunnel's
+`config.yml` and `cloudflared tunnel route dns <tunnel> hqc-demo.drewnja.xyz`. Keep it outside
+Cloudflare Access: it has no account to sign in to. A hostname one level under the zone
+(`hqc-demo.drewnja.xyz`, not `demo.hqc.drewnja.xyz`) stays inside the free certificate.
+
 ## 2. Worker on macOS
 
 ### 2.1 Installation

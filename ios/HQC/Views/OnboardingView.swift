@@ -170,8 +170,11 @@ struct OnboardingView: View {
                         "Rooms, schedules and sessions that talk to each other.", shown: revealed >= 5)
             }
             .padding(.vertical, 8)
-            primary("Get started") { step = .hub }
-                .appear(revealed >= 6)
+            VStack(spacing: 12) {
+                primary("Get started") { step = .hub }
+                demoButton
+            }
+            .appear(revealed >= 6)
         }
         .task(id: isRevealed) { await revealWelcome() }
     }
@@ -232,6 +235,7 @@ struct OnboardingView: View {
                 Label("No hub yet? How to set one up", systemImage: "book")
                     .font(.footnote)
             }
+            demoButton
         }
         .onAppear {
             if address.isEmpty, let h = app.hubURL { address = h.host() ?? "" }
@@ -315,6 +319,25 @@ struct OnboardingView: View {
         .buttonStyle(.glassProminent)
         .controlSize(.large)
         .disabled(disabled)
+    }
+
+    /// The public demo hub: made-up projects and agents to try every screen with, no account
+    /// and no machine of one's own (it is what App Review uses).
+    static let demoHub = URL(string: "https://hqc-demo.drewnja.xyz")!
+
+    private var demoButton: some View {
+        Button {
+            Feedback.play(.tap)
+            address = Self.demoHub.host() ?? ""
+            busy = true
+            app.lastError = nil
+            app.setHub(Self.demoHub)
+        } label: {
+            Label("Try the demo", systemImage: "play.circle")
+                .font(.subheadline.weight(.medium))
+        }
+        .disabled(busy)
+        .accessibilityHint("Opens a demo hub with sample projects and agents, no account needed")
     }
 
     private func connect() {

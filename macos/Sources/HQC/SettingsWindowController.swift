@@ -1,7 +1,7 @@
 import AppKit
 
 // Settings, shown as a sheet on the main window: the server list (a table with Name/Address
-// columns plus add/remove/edit), the app's shortcuts and how long a notification card stays.
+// columns plus add/remove/edit), the global shortcut and how long a notification card stays.
 final class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
 
     private let store: ServerStore
@@ -9,7 +9,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     private let removeButton = NSButton()
     private let editButton = NSButton()
-    private let recorders = ShortcutAction.allCases.map { ShortcutRecorder(action: $0) }
+    private let recorder = ShortcutRecorder()
     // How long a notification card other than a permission request stays on screen.
     private let lifetimeValue = NSTextField(labelWithString: "")
     private let lifetimeStepper = NSStepper()
@@ -96,17 +96,21 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         buttonStack.spacing = 8
         buttonStack.translatesAutoresizingMaskIntoConstraints = false
 
-        // The app's shortcuts: one row per action, its name and its recorder.
-        let shortcutsLabel = NSTextField(labelWithString: "Shortcuts")
+        // The global shortcut: the action's name and its recorder; every other key is the
+        // client's, set in the client's own Settings.
+        let shortcutsLabel = NSTextField(labelWithString: "Shortcut")
         shortcutsLabel.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
         shortcutsLabel.translatesAutoresizingMaskIntoConstraints = false
-        let shortcutsGrid = NSGridView(views: zip(ShortcutAction.allCases, recorders).map { action, recorder -> [NSView] in
-            [NSTextField(labelWithString: action.title), recorder]
-        })
-        shortcutsGrid.rowSpacing = 6
-        shortcutsGrid.columnSpacing = 12
-        shortcutsGrid.rowAlignment = .firstBaseline
-        shortcutsGrid.translatesAutoresizingMaskIntoConstraints = false
+        let shortcutRow = NSStackView(views: [NSTextField(labelWithString: ShortcutMonitor.globalAction.title), recorder])
+        shortcutRow.orientation = .horizontal
+        shortcutRow.spacing = 12
+        shortcutRow.alignment = .firstBaseline
+        shortcutRow.translatesAutoresizingMaskIntoConstraints = false
+        let shortcutsNote = NSTextField(wrappingLabelWithString:
+            "Works from any app. The keys of the other File and Go items are the client's: its Settings ▸ Keys.")
+        shortcutsNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        shortcutsNote.textColor = .secondaryLabelColor
+        shortcutsNote.translatesAutoresizingMaskIntoConstraints = false
 
         // How long a notification card other than a permission request stays on screen.
         let notificationsLabel = NSTextField(labelWithString: "Notifications")
@@ -139,7 +143,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         contentView.addSubview(scrollView)
         contentView.addSubview(buttonStack)
         contentView.addSubview(shortcutsLabel)
-        contentView.addSubview(shortcutsGrid)
+        contentView.addSubview(shortcutRow)
+        contentView.addSubview(shortcutsNote)
         contentView.addSubview(notificationsLabel)
         contentView.addSubview(lifetimeRow)
         contentView.addSubview(closeButton)
@@ -156,11 +161,15 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             shortcutsLabel.topAnchor.constraint(equalTo: buttonStack.bottomAnchor, constant: 20),
             shortcutsLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
 
-            shortcutsGrid.topAnchor.constraint(equalTo: shortcutsLabel.bottomAnchor, constant: 8),
-            shortcutsGrid.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            shortcutsGrid.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -16),
+            shortcutRow.topAnchor.constraint(equalTo: shortcutsLabel.bottomAnchor, constant: 8),
+            shortcutRow.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            shortcutRow.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -16),
 
-            notificationsLabel.topAnchor.constraint(equalTo: shortcutsGrid.bottomAnchor, constant: 20),
+            shortcutsNote.topAnchor.constraint(equalTo: shortcutRow.bottomAnchor, constant: 6),
+            shortcutsNote.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            shortcutsNote.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -16),
+
+            notificationsLabel.topAnchor.constraint(equalTo: shortcutsNote.bottomAnchor, constant: 20),
             notificationsLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
 
             lifetimeRow.topAnchor.constraint(equalTo: notificationsLabel.bottomAnchor, constant: 8),
@@ -318,8 +327,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     @objc private func closeSettings() {
-        // A recording left on would keep the shortcuts paused and its key monitor alive.
-        recorders.forEach { $0.stopRecording() }
+        // A recording left on would keep the shortcut paused and its key monitor alive.
+        recorder.stopRecording()
         guard let window = window else { return }
         if let sheetParent = window.sheetParent {
             sheetParent.endSheet(window)

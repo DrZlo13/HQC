@@ -48,7 +48,7 @@ pub async fn pause(
     match turn_open {
         Some(false) => stop_if_paused(&app, id).await?,
         Some(true) => {
-            crate::api::stop_session(&app, &s).await?;
+            crate::api::stop_session(&app, &s, false).await?;
         }
         None => {}
     }

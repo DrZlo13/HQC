@@ -254,4 +254,19 @@ describe('mock secrets', () => {
     const workers = await api.workers();
     expect(workers[0].session_secrets).toBe(true);
   });
+
+  it('gives a vault entry in place of a value, and refuses both or neither', async () => {
+    const me = await api.me();
+    const s = (await api.sessions(me.personal_project_id)).find((x) => x.title === 'Empty session')!;
+    const g = await api.giveSecret(s.id, { kind: 'secret', name: 'WIFI_PASS', vault: 'home-wifi' });
+    expect(g.note).toContain('$HQC_SECRETS/WIFI_PASS');
+    const post = (body: unknown) =>
+      fetch(`${mock.url}/api/sessions/${s.id}/secrets`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    expect((await post({ kind: 'secret', name: 'A', value: 'b', vault: 'c' })).status).toBe(400);
+    expect((await post({ kind: 'secret', name: 'A' })).status).toBe(400);
+  });
 });

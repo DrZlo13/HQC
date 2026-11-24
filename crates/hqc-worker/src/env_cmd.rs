@@ -83,6 +83,7 @@ pub fn summary(cfg: &Config) -> String {
         "session_secrets: {}",
         if cfg.session_secrets { "on" } else { "off" }
     );
+    let _ = writeln!(out, "vault: {}", if cfg.vault { "on" } else { "off" });
     let _ = writeln!(
         out,
         "browser: {}",
@@ -91,6 +92,11 @@ pub fn summary(cfg: &Config) -> String {
         } else {
             "off"
         }
+    );
+    let _ = writeln!(
+        out,
+        "task_tools: {}",
+        if cfg.task_tools { "on" } else { "off" }
     );
     out.push_str("workspace keys:\n");
     match cfg.secrets.all() {

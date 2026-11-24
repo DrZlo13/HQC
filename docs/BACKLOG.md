@@ -61,8 +61,6 @@ First:
 - How full the context window is, before the auto-compaction (T3 Code, Orca; Claude Code:
   `get_context_usage`).
 - The prompt-cache timer: how long until Claude's cache of the session expires (Orca).
-- A secret from Bitwarden (Vaultwarden): the `hqc_secret` card (SPEC 0.147) takes the secret from
-  Bitwarden instead of a typed value, as T3 Code's card takes a 1Password reference.
 - "Send now" (Claude Code: `priority: "now"` with `origin: {kind: "human"}`): the CLI moves the
   running Bash, MCP call or subagent to the background and takes the message into the same turn,
   without waiting for the call to end. `origin` matters by itself too: without it the message is
@@ -86,10 +84,8 @@ Second:
 - The machine kept awake while its agents work (T3 Code, Orca; desktop apps).
 - MCP Apps: an interactive page an MCP server returns with a tool result, shown under the call in
   the feed (T3 Code; Claude Code since 2.1.301).
-- Signing in to Claude Code from hqc, a phone included, when the CLI on a node is signed out
-  (T3 Code; Claude Code: `--enable-auth-status`).
-- The last 8 KiB of a background build's or server's output on a click (Claude Code:
-  `get_task_output`).
+- The last 8 KiB of a background build's or server's output on a click while it runs (Claude
+  Code: `get_task_output`); its output after the end has been an attachment since SPEC 0.181.
 - A turn cut by a worker restart goes on after `--resume` instead of ending in "Agent process
   exited during a turn" (Claude Code: `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1`; the VS Code
   extension sets it with a limit of 1 hour); the hub then must not close a turn the worker will
@@ -108,8 +104,8 @@ Second:
   `CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1`).
 - A clean exit of the process on unload and kill instead of SIGTERM with code 143 (Claude Code:
   `end_session`).
-- The subscription's spending and limits, as `/usage` shows them (Claude Code: `get_usage`,
-  `get_session_cost`).
+- The subscription's spending, as `/usage` shows it (Claude Code: `get_usage`,
+  `get_session_cost`); the limits are in the model menu since SPEC 0.206.
 - Plugins and skills reloaded without restarting the session (Claude Code: `reload_plugins`,
   `reload_skills`).
 - One TodoWrite instead of four task tools, as the VS Code extension does (Claude Code:
@@ -119,6 +115,57 @@ Second:
 - A slash command the CLI runs at once in the middle of a turn, where hqc holds every command
   until the turn ends (Claude Code: `command_lifecycle queued` with `ran_ahead`); by the code of
   2.1.312, in stream mode only a plugin's local command marked `immediate` runs so.
+
+## From the Claude app's Code tab (2026-11-18)
+
+What the Claude app for macOS has in its Code tab and hqc does not, picked from
+`docs/notes/hqc-vs-claude-desktop.md`; the second list comes after the first. The bugs that note
+lists are not here: #156–#160 fixed them.
+
+First:
+- "Waiting for you" on a session that ended its turn with a question in its text, from the
+  CLI's turn summary (`system/post_turn_summary`: blocked / completed). The CLI sends it only
+  with the `claude-desktop` entry point, and switching the worker to that entry point breaks
+  sessions with a model provider, adds the login shell's variables to the agent's Bash and gives
+  the agent `SendUserFile`, which bypasses the chat.
+- Going on after the laptop slept: a turn that ended with `api_error: "computer_slept"` before
+  the answer began is continued by the worker with "the computer was asleep, go on"; macOS
+  workers only.
+- Going on after the context filled up mid-turn: the worker sends `/compact`, then "go on", one
+  attempt per turn.
+- A spare process started ahead, so the first message of a new session does not wait for the CLI
+  and its MCP servers to start; the price is one more process per worker.
+- An API error that says why and what to do (529, 429, a full context, the network, the
+  sign-in) as one line, with Retry of the same message and the model menu, and a compaction for a
+  full context.
+- A refusal answered inside the turn: declare the `refusal_fallback_prompt` dialog to the CLI
+  and answer it with a card "retry on the fallback model / edit"; "Edit and retry" is a fork from
+  the refused message with its text in the composer.
+- The turn's time, tokens, stage and "Stopping…" in the "Agent is working" line.
+- How long the model thought: "Thought for 12s".
+- Bash output: the exit code and "no output" as marks, diff lines coloured, and the full output
+  the CLI saved on the worker as an attachment.
+- An edit's diff with the file's line numbers and "+N −M", from the edit result's
+  `structuredPatch`.
+- A workflow: a line above the composer with Stop, and the call's card with its phases and
+  agents.
+- WebSearch links as a "title — domain" list, a WebFetch page as Markdown.
+- TodoWrite in its opened line as a list with check marks.
+- In the mirror, the interactive CLI's service lines from the transcript: "while you were away",
+  "saved to memory", "background agents stopped".
+- Which notifications to send: permission requests, questions, "the agent finished".
+- A message queued for after the turn (⌘Enter): the hub holds it until the turn ends, and it can
+  be removed or edited until it is delivered.
+- "Compact now" after a long idle time: a bar above the composer after 70 min idle with the
+  context at 75 % of the window or more; needs the context fill after the last answer.
+- Links and `#123` in the person's own messages open on a click.
+
+Second:
+- What the usage limit went on over 24 hours, as the app says it: context over 150k, 4+
+  sessions in parallel, subagent-heavy sessions, sessions active for 8+ hours, cache misses over
+  100k tokens; the hub has all of it per turn.
+- Rewinding the conversation in place, without rolling files back.
+- Big images in attachments downscaled before they go to the agent (to 2000 px).
 
 ## Earlier
 

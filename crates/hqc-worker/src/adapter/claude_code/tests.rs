@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hqc_proto::event::{
-    ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
+    AgentTask, ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
     ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, GrantPlace, LiveKind,
-    LiveSubagent, OptionGrant, SessionState,
+    LiveSubagent, OptionGrant, SessionState, TaskStatus,
 };
 use hqc_proto::frame::{Activity, LeftoverCommand, Runtime, SessionInput, SlashCommand};
 use serde_json::{json, Value};
@@ -83,6 +83,8 @@ fn without_uuids(lines: Vec<Value>) -> Vec<Value> {
                 assert_eq!(u.get_version_num(), 4, "{v}");
                 assert!(seen.insert(u), "uuid written twice: {v}");
                 v.as_object_mut().unwrap().remove("uuid");
+                // A person's `origin` is checked on its own (SPEC 0.219).
+                v.as_object_mut().unwrap().remove("origin");
             }
             v
         })
@@ -251,6 +253,7 @@ impl Harness {
                 peer: None,
                 permission_cap: None,
                 schedule_id: None,
+                human: false,
             })
             .await
             .unwrap();
@@ -310,6 +313,9 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             // `a_task_end_carries_its_usage_and_output` looks at it.
             AdapterEvent::TaskOutput(_) => continue,
             AdapterEvent::SubagentLeftovers { .. } => "subagent_leftovers".into(),
+            AdapterEvent::QuietTaken { .. } => "quiet_taken".into(),
+            AdapterEvent::QuietCancelled { .. } => "quiet_cancelled".into(),
+            AdapterEvent::SideAnswer { .. } => "side_answer".into(),
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -438,6 +444,38 @@ async fn ai_title_is_reported_at_turn_end() {
         .turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
         .await;
     assert_eq!(titles_in(&evs), ["Touch a file"]);
+}
+
+/// SPEC 0.218: before a `result` line the adapter reads the goal records the transcript holds,
+/// so the check of the turn's last text is sent with the turn, not up to a tick later, after
+/// whatever follows the turn at once. The meter's next tick is 2 s away: without the read the
+/// record is not sent before `TurnEnded`.
+#[tokio::test]
+async fn a_goal_record_is_read_before_the_result() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start(fx.stream, fx.claude_session()).await;
+    let (work, config) = &h._dirs;
+    let transcript = super::paths::transcript_path(
+        config.path(),
+        &work.path().canonicalize().unwrap(),
+        &fx.claude_session(),
+    );
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let goal = json!({"type": "attachment", "uuid": "00000000-0000-4000-8000-0000000000aa",
+        "timestamp": "2099-01-01T00:00:00.000Z",
+        "attachment": {"type": "goal_status", "met": false, "condition": "C", "reason": "R"}});
+    std::fs::write(&transcript, format!("{}{goal}\n", fx.transcript)).unwrap();
+
+    let evs = h
+        .turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
+        .await;
+    assert!(
+        events(&evs).iter().any(
+            |e| matches!(&e.kind, EventKind::System { goal: Some(g), .. } if g.state == "unmet")
+        ),
+        "{:?}",
+        shape(&evs)
+    );
 }
 
 /// The titles among `evs`.
@@ -598,7 +636,7 @@ async fn permission_allow_once() {
     )));
     assert!(evs.iter().any(|e| matches!(
         &e.kind,
-        EventKind::Usage { input_tokens: 4, output_tokens: 96, cache_read: Some(36251), cache_write: Some(12206), cost_usd: Some(_), session_cost_usd: Some(_), model: Some(m) }
+        EventKind::Usage { input_tokens: 4, output_tokens: 96, cache_read: Some(36251), cache_write: Some(12206), cost_usd: Some(_), session_cost_usd: Some(_), model: Some(m), .. }
             if m == "claude-haiku-5-5"
     )));
     assert!(evs.iter().any(|e| matches!(
@@ -1828,6 +1866,7 @@ async fn stop_interrupts_then_falls_back_to_sigint() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -1863,6 +1902,7 @@ async fn stop_interrupts_then_falls_back_to_sigint() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .is_err());
@@ -1896,6 +1936,7 @@ async fn stop_escalates_to_sigterm_when_sigint_does_not_end_the_turn() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -1959,6 +2000,198 @@ async fn an_answered_interrupt_is_waited_for() {
     assert_eq!(h.claude.signals(), []);
 }
 
+/// Input the running turn of [`running_turn`] takes, `event_id` its id.
+fn another_input(h: &Harness, event_id: Uuid) -> SessionInput {
+    SessionInput {
+        session_id: h.session_id,
+        event_id,
+        text: "now".into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+        schedule_id: None,
+        human: true,
+    }
+}
+
+/// SPEC 0.219: `inject_now_with` writes the line with `priority: "now"`; `withdraw_input` asks
+/// the CLI to cancel that very line (its `uuid`) and tells whether the CLI did, waiting for the
+/// answer; a message not written is not withdrawn.
+#[tokio::test]
+async fn a_message_sent_now_is_withdrawn_by_its_uuid() {
+    let fx = fixture!("permission-allow");
+    let claude = ScriptedClaude::new(&running_turn(&fx)).answering_cancels(true);
+    let mut h = Harness::start_with_options(claude, fx.claude_session(), |_| {}).await;
+    start_the_turn(&mut h).await;
+    let id = Uuid::now_v7();
+    assert!(h
+        .adapter
+        .inject_now_with(&another_input(&h, id), &[])
+        .await
+        .unwrap());
+    // The scripted CLI reads its stdin in a task of its own.
+    let sent = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let line = h
+                .claude
+                .stdin()
+                .into_iter()
+                .find(|l| l["priority"] == "now");
+            if let Some(line) = line {
+                break line;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the line sent now is not on the CLI's stdin");
+    assert_eq!(sent["priority"], "now");
+    assert_eq!(sent["origin"], json!({"kind": "human"}));
+    assert!(h.adapter.withdraw_input(id).await.unwrap());
+    let asked = h.claude.stdin().last().cloned().unwrap();
+    assert_eq!(asked["request"]["subtype"], "cancel_async_message");
+    assert_eq!(asked["request"]["message_uuid"], sent["uuid"]);
+    assert!(
+        !h.adapter.withdraw_input(id).await.unwrap(),
+        "it is gone: nothing to withdraw"
+    );
+    assert!(!h.adapter.withdraw_input(Uuid::now_v7()).await.unwrap());
+}
+
+/// SPEC 0.219, through the adapter: the line of an input the hub marked `human` (the owner's)
+/// reaches the CLI with `origin: {kind: "human"}`, the line of one it did not (a message of
+/// another session, a room's input, a note of the hub's own: all arrive with `human` false)
+/// without it, and each input is a line of its own.
+#[tokio::test]
+async fn only_the_owners_input_reaches_the_cli_with_origin_human() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start_with_options(
+        ScriptedClaude::new(&running_turn(&fx)),
+        fx.claude_session(),
+        |_| {},
+    )
+    .await;
+    start_the_turn(&mut h).await;
+    let owner = another_input(&h, Uuid::now_v7());
+    let mut other = another_input(&h, Uuid::now_v7());
+    other.text = "from another session".into();
+    other.human = false;
+    assert!(h.adapter.inject_with(&owner, &[]).await.unwrap());
+    assert!(h.adapter.inject_with(&other, &[]).await.unwrap());
+    // The scripted CLI reads its stdin in a task of its own.
+    let users = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let users: Vec<Value> = h
+                .claude
+                .stdin()
+                .into_iter()
+                .filter(|l| l["type"] == "user")
+                .collect();
+            if users.len() == 3 {
+                break users;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the lines are not on the CLI's stdin");
+    let by_text = |text: &str| {
+        users
+            .iter()
+            .find(|l| l["message"]["content"] == json!(text))
+            .unwrap_or_else(|| panic!("no line {text:?}: {users:?}"))
+    };
+    assert_eq!(by_text("now")["origin"], json!({"kind": "human"}));
+    assert!(by_text("hi").get("origin").is_none());
+    assert!(by_text("from another session").get("origin").is_none());
+}
+
+/// The CLI answers `cancelled: false`: the message has been taken, `false`.
+#[tokio::test]
+async fn a_message_the_cli_will_not_cancel_is_not_withdrawn() {
+    let fx = fixture!("permission-allow");
+    let claude = ScriptedClaude::new(&running_turn(&fx)).answering_cancels(false);
+    let mut h = Harness::start_with_options(claude, fx.claude_session(), |_| {}).await;
+    start_the_turn(&mut h).await;
+    let id = Uuid::now_v7();
+    assert!(h
+        .adapter
+        .inject_with(&another_input(&h, id), &[])
+        .await
+        .unwrap());
+    assert!(!h.adapter.withdraw_input(id).await.unwrap());
+}
+
+/// A CLI that does not answer the cancel is hung: an error after `interrupt_answer`, not a wait
+/// for ever and not a guess.
+#[tokio::test]
+async fn a_cancel_the_cli_does_not_answer_is_an_error() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start_with_options(
+        ScriptedClaude::new(&running_turn(&fx)),
+        fx.claude_session(),
+        |o| o.interrupt_answer = Duration::from_millis(100),
+    )
+    .await;
+    start_the_turn(&mut h).await;
+    let id = Uuid::now_v7();
+    assert!(h
+        .adapter
+        .inject_with(&another_input(&h, id), &[])
+        .await
+        .unwrap());
+    assert!(h.adapter.withdraw_input(id).await.is_err());
+    // SPEC 0.219: the input is no longer being withdrawn: it is a written one that the CLI may
+    // cancel by itself later, which is then its drop. A second ask is made (and not met with
+    // "it is gone", which a withdrawal still marked under way would give).
+    assert!(h.adapter.withdraw_input(id).await.is_err());
+}
+
+/// SPEC 0.219: a cancel the CLI does not answer in time leaves the input a written one again:
+/// when the CLI then cancels it after all (its `cancelled` line comes late), that is a drop like
+/// any other, which the turn's end reports as `dropped` so the input is sent again, not the
+/// silence of a withdrawal the owner was told had failed.
+#[test]
+fn an_unanswered_cancel_leaves_a_late_cancelled_input_dropped() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b) = (user_input(sid, "first"), user_input(sid, "second"));
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ub, "queued"));
+    let rid = cancel_request(&mut core, b.event_id, &ub);
+    // The adapter gave up waiting for the answer.
+    core.withdraw_unanswered(&rid);
+    // No cancel is under way any more: it is asked for again, and left unanswered again.
+    let rid2 = cancel_request(&mut core, b.event_id, &ub);
+    core.withdraw_unanswered(&rid2);
+    let mut out = play(&mut core, &lifecycle(&ub, "cancelled"));
+    out.extend(play(&mut core, &cancel_answer(&rid, true)));
+    out.extend(play(
+        &mut core,
+        &lines_of(&[tool_result("toolu_1"), reply("DONE"), result("success")]),
+    ));
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "message \"DONE\" to A",
+            "status to A",
+            "turn_ended [] dropped [B]"
+        ]
+    );
+}
+
 /// The echo of the prompt and a delta, then silence: a turn that never ends by itself.
 fn running_turn(fx: &Fixture) -> String {
     fx.stream
@@ -1981,6 +2214,7 @@ async fn start_the_turn(h: &mut Harness) {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -2497,8 +2731,10 @@ fn approval_errors_and_restricted_always() {
     assert_eq!(ids, ["once", "session", "deny"]);
     assert!(core.answer_approval("r1", "bogus", None).is_err());
     assert!(core.answer_approval("nope", "once", None).is_err());
-    // `always` in restricted mode behaves as `session`: no updatedPermissions.
-    let w = writes(&core.answer_approval("r1", "always", None).unwrap());
+    // `always`, not offered in restricted mode, is refused and the request stays open.
+    assert!(core.answer_approval("r1", "always", None).is_err());
+    assert_eq!(core.session_rules(), 0);
+    let w = writes(&core.answer_approval("r1", "session", None).unwrap());
     assert!(w[0]["response"]["response"]
         .get("updatedPermissions")
         .is_none());
@@ -2690,6 +2926,90 @@ fn folder_rules_in_can_use_tool() {
     rules.set(&[]);
     let a = core.on_line(&can_use_tool_line(&fx, "r5", Some("python3 x")));
     assert_eq!(approvals(&a), 1);
+}
+
+/// An MCP tool's approval offers "all tools of this server" for the session, and as a folder
+/// rule when the session has a folder and is not restricted; answering the session one allows
+/// the server's other tools without a card and not another server's.
+#[test]
+fn an_mcp_server_is_allowed_whole() {
+    let mcp = |id: &str, tool: &str| {
+        json!({"type": "control_request", "request_id": id, "request": {
+            "subtype": "can_use_tool", "tool_name": tool, "input": {}}})
+        .to_string()
+    };
+    let with_folder = |restricted: bool| {
+        Core::new(Uuid::now_v7(), restricted).with_folder(
+            crate::permissions::FolderRules::default(),
+            std::path::PathBuf::from("/w/proj"),
+        )
+    };
+    let ids = |core: &mut Core, tool: &str| approval_of(&core.on_line(&mcp("r", tool))).0;
+
+    let mut core = with_folder(false);
+    assert_eq!(
+        ids(&mut core, "mcp__srv__one"),
+        ["once", "session", "server_session", "server_always", "deny"]
+    );
+    // Not an MCP tool, no folder, restricted: fewer options.
+    assert!(!ids(&mut core, "Edit")
+        .iter()
+        .any(|i| i.starts_with("server_")));
+    let mut core = Core::new(Uuid::now_v7(), false);
+    assert_eq!(
+        ids(&mut core, "mcp__srv__one"),
+        ["once", "session", "server_session", "deny"]
+    );
+    let mut core = with_folder(true);
+    assert_eq!(
+        ids(&mut core, "mcp__srv__one"),
+        ["once", "session", "server_session", "deny"]
+    );
+    // A request only a person may answer offers no standing answer (SPEC §8.1).
+    let mut core = with_folder(false);
+    let line = json!({"type": "control_request", "request_id": "h", "request": {
+        "subtype": "can_use_tool", "tool_name": "mcp__srv__one", "input": {},
+        "requires_user_interaction": true}})
+    .to_string();
+    assert_eq!(approval_of(&core.on_line(&line)).0, ["once", "deny"]);
+    // An option the card did not offer is refused and the request stays open.
+    for option in ["session", "server_session", "server_always", "always"] {
+        assert!(core.answer_approval("h", option, None).is_err(), "{option}");
+    }
+    assert_eq!(core.session_rules(), 0);
+    assert!(core.answer_approval("h", "once", None).is_ok());
+    let mut core = with_folder(true);
+    ids(&mut core, "mcp__srv__one");
+    assert!(core.answer_approval("r", "server_always", None).is_err());
+    assert!(core.answer_approval("r", "server_session", None).is_ok());
+    // A name another server's tool could share (`hqc_`'s `x`, `a__b`'s `x`) offers no
+    // answer for the whole server.
+    let mut core = with_folder(false);
+    for tool in ["mcp__hqc___x", "mcp___a__x", "mcp__a__b__x"] {
+        assert_eq!(ids(&mut core, tool), ["once", "session", "deny"], "{tool}");
+        assert!(core.answer_approval("r", "server_session", None).is_err());
+        assert!(core.answer_approval("r", "deny", None).is_ok());
+    }
+
+    let mut core = with_folder(false);
+    ids(&mut core, "mcp__srv__one");
+    let a = core.answer_approval("r", "server_session", None).unwrap();
+    assert_eq!(writes(&a)[0]["response"]["response"]["behavior"], "allow");
+    let a = core.on_line(&mcp("r2", "mcp__srv__two"));
+    assert_eq!(approvals(&a), 0);
+    assert_eq!(writes(&a)[0]["response"]["response"]["behavior"], "allow");
+    assert_eq!(approvals(&core.on_line(&mcp("r3", "mcp__srv2__two"))), 1);
+    assert_eq!(approvals(&core.on_line(&mcp("r4", "mcp__other__one"))), 1);
+
+    // `server_always` is allowed the same way; an answer for a tool that is not an MCP one
+    // is refused and the request stays open.
+    let mut core = with_folder(false);
+    ids(&mut core, "mcp__srv__one");
+    core.answer_approval("r", "server_always", None).unwrap();
+    assert_eq!(approvals(&core.on_line(&mcp("r2", "mcp__srv__two"))), 0);
+    ids(&mut core, "Edit");
+    assert!(core.answer_approval("r", "server_session", None).is_err());
+    assert!(core.answer_approval("r", "once", None).is_ok());
 }
 
 /// T12: `approval.request.policy_hint` is `allow` when an allow rule matches a call the CLI
@@ -2947,6 +3267,59 @@ fn approval_carries_the_reason_and_the_tools_name() {
         p.get("reason").is_none() && p.get("display_name").is_none(),
         "{p}"
     );
+}
+
+/// SPEC 0.217: for a call an ask rule caught, Claude Code sends no `decision_reason`, only
+/// `decision_reason_type: "rule"` and the rule's source (2.1.329, also in `bypassPermissions`),
+/// so the card says that an ask rule for the tool asks and where it lives; `matched_ask_rule`
+/// names the rule itself; a `decision_reason` of the CLI still wins.
+#[test]
+fn an_ask_rule_names_itself_on_the_card() {
+    let fx = fixture!("permission-allow");
+    let mut core = Core::new(Uuid::now_v7(), false);
+    // The request as 2.1.329 sent it for an `Artifact` call under the ask rule `Artifact`.
+    let p = approval_wire(&core.on_line(&patched(&fx, "r1", |r| {
+        r["decision_reason_type"] = json!("rule");
+        r["decision_reason_rule_source"] = json!("userSettings");
+        r["suppress_always_allow_rule"] = json!(true);
+    })));
+    let tool = p["tool"].as_str().unwrap().to_owned();
+    assert_eq!(
+        p["reason"],
+        json!(format!(
+            "An ask rule for {tool} in user settings (~/.claude/settings.json) requires approval for this call"
+        ))
+    );
+    let p = approval_wire(&core.on_line(&patched(&fx, "r2", |r| {
+        r["decision_reason_type"] = json!("rule");
+        r["decision_reason_rule_source"] = json!("projectSettings");
+        r["matched_ask_rule"] = json!({"source": "localSettings", "tool_name": "Bash",
+            "rule_content": "git push:*"});
+    })));
+    assert_eq!(
+        p["reason"],
+        json!("The ask rule Bash(git push:*) in project local settings (.claude/settings.local.json) requires approval for this call")
+    );
+    // A tool's own ask with the rule beside it (`subcommandResults`, `mode`), a rule on the
+    // whole tool.
+    let p = approval_wire(&core.on_line(&patched(&fx, "r5", |r| {
+        r["decision_reason_type"] = json!("subcommandResults");
+        r["matched_ask_rule"] = json!({"source": "userSettings", "tool_name": "Bash"});
+    })));
+    assert_eq!(
+        p["reason"],
+        json!("The ask rule Bash in user settings (~/.claude/settings.json) requires approval for this call")
+    );
+    let p = approval_wire(&core.on_line(&patched(&fx, "r3", |r| {
+        r["decision_reason_type"] = json!("rule");
+        r["decision_reason"] = json!("A hook asks");
+    })));
+    assert_eq!(p["reason"], json!("A hook asks"));
+    let p = approval_wire(&core.on_line(&patched(&fx, "r4", |r| {
+        r["decision_reason_type"] = json!("mode");
+        r["decision_reason_rule_source"] = json!("userSettings");
+    })));
+    assert!(p.get("reason").is_none(), "{p}");
 }
 
 /// `approval.cancel` / `clarify.cancel` events of `actions`: kind, request id, reason.
@@ -3398,6 +3771,7 @@ fn deny_is_the_tabs_no() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     });
     core.on_line(&can_use_tool_line(&fx, "r1", None));
     let w = writes(&core.answer_approval("r1", "deny", None).unwrap());
@@ -3698,6 +4072,40 @@ fn an_interrupted_turn_without_tokens_gives_no_usage_line() {
     assert_eq!(wire[1]["payload"]["input_tokens"], 0);
     assert!(wire[1]["payload"].get("cost_usd").is_none());
     assert_eq!(wire[1]["payload"]["session_cost_usd"], 0.00013);
+}
+
+/// `session_tokens` of every `usage` the `result` line `r` makes, as the wire shows it.
+fn session_tokens_of(r: Value) -> Vec<Option<u64>> {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    events(&emitted(core.on_line(&r.to_string())))
+        .into_iter()
+        .filter(|e| matches!(e.kind, EventKind::Usage { .. }))
+        .map(|e| serde_json::to_value(&e.kind).unwrap()["payload"]["session_tokens"].as_u64())
+        .collect()
+}
+
+/// The `usage` of a turn and the one with the total only carry the runtime's
+/// cumulative tokens: the four `modelUsage` counts summed over all its models; none when the
+/// `result` has no `modelUsage`.
+#[test]
+fn usage_carries_the_session_tokens_of_model_usage() {
+    let model_usage = json!({
+        "claude-opus-5-5": {"inputTokens": 1, "outputTokens": 2, "cacheReadInputTokens": 3, "cacheCreationInputTokens": 4},
+        "claude-haiku-5-5": {"inputTokens": 10, "outputTokens": 20, "cacheReadInputTokens": 30, "cacheCreationInputTokens": 40},
+    });
+    let turn = json!({"type": "result", "num_turns": 1, "total_cost_usd": 0.01,
+        "usage": {"input_tokens": 4, "output_tokens": 2}, "modelUsage": model_usage});
+    assert_eq!(session_tokens_of(turn), [Some(110)]);
+    // No tokens in `usage`, the total grew: the total-only `usage`.
+    let total_only = json!({"type": "result", "num_turns": 1, "total_cost_usd": 0.01,
+        "terminal_reason": "aborted_streaming",
+        "usage": {"input_tokens": 0, "output_tokens": 0}, "modelUsage": model_usage});
+    assert_eq!(session_tokens_of(total_only), [Some(110)]);
+    let bare = json!({"type": "result", "num_turns": 1, "total_cost_usd": 0.01,
+        "usage": {"input_tokens": 4, "output_tokens": 2}});
+    assert_eq!(session_tokens_of(bare), [None]);
 }
 
 /// A turn the CLI ended early for any reason but an interrupt ends with one line that says
@@ -4259,6 +4667,7 @@ async fn image_attachments_are_image_blocks() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     };
     let a = core.input_with_images(&input, images);
     assert!(
@@ -4287,6 +4696,7 @@ fn held_text_is_not_final_before_a_tool_call() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     });
     core.on_line(&echo(&Uuid::new_v4().to_string(), "x"));
     let u1 = Uuid::new_v4();
@@ -4340,6 +4750,7 @@ fn nul_never_reaches_an_event() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     });
     let lines = [
         json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta",
@@ -4570,6 +4981,7 @@ async fn takeover_records_are_registered_as_own() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     })
     .await
     .unwrap();
@@ -4879,6 +5291,62 @@ async fn entrypoint_for_the_vscode_history() {
     }
 }
 
+/// `task_tools` (worker config): the child gets `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` over the
+/// environment's own value; without it the variable is removed, that value too.
+#[tokio::test]
+async fn the_task_tools_variable_follows_the_worker_config() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("ws")).unwrap();
+    let cfg = crate::config::Config::parse(&format!(
+        r#"hub_url = "https://h"
+allowed_roots = [{root:?}]
+[environments.e]
+env = {{ CLAUDE_CODE_ENABLE_TODO_TOOLS = "0" }}
+[[env_bindings]]
+path = "{}"
+environment = "e"
+"#,
+        root.join("ws").display()
+    ))
+    .unwrap();
+    let config = tempfile::tempdir().unwrap();
+    for (task_tools, want) in [(true, Some("1")), (false, None)] {
+        let claude = ScriptedClaude::new("");
+        let mut opts = options(config.path());
+        opts.task_tools = task_tools;
+        let factory = ClaudeCodeAdapters::new(opts, Arc::new(claude.clone()));
+        let mut s = spec(Uuid::now_v7(), &root.join("ws"), Uuid::new_v4());
+        s.environment = cfg.environment(&s.workspace);
+        let (tx, _rx) = mpsc::channel(16);
+        let mut a = factory.create(&s, tx);
+        a.start(&s).await.unwrap();
+        let vars: Vec<String> = claude.commands()[0]
+            .env
+            .iter()
+            .filter(|(k, _)| k == "CLAUDE_CODE_ENABLE_TODO_TOOLS")
+            .map(|(_, v)| v.clone())
+            .collect();
+        assert_eq!(vars, want.into_iter().collect::<Vec<_>>());
+        a.kill().await.unwrap();
+    }
+    // The config's key reaches the options.
+    let on = crate::config::Config::parse(&format!(
+        "hub_url = \"https://h\"\nallowed_roots = [{root:?}]\ntask_tools = true\n"
+    ))
+    .unwrap();
+    assert!(
+        ClaudeCodeAdapters::from_config(&on, "default".into())
+            .opts
+            .task_tools
+    );
+    assert!(
+        !ClaudeCodeAdapters::from_config(&cfg, "default".into())
+            .opts
+            .task_tools
+    );
+}
+
 /// A local slash command (`/name x`): the CLI answers with a `result` and no replay echo.
 /// The input still counts as taken, otherwise the supervisor resends it forever; taken before
 /// the turn's `status idle`, whose `ack` after it would open a turn on the hub (SPEC §5.2).
@@ -4973,6 +5441,345 @@ fn compact_keeps_its_usage() {
         r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_ms":3,"result":"","total_cost_usd":0.01,"usage":{"input_tokens":0,"output_tokens":0}}"#,
     ));
     assert_eq!(usage, vec![(0, 0, None, Some(0.01))]);
+}
+
+/// A main agent's `assistant` line of a response of `claude-opus-5-5` with this `usage`; with
+/// `sub` it is a subagent's.
+fn response_line(n: u32, usage: Value, sub: bool) -> String {
+    json!({
+        "type": "assistant",
+        "uuid": format!("0f6c1d2e-2222-4a55-9d0e-1a2b3c4d5e{n:02}"),
+        "parent_tool_use_id": if sub { json!("toolu_sub") } else { Value::Null },
+        "message": {
+            "id": format!("msg_{n}"),
+            "model": "claude-opus-5-5",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "x"}],
+            "usage": usage,
+        },
+    })
+    .to_string()
+}
+
+/// A turn's `result` with this `modelUsage` entry under `key`.
+fn turn_result_as(key: &str, entry: Value) -> String {
+    json!({
+        "type": "result", "subtype": "success", "is_error": false, "num_turns": 1,
+        "duration_ms": 9, "result": "x", "total_cost_usd": 0.01,
+        "usage": {"input_tokens": 3, "output_tokens": 4},
+        "modelUsage": {key: entry},
+    })
+    .to_string()
+}
+
+/// A turn's `result` with this `modelUsage` entry of `claude-opus-5-5`.
+fn turn_result(entry: Value) -> String {
+    turn_result_as("claude-opus-5-5", entry)
+}
+
+/// The `init` line of a CLI that runs `model`.
+fn init_line(model: &str) -> String {
+    json!({"type": "system", "subtype": "init", "model": model, "permissionMode": "default",
+        "uuid": "fb2b6af8-8921-4277-a09e-61e710bfcdb2"})
+    .to_string()
+}
+
+/// `(context_tokens, context_limit, cache_ttl_s)` of every `usage` among `actions`.
+fn context_fields(actions: Vec<Action>) -> Vec<(Option<u64>, Option<u64>, Option<u64>)> {
+    events(&emitted(actions))
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Usage {
+                context_tokens,
+                context_limit,
+                cache_ttl_s,
+                ..
+            } => Some((context_tokens, context_limit, cache_ttl_s)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The size of the context is the sum of the usage of the main agent's last response (the
+/// frames of one response repeat it: the last wins); a subagent's frame, even a later one and
+/// a larger one, is not the main agent's context.
+#[test]
+fn the_context_is_the_last_main_response_not_a_subagents() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&response_line(
+        1,
+        json!({"input_tokens": 2, "cache_read_input_tokens": 40, "cache_creation_input_tokens": 30, "output_tokens": 1}),
+        false,
+    ));
+    core.on_line(&response_line(
+        2,
+        json!({"input_tokens": 2, "cache_read_input_tokens": 400, "cache_creation_input_tokens": 30, "output_tokens": 8}),
+        false,
+    ));
+    core.on_line(&response_line(
+        3,
+        json!({"input_tokens": 9000, "cache_read_input_tokens": 9000, "output_tokens": 9000}),
+        true,
+    ));
+    let got = context_fields(core.on_line(&turn_result(json!({}))));
+    assert_eq!(got, vec![(Some(440), None, None)]);
+}
+
+/// A line of the CLI's own (`<synthetic>`, zero usage: an error text, a refusal) after a real
+/// response is no response of the model: the context stays.
+#[test]
+fn a_synthetic_line_leaves_the_context_alone() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&response_line(
+        1,
+        json!({"input_tokens": 700, "output_tokens": 5}),
+        false,
+    ));
+    let synthetic = response_line(2, json!({"input_tokens": 0, "output_tokens": 0}), false)
+        .replace("claude-opus-5-5", "<synthetic>");
+    core.on_line(&synthetic);
+    let got = context_fields(core.on_line(&turn_result(json!({}))));
+    assert_eq!(got, vec![(Some(705), None, None)]);
+}
+
+/// The limit is `contextWindow − min(maxOutputTokens, 20000) − 13000` of the main model's entry:
+/// the threshold of the model's window, not of an overridden auto-compaction window
+/// (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `autoCompactWindow`, `/autocompact`) nor of a disabled
+/// one, which the stream does not show. Checked live on 2.1.329: a window of 1 000 000 gives
+/// 967 000 in `get_context_usage`.
+#[test]
+fn the_context_limit_is_the_window_less_the_reserve_and_the_margin() {
+    let usage = json!({"input_tokens": 1, "output_tokens": 1});
+    let run = |result: String| {
+        let sid = Uuid::now_v7();
+        let mut core = Core::new(sid, false);
+        started(&mut core, sid);
+        core.on_line(&response_line(1, usage.clone(), false));
+        context_fields(core.on_line(&result))
+    };
+    let got = run(turn_result(
+        json!({"contextWindow": 1_000_000, "maxOutputTokens": 128_000}),
+    ));
+    assert_eq!(got, vec![(Some(2), Some(967_000), None)]);
+    let got = run(turn_result(
+        json!({"contextWindow": 200_000, "maxOutputTokens": 20_000}),
+    ));
+    assert_eq!(got, vec![(Some(2), Some(167_000), None)]);
+    // An output limit below the reserve counts as it is.
+    let got = run(turn_result(
+        json!({"contextWindow": 200_000, "maxOutputTokens": 8_192}),
+    ));
+    assert_eq!(got, vec![(Some(2), Some(178_808), None)]);
+    // The entry of a model that is neither the main one nor the response's is not used.
+    let other = turn_result_as("claude-haiku-5-5", json!({"contextWindow": 200_000}));
+    assert_eq!(run(other), vec![(Some(2), None, None)]);
+}
+
+/// The CLI keys `modelUsage` by the model as requested (`claude-opus-5-5[1m]`), the response
+/// names it without the suffix: the main loop's model from `init` finds the entry; so does the
+/// entry whose `canonicalModel` is the response's when the main model is not known; and a turn
+/// with no tracked response (`/compact` first after a restart) still has the limit.
+#[test]
+fn the_limit_is_found_under_the_requested_model() {
+    let entry = json!({"contextWindow": 1_000_000, "maxOutputTokens": 64_000, "canonicalModel": "claude-opus-5-5"});
+    let usage = json!({"input_tokens": 1, "output_tokens": 1});
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    core.on_line(&init_line("claude-opus-5-5[1m]"));
+    started(&mut core, sid);
+    core.on_line(&response_line(1, usage.clone(), false));
+    let got = context_fields(core.on_line(&turn_result_as("claude-opus-5-5[1m]", entry.clone())));
+    assert_eq!(got, vec![(Some(2), Some(967_000), None)]);
+    // No `init`: by `canonicalModel`.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&response_line(1, usage, false));
+    let got = context_fields(core.on_line(&turn_result_as("some-provider-id", entry.clone())));
+    assert_eq!(got, vec![(Some(2), Some(967_000), None)]);
+    // No response of this process: the size is unknown, the limit is not.
+    let mut core = Core::new(sid, false);
+    core.on_line(&init_line("claude-opus-5-5[1m]"));
+    started(&mut core, sid);
+    let got = context_fields(core.on_line(&turn_result_as("claude-opus-5-5[1m]", entry)));
+    assert_eq!(got, vec![(None, Some(967_000), None)]);
+}
+
+/// The cache lives an hour when the response (or the session's `modelUsage` of its model)
+/// shows a write with the 1-hour TTL, else five minutes when it shows a 5-minute write, else
+/// nothing is known.
+#[test]
+fn the_cache_ttl_follows_the_writes_seen() {
+    let run = |usage: Value, entry: Value| {
+        let sid = Uuid::now_v7();
+        let mut core = Core::new(sid, false);
+        started(&mut core, sid);
+        core.on_line(&response_line(1, usage, false));
+        context_fields(core.on_line(&turn_result(entry)))[0].2
+    };
+    // The test runs for far less than a minute, so a TTL read at the end is within a few
+    // seconds of its full value.
+    let near = |ttl: Option<u64>, full: u64| ttl.is_some_and(|t| t <= full && t + 30 >= full);
+    let hour = json!({"cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 33468}});
+    let five = json!({"cache_creation": {"ephemeral_5m_input_tokens": 70, "ephemeral_1h_input_tokens": 0}});
+    let both = json!({"cache_creation": {"ephemeral_5m_input_tokens": 70, "ephemeral_1h_input_tokens": 5}});
+    assert!(near(run(hour, json!({})), 3600));
+    assert!(near(run(five.clone(), json!({})), 300));
+    assert!(near(run(both, json!({})), 3600));
+    assert_eq!(run(json!({}), json!({})), None);
+    // A response that wrote nothing: what the session's entry of the model shows.
+    let written = |k: &str| json!({k: 12});
+    assert!(near(
+        run(json!({}), written("cacheCreationEphemeral1hInputTokens")),
+        3600
+    ));
+    assert!(near(
+        run(json!({}), written("cacheCreationEphemeral5mInputTokens")),
+        300
+    ));
+    assert!(near(
+        run(five, written("cacheCreationEphemeral1hInputTokens")),
+        3600
+    ));
+}
+
+/// The cache is written when the request goes out, not when the turn ends: the TTL sent is
+/// what is left since the response started, from its `message_start` when that came first,
+/// else from its first line; never below 0.
+#[test]
+fn the_cache_ttl_counts_from_the_request() {
+    let hour =
+        json!({"cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 9}});
+    let sid = Uuid::now_v7();
+    let near = |ttl: Option<u64>, full: u64| ttl.is_some_and(|t| t <= full && t + 30 >= full);
+    // A response seen from its first line, which started 100 s before the result.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&response_line(1, hour.clone(), false));
+    core.rewind_response(Duration::from_secs(100));
+    assert!(near(
+        context_fields(core.on_line(&turn_result(json!({}))))[0].2,
+        3500
+    ));
+    // The `message_start` came first: its time stands, the later line does not restart it.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_1"}}}"#,
+    );
+    core.rewind_response(Duration::from_secs(100));
+    core.on_line(&response_line(1, hour.clone(), false));
+    assert!(near(
+        context_fields(core.on_line(&turn_result(json!({}))))[0].2,
+        3500
+    ));
+    // Past the TTL: 0.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&response_line(1, hour, false));
+    core.rewind_response(Duration::from_secs(4000));
+    assert_eq!(
+        context_fields(core.on_line(&turn_result(json!({}))))[0].2,
+        Some(0)
+    );
+}
+
+/// The lines of a response carry the usage of its `message_start` (a few output tokens): the
+/// context takes the response's own count from its `message_delta`, and only for that response.
+#[test]
+fn the_context_takes_the_output_count_of_the_message_delta() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_1"}}}"#,
+    );
+    core.on_line(&response_line(
+        1,
+        json!({"input_tokens": 100, "output_tokens": 4}),
+        false,
+    ));
+    core.on_line(
+        r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":500}}}"#,
+    );
+    assert_eq!(
+        context_fields(core.on_line(&turn_result(json!({}))))[0].0,
+        Some(600)
+    );
+    // A delta of another response does not touch it.
+    started(&mut core, sid);
+    core.on_line(
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_9"}}}"#,
+    );
+    core.on_line(
+        r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":900}}}"#,
+    );
+    assert_eq!(
+        context_fields(core.on_line(&turn_result(json!({}))))[0].0,
+        Some(600)
+    );
+}
+
+/// After a compaction the context is the `post_tokens` of its boundary until the next
+/// response, and it is in no cache yet: no TTL, though the session's `modelUsage` has writes. A
+/// boundary without `post_tokens` (the runtime did not count the size) leaves no size, not the
+/// one before.
+#[test]
+fn the_context_after_a_compaction_is_its_post_tokens() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let hour = json!({"input_tokens": 80_000, "output_tokens": 20,
+        "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 80_000}});
+    let before = response_line(1, hour, false);
+    let entry = json!({"contextWindow": 200_000, "maxOutputTokens": 64_000,
+        "cacheCreationEphemeral1hInputTokens": 80_000});
+    core.on_line(&before);
+    core.on_line(COMPACT_BOUNDARY);
+    let got = context_fields(core.on_line(&turn_result(entry)));
+    // The model of the response before the boundary is the one whose window gives the limit.
+    assert_eq!(got, vec![(Some(9743), Some(167_000), None)]);
+    // The next response is the size again, and in the cache.
+    core.on_line(&response_line(
+        2,
+        json!({"input_tokens": 12_000, "output_tokens": 5}),
+        false,
+    ));
+    let got = context_fields(core.on_line(&turn_result(
+        json!({"cacheCreationEphemeral1hInputTokens": 5}),
+    )));
+    assert_eq!((got[0].0, got[0].2.is_some()), (Some(12_005), true));
+    // No `post_tokens`: nothing to show for the compaction's `usage`.
+    core.on_line(&before);
+    core.on_line(&COMPACT_BOUNDARY.replace(r#","post_tokens":9743"#, ""));
+    let got = context_fields(core.on_line(&turn_result(json!({}))));
+    assert_eq!(got, vec![(None, None, None)]);
+}
+
+/// `/clear` starts a new conversation: a turn of it that has only a line of the CLI's own
+/// carries nothing of the old conversation's context.
+#[test]
+fn a_clear_forgets_the_context() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&response_line(
+        1,
+        json!({"input_tokens": 90_000, "output_tokens": 5}),
+        false,
+    ));
+    core.on_line(
+        &json!({"type": "conversation_reset", "trigger": "clear", "session_id": "s"}).to_string(),
+    );
+    started(&mut core, sid);
+    let synthetic = response_line(2, json!({"input_tokens": 0, "output_tokens": 0}), false)
+        .replace("claude-opus-5-5", "<synthetic>");
+    core.on_line(&synthetic);
+    let got = context_fields(core.on_line(&turn_result(json!({}))));
+    assert_eq!(got, vec![(None, None, None)]);
 }
 
 /// A cost baseline with `input` and `output` tokens of one model.
@@ -5404,6 +6211,7 @@ fn written(core: &mut Core, sid: Uuid, text: &str) -> Uuid {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     });
     input
 }
@@ -6625,6 +7433,7 @@ fn a_refused_model_switch_is_a_line_and_the_kept_model() {
             fork: None,
             compaction: None,
             model: Some("claude-opus-5-5".into()),
+            goal: None,
         }
     );
 }
@@ -6706,6 +7515,121 @@ fn a_refusal_answered_by_another_model_names_it_in_the_usage() {
     assert_eq!(turn(None).as_deref(), Some("claude-sonnet-5"));
     assert_eq!(turn(Some("session")).as_deref(), Some("claude-sonnet-5"));
     assert_eq!(turn(Some("local")).as_deref(), Some("claude-opus-5-5"));
+}
+
+/// SPEC 0.232, §8.1: a side question is a `control_request` named after the hub's event, with
+/// the earlier ones as `history` when there are any; the CLI's progress line is no event, and
+/// its answer is a `SideAnswer`: the text, a `synthetic` notice and a `null` answer as an
+/// error, an error answer with its text. It opens no turn and writes no event of its own.
+#[test]
+fn a_side_question_is_asked_and_answered_outside_the_conversation() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let event_id = Uuid::now_v7();
+    let Action::Write(v) = core.side_question(event_id, "What now?", &[]) else {
+        panic!("not a write");
+    };
+    assert_eq!(v["type"], "control_request");
+    assert_eq!(v["request_id"], format!("hqc-side-{event_id}"));
+    assert_eq!(
+        v["request"],
+        json!({"subtype": "side_question", "question": "What now?"})
+    );
+    let history = [hqc_proto::frame::SideExchange {
+        question: "Before?".into(),
+        response: "Earlier.".into(),
+    }];
+    let Action::Write(v) = core.side_question(event_id, "And now?", &history) else {
+        panic!("not a write");
+    };
+    assert_eq!(
+        v["request"]["history"],
+        json!([{"question": "Before?", "response": "Earlier."}])
+    );
+    let progress = json!({"type": "system", "subtype": "control_request_progress",
+        "request_id": format!("hqc-side-{event_id}"), "status": "started"});
+    assert!(core.on_line(&progress.to_string()).is_empty());
+    let answer = |core: &mut Core, response: Value| {
+        let a = core.on_line(&response.to_string());
+        match a.as_slice() {
+            [Action::Emit(AdapterEvent::SideAnswer {
+                event_id: e,
+                text,
+                error,
+            })] => {
+                assert_eq!(*e, event_id);
+                (text.clone(), error.clone())
+            }
+            a => panic!("{a:?}"),
+        }
+    };
+    let success = |response: Value| {
+        json!({"type": "control_response", "response": {"subtype": "success",
+            "request_id": format!("hqc-side-{event_id}"), "response": response}})
+    };
+    assert_eq!(
+        answer(
+            &mut core,
+            success(json!({"response": "It reads.", "synthetic": false}))
+        ),
+        (Some("It reads.".into()), None)
+    );
+    assert_eq!(
+        answer(
+            &mut core,
+            success(json!({"response": "Try later.", "synthetic": true}))
+        ),
+        (None, Some("Try later.".into()))
+    );
+    assert_eq!(
+        answer(
+            &mut core,
+            success(json!({"response": null, "synthetic": false}))
+        ),
+        (None, Some("No answer".into()))
+    );
+    assert_eq!(
+        answer(
+            &mut core,
+            json!({"type": "control_response", "response": {"subtype": "error",
+                "request_id": format!("hqc-side-{event_id}"), "error": "Side question cancelled"}})
+        ),
+        (None, Some("Side question cancelled".into()))
+    );
+    // Nothing of it reached the turn machinery.
+    assert!(!core.turn_open());
+}
+
+/// SPEC 0.232, §8.1: a `model_refusal_fallback` of `scope` `local` (a side question's or a
+/// subagent's answer came from the other model) takes back no record of the conversation, though
+/// it names uuids; one for the session still does.
+#[test]
+fn a_local_refusal_fallback_retracts_nothing() {
+    let retractions = |scope: Option<&str>| {
+        let sid = Uuid::now_v7();
+        let mut core = Core::new(sid, false);
+        started(&mut core, sid);
+        let t = Uuid::new_v4();
+        play(
+            &mut core,
+            &json!({"type": "assistant", "parent_tool_use_id": null, "uuid": t,
+                "message": {"model": "claude-opus-5-5", "role": "assistant",
+                    "content": [{"type": "text", "text": "Working."}]}})
+            .to_string(),
+        );
+        let mut fallback = json!({"type": "system", "subtype": "model_refusal_fallback",
+            "trigger": "refusal", "direction": "retry", "original_model": "claude-opus-5-5",
+            "fallback_model": "claude-sonnet-5", "request_id": null,
+            "retracted_message_uuids": [t], "content": "Switched."});
+        if let Some(s) = scope {
+            fallback["scope"] = json!(s);
+        }
+        play(&mut core, &fallback.to_string())
+            .iter()
+            .filter(|a| matches!(a, Action::Emit(AdapterEvent::Event(e)) if matches!(e.kind, EventKind::Retraction { .. })))
+            .count()
+    };
+    assert_eq!(retractions(Some("local")), 0);
+    assert_eq!(retractions(Some("session")), 1);
 }
 
 /// SPEC §4, §8.1: `system/init`'s MCP servers that are not connected (live on 2.1.312, a server
@@ -6982,6 +7906,343 @@ fn synthetic_refusal_is_a_refusal_agent_message() {
     );
 }
 
+/// SPEC 0.218: a slash command's output (`<synthetic>` with `local_command_source`, as 2.1.312
+/// writes the reply to `/goal`, with `local_command_run` or, as for "/config opens an
+/// interactive panel…", without) is `system command_output` with the record's id, after the
+/// text held before it; a `<synthetic>` message without `local_command_source` (an API error)
+/// stays a runtime `agent.message`. Cut at 4096 bytes.
+#[test]
+fn a_slash_commands_output_is_a_system_line() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let u: Uuid = "1d2f3a4b-5c6d-4e7f-8a9b-0c1d2e3f4a5b".parse().unwrap();
+    let line = |text: &str, extra: &str| {
+        format!(
+            r#"{{"type":"assistant","message":{{"model":"<synthetic>","stop_reason":"end_turn","content":[{{"type":"text","text":"{text}"}}]}},"uuid":"{u}"{extra}}}"#
+        )
+    };
+    let source = |text: &str| {
+        format!(r#","local_command_source":"<local-command-stdout>{text}</local-command-stdout>""#)
+    };
+    let held = r#"{"type":"assistant","message":{"model":"claude-haiku-5-5","content":[{"type":"text","text":"Before"}]},"parent_tool_use_id":null,"uuid":"6a0f4a45-3f09-4c09-b2b7-7d3a0d7e1f10"}"#;
+    let run = r#","local_command_run":{"command":"goal","args":"clear"}"#;
+    let mut evs = emitted(core.on_line(held));
+    evs.extend(emitted(core.on_line(&line(
+        "Goal cleared: C",
+        &(source("Goal cleared: C") + run),
+    ))));
+    let shown: Vec<(&str, Option<&str>)> = events(&evs)
+        .into_iter()
+        .map(|e| match &e.kind {
+            EventKind::AgentMessage { text, runtime, .. } => {
+                (text.as_str(), runtime.then_some("runtime"))
+            }
+            EventKind::System { code, text, .. } => (text.as_str(), Some(code.as_str())),
+            k => panic!("{k:?}"),
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("Before", None),
+            ("Goal cleared: C", Some("command_output"))
+        ]
+    );
+    assert_eq!(events(&evs)[1].event_id, record_event_id(&u, 0));
+    assert_eq!(events(&evs)[1].author, Author::System);
+
+    // Without `local_command_run` it is still a command's output.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let panel = "/config opens an interactive panel and isn't available in this environment";
+    let evs = emitted(core.on_line(&line(panel, &source(panel))));
+    let shown = events(&evs);
+    assert_eq!(shown.len(), 1);
+    assert!(matches!(&shown[0].kind, EventKind::System { code, .. } if code == "command_output"));
+
+    // Without `local_command_source` it is the CLI's reply to the turn, held until the turn ends.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    assert!(emitted(core.on_line(&line("API Error", ""))).is_empty());
+    let evs = emitted(core.on_line(r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#));
+    assert!(events(&evs).iter().any(|e| matches!(
+        &e.kind,
+        EventKind::AgentMessage { text, runtime: true, r#final: true, .. } if text == "API Error"
+    )));
+
+    // A long output is cut.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let long = "x".repeat(5000);
+    let evs = emitted(core.on_line(&line(&long, &source("x"))));
+    let EventKind::System { text, .. } = &events(&evs)[0].kind else {
+        panic!("{evs:?}");
+    };
+    assert_eq!(text.len(), 4096);
+}
+
+/// SPEC 0.218: `system goal` for a goal record of the transcript: the text in Claude Code's
+/// words, the goal as a nested object, the id from the record's `uuid`, the condition and
+/// the reason cut at 4096 bytes.
+#[test]
+fn a_goal_record_is_a_goal_line() {
+    use hqc_claude_jsonl::{GoalRecord, GoalState};
+    let uuid: Uuid = "36c72c19-b4ad-4d95-a482-ce4e281952cb".parse().unwrap();
+    let record = |state, reason: Option<&str>| GoalRecord {
+        uuid,
+        timestamp: None,
+        condition: "C".into(),
+        state,
+        reason: reason.map(str::to_owned),
+        checks: Some(2),
+        duration_ms: Some(10),
+        tokens: Some(3),
+    };
+    let sid = Uuid::now_v7();
+    let line = |g: &GoalRecord| {
+        let e = super::engine::goal_event(sid, g);
+        assert_eq!(e.event_id, Event::id_from_claude_record(&uuid));
+        assert_eq!(e.author, Author::System);
+        let EventKind::System {
+            text, code, goal, ..
+        } = e.kind
+        else {
+            panic!("not system");
+        };
+        assert_eq!(code, "goal");
+        (text, goal.unwrap())
+    };
+    let texts: Vec<String> = [
+        GoalState::Set,
+        GoalState::Unmet,
+        GoalState::Met,
+        GoalState::Failed,
+        GoalState::Cleared,
+    ]
+    .into_iter()
+    .map(|s| line(&record(s, None)).0)
+    .collect();
+    assert_eq!(
+        texts,
+        [
+            "Goal set: C",
+            "Goal not yet met… continuing",
+            "Goal achieved",
+            "Goal could not be achieved",
+            "Goal cleared: C"
+        ]
+    );
+    let (_, goal) = line(&record(GoalState::Met, Some("R")));
+    assert_eq!(
+        goal,
+        hqc_proto::event::GoalStatus {
+            condition: "C".into(),
+            state: "met".into(),
+            reason: Some("R".into()),
+            checks: Some(2),
+            duration_ms: Some(10),
+            tokens: Some(3),
+        }
+    );
+    let mut long = record(GoalState::Unmet, Some(&"r".repeat(5000)));
+    long.condition = "é".repeat(3000);
+    let (_, goal) = line(&long);
+    assert_eq!(goal.condition.len(), 4096);
+    assert_eq!(goal.reason.unwrap().len(), 4096);
+}
+
+/// A goal record of the transcript written at `ts`.
+fn goal_at(ts: Option<&str>, state: hqc_claude_jsonl::GoalState) -> hqc_claude_jsonl::GoalRecord {
+    hqc_claude_jsonl::GoalRecord {
+        uuid: Uuid::new_v4(),
+        timestamp: ts.map(str::to_owned),
+        condition: "C".into(),
+        state,
+        reason: Some("R".into()),
+        checks: Some(1),
+        duration_ms: None,
+        tokens: None,
+    }
+}
+
+/// An assistant text record of the main chain.
+fn text_line(u: Uuid, text: &str) -> String {
+    json!({"type": "assistant", "parent_tool_use_id": null, "uuid": u,
+        "message": {"model": "claude-opus-5-5", "role": "assistant",
+            "content": [{"type": "text", "text": text}]}})
+    .to_string()
+}
+
+/// What the actions emit, one word each: `text:<t>:<final>` or `goal:<state>`.
+fn goal_shape(actions: Vec<Action>) -> Vec<String> {
+    emitted(actions)
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Event(e) => Some(match &e.kind {
+                EventKind::AgentMessage { text, r#final, .. } => format!("text:{text}:{final}"),
+                EventKind::System { goal: Some(g), .. } => format!("goal:{}", g.state),
+                EventKind::ToolCall { tool, .. } => format!("call:{tool}"),
+                EventKind::Retraction { .. } => "retraction".into(),
+                EventKind::Usage { .. } => "usage".into(),
+                _ => return None,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+const LATER: &str = "2099-01-01T00:00:00.000Z";
+const EARLIER: &str = "2000-01-01T00:00:00.000Z";
+
+/// SPEC 0.218: a goal record read while the text it judged is still held (the meter reads the
+/// transcript on its own clock, stdout waits for the next element) goes out behind that text,
+/// not above it; the text is not flushed for it.
+#[test]
+fn a_goal_record_read_before_the_text_it_judged_waits_behind_it() {
+    use hqc_claude_jsonl::GoalState;
+    let sid = Uuid::now_v7();
+    let tool = json!({"type": "assistant", "parent_tool_use_id": null, "uuid": Uuid::new_v4(),
+        "message": {"model": "claude-opus-5-5", "role": "assistant", "content":
+            [{"type": "tool_use", "id": "toolu_g", "name": "Bash", "input": {}}]}})
+    .to_string();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    assert!(emitted(core.on_line(&text_line(Uuid::new_v4(), "Done."))).is_empty());
+    assert!(core
+        .on_goal(&goal_at(Some(LATER), GoalState::Unmet))
+        .is_empty());
+    assert_eq!(
+        goal_shape(core.on_line(&tool)),
+        ["text:Done.:false", "goal:unmet", "call:Bash"]
+    );
+
+    // The turn's last text keeps `final`; the goal line follows the turn's `usage`, which the
+    // feed draws with that text.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&text_line(Uuid::new_v4(), "Done."));
+    assert!(core.on_goal(&goal_at(None, GoalState::Unmet)).is_empty());
+    let result = r#"{"type":"result","subtype":"success","is_error":false,"result":"Done.","total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5}}"#;
+    assert_eq!(
+        goal_shape(core.on_line(result)),
+        ["text:Done.:true", "usage", "goal:unmet"]
+    );
+
+    // Nothing held: sent at once. One written before the held text: sent at once, which is
+    // above it.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    assert_eq!(
+        goal_shape(core.on_goal(&goal_at(Some(LATER), GoalState::Set))),
+        ["goal:set"]
+    );
+    core.on_line(&text_line(Uuid::new_v4(), "Done."));
+    assert_eq!(
+        goal_shape(core.on_goal(&goal_at(Some(EARLIER), GoalState::Unmet))),
+        ["goal:unmet"]
+    );
+    assert_eq!(goal_shape(core.on_exit()), ["text:Done.:false"]);
+}
+
+/// SPEC 0.218: where the held text is dropped, not sent, the goal events behind it are not
+/// lost: a retraction of the text, an input written into a turn the CLI began by itself, the
+/// process ending with nothing held.
+#[test]
+fn a_goal_behind_a_dropped_text_is_still_sent() {
+    use hqc_claude_jsonl::GoalState;
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let h = Uuid::new_v4();
+    core.on_line(&text_line(h, "I can't help with that."));
+    assert!(core
+        .on_goal(&goal_at(Some(LATER), GoalState::Unmet))
+        .is_empty());
+    let fallback = json!({"type": "system", "subtype": "model_refusal_fallback",
+        "trigger": "refusal", "direction": "retry", "original_model": "claude-opus-5-5",
+        "fallback_model": "claude-sonnet-5", "request_id": null,
+        "retracted_message_uuids": [h],
+        "content": "Opus 5.5 declined. This response was generated by Sonnet 5 instead."})
+    .to_string();
+    let got = goal_shape(core.on_line(&fallback));
+    assert_eq!(&got[..2], ["goal:unmet", "retraction"], "{got:?}");
+    assert!(!got.iter().any(|g| g.starts_with("text:")), "{got:?}");
+
+    // An input written while a text is held drops it; the goal comes out with that call.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&text_line(Uuid::new_v4(), "Done."));
+    assert!(core
+        .on_goal(&goal_at(Some(LATER), GoalState::Met))
+        .is_empty());
+    let input = SessionInput {
+        session_id: sid,
+        event_id: Uuid::now_v7(),
+        text: "next".into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+        schedule_id: None,
+        human: false,
+    };
+    assert_eq!(goal_shape(core.input(&input)), ["goal:met"]);
+    assert!(core.on_exit().is_empty(), "nothing left behind");
+}
+
+/// SPEC 0.218: a resume tells the transcript's last goal record, whatever its state, with the
+/// record's id; a transcript with none tells nothing.
+#[tokio::test]
+async fn a_resume_tells_the_goal_the_transcript_holds() {
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let claude_session = Uuid::new_v4();
+    let s = spec(Uuid::now_v7(), work.path(), claude_session);
+    let (tx, mut rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    let t = super::paths::transcript_path(config.path(), &s.workdir, &claude_session);
+    std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+    let at = |u: &str, a: Value| {
+        json!({"type": "attachment", "uuid": u, "timestamp": "2026-11-22T19:33:57.895Z", "attachment": a})
+            .to_string()
+    };
+    let set = at(
+        "00000000-0000-4000-8000-000000000001",
+        json!({"type": "goal_status", "met": false, "sentinel": true, "condition": "C"}),
+    );
+    let met = at(
+        "00000000-0000-4000-8000-000000000002",
+        json!({"type": "goal_status", "met": true, "condition": "C", "reason": "R", "iterations": 1}),
+    );
+    std::fs::write(&t, format!("{set}\n{met}\n")).unwrap();
+    a.resume(&s).await.unwrap();
+    let Ok(AdapterEvent::Event(ev)) = rx.try_recv() else {
+        panic!("no goal line");
+    };
+    let EventKind::System {
+        code, text, goal, ..
+    } = &ev.kind
+    else {
+        panic!("{ev:?}");
+    };
+    assert_eq!((code.as_str(), text.as_str()), ("goal", "Goal achieved"));
+    assert_eq!(goal.as_ref().unwrap().state, "met");
+    assert_eq!(
+        ev.event_id,
+        Event::id_from_claude_record(&"00000000-0000-4000-8000-000000000002".parse().unwrap())
+    );
+    assert!(rx.try_recv().is_err());
+    a.kill().await.unwrap();
+
+    std::fs::write(&t, "").unwrap();
+    a.resume(&s).await.unwrap();
+    assert!(rx.try_recv().is_err());
+    a.kill().await.unwrap();
+}
+
 // ---- SPEC §17.2: a message during a turn, and the subagents running ------------------------
 // The lines are those of live runs on 2.1.312 (haiku, `--replay-user-messages`, 2026-11-05),
 // with the message uuids the engine gave.
@@ -6998,6 +8259,7 @@ fn user_input(sid: Uuid, text: &str) -> SessionInput {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: true,
     }
 }
 
@@ -7439,6 +8701,267 @@ fn a_cancelled_message_is_not_taken() {
             "status to A",
             "turn_ended [] dropped [B]"
         ]
+    );
+}
+
+/// The CLI's answer to our `cancel_async_message` `request_id`.
+fn cancel_answer(request_id: &str, cancelled: bool) -> String {
+    json!({"type": "control_response", "response": {"subtype": "success",
+        "request_id": request_id, "response": {"cancelled": cancelled}}})
+    .to_string()
+}
+
+/// The `request_id` of the `cancel_async_message` asked for the message with `uuid`, after
+/// checking what it asks.
+fn cancel_request(core: &mut Core, event_id: Uuid, uuid: &str) -> String {
+    let (actions, request_id) = core.withdraw(event_id).expect("the CLI has not taken it");
+    let [Action::Write(v)] = &actions[..] else {
+        panic!("not one write");
+    };
+    assert_eq!(v["type"], "control_request");
+    assert_eq!(v["request_id"], request_id);
+    assert_eq!(
+        v["request"],
+        json!({"subtype": "cancel_async_message", "message_uuid": uuid})
+    );
+    request_id
+}
+
+/// SPEC 0.219: an input the hub marks `human` (what the owner typed) goes to the CLI with
+/// `origin: {kind: "human"}`, which its strict `isHuman()` gates ask for; one it does not mark
+/// (a message of another session, a run of a schedule, a room's input, a note of the hub's own)
+/// has none. Send now adds `priority: "now"`, which nothing else carries.
+#[test]
+fn a_persons_input_is_human_and_send_now_has_priority_now() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(sid, "first");
+    let first = writes(&core.input(&a));
+    assert_eq!(first[0]["origin"], json!({"kind": "human"}));
+    assert!(first[0].get("priority").is_none(), "{first:?}");
+    let b = user_input(sid, "now");
+    let now = writes(
+        &core
+            .inject_now_with_images(&b, vec![])
+            .expect("a turn runs"),
+    );
+    assert_eq!(now[0]["origin"], json!({"kind": "human"}));
+    assert_eq!(now[0]["priority"], "now");
+    assert_eq!(now[0]["message"]["content"], "now");
+    // The mark is the hub's word alone: `peer` and `schedule_id` set no origin of their own, and
+    // an input without them, which the hub did not mark, has none (the runtime's `peer` is
+    // consumed into the text before this, so no input of another session shows it).
+    let mut unmarked = user_input(sid, "from a session");
+    unmarked.human = false;
+    let from_peer = writes(
+        &core
+            .inject_with_images(&unmarked, vec![])
+            .expect("a turn runs"),
+    );
+    assert!(from_peer[0].get("origin").is_none(), "{from_peer:?}");
+    // Send now only goes into a turn that runs.
+    let mut idle = Core::new(sid, false);
+    assert!(idle.inject_now_with_images(&b, vec![]).is_none());
+}
+
+/// SPEC 0.219: a message the CLI holds in its queue is taken back with `cancel_async_message`.
+/// The CLI's `cancelled` for it is no drop of a turn's end and its answer `cancelled: true` is
+/// told once; the message is never accepted, and the turn goes on as if it had not been written.
+#[test]
+fn a_withdrawn_message_is_never_accepted_or_dropped() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b) = (user_input(sid, "first"), user_input(sid, "second"));
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ub, "queued"));
+    let rid = cancel_request(&mut core, b.event_id, &ub);
+    assert!(
+        core.withdraw(b.event_id).is_none(),
+        "the CLI is asked already"
+    );
+    let mut out = play(&mut core, &lifecycle(&ub, "cancelled"));
+    out.extend(play(&mut core, &cancel_answer(&rid, true)));
+    assert_eq!(core.withdraw_answer(&rid), Some(true));
+    assert_eq!(core.withdraw_answer(&rid), None, "told once");
+    assert!(core.withdraw(b.event_id).is_none(), "it is gone");
+    out.extend(play(
+        &mut core,
+        &lines_of(&[tool_result("toolu_1"), reply("DONE"), result("success")]),
+    ));
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        ["message \"DONE\" to A", "status to A", "turn_ended []"]
+    );
+}
+
+/// A message the CLI took (`started`, or echoed) is not taken back: no request is written.
+/// One it did not cancel (`cancelled: false`) stays, and its echo is its acceptance.
+#[test]
+fn a_message_the_cli_took_is_not_withdrawn() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b, d) = (
+        user_input(sid, "first"),
+        user_input(sid, "second"),
+        user_input(sid, "third"),
+    );
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    assert!(core.withdraw(a.event_id).is_none(), "echoed");
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    let ud = line_uuid(&core.inject_with_images(&d, vec![]).expect("a turn runs"));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "queued"),
+            lifecycle(&ud, "queued"),
+            lifecycle(&ub, "started"),
+        ]),
+    );
+    assert!(core.withdraw(b.event_id).is_none(), "started");
+    // The CLI took D between the request and its answer: `cancelled: false`, D stays written.
+    let rid = cancel_request(&mut core, d.event_id, &ud);
+    let mut out = play(&mut core, &cancel_answer(&rid, false));
+    assert_eq!(core.withdraw_answer(&rid), Some(false));
+    out.extend(play(
+        &mut core,
+        &lines_of(&[echo(&ub, "second"), echo(&ud, "third")]),
+    ));
+    let names = [(a.event_id, "A"), (b.event_id, "B"), (d.event_id, "D")];
+    assert_eq!(trace(&out, &names), ["accepted B", "accepted D"]);
+}
+
+/// A message withdrawn after the `result` carried it: the CLI's own `cancelled` for it is no
+/// drop, and its answer ends the turn it kept running, with nothing dropped and no `result` to
+/// come (the supervisor has it out of its books and goes on with its queue).
+#[test]
+fn withdrawing_a_carried_message_ends_the_turn_it_kept_running() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b, d) = (
+        user_input(sid, "first"),
+        user_input(sid, "second"),
+        user_input(sid, "third"),
+    );
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 15"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    let ud = line_uuid(&core.inject_with_images(&d, vec![]).expect("a turn runs"));
+    core.interrupt().expect("a turn runs");
+    let mut out = play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "queued"),
+            lifecycle(&ud, "queued"),
+            tool_result("toolu_1"),
+            result("error_during_execution"),
+            lifecycle(&ua, "cancelled"),
+        ]),
+    );
+    assert!(core.can_inject(), "the carried inputs' turn runs");
+    let rid = cancel_request(&mut core, b.event_id, &ub);
+    out.extend(play(&mut core, &lifecycle(&ub, "cancelled")));
+    assert!(core.can_inject(), "D is still carried");
+    out.extend(play(&mut core, &cancel_answer(&rid, true)));
+    assert_eq!(core.withdraw_answer(&rid), Some(true));
+    assert!(core.can_inject(), "D is still carried");
+    let rid = cancel_request(&mut core, d.event_id, &ud);
+    out.extend(play(&mut core, &lifecycle(&ud, "cancelled")));
+    out.extend(play(&mut core, &cancel_answer(&rid, true)));
+    assert!(!core.can_inject(), "nothing runs");
+    assert!(core.interrupt().is_none(), "nothing to interrupt");
+    let names = [(a.event_id, "A"), (b.event_id, "B"), (d.event_id, "D")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "status to A",
+            "turn_ended [B, D]",
+            "turn_ended [D]",
+            "turn_ended []"
+        ]
+    );
+}
+
+/// A message that begins the turn, withdrawn before the CLI starts it: no turn runs after, and
+/// a `result` that ends the CLI's own turn first does not drop it.
+#[test]
+fn withdrawing_the_message_that_began_the_turn_ends_it() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(sid, "first");
+    let ua = line_uuid(&core.input(&a));
+    play(&mut core, &lifecycle(&ua, "queued"));
+    assert!(core.can_inject());
+    let rid = cancel_request(&mut core, a.event_id, &ua);
+    let mut out = play(&mut core, &lifecycle(&ua, "cancelled"));
+    out.extend(play(&mut core, &cancel_answer(&rid, true)));
+    assert_eq!(core.withdraw_answer(&rid), Some(true));
+    assert!(!core.can_inject(), "no turn runs");
+    assert_eq!(trace(&out, &[(a.event_id, "A")]), ["turn_ended []"]);
+}
+
+/// The CLI's `cancelled` for a message being withdrawn, then the `result` of the turn it was
+/// written in before the answer: nothing is dropped.
+#[test]
+fn a_result_between_the_cancel_and_its_answer_drops_nothing() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b) = (user_input(sid, "first"), user_input(sid, "second"));
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ub, "queued"));
+    let rid = cancel_request(&mut core, b.event_id, &ub);
+    let mut out = play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "cancelled"),
+            tool_result("toolu_1"),
+            reply("DONE"),
+            result("success"),
+        ]),
+    );
+    out.extend(play(&mut core, &cancel_answer(&rid, true)));
+    assert_eq!(core.withdraw_answer(&rid), Some(true));
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        ["message \"DONE\" to A", "status to A", "turn_ended []"]
     );
 }
 
@@ -8129,6 +9652,804 @@ fn a_cron_job_is_a_row_until_it_is_deleted() {
     assert_eq!(lists.len(), 1);
     let ids: Vec<_> = lists[0].iter().map(|r| r.task_id.as_str()).collect();
     assert_eq!(ids, ["5e6f7a8b"]);
+}
+
+/// The whole lists of the `tasks` events in `actions`.
+fn task_lists(actions: Vec<Action>) -> Vec<Vec<AgentTask>> {
+    emitted(actions)
+        .into_iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Event(Event {
+                kind: EventKind::Tasks { items },
+                ..
+            }) => Some(items),
+            _ => None,
+        })
+        .collect()
+}
+
+fn task(subject: &str, status: TaskStatus, active_form: Option<&str>) -> AgentTask {
+    AgentTask {
+        subject: subject.into(),
+        status,
+        active_form: active_form.map(str::to_owned),
+    }
+}
+
+/// The main agent's `TodoWrite` replaces the task list, as the CLI keeps it (every task done:
+/// none). Nothing is sent when the list does not change, for a failed call, a subagent's call
+/// and a task with a status this build does not know (left out).
+#[test]
+fn a_todo_write_replaces_the_task_list() {
+    use TaskStatus::*;
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let write = |core: &mut Core, id: &str, todos: Value, error: bool, parent: Option<&str>| {
+        core.on_line(&tool_call(
+            id,
+            "TodoWrite",
+            json!({ "todos": todos }),
+            parent,
+        ));
+        task_lists(core.on_line(&tool_done(id, error, json!({}), parent)))
+    };
+    let todos = json!([
+        {"content": "Read the test", "status": "completed", "activeForm": "Reading the test"},
+        {"content": "Fix the parser", "status": "in_progress", "activeForm": "Fixing the parser"},
+        {"content": "Run the suite", "status": "pending", "activeForm": "Running the suite"},
+        {"content": "Odd", "status": "blocked", "activeForm": "Oddly"},
+    ]);
+    let want = vec![
+        task("Read the test", Completed, Some("Reading the test")),
+        task("Fix the parser", InProgress, Some("Fixing the parser")),
+        task("Run the suite", Pending, Some("Running the suite")),
+    ];
+    assert_eq!(
+        write(&mut core, "toolu_t1", todos.clone(), false, None),
+        [want]
+    );
+    assert!(write(&mut core, "toolu_t2", todos.clone(), false, None).is_empty());
+    assert!(
+        write(&mut core, "toolu_t3", json!([]), true, None).is_empty(),
+        "failed"
+    );
+    assert!(
+        write(&mut core, "toolu_t4", json!([]), false, Some("toolu_agent")).is_empty(),
+        "a subagent's"
+    );
+    let done = json!([{"content": "Read the test", "status": "completed", "activeForm": "x"}]);
+    assert_eq!(
+        write(&mut core, "toolu_t5", done.clone(), false, None),
+        [vec![]],
+        "every task done"
+    );
+    assert!(write(&mut core, "toolu_t6", done, false, None).is_empty());
+}
+
+/// A call of the task tool `tool` of the main agent and its result block with `text`, `data`
+/// the record's `tool_use_result`: the lists of the `tasks` events it gives.
+fn task_call(
+    core: &mut Core,
+    tool: &str,
+    input: Value,
+    error: bool,
+    text: &str,
+    data: Value,
+) -> Vec<Vec<AgentTask>> {
+    let id = format!("toolu_{}", Uuid::new_v4());
+    core.on_line(&tool_call(&id, tool, input, None));
+    task_lists(core.on_line(&tool_done_text(&id, error, text, data)))
+}
+
+/// The `user` line with the result of call `id`: the block's own `text`, `data` its
+/// `tool_use_result`.
+fn tool_done_text(id: &str, error: bool, text: &str, data: Value) -> String {
+    json!({"type": "user", "message": {"role": "user", "content": [{"tool_use_id": id,
+        "type": "tool_result", "is_error": error, "content": text}]},
+        "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4(),
+        "tool_use_result": data})
+    .to_string()
+}
+
+fn create_input(subject: &str) -> Value {
+    json!({"subject": subject, "description": "d", "activeForm": format!("Doing {subject}")})
+}
+
+fn task_create(core: &mut Core, id: &str, subject: &str) -> Vec<Vec<AgentTask>> {
+    let text = format!("Task #{id} created successfully: {subject}");
+    let data = json!({"task": {"id": id}});
+    task_call(
+        core,
+        "TaskCreate",
+        create_input(subject),
+        false,
+        &text,
+        data,
+    )
+}
+
+/// A `TaskUpdate` whose result block says `Updated task #…` (`updated`) or the error the CLI
+/// writes for a task it did not find; the record's `tool_use_result` says `success: true` either
+/// way, as one that belongs to another block of the record would.
+fn task_update(core: &mut Core, input: Value, updated: bool) -> Vec<Vec<AgentTask>> {
+    let id = input["taskId"].as_str().unwrap().to_owned();
+    let text = if updated {
+        format!("Updated task #{id} status")
+    } else {
+        format!("Task #{id} not found")
+    };
+    task_call(
+        core,
+        "TaskUpdate",
+        input,
+        false,
+        &text,
+        json!({"success": true}),
+    )
+}
+
+/// `TaskCreate` adds a task under the id its result block names, `TaskUpdate` changes it or, with
+/// `deleted`, removes it, `TaskList` replaces the list and a known task keeps its `activeForm`.
+/// A `TaskUpdate` whose block says it found no task, an update of an unknown id and a failed
+/// call change nothing.
+#[test]
+fn the_task_tools_keep_the_task_list() {
+    use TaskStatus::*;
+    let mut core = Core::new(Uuid::now_v7(), false);
+    assert_eq!(
+        task_create(&mut core, "1", "Fix"),
+        [vec![task("Fix", Pending, Some("Doing Fix"))]]
+    );
+    assert_eq!(task_create(&mut core, "2", "Test").len(), 1);
+    let failed = task_call(
+        &mut core,
+        "TaskCreate",
+        json!({"subject": "Lost"}),
+        true,
+        "Task #9 created successfully: Lost",
+        json!({"task": {"id": "9"}}),
+    );
+    assert!(failed.is_empty(), "failed");
+    let started = json!({"taskId": "1", "status": "in_progress"});
+    assert_eq!(
+        task_update(&mut core, started.clone(), true),
+        [vec![
+            task("Fix", InProgress, Some("Doing Fix")),
+            task("Test", Pending, Some("Doing Test")),
+        ]]
+    );
+    let refused = json!({"taskId": "2", "status": "completed"});
+    assert!(
+        task_update(&mut core, refused, false).is_empty(),
+        "the block says it found no task"
+    );
+    let unknown = json!({"taskId": "7", "status": "completed"});
+    assert!(
+        task_update(&mut core, unknown, true).is_empty(),
+        "unknown id"
+    );
+    assert!(
+        task_update(&mut core, started, true).is_empty(),
+        "unchanged"
+    );
+    let done = json!({"taskId": "1", "status": "completed", "subject": "Fix it",
+        "activeForm": "Fixing it"});
+    let lists = task_update(&mut core, done, true);
+    assert_eq!(lists[0][0], task("Fix it", Completed, Some("Fixing it")));
+    // The list the agent asks for replaces ours; a task it knew keeps its active form.
+    let listed = json!({"tasks": [
+        {"id": "1", "subject": "Fix it", "status": "completed"},
+        {"id": "3", "subject": "Ship", "status": "pending"},
+        {"id": "4", "subject": "Odd", "status": "blocked"},
+    ]});
+    let list =
+        |core: &mut Core| task_call(core, "TaskList", json!({}), false, "tasks", listed.clone());
+    assert_eq!(
+        list(&mut core),
+        [vec![
+            task("Fix it", Completed, Some("Fixing it")),
+            task("Ship", Pending, None),
+        ]]
+    );
+    assert!(list(&mut core).is_empty());
+    let deleted = json!({"taskId": "3", "status": "deleted"});
+    assert_eq!(
+        task_update(&mut core, deleted, true),
+        [vec![task("Fix it", Completed, Some("Fixing it"))]]
+    );
+}
+
+/// Parallel `TaskCreate` calls come back in one `user` record, the `tool_use_result` of which
+/// is of one of them (or none): each task takes its id from its own block's text. Without the
+/// text the result's `task.id` is the id.
+#[test]
+fn parallel_task_creates_in_one_record_lose_nothing() {
+    use TaskStatus::*;
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let calls: Vec<Value> = ["A", "B", "C"]
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            json!({"type": "tool_use", "id": format!("toolu_p{i}"), "name": "TaskCreate",
+                "input": create_input(s)})
+        })
+        .collect();
+    core.on_line(
+        &json!({"type": "assistant", "message": {"model": "claude-haiku-5-5", "role": "assistant",
+            "content": calls}, "parent_tool_use_id": null, "session_id": CLI_SESSION,
+            "uuid": Uuid::new_v4()})
+        .to_string(),
+    );
+    let results: Vec<Value> = ["A", "B", "C"]
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            json!({"tool_use_id": format!("toolu_p{i}"), "type": "tool_result",
+                "content": format!("Task #{} created successfully: {s}", i + 1)})
+        })
+        .collect();
+    let record = json!({"type": "user", "message": {"role": "user", "content": results},
+        "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4(),
+        "tool_use_result": {"task": {"id": "1", "subject": "A"}}});
+    let lists = task_lists(core.on_line(&record.to_string()));
+    let Some(last) = lists.last() else {
+        panic!("no list")
+    };
+    assert_eq!(
+        last,
+        &vec![
+            task("A", Pending, Some("Doing A")),
+            task("B", Pending, Some("Doing B")),
+            task("C", Pending, Some("Doing C")),
+        ]
+    );
+    // The ids are the texts': an update of the third finds it.
+    let lists = task_update(
+        &mut core,
+        json!({"taskId": "3", "status": "completed"}),
+        true,
+    );
+    assert_eq!(lists[0][2].status, Completed);
+    // Text of no known form: the result's id.
+    let lists = task_call(
+        &mut core,
+        "TaskCreate",
+        create_input("D"),
+        false,
+        "ok",
+        json!({"task": {"id": "4"}}),
+    );
+    assert_eq!(lists[0][3], task("D", Pending, Some("Doing D")));
+}
+
+/// A call the CLI corrects before it runs (SPEC §8.1): `TaskCreate` with `content` and the `task`
+/// wrapper, `active_form`, no `subject`: the task is the one its result text names, with the
+/// call's `active_form`; `TaskUpdate` with `id` for `taskId`: the task of the id the text names.
+#[test]
+fn a_call_the_cli_corrected_is_read_from_its_result_text() {
+    use TaskStatus::*;
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let lists = task_call(
+        &mut core,
+        "TaskCreate",
+        json!({"task": {"content": "Wrapped one", "active_form": "Wrapping"}}),
+        false,
+        "Task #7 created successfully: Wrapped one",
+        json!({}),
+    );
+    assert_eq!(
+        lists,
+        [vec![task("Wrapped one", Pending, Some("Wrapping"))]]
+    );
+    let lists = task_call(
+        &mut core,
+        "TaskUpdate",
+        json!({"id": "7", "status": "in_progress"}),
+        false,
+        "Updated task #7 status",
+        json!({"success": true}),
+    );
+    assert_eq!(
+        lists,
+        [vec![task("Wrapped one", InProgress, Some("Wrapping"))]]
+    );
+    // A `task` wrapper next to a top-level `subject` is not unwrapped, as in the CLI.
+    let lists = task_call(
+        &mut core,
+        "TaskCreate",
+        json!({"subject": "Top", "task": {"active_form": "Wrapped"}}),
+        false,
+        "ok",
+        json!({"task": {"id": "9"}}),
+    );
+    assert_eq!(lists[0][1], task("Top", Pending, None));
+    // And a `TaskUpdate` takes no `title` (the CLI refuses such a call; nothing reaches us).
+    let lists = task_call(
+        &mut core,
+        "TaskUpdate",
+        json!({"taskId": "9", "title": "Renamed"}),
+        false,
+        "Updated task #9",
+        json!({"success": true}),
+    );
+    assert!(lists.is_empty());
+    // `title` for `subject` when the text names none.
+    let lists = task_call(
+        &mut core,
+        "TaskCreate",
+        json!({"title": "Titled", "activeForm": "Titling"}),
+        false,
+        "Task #8 created",
+        json!({"task": {"id": "8"}}),
+    );
+    assert_eq!(lists[0][2], task("Titled", Pending, Some("Titling")));
+}
+
+/// A record of two results, `TaskList`'s and `TaskGet`'s, carries the `tool_use_result` of one of
+/// them: `TaskList` changes nothing from it, and nor does a `TaskList` result with no `tasks`
+/// array (never an empty list); nor does a `TaskCreate` that names no id in its text take the
+/// `task.id` of such a record.
+#[test]
+fn a_task_list_result_of_a_record_of_several_changes_nothing() {
+    use TaskStatus::*;
+    let mut core = Core::new(Uuid::now_v7(), false);
+    task_create(&mut core, "1", "Keep");
+    let call =
+        |id: &str, tool: &str| json!({"type": "tool_use", "id": id, "name": tool, "input": {}});
+    core.on_line(
+        &json!({"type": "assistant", "message": {"model": "claude-haiku-5-5", "role": "assistant",
+            "content": [call("toolu_l", "TaskList"), call("toolu_g", "TaskGet")]},
+            "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+        .to_string(),
+    );
+    let results = json!([
+        {"tool_use_id": "toolu_l", "type": "tool_result", "content": "#1 [pending] Keep"},
+        {"tool_use_id": "toolu_g", "type": "tool_result", "content": "Task #1: Keep"}
+    ]);
+    // The record's `tool_use_result` is the `TaskGet`'s, or another call's with a `tasks` array.
+    for data in [json!({"task": {"id": "1"}}), json!({"tasks": []})] {
+        let record = json!({"type": "user", "message": {"role": "user", "content": results},
+            "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4(),
+            "tool_use_result": data});
+        assert!(task_lists(core.on_line(&record.to_string())).is_empty());
+        core.on_line(
+            &json!({"type": "assistant", "message": {"model": "claude-haiku-5-5",
+                "role": "assistant", "content": [call("toolu_l", "TaskList"),
+                call("toolu_g", "TaskGet")]}, "parent_tool_use_id": null,
+                "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+            .to_string(),
+        );
+    }
+    // Two `TaskCreate` results whose texts name no id: the record's `task.id` is of one of them,
+    // so neither is added.
+    let create = |id: &str| json!({"type": "tool_use", "id": id, "name": "TaskCreate", "input": create_input("New")});
+    core.on_line(
+        &json!({"type": "assistant", "message": {"model": "claude-haiku-5-5", "role": "assistant",
+            "content": [create("toolu_c1"), create("toolu_c2")]},
+            "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+        .to_string(),
+    );
+    let record = json!({"type": "user", "message": {"role": "user", "content": [
+        {"tool_use_id": "toolu_c1", "type": "tool_result", "content": "ok"},
+        {"tool_use_id": "toolu_c2", "type": "tool_result", "content": "ok"}]},
+        "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4(),
+        "tool_use_result": {"task": {"id": "5"}}});
+    assert!(task_lists(core.on_line(&record.to_string())).is_empty());
+    // Alone, with no `tasks` array: nothing either.
+    assert!(task_call(
+        &mut core,
+        "TaskList",
+        json!({}),
+        false,
+        "No tasks found",
+        json!({})
+    )
+    .is_empty());
+    // Alone, with the array: the list.
+    let lists = task_call(
+        &mut core,
+        "TaskList",
+        json!({}),
+        false,
+        "#1 [completed] Keep",
+        json!({"tasks": [{"id": "1", "subject": "Keep", "status": "completed"}]}),
+    );
+    assert_eq!(lists, [vec![task("Keep", Completed, Some("Doing Keep"))]]);
+}
+
+/// The same in the replay of a transcript: a `TaskList` result sharing its record with another
+/// result does not replace the list, and a `TaskCreate` of such a record takes its id from the
+/// text.
+#[test]
+fn the_replay_of_a_task_list_result_of_a_record_of_several_changes_nothing() {
+    let line = |v: Value| v.to_string();
+    let transcript = [
+        line(json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "c1", "name": "TaskCreate", "input": create_input("Keep")}]}})),
+        line(json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "c1",
+             "content": "Task #1 created successfully: Keep"}]},
+            "toolUseResult": {"task": {"id": "1"}}})),
+        line(json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "l1", "name": "TaskList", "input": {}},
+            {"type": "tool_use", "id": "g1", "name": "TaskGet", "input": {}}]}})),
+        line(json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "l1", "content": "#1 [pending] Keep"},
+            {"type": "tool_result", "tool_use_id": "g1", "content": "Task #1: Keep"}]},
+            "toolUseResult": {"tasks": []}})),
+    ]
+    .join("\n");
+    let list = super::engine::resurrected_tasks(&transcript);
+    assert_eq!(list.len(), 1);
+}
+
+/// A subject and an `active_form` are cut at 512 bytes, the list at 200 tasks.
+#[test]
+fn the_task_list_is_cut_to_its_limits() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let long = "я".repeat(300); // 600 bytes
+    let todos: Vec<Value> = (0..250)
+        .map(|i| {
+            json!({"content": if i == 0 { long.clone() } else { format!("T{i}") },
+                "status": "pending", "activeForm": long})
+        })
+        .collect();
+    let lists = task_call(
+        &mut core,
+        "TodoWrite",
+        json!({"todos": todos}),
+        false,
+        "ok",
+        json!({}),
+    );
+    let [list] = &lists[..] else {
+        panic!("{lists:?}")
+    };
+    assert_eq!(list.len(), 200);
+    assert_eq!(list[0].subject.len(), 512);
+    assert_eq!(list[0].active_form.as_deref().map(str::len), Some(512));
+    // A created task over the limit is not added either.
+    assert!(task_create(&mut core, "9", "Over").is_empty());
+}
+
+/// A transcript of the main agent's tasks: three created (the last two by parallel calls whose
+/// results share a record), the first one completed, a subagent's create and an update that
+/// found no task not counted.
+fn tasks_transcript() -> String {
+    let call = |side: bool, calls: Vec<(&str, &str, Value)>| {
+        let blocks: Vec<Value> = calls
+            .into_iter()
+            .map(|(id, tool, input)| json!({"type": "tool_use", "id": id, "name": tool, "input": input}))
+            .collect();
+        json!({"type": "assistant", "isSidechain": side, "message": {"content": blocks}})
+            .to_string()
+    };
+    let result = |side: bool, results: Vec<(&str, &str)>, data: Value| {
+        let blocks: Vec<Value> = results
+            .into_iter()
+            .map(|(id, text)| json!({"type": "tool_result", "tool_use_id": id, "content": text}))
+            .collect();
+        json!({"type": "user", "isSidechain": side, "message": {"content": blocks},
+            "toolUseResult": data})
+        .to_string()
+    };
+    [
+        call(false, vec![("toolu_r1", "TaskCreate", create_input("One"))]),
+        result(
+            false,
+            vec![("toolu_r1", "Task #1 created successfully: One")],
+            json!({"task": {"id": "1"}}),
+        ),
+        call(
+            false,
+            vec![
+                ("toolu_r2", "TaskCreate", create_input("Two")),
+                ("toolu_r3", "TaskCreate", create_input("Three")),
+            ],
+        ),
+        result(
+            false,
+            vec![
+                ("toolu_r2", "Task #2 created successfully: Two"),
+                ("toolu_r3", "Task #3 created successfully: Three"),
+            ],
+            json!({"task": {"id": "2"}}),
+        ),
+        call(true, vec![("toolu_s1", "TaskCreate", create_input("Sub"))]),
+        result(
+            true,
+            vec![("toolu_s1", "Task #4 created successfully: Sub")],
+            json!({"task": {"id": "4"}}),
+        ),
+        call(
+            false,
+            vec![(
+                "toolu_r4",
+                "TaskUpdate",
+                json!({"taskId": "1", "status": "completed"}),
+            )],
+        ),
+        result(
+            false,
+            vec![("toolu_r4", "Updated task #1 status")],
+            json!({"success": true}),
+        ),
+        call(
+            false,
+            vec![(
+                "toolu_r5",
+                "TaskUpdate",
+                json!({"taskId": "9", "status": "completed"}),
+            )],
+        ),
+        result(
+            false,
+            vec![("toolu_r5", "Task #9 not found")],
+            json!({"success": false}),
+        ),
+    ]
+    .join("\n")
+}
+
+/// A resumed process starts with the task list its transcript makes, as the CLI does: a live
+/// `TaskUpdate` then sends the whole list, the three tasks with their states. Seeding sends no
+/// event (the hub has the latest one).
+#[test]
+fn a_resumed_core_has_the_tasks_of_its_transcript() {
+    use TaskStatus::*;
+    let seeded = super::engine::resurrected_tasks(&tasks_transcript());
+    let mut core = Core::new(Uuid::now_v7(), false).with_resumed_tasks(seeded);
+    assert!(core.resumed_live().is_empty(), "no event for the seed");
+    let lists = task_update(
+        &mut core,
+        json!({"taskId": "2", "status": "in_progress"}),
+        true,
+    );
+    assert_eq!(
+        lists,
+        [vec![
+            task("One", Completed, Some("Doing One")),
+            task("Two", InProgress, Some("Doing Two")),
+            task("Three", Pending, Some("Doing Three")),
+        ]]
+    );
+}
+
+/// Sends one input to a started adapter (the scripted CLI plays its stream after the first
+/// one) and returns the task lists the process sends.
+async fn task_lists_after_input(
+    a: &mut Box<dyn Adapter>,
+    rx: &mut mpsc::Receiver<AdapterEvent>,
+    session_id: Uuid,
+) -> Vec<Vec<AgentTask>> {
+    a.input(&SessionInput {
+        session_id,
+        event_id: Uuid::now_v7(),
+        text: "go".into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+        schedule_id: None,
+        human: false,
+    })
+    .await
+    .unwrap();
+    let mut lists = Vec::new();
+    let mut quiet = false;
+    while !quiet {
+        // Up to 5 s for the first list, then 200 ms of quiet for any more.
+        let wait = if lists.is_empty() { 5000 } else { 200 };
+        match tokio::time::timeout(Duration::from_millis(wait), rx.recv()).await {
+            Ok(Some(AdapterEvent::Event(Event {
+                kind: EventKind::Tasks { items },
+                ..
+            }))) => lists.push(items),
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => quiet = true,
+        }
+    }
+    lists
+}
+
+/// The same through the adapter: a `--resume` of a transcript starts its process with its tasks,
+/// which a `TaskUpdate` the process makes then completes into the whole list; a fork of one (a
+/// copy cut at the fork point) starts with none, as the CLI's, which keeps the list per session
+/// id: the task its process creates is the whole list.
+#[tokio::test]
+async fn a_resume_keeps_the_tasks_of_the_transcript_and_a_fork_starts_without() {
+    use TaskStatus::*;
+    let stream = [
+        tool_call(
+            "toolu_l1",
+            "TaskUpdate",
+            json!({"taskId": "3", "status": "completed"}),
+            None,
+        ),
+        tool_done_text(
+            "toolu_l1",
+            false,
+            "Updated task #3 status",
+            json!({"success": true}),
+        ),
+    ]
+    .join("\n");
+    let want = vec![
+        task("One", Completed, Some("Doing One")),
+        task("Two", Pending, Some("Doing Two")),
+        task("Three", Completed, Some("Doing Three")),
+    ];
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let transcript = tasks_transcript();
+    // Resume.
+    let claude = ScriptedClaude::new(&stream);
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let runtime = Uuid::new_v4();
+    let mut s = spec(Uuid::now_v7(), work.path(), runtime);
+    s.has_history = true;
+    let t = super::paths::transcript_path(config.path(), &s.workdir, &runtime);
+    std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+    std::fs::write(&t, &transcript).unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut a = factory.create(&s, tx);
+    a.resume(&s).await.unwrap();
+    let lists = task_lists_after_input(&mut a, &mut rx, s.session_id).await;
+    assert_eq!(lists, std::slice::from_ref(&want), "resume");
+    a.kill().await.unwrap();
+    // Fork: the transcript up to the point, then a task made after it.
+    let (turns, ids) = two_turns();
+    let (source, copy) = (Uuid::new_v4(), Uuid::new_v4());
+    let from = super::paths::transcript_path(config.path(), work.path(), &source);
+    std::fs::create_dir_all(from.parent().unwrap()).unwrap();
+    let after = transcript
+        .replace("Three", "Later")
+        .replace("toolu_r", "toolu_x");
+    std::fs::write(&from, format!("{transcript}\n{turns}\n{after}")).unwrap();
+    let fork_stream = [
+        tool_call("toolu_f1", "TaskCreate", create_input("Fresh"), None),
+        tool_done_text(
+            "toolu_f1",
+            false,
+            "Task #4 created successfully: Fresh",
+            json!({"task": {"id": "4"}}),
+        ),
+    ]
+    .join("\n");
+    let claude = ScriptedClaude::new(&fork_stream);
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let mut s = spec(Uuid::now_v7(), work.path(), copy);
+    s.fork = Some(hqc_proto::frame::ForkFrom {
+        runtime_session_id: source.to_string(),
+        at_event_ids: vec![super::engine::record_event_id(&ids[1], 1)],
+    });
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let lists = task_lists_after_input(&mut a, &mut rx, s.session_id).await;
+    assert_eq!(
+        lists,
+        [vec![task("Fresh", Pending, Some("Doing Fresh"))]],
+        "fork"
+    );
+    a.kill().await.unwrap();
+}
+
+/// A copy made by a fork has the source's records up to the cut in its own transcript, with their
+/// uuids, and the CLI's list of the copy only the tasks made after the fork (numbered from #1
+/// again). On the copy's second start (its transcript exists, `fork` is still sent) the replay
+/// takes only what follows the cut.
+#[tokio::test]
+async fn a_copys_resume_replays_only_what_follows_its_cut() {
+    use TaskStatus::*;
+    let (turns, ids) = two_turns();
+    let own = [
+        json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "toolu_own", "name": "TaskCreate",
+             "input": create_input("Fresh")}]}}),
+        json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "toolu_own",
+             "content": "Task #1 created successfully: Fresh"}]}}),
+    ]
+    .map(|v| v.to_string())
+    .join("\n");
+    // The source's three tasks, the turns up to the cut, then the copy's own task.
+    let text = format!("{}\n{turns}\n{own}\n", tasks_transcript());
+    let at = vec![super::engine::record_event_id(&ids[1], 1)];
+    let fork = hqc_proto::frame::ForkFrom {
+        runtime_session_id: Uuid::new_v4().to_string(),
+        at_event_ids: at,
+    };
+    // What a live update of task #1 (the copy's own) sends on top of a replay.
+    let shown = |tasks| {
+        let mut core = Core::new(Uuid::now_v7(), false).with_resumed_tasks(tasks);
+        task_update(
+            &mut core,
+            json!({"taskId": "1", "status": "completed"}),
+            true,
+        )
+    };
+    let own_only = vec![vec![task("Fresh", Completed, Some("Doing Fresh"))]];
+    assert_eq!(shown(super::resumed_tasks(&text, Some(&fork))), own_only);
+    // A cut that is not in the transcript: all of it, as a plain resume.
+    let lost = hqc_proto::frame::ForkFrom {
+        runtime_session_id: fork.runtime_session_id.clone(),
+        at_event_ids: vec![Uuid::new_v4()],
+    };
+    let all = shown(super::resumed_tasks(&text, None));
+    assert_ne!(all, own_only);
+    assert_eq!(shown(super::resumed_tasks(&text, Some(&lost))), all);
+}
+
+/// The same through the adapter, which is what passes the fork on: a copy's second start (its
+/// transcript exists, holding the source's records up to the cut and then the copy's own task;
+/// `fork` is still in `StartSpec`) starts its process with the copy's own task only.
+#[tokio::test]
+async fn a_copys_second_start_resumes_with_its_own_tasks_only() {
+    use TaskStatus::*;
+    let (turns, ids) = two_turns();
+    let own = [
+        json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "toolu_own", "name": "TaskCreate",
+             "input": create_input("Fresh")}]}}),
+        json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "toolu_own",
+             "content": "Task #1 created successfully: Fresh"}]}}),
+    ]
+    .map(|v| v.to_string())
+    .join("\n");
+    let text = format!("{}\n{turns}\n{own}\n", tasks_transcript());
+    // The process then completes task #1, the copy's own, which sends the whole list.
+    let stream = [
+        tool_call(
+            "toolu_u1",
+            "TaskUpdate",
+            json!({"taskId": "1", "status": "completed"}),
+            None,
+        ),
+        tool_done_text(
+            "toolu_u1",
+            false,
+            "Updated task #1 status",
+            json!({"success": true}),
+        ),
+    ]
+    .join("\n");
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new(&stream);
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let copy = Uuid::new_v4();
+    let mut s = spec(Uuid::now_v7(), work.path(), copy);
+    s.has_history = true;
+    s.fork = Some(hqc_proto::frame::ForkFrom {
+        runtime_session_id: Uuid::new_v4().to_string(),
+        at_event_ids: vec![super::engine::record_event_id(&ids[1], 1)],
+    });
+    let t = super::paths::transcript_path(config.path(), &s.workdir, &copy);
+    std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+    std::fs::write(&t, &text).unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut a = factory.create(&s, tx);
+    a.resume(&s).await.unwrap();
+    let lists = task_lists_after_input(&mut a, &mut rx, s.session_id).await;
+    assert_eq!(lists, [vec![task("Fresh", Completed, Some("Doing Fresh"))]]);
+    a.kill().await.unwrap();
+}
+
+/// `/clear` starts a new conversation: its task list is empty, said once.
+#[test]
+fn a_clear_empties_the_task_list() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let todos = json!({"todos": [{"content": "A", "status": "pending", "activeForm": "Aing"}]});
+    core.on_line(&tool_call("toolu_c", "TodoWrite", todos, None));
+    assert_eq!(
+        task_lists(core.on_line(&tool_done("toolu_c", false, json!({}), None))).len(),
+        1
+    );
+    let reset =
+        json!({"type": "conversation_reset", "trigger": "clear", "session_id": "s"}).to_string();
+    assert_eq!(task_lists(core.on_line(&reset)), [vec![]]);
+    assert!(task_lists(core.on_line(&reset)).is_empty());
 }
 
 /// The CLI fires a cron job with a `command_lifecycle` `started` with `wakeup_source:
@@ -9398,6 +11719,7 @@ async fn after_clear_the_process_writes_the_new_transcript() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     };
     a.input(&input("x")).await.unwrap();
     let mut titles = Vec::new();
@@ -9482,6 +11804,7 @@ async fn a_cleared_folder_is_marked_until_init() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     })
     .await
     .unwrap();
@@ -9687,6 +12010,7 @@ async fn a_title_written_during_a_turn_is_reported_before_its_end() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -9807,6 +12131,7 @@ async fn a_title_read_before_the_switch_does_not_stop_the_new_ones() {
         title: std::sync::Mutex::new(None),
         runtime: std::sync::Mutex::new(old),
         own: options(dir.path()).own_records,
+        goals: tokio::sync::Mutex::new(super::rate::GoalTail::start(None).await),
     };
     io.report_title(None).await;
     assert!(matches!(events.try_recv(), Ok(AdapterEvent::Title(t)) if t == "Before"));
@@ -10137,4 +12462,411 @@ fn grant_rules_past_the_cap_say_how_many_more() {
     assert_eq!(shown.len(), 10);
     assert_eq!(shown[..9], twelve[..9]);
     assert_eq!(shown[9], "… 3 more");
+}
+
+/// SPEC 0.231: Stop's `interrupt` is plain: `cancel_queued` would also dequeue the CLI's own
+/// lines that carry no `uuid` (task notifications, cron, `/loop`), which hqc cannot write back.
+#[test]
+fn an_interrupt_does_not_cancel_the_queue_wholesale() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let (req, _, _) = core.interrupt().expect("a turn runs");
+    assert_eq!(
+        writes(&[req])[0]["request"],
+        json!({"subtype": "interrupt"})
+    );
+}
+
+/// SPEC 0.231: a Stop cancels, one by one, the lines hqc wrote that the CLI has not taken: the
+/// queued one and the one it has not answered yet, not the one it started, one being withdrawn
+/// or a line it already cancelled. The CLI's `cancelled` for them comes out as `dropped` of the
+/// turn's end, unlike a withdrawn input's.
+#[test]
+fn a_stop_cancels_the_lines_the_cli_has_not_taken() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b, c, d) = (
+        user_input(sid, "first"),
+        user_input(sid, "second"),
+        user_input(sid, "third"),
+        user_input(sid, "fourth"),
+    );
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ub, "queued"));
+    let uc = line_uuid(&core.inject_with_images(&c, vec![]).expect("a turn runs"));
+    // `d` is queued and being withdrawn: a Stop leaves it alone.
+    let ud = line_uuid(&core.inject_with_images(&d, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ud, "queued"));
+    let _ = cancel_request(&mut core, d.event_id, &ud);
+    let asked: Vec<String> = writes(&core.cancel_unstarted())
+        .iter()
+        .map(|v| {
+            assert_eq!(v["type"], "control_request");
+            assert!(v["request_id"].as_str().unwrap().starts_with("hqc-cancel-"));
+            assert_eq!(v["request"]["subtype"], "cancel_async_message");
+            v["request"]["message_uuid"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(asked, [ub.clone(), uc.clone()]);
+    // What the CLI answers with `cancelled` ends up in `dropped`.
+    let mut out = play(&mut core, &lifecycle(&ub, "cancelled"));
+    out.extend(play(&mut core, &lifecycle(&uc, "cancelled")));
+    out.extend(play(&mut core, &lifecycle(&ud, "cancelled")));
+    out.extend(play(
+        &mut core,
+        &lines_of(&[tool_result("toolu_1"), reply("DONE"), result("success")]),
+    ));
+    let names = [
+        (a.event_id, "A"),
+        (b.event_id, "B"),
+        (c.event_id, "C"),
+        (d.event_id, "D"),
+    ];
+    let t = trace(&out, &names);
+    assert_eq!(
+        t.iter()
+            .filter(|l| l.starts_with("turn_ended"))
+            .collect::<Vec<_>>(),
+        ["turn_ended [] dropped [B, C]"],
+        "{t:?}"
+    );
+    // Nothing runs: nothing to cancel.
+    let mut idle = Core::new(sid, false);
+    assert!(idle.cancel_unstarted().is_empty());
+}
+
+/// SPEC 0.231: a Stop's `cancel_async_message` can reach the turn's own head line before the CLI
+/// started it (cold start): the CLI answers `cancelled` and then no `result` comes for it. That
+/// line comes back as dropped, so the supervisor writes it quiet; in the turn the runtime
+/// started by itself the head line is not what keeps the turn open and stays as it is.
+#[test]
+fn a_head_line_the_cli_cancels_before_it_started_comes_back_dropped() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(sid, "first");
+    let ua = line_uuid(&core.input(&a));
+    let asked = writes(&core.cancel_unstarted());
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0]["request"]["message_uuid"], json!(ua));
+    let out = play(&mut core, &lifecycle(&ua, "cancelled"));
+    let t = trace(&out, &[(a.event_id, "A")]);
+    assert_eq!(t, ["turn_ended [] dropped [A]"], "{t:?}");
+    assert!(!core.turn_open());
+
+    // In a turn the runtime started by itself the head line is not what keeps the turn open:
+    // its `cancelled` ends nothing, and the turn's own `result` brings it back as dropped.
+    let mut core = Core::new(sid, false);
+    play(&mut core, &sonnet_init_line());
+    assert!(core.runs_own_turn());
+    let ua = line_uuid(&core.input(&a));
+    assert_eq!(writes(&core.cancel_unstarted()).len(), 1);
+    let out = play(&mut core, &lifecycle(&ua, "cancelled"));
+    let t = trace(&out, &[(a.event_id, "A")]);
+    assert!(!t.iter().any(|l| l.starts_with("turn_ended")), "{t:?}");
+    assert!(core.turn_open());
+    let out = play(&mut core, &result("success"));
+    let t = trace(&out, &[(a.event_id, "A")]);
+    assert!(t.iter().any(|l| l == "turn_ended [] dropped [A]"), "{t:?}");
+}
+
+/// SPEC 0.231: a take-back of a line the CLI already cancelled (a Stop's) is answered at once,
+/// without asking the CLI again, and the turn's end leaves it out of `dropped`; after the
+/// turn's end it is no longer here to withdraw.
+#[test]
+fn a_line_a_stop_cancelled_is_withdrawn_at_once() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b) = (user_input(sid, "first"), user_input(sid, "second"));
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ub, "queued"));
+    assert_eq!(writes(&core.cancel_unstarted()).len(), 1);
+    play(&mut core, &lifecycle(&ub, "cancelled"));
+    let (actions, request_id) = core.withdraw(b.event_id).expect("it is still here");
+    assert!(
+        actions.is_empty(),
+        "nothing is asked of the CLI: {actions:?}"
+    );
+    assert_eq!(core.withdraw_answer(&request_id), Some(true));
+    let out = play(
+        &mut core,
+        &lines_of(&[tool_result("toolu_1"), reply("DONE"), result("success")]),
+    );
+    let t = trace(&out, &[(a.event_id, "A"), (b.event_id, "B")]);
+    assert_eq!(
+        t.iter()
+            .filter(|l| l.starts_with("turn_ended"))
+            .collect::<Vec<_>>(),
+        ["turn_ended []"],
+        "{t:?}"
+    );
+    // The other order: the turn ended first, B came back dropped, there is nothing to withdraw.
+    let mut core = Core::new(sid, false);
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ub, "queued"));
+    core.cancel_unstarted();
+    play(&mut core, &lifecycle(&ub, "cancelled"));
+    let out = play(&mut core, &lines_of(&[reply("DONE"), result("success")]));
+    let t = trace(&out, &[(a.event_id, "A"), (b.event_id, "B")]);
+    assert!(t.iter().any(|l| l == "turn_ended [] dropped [B]"), "{t:?}");
+    assert!(core.withdraw(b.event_id).is_none());
+}
+
+/// SPEC 0.231: a quiet line is the record of an earlier Stop, so a Stop never cancels it, also
+/// when it waits in the CLI's queue behind a turn.
+#[test]
+fn a_stop_never_cancels_a_quiet_line() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(sid, "first");
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    let q = user_input(sid, "stopped earlier");
+    let uq = line_uuid(&[core.input_quiet_with_images(&q, vec![])]);
+    play(&mut core, &lifecycle(&uq, "queued"));
+    let b = user_input(sid, "second");
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    play(&mut core, &lifecycle(&ub, "queued"));
+    let asked: Vec<String> = writes(&core.cancel_unstarted())
+        .iter()
+        .map(|v| v["request"]["message_uuid"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(asked, [ub]);
+}
+
+fn quiet_result(taken: &[&str]) -> String {
+    json!({"type": "result", "subtype": "success", "is_error": false, "duration_api_ms": 0,
+        "num_turns": 0, "stop_reason": null, "total_cost_usd": 0.153686,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "session_id": CLI_SESSION, "user_message_uuids": taken})
+    .to_string()
+}
+
+fn sonnet_init_line() -> String {
+    json!({"type": "system", "subtype": "init", "model": "claude-sonnet-5-5",
+        "permissionMode": "default", "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+    .to_string()
+}
+
+/// SPEC 0.231, the capture after Stop (2.1.312): a line written with `shouldQuery: false` gets
+/// `queued`, `started`, an `init`, its echo, a `result` with `num_turns: 0` and `completed`. The
+/// engine sends one event for it, naming the input, and nothing a turn would: no `status
+/// running` for that `init`, no accepted input at the echo, no `usage`, `status idle` or end of
+/// turn at the `result`; no turn of the CLI's own runs meanwhile.
+#[test]
+fn a_quiet_line_is_taken_by_its_result_and_makes_no_turn() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let input = user_input(sid, "Also remember: the code word is OTTER-42.");
+    let action = core.input_quiet_with_images(&input, vec![]);
+    let line = &writes(&[action])[0];
+    assert_eq!(line["shouldQuery"], false);
+    // "later": the CLI folds only "next" and above into a running turn, a turn it started by
+    // itself too (SPEC 0.231); a line without `priority` is "next".
+    assert_eq!(line["priority"], "later");
+    assert_eq!(line["origin"], json!({"kind": "human"}));
+    assert_eq!(line["message"]["content"], input.text);
+    let u = line["uuid"].as_str().unwrap().to_owned();
+    assert!(!core.turn_open());
+
+    let mut got = vec![];
+    for l in [
+        lifecycle(&u, "queued"),
+        lifecycle(&u, "started"),
+        sonnet_init_line(),
+    ] {
+        got.extend(emitted(core.on_line(&l)));
+        assert!(!core.turn_open() && !core.runs_own_turn(), "after {l}");
+    }
+    got.extend(emitted(core.on_line(&echo(&u, &input.text))));
+    got.extend(emitted(core.on_line(&quiet_result(&[&u]))));
+    got.extend(emitted(core.on_line(&lifecycle(&u, "completed"))));
+    assert!(!core.turn_open());
+    assert_eq!(
+        got.iter()
+            .filter(|e| !matches!(
+                e,
+                AdapterEvent::Commands(_) | AdapterEvent::PermissionMode(_)
+            ))
+            .collect::<Vec<_>>(),
+        [&AdapterEvent::QuietTaken {
+            event_ids: vec![input.event_id]
+        }],
+        "{got:?}"
+    );
+
+    // A quiet line of a message that is no person's has no `origin`.
+    let mut other = user_input(sid, "FYI");
+    other.human = false;
+    let action = core.input_quiet_with_images(&other, vec![]);
+    assert!(writes(&[action])[0].get("origin").is_none());
+}
+
+/// SPEC 0.231, the second capture: three quiet lines written back to back. The CLI takes the
+/// first alone, the second and third together (one `init`, one echo with the third's `uuid` and
+/// both texts, one `result` listing both): each input is named exactly once.
+#[test]
+fn quiet_lines_taken_together_are_each_named_once() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let inputs: Vec<SessionInput> = ["first", "second", "third"]
+        .into_iter()
+        .map(|t| user_input(sid, &format!("Remember the {t} code word.")))
+        .collect();
+    let u: Vec<String> = inputs
+        .iter()
+        .map(|i| line_uuid(&[core.input_quiet_with_images(i, vec![])]))
+        .collect();
+    let both = format!("{}\n{}", inputs[1].text, inputs[2].text);
+    let mut got = vec![];
+    for l in [
+        lifecycle(&u[0], "queued"),
+        lifecycle(&u[1], "queued"),
+        lifecycle(&u[2], "queued"),
+        lifecycle(&u[0], "started"),
+        sonnet_init_line(),
+        echo(&u[0], &inputs[0].text),
+        quiet_result(&[&u[0]]),
+        lifecycle(&u[0], "completed"),
+        // The second is echoed on its own before the `init` of the pair.
+        echo(&u[1], &inputs[1].text),
+        lifecycle(&u[1], "started"),
+        lifecycle(&u[2], "started"),
+        sonnet_init_line(),
+        echo(&u[2], &both),
+        quiet_result(&[&u[1], &u[2]]),
+        lifecycle(&u[1], "completed"),
+        lifecycle(&u[2], "completed"),
+    ] {
+        got.extend(emitted(core.on_line(&l)));
+        assert!(!core.turn_open(), "after {l}");
+    }
+    assert_eq!(
+        got.iter()
+            .filter(|e| !matches!(
+                e,
+                AdapterEvent::Commands(_) | AdapterEvent::PermissionMode(_)
+            ))
+            .collect::<Vec<_>>(),
+        [
+            &AdapterEvent::QuietTaken {
+                event_ids: vec![inputs[0].event_id]
+            },
+            &AdapterEvent::QuietTaken {
+                event_ids: vec![inputs[1].event_id, inputs[2].event_id]
+            },
+        ],
+        "{got:?}"
+    );
+}
+
+/// SPEC 0.231: a quiet line the CLI drops (`command_lifecycle` `cancelled`: it failed to process
+/// the line) is told once as `QuietCancelled`, naming the input; it is not taken, and a `result`
+/// listing none of it names nothing.
+#[test]
+fn a_quiet_line_the_cli_drops_is_told_cancelled() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let input = user_input(sid, "Remember OTTER-42.");
+    let q = line_uuid(&[core.input_quiet_with_images(&input, vec![])]);
+    let mut got = emitted(core.on_line(&lifecycle(&q, "queued")));
+    got.extend(emitted(core.on_line(&lifecycle(&q, "cancelled"))));
+    got.extend(emitted(core.on_line(&lifecycle(&q, "cancelled"))));
+    assert_eq!(
+        got.iter()
+            .filter(|e| !matches!(e, AdapterEvent::Commands(_)))
+            .collect::<Vec<_>>(),
+        [&AdapterEvent::QuietCancelled {
+            event_id: input.event_id
+        }],
+        "{got:?}"
+    );
+    let after = emitted(core.on_line(&quiet_result(&[])));
+    assert!(
+        !after
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::QuietTaken { .. })),
+        "{after:?}"
+    );
+}
+
+/// After quiet lines the next input is an ordinary turn: its `init` is `status running` of no
+/// one's, its echo accepts it and its `result` ends the turn, and a `result` that lists none of
+/// the quiet lines is that turn's.
+#[test]
+fn a_turn_after_a_quiet_line_is_an_ordinary_turn() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let quiet = user_input(sid, "Remember OTTER-42.");
+    let q = line_uuid(&[core.input_quiet_with_images(&quiet, vec![])]);
+    for l in [
+        lifecycle(&q, "started"),
+        sonnet_init_line(),
+        echo(&q, &quiet.text),
+        quiet_result(&[&q]),
+    ] {
+        core.on_line(&l);
+    }
+    let next = user_input(sid, "What code word did I give you?");
+    let u = line_uuid(&core.input(&next));
+    let out = emitted(play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&u, "started"),
+            sonnet_init_line(),
+            echo(&u, &next.text),
+            reply("OTTER-42"),
+            result("success"),
+        ]),
+    ));
+    let names = [(next.event_id, "N")];
+    assert_eq!(
+        trace(
+            &out.into_iter().map(Action::Emit).collect::<Vec<_>>(),
+            &names
+        ),
+        [
+            "accepted N",
+            "message \"OTTER-42\" to N",
+            "status to N",
+            "turn_ended []"
+        ]
+    );
 }

@@ -162,6 +162,95 @@ impl Attachment {
     }
 }
 
+/// How the CLI's `/goal` stands after a `goal_status` attachment (2.1.312): it sets the goal
+/// (`sentinel`, not `met`), checks it at each turn's end, and ends it by meeting it, judging it
+/// impossible (`failed`) or `/goal clear` (`sentinel`, `met`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalState {
+    Set,
+    /// A check that did not pass; the CLI goes on.
+    Unmet,
+    Met,
+    Failed,
+    Cleared,
+}
+
+impl GoalState {
+    /// The name the wire uses (`system goal`, SPEC 0.218).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GoalState::Set => "set",
+            GoalState::Unmet => "unmet",
+            GoalState::Met => "met",
+            GoalState::Failed => "failed",
+            GoalState::Cleared => "cleared",
+        }
+    }
+}
+
+/// A `goal_status` attachment: `{"met": false, "sentinel": true, "condition": c}` when set,
+/// `{"met": false, "condition": c, "reason": r}` for each unmet check, `{"met": true, ...,
+/// "iterations", "durationMs", "tokens"}` when met, `"failed": true` in place of `met` when
+/// impossible, `{"met": true, "sentinel": true, ...}` when cleared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalRecord {
+    pub uuid: Uuid,
+    /// The record's own `timestamp`, as written.
+    pub timestamp: Option<String>,
+    pub condition: String,
+    pub state: GoalState,
+    pub reason: Option<String>,
+    /// `iterations`: how many checks it took.
+    pub checks: Option<u32>,
+    pub duration_ms: Option<u64>,
+    pub tokens: Option<u64>,
+}
+
+/// The [`GoalRecord`] of a transcript line; `None` for any other line and for a record without
+/// `uuid` or `condition`. Lines that do not mention `goal_status` are not parsed.
+pub fn goal_record(line: &str) -> Option<GoalRecord> {
+    if !line.contains("\"goal_status\"") {
+        return None;
+    }
+    let Ok(Record::Attachment(a)) = parse_line(line) else {
+        return None;
+    };
+    goal_of(&a)
+}
+
+/// The [`GoalRecord`] of a parsed `attachment` record, under the rules of [`goal_record`].
+pub fn goal_of(a: &Attachment) -> Option<GoalRecord> {
+    let g = &a.attachment;
+    if g["type"] != "goal_status" || a.is_sidechain {
+        return None;
+    }
+    let sentinel = g["sentinel"] == true;
+    let met = g["met"] == true;
+    let state = match (sentinel, met, g["failed"] == true) {
+        (true, false, _) => GoalState::Set,
+        (true, true, _) => GoalState::Cleared,
+        (false, _, true) => GoalState::Failed,
+        (false, true, false) => GoalState::Met,
+        (false, false, false) => GoalState::Unmet,
+    };
+    Some(GoalRecord {
+        uuid: a.uuid?,
+        timestamp: a.timestamp.clone(),
+        condition: g["condition"].as_str()?.to_owned(),
+        state,
+        reason: g["reason"].as_str().map(str::to_owned),
+        checks: g["iterations"].as_u64().and_then(|n| u32::try_from(n).ok()),
+        duration_ms: g["durationMs"].as_u64(),
+        tokens: g["tokens"].as_u64(),
+    })
+}
+
+/// The last [`GoalRecord`] of a transcript: how the session's goal stood when the CLI last
+/// wrote about it. Cheap like [`last_ai_title`].
+pub fn last_goal_status(s: &str) -> Option<GoalRecord> {
+    s.lines().rev().find_map(goal_record)
+}
+
 /// A `system` record (SPEC §9): `local_command` holds a slash command's output as `content`
 /// `<local-command-stdout>…</local-command-stdout>` (or `-stderr`); `compact_boundary` is where
 /// a compaction began, the summary record (`isCompactSummary`) comes after it; others
@@ -277,6 +366,14 @@ impl TokenSums {
             cache_write: self.cache_write.max(other.cache_write),
         }
     }
+
+    /// All four counts added together; saturating.
+    pub fn total(self) -> u64 {
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
+    }
 }
 
 /// The `inputTokens`, `outputTokens`, `cacheReadInputTokens` and `cacheCreationInputTokens`
@@ -373,6 +470,80 @@ mod tests {
     use super::*;
 
     const FIXTURE: &str = include_str!("../fixtures/tool-call-2.1.307.jsonl");
+
+    /// SPEC 0.218: every shape of the `goal_status` attachment (2.1.312) maps to its state.
+    #[test]
+    fn goal_status_by_state() {
+        let line = |attachment: serde_json::Value| {
+            serde_json::json!({
+                "type": "attachment",
+                "uuid": "36c72c19-b4ad-4d95-a482-ce4e281952cb",
+                "timestamp": "2026-11-22T19:33:57.895Z",
+                "attachment": attachment,
+            })
+            .to_string()
+        };
+        let state = |a: serde_json::Value| goal_record(&line(a)).unwrap();
+        let g = state(
+            serde_json::json!({"type": "goal_status", "met": false, "sentinel": true, "condition": "C"}),
+        );
+        assert_eq!(
+            (g.state, g.condition.as_str(), g.reason),
+            (GoalState::Set, "C", None)
+        );
+        assert_eq!(g.uuid.to_string(), "36c72c19-b4ad-4d95-a482-ce4e281952cb");
+        assert_eq!(g.timestamp.as_deref(), Some("2026-11-22T19:33:57.895Z"));
+        let g = state(
+            serde_json::json!({"type": "goal_status", "met": false, "condition": "C", "reason": "R"}),
+        );
+        assert_eq!(
+            (g.state, g.reason.as_deref(), g.checks),
+            (GoalState::Unmet, Some("R"), None)
+        );
+        let g = state(
+            serde_json::json!({"type": "goal_status", "met": true, "condition": "C", "reason": "R",
+            "iterations": 1, "durationMs": 21808, "tokens": 549}),
+        );
+        assert_eq!(
+            (g.state, g.checks, g.duration_ms, g.tokens),
+            (GoalState::Met, Some(1), Some(21808), Some(549))
+        );
+        let g = state(
+            serde_json::json!({"type": "goal_status", "met": true, "sentinel": true, "condition": "C"}),
+        );
+        assert_eq!(g.state, GoalState::Cleared);
+        let g = state(
+            serde_json::json!({"type": "goal_status", "met": false, "failed": true, "condition": "C",
+            "reason": "R", "iterations": 4, "durationMs": 9, "tokens": 7}),
+        );
+        assert_eq!((g.state, g.checks), (GoalState::Failed, Some(4)));
+        // Not a goal: another attachment, another record, a goal without a condition.
+        assert!(goal_record(&line(serde_json::json!({"type": "queued_command"}))).is_none());
+        assert!(goal_record(&line(
+            serde_json::json!({"type": "goal_status", "met": false})
+        ))
+        .is_none());
+        assert!(goal_record(r#"{"type":"user","uuid":"36c72c19-b4ad-4d95-a482-ce4e281952cb","message":{"content":"goal_status"}}"#).is_none());
+    }
+
+    /// SPEC 0.218: the last goal record of a transcript, whatever its state.
+    #[test]
+    fn the_last_goal_status_of_a_transcript() {
+        let at = |u: &str, a: serde_json::Value| {
+            serde_json::json!({"type": "attachment", "uuid": u, "attachment": a}).to_string()
+        };
+        let set = at(
+            "00000000-0000-0000-0000-000000000001",
+            serde_json::json!({"type": "goal_status", "met": false, "sentinel": true, "condition": "C"}),
+        );
+        let met = at(
+            "00000000-0000-0000-0000-000000000002",
+            serde_json::json!({"type": "goal_status", "met": true, "condition": "C"}),
+        );
+        let t = format!("{set}\n{met}\n{{\"type\":\"user\"}}\n");
+        assert_eq!(last_goal_status(&t).unwrap().state, GoalState::Met);
+        assert!(last_goal_status("{\"type\":\"user\"}\n").is_none());
+    }
 
     #[test]
     fn fixture_parses_and_keeps_main_chain() {

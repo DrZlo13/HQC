@@ -17,7 +17,12 @@
 //!   last); non-empty `thinking` → `agent.thinking`;
 //! - `assistant` text with `model` `<synthetic>` (the CLI's own reply: an API error, "Credit
 //!   balance is too low") → `agent.message` with `runtime: true`, held and flushed as any;
-//!   with `stop_reason` `refusal` (its reply to a model refusal) also `refusal: true`;
+//!   with `stop_reason` `refusal` (its reply to a model refusal) also `refusal: true`; with
+//!   `local_command_source` (a slash command's output, which alone carries it) → `system
+//!   command_output` instead, after the held text is flushed (SPEC 0.218);
+//! - an `attachment` `goal_status` of the transcript (the CLI writes it nowhere else; the
+//!   meter reads it, [`Core::on_goal`]) → `system goal`, behind a text held when the record was
+//!   written after it (SPEC 0.218);
 //! - `assistant` text with `aborted: true` (an interrupt cut it off) → `agent.message` with
 //!   `interrupted: true`, held and flushed as any;
 //! - `system` `task_notification` (a background task ended) → `system task_notification`
@@ -110,7 +115,11 @@
 //!   preview and the result's images go with it to be uploaded ([`AdapterEvent::ToolResult`]);
 //!   `user` with `isReplay: true` → input accepted;
 //!   every user message written to stdin gets a fresh v4 `uuid`, which its echo and its
-//!   `command_lifecycle` lines name (2.1.312);
+//!   `command_lifecycle` lines name (2.1.312); a quiet line (`shouldQuery: false`, written after
+//!   a Stop, [`Core::input_quiet_with_images`]) has its `init` and echo ignored and is taken by
+//!   the `result` with `num_turns: 0` that lists its `uuid` in `user_message_uuids` →
+//!   [`AdapterEvent::QuietTaken`], and nothing else: no status, message, `usage` or end of turn;
+//!   its `command_lifecycle` `cancelled` → [`AdapterEvent::QuietCancelled`];
 //! - `result` → `usage` (one with no tokens and no `compact_boundary` in it gives none, or,
 //!   when the total grew, one with no tokens, no `cost_usd` and the total),
 //!   then `system turn_interrupted` for a `terminal_reason` `aborted_*`, or `system
@@ -119,9 +128,18 @@
 //!   of turn;
 //!   `usage.cost_usd` is the growth of the CLI's cumulative `total_cost_usd` since the previous
 //!   `usage` with a `cost_usd` (or since the transcript's last `cost-state` after `--resume`,
-//!   or since 0 after `conversation_reset`), `session_cost_usd` the total itself; the tokens
+//!   or since 0 after `conversation_reset`), `session_cost_usd` the total itself,
+//!   `session_tokens` the sum of the cumulative `modelUsage` tokens; the tokens
 //!   of a compaction's `result` (zeros in its `usage`) are the growth of its cumulative
-//!   `modelUsage`, summed over the models, since the same baseline;
+//!   `modelUsage`, summed over the models, since the same baseline; `context_tokens` is the
+//!   sum of the usage of the main agent's last API response (the size `post_tokens` of a
+//!   `compact_boundary` gives, until the next response; none after a boundary without it, the
+//!   runtime not having counted the size),
+//!   `context_limit` the `contextWindow` of the main model's entry in `modelUsage` less the
+//!   reserve for output and the CLI's margin ([`context_limit`], [`usage_entry`]),
+//!   `cache_ttl_s` the TTL of the cache writes the response or `modelUsage` shows, less the
+//!   seconds since that response started ([`ContextUse::cache_ttl_s`]); the output tokens of
+//!   the context are the response's `message_delta` count; `/clear` forgets the context;
 //!   a request of the main agent or of a foreground subagent still open then gets
 //!   `approval.cancel` / `clarify.cancel` `stopped`, any other subagent's stays open until its
 //!   `task_notification`, which cancels it; an input written during the turn and not echoed
@@ -146,6 +164,9 @@
 //! - the result of the main agent's `ScheduleWakeup` call → [`AdapterEvent::Wakeup`] with its
 //!   `scheduledFor`, none for 0; a `command_lifecycle` `started` with `wakeup_source:
 //!   loop_wakeup` and that `scheduled_for` → [`AdapterEvent::Wakeup`] with none;
+//! - the result of the main agent's `TodoWrite`, `TaskCreate`, `TaskUpdate` or `TaskList` call
+//!   (none of a subagent's, none of a failed call) → `tasks` with the whole list when it
+//!   changed ([`apply_task_result`]); `conversation_reset` empties it;
 //! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint`, the hqc
 //!   rules suggested for the call and the subagent whose `agent_id` it names) /
 //!   `clarify.request` (with that subagent too), an immediate allow by a `session`
@@ -179,11 +200,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
-use hqc_claude_jsonl::{model_usage_tokens, CostState, TokenSums};
+use hqc_claude_jsonl::{model_usage_tokens, CostState, GoalRecord, GoalState, TokenSums};
 use hqc_proto::event::{
-    AnswerInput, ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
-    ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, GrantPlace, LiveKind,
-    LiveSubagent, OptionGrant, RequestSubagent, SessionState, TaskUsage, MODEL_NOT_SWITCHED,
+    AgentTask, AnswerInput, ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason,
+    ClarifyAction, ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, GoalStatus,
+    GrantPlace, LiveKind, LiveSubagent, OptionGrant, RequestSubagent, SessionState, TaskStatus,
+    TaskUsage, GOAL, MODEL_NOT_SWITCHED, OPTION_SERVER_ALWAYS, OPTION_SERVER_SESSION,
 };
 use hqc_proto::frame::{Activity, LeftoverCommand, PermissionMode, SessionInput, SlashCommand};
 use serde_json::{json, Value};
@@ -243,6 +265,15 @@ const NOT_REPORTED_YET: &str = "This agent has not reported yet";
 /// How long after a subagent reported, with background commands it started still listed, the
 /// main agent is told of those still listed then ([`Core::leftovers`]).
 const LEFTOVER_AFTER: Duration = Duration::from_secs(30 * 60);
+/// The CLI keeps this many tokens of the model's output out of the window the auto-compaction
+/// counts against, at most (`get_context_usage` of 2.1.329; `yPt` of the VS Code tab): the
+/// reserve is `min(maxOutputTokens, this)`.
+const AUTO_COMPACT_OUTPUT_RESERVE_MAX: u64 = 20_000;
+/// A further margin below the window and the output reserve at which the CLI compacts.
+const AUTO_COMPACT_BUFFER: u64 = 13_000;
+/// `cache_ttl_s` of a prompt cache written with the 1-hour TTL, and of the default 5-minute one.
+const CACHE_TTL_1H_S: u64 = 3600;
+const CACHE_TTL_5M_S: u64 = 300;
 /// `system.code` of stream-json `system` `compact_boundary` (SPEC §4, §8.1).
 pub const CONTEXT_COMPACTED: &str = "context_compacted";
 pub const CONTEXT_COMPACTED_TEXT: &str = "Context compacted";
@@ -266,6 +297,10 @@ pub const CONVERSATION_CLEARED_TEXT: &str = "Conversation cleared";
 pub const COMMAND_OUTPUT: &str = "command_output";
 /// At most this many bytes of a slash command's description and argument hint are reported.
 pub const COMMAND_TEXT_LIMIT: usize = 200;
+/// At most this many bytes of a task's subject and active form, and at most this many tasks, are
+/// kept: the `tasks` event stays far under the hub's WebSocket frame limit (SPEC §4).
+pub const TASK_TEXT_LIMIT: usize = 512;
+pub const TASKS_LIMIT: usize = 200;
 /// At most this many slash commands are reported, and none whose name is longer than
 /// [`COMMAND_NAME_LIMIT`] characters: what the hub keeps (SPEC §5.4).
 pub const COMMANDS_LIMIT: usize = 500;
@@ -319,6 +354,13 @@ const MODE_REQUEST: &str = "hqc-mode-";
 const MODEL_REQUEST: &str = "hqc-model-";
 /// `request_id` prefix of our `background_tasks` control requests.
 const BACKGROUND_REQUEST: &str = "hqc-background-";
+/// `request_id` prefix of our `cancel_async_message` control requests.
+const CANCEL_REQUEST: &str = "hqc-cancel-";
+/// `request_id` prefix of our `side_question` control requests, followed by the `event_id` of
+/// the hub's `side.question`.
+const SIDE_REQUEST: &str = "hqc-side-";
+/// What the CLI's answer to a side question says when it carries no text.
+pub const NO_SIDE_ANSWER: &str = "No answer";
 /// `request_id` prefix of our `stop_task` control requests.
 const STOP_TASK_REQUEST: &str = "hqc-stop-task-";
 const INTERRUPT_REQUEST: &str = "hqc-interrupt-";
@@ -343,6 +385,8 @@ enum Pending {
         local_rules: Vec<Value>,
         /// Every `rules[]` entry of every `addRules` suggestion, for `session`.
         suggested: Vec<Value>,
+        /// The ids of the options the card offered: an answer with another one is refused.
+        offered: Vec<String>,
         /// The subagent that asked ([`agent_of`]); `None`: the main agent.
         agent_id: Option<String>,
     },
@@ -383,6 +427,19 @@ struct Written {
     state: Option<String>,
     /// A turn ended without taking it: the CLI runs it next by itself.
     carried: bool,
+    /// The `request_id` of the `cancel_async_message` asking the CLI to drop it (SPEC 0.219),
+    /// until the CLI answers.
+    withdrawing: Option<String>,
+}
+
+/// An input written as a quiet line ([`Core::input_quiet_with_images`]), until the `result` that
+/// names it.
+#[derive(Debug)]
+struct QuietInput {
+    event_id: Uuid,
+    /// Its `command_lifecycle` said `started`: the `system/init` that follows is its own and no
+    /// turn of the CLI's.
+    started: bool,
 }
 
 /// A subagent of [`Core::live`], a command or a Monitor of [`Core::live_commands`], the wakeup
@@ -425,6 +482,14 @@ impl LiveAgent {
     }
 }
 
+/// A task of the agent's task list ([`Core::task_list`]).
+#[derive(Debug, Clone)]
+pub struct TaskEntry {
+    /// The runtime's id of the task; `TodoWrite` gives none.
+    id: Option<String>,
+    task: AgentTask,
+}
+
 /// A job of the agent's `CronCreate`, shown as a row ([`Core::cron_jobs`]).
 #[derive(Debug)]
 pub struct CronJob {
@@ -459,6 +524,13 @@ pub struct Core {
     /// The last assistant text: event id, text, whether the CLI wrote it itself, whether an
     /// interrupt cut it off, and whether it is the CLI's reply to a model refusal.
     held: Option<(Uuid, String, bool, bool, bool)>,
+    /// When [`Core::held`] was set, by this process's clock: a goal record of the transcript
+    /// written at or after it came after that text ([`Core::on_goal`]).
+    held_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Goal events ([`goal_event`]) whose record was written after the held text and read
+    /// before the next element brought it out: they go out behind it ([`Core::flush`]), so a
+    /// "Goal not yet met" line is not above the text the check judged (SPEC 0.218).
+    goals_behind: Vec<Event>,
     /// Event id of the `context_compacted` of a `compact_boundary`, and its `compact_metadata`,
     /// held for the summary that follows it ([`Core::release_compaction`]).
     compaction: Option<(Uuid, Option<ContextCompacted>)>,
@@ -470,6 +542,11 @@ pub struct Core {
     last_input: Option<Uuid>,
     /// Inputs written to stdin whose echo has not come yet, in the order written.
     awaiting_echo: VecDeque<Written>,
+    /// Inputs written as quiet lines (`shouldQuery: false`, SPEC 0.231) by the `uuid` of the
+    /// line, until the `result` of the CLI's turn of no model call that lists it in
+    /// `user_message_uuids`. None is in [`Core::awaiting_echo`]: no echo or lifecycle line of
+    /// one is an input taken, and the `result` is what says so.
+    quiet: HashMap<Uuid, QuietInput>,
     /// An input was written to this process.
     wrote: bool,
     /// The CLI sends `command_lifecycle` lines (2.1.312).
@@ -510,6 +587,12 @@ pub struct Core {
     /// The main agent's cron jobs, in the order they were created, sent after
     /// [`Core::wakeup_row`].
     cron_jobs: Vec<CronJob>,
+    /// The main agent's `TodoWrite`, `TaskCreate`, `TaskUpdate` and `TaskList` calls until their
+    /// result: call id → (tool, input).
+    todo_calls: HashMap<String, (String, Value)>,
+    /// The main agent's task list as the `tasks` event last sent says it
+    /// ([`Core::tasks_changed`]).
+    task_list: Vec<TaskEntry>,
     /// [`Core::live`] got a subagent or a title since it was last reported.
     live_changed: bool,
     /// A `background_tasks_changed` lowered [`Core::running_subagents`] below the count last
@@ -535,6 +618,9 @@ pub struct Core {
     turn: u64,
     /// The ids of the `interrupt` requests the CLI answered.
     interrupt_answers: HashSet<String>,
+    /// The CLI's answers to our `cancel_async_message` requests by `request_id`: whether it
+    /// dropped the message ([`Core::withdraw_answer`]).
+    cancel_answers: HashMap<String, bool>,
     pending: HashMap<String, Pending>,
     rules: SessionRules,
     /// `[permissions]` of the worker config, for `policy_hint` and denying what a deny
@@ -554,6 +640,13 @@ pub struct Core {
     /// the baseline of the next turn's cost and of a compaction's tokens, one value so that
     /// both move together.
     cost_base: Option<CostState>,
+    /// The context the main agent's last API response left, or the size a compaction
+    /// reported; the `context_*` and `cache_ttl_s` of the next `usage` ([`ContextUse`]).
+    context: Option<ContextUse>,
+    /// `message.id` of the main agent's latest response and when it started: its first line
+    /// (`message_start` or `assistant`) that came here. The prompt cache is read or written
+    /// at that moment ([`ContextUse::cache_ttl_s`]).
+    response_started: Option<(String, Instant)>,
     /// A `compact_boundary` came since the last `result`: a `result` with no model turn costs
     /// for the compaction itself.
     compacted: bool,
@@ -663,11 +756,14 @@ impl Core {
             session_id,
             restricted,
             held: None,
+            held_at: None,
+            goals_behind: Vec::new(),
             compaction: None,
             activity: None,
             activity_at: None,
             last_input: None,
             awaiting_echo: VecDeque::new(),
+            quiet: HashMap::new(),
             wrote: false,
             lifecycle: false,
             subagents: HashSet::new(),
@@ -683,6 +779,8 @@ impl Core {
             cron_creates: HashMap::new(),
             cron_deletes: HashSet::new(),
             cron_jobs: Vec::new(),
+            todo_calls: HashMap::new(),
+            task_list: Vec::new(),
             live_changed: false,
             recount: false,
             background: Vec::new(),
@@ -692,6 +790,7 @@ impl Core {
             stopping: false,
             turn: 0,
             interrupt_answers: HashSet::new(),
+            cancel_answers: HashMap::new(),
             pending: HashMap::new(),
             rules: SessionRules::default(),
             policy: Arc::default(),
@@ -701,6 +800,8 @@ impl Core {
             model_requested: None,
             model_noticed: None,
             cost_base: None,
+            context: None,
+            response_started: None,
             compacted: false,
             commands: None,
             listed: None,
@@ -742,6 +843,17 @@ impl Core {
     pub fn with_folder(mut self, rules: FolderRules, root: std::path::PathBuf) -> Self {
         self.folder = Some((rules, root));
         self
+    }
+
+    /// Moves the start of the main agent's last response `by` into the past (tests).
+    #[cfg(test)]
+    pub fn rewind_response(&mut self, by: Duration) {
+        if let Some(c) = self.context.as_mut() {
+            c.rewind(by);
+        }
+        if let Some((_, t)) = self.response_started.as_mut() {
+            *t = t.checked_sub(by).unwrap_or(*t);
+        }
     }
 
     /// The session's cumulative cost and `modelUsage` tokens before this process: the
@@ -895,10 +1007,12 @@ impl Core {
         // into a turn of hqc's leaves it ([`Core::inject_with_images`]): that turn's next line,
         // its `result`, ends it. Dropped here, it was lost when the input came between the
         // text and the `result` (SPEC §8.1).
+        let mut out = Vec::new();
         if !self.self_turn {
-            self.held = None;
+            out.extend(self.drop_held());
         }
-        vec![self.write(input, images, false)]
+        out.push(self.write(input, images, false, false));
+        out
     }
 
     /// An input that may join (a person's input or a `send`, SPEC §17.2) may go into the
@@ -918,13 +1032,35 @@ impl Core {
         if !self.can_inject() {
             return None;
         }
-        Some(vec![self.write(input, images, true)])
+        Some(vec![self.write(input, images, true, false)])
     }
 
-    /// The user message of stream-json, with a fresh `uuid` its echo and `command_lifecycle`
-    /// will name.
-    fn write(&mut self, input: &SessionInput, images: Vec<Value>, mid_turn: bool) -> Action {
-        // `peer_prefix` and `peer` are in `text` already (crate::peer, SPEC §7.1).
+    /// [`Core::inject_with_images`] with `priority: "now"` (SPEC 0.219): the CLI moves the
+    /// running Bash, MCP call or subagent to the background and takes the line into the same
+    /// turn at once, instead of at the end of the call; a turn with no open call ends
+    /// `aborted_streaming` and runs the line as a turn of its own, which comes back as a
+    /// carried input.
+    pub fn inject_now_with_images(
+        &mut self,
+        input: &SessionInput,
+        images: Vec<Value>,
+    ) -> Option<Vec<Action>> {
+        if !self.can_inject() {
+            return None;
+        }
+        Some(vec![self.write(input, images, true, true)])
+    }
+
+    /// The user message of stream-json ([`user_line`]), with a fresh `uuid` its echo and
+    /// `command_lifecycle` will name. `now`: `priority: "now"`. Every input is a line of its
+    /// own: the worker joins no two, so no line mixes a human's text with another's.
+    fn write(
+        &mut self,
+        input: &SessionInput,
+        images: Vec<Value>,
+        mid_turn: bool,
+        now: bool,
+    ) -> Action {
         let uuid = Uuid::new_v4();
         self.wrote = true;
         self.awaiting_echo.push_back(Written {
@@ -933,19 +1069,94 @@ impl Core {
             mid_turn,
             state: None,
             carried: false,
+            withdrawing: None,
         });
-        let content = if images.is_empty() {
-            json!(input.text)
-        } else {
-            let mut blocks = vec![json!({"type": "text", "text": input.text})];
-            blocks.extend(images);
-            Value::Array(blocks)
-        };
-        Action::Write(json!({
-            "type": "user",
-            "uuid": uuid,
-            "message": {"role": "user", "content": content},
-        }))
+        let mut line = user_line(uuid, input, images);
+        if now {
+            line["priority"] = json!("now");
+        }
+        Action::Write(line)
+    }
+
+    /// [`Core::input_with_images`] as a quiet line (SPEC 0.231): `shouldQuery: false`, which the
+    /// CLI writes into the conversation without calling the model, so the agent knows the
+    /// text next time and does not act on it now, and `priority: "later"`, which keeps the
+    /// CLI from folding the line into a turn that runs (it folds lines of priority "next" or
+    /// above into a running turn, without looking at `shouldQuery`): not into one of ours, not
+    /// into one it started by itself after a task notification either. The CLI takes a "later"
+    /// line when it is idle, after that turn's `result`. It answers the line with a
+    /// `system/init`, its echo and a `result` with `num_turns: 0` that lists the line's `uuid`
+    /// in `user_message_uuids`, and takes lines written back to back together (one echo, one
+    /// `result`, 2.1.312): that `result` is [`AdapterEvent::QuietTaken`], and no turn of ours
+    /// opens, so no `status running`, agent message, `usage` or turn's end comes of it. The CLI
+    /// batches only lines of the same `shouldQuery`, so a normal line written after quiet ones
+    /// is a turn of its own. Quiet lines are not in [`Core::awaiting_echo`]: a Stop's
+    /// [`Core::cancel_unstarted`] never cancels one.
+    pub fn input_quiet_with_images(&mut self, input: &SessionInput, images: Vec<Value>) -> Action {
+        let uuid = Uuid::new_v4();
+        self.quiet.insert(
+            uuid,
+            QuietInput {
+                event_id: input.event_id,
+                started: false,
+            },
+        );
+        let mut line = user_line(uuid, input, images);
+        line["shouldQuery"] = json!(false);
+        line["priority"] = json!("later");
+        Action::Write(line)
+    }
+
+    /// `control_request` `cancel_async_message` for the input `event_id` the CLI has not taken
+    /// (SPEC 0.219), with the request's id ([`Core::withdraw_answer`]); `None` when no such
+    /// input waits: it was echoed, or its `command_lifecycle` says the CLI started it, or the
+    /// CLI is already asked; one the CLI cancelled already (a Stop's) is withdrawn at once, with no
+    /// request to write. On `cancelled: true` the CLI drops the line (`command_lifecycle`
+    /// `cancelled`, 2.1.312), which then never reaches the model and is no `dropped` input of
+    /// a turn's end; the input is gone from [`Core::awaiting_echo`] and, when it was what kept
+    /// a turn running, that turn is over ([`Core::carried_gone`]).
+    pub fn withdraw(&mut self, event_id: Uuid) -> Option<(Vec<Action>, String)> {
+        let w = self.awaiting_echo.iter_mut().find(|w| {
+            w.event_id == event_id
+                && w.withdrawing.is_none()
+                && !matches!(w.state.as_deref(), Some("started" | "completed"))
+        })?;
+        let request_id = format!("{CANCEL_REQUEST}{}", Uuid::now_v7());
+        w.withdrawing = Some(request_id.clone());
+        if w.state.as_deref() == Some("cancelled") {
+            // The CLI dropped it already (a Stop's `cancel_async_message`): nothing to ask, it
+            // is withdrawn at once, and the turn's end leaves it out of `dropped`.
+            self.cancel_answers.insert(request_id.clone(), true);
+            return Some((vec![], request_id));
+        }
+        let req = json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {"subtype": "cancel_async_message", "message_uuid": w.uuid},
+        });
+        Some((vec![Action::Write(req)], request_id))
+    }
+
+    /// Whether the CLI dropped the message of the `cancel_async_message` with this id, once
+    /// it answered; the answer is taken out, so it is told once.
+    pub fn withdraw_answer(&mut self, request_id: &str) -> Option<bool> {
+        self.cancel_answers.remove(request_id)
+    }
+
+    /// The CLI did not answer the `cancel_async_message` with this id in time (SPEC 0.219): the
+    /// input is no longer being withdrawn. An answer or a `cancelled` line that comes late is
+    /// then no word of the owner's withdrawal: the input goes the way of any other the CLI
+    /// drops (`dropped` at the turn's end, resent), instead of being taken for a withdrawn one
+    /// that is out of the supervisor's books.
+    pub fn withdraw_unanswered(&mut self, request_id: &str) {
+        self.cancel_answers.remove(request_id);
+        if let Some(w) = self
+            .awaiting_echo
+            .iter_mut()
+            .find(|w| w.withdrawing.as_deref() == Some(request_id))
+        {
+            w.withdrawing = None;
+        }
     }
 
     /// `control_request` `initialize` with only `perTaskStopAffordance: true`, the first line
@@ -964,7 +1175,10 @@ impl Core {
 
     /// `control_request` `interrupt` for the running turn, also one the CLI started by
     /// itself, with the turn's number and the request's id ([`Core::interrupt_answered`]);
-    /// `None` if no turn runs.
+    /// `None` if no turn runs. Plain, without `cancel_queued`: that one also dequeues the CLI's
+    /// own lines that carry no `uuid` (the task notifications of background subagents and tasks,
+    /// cron and `/loop` triggers), which hqc cannot write back; the lines hqc wrote are
+    /// cancelled one by one before it ([`Core::cancel_unstarted`], SPEC 0.231).
     pub fn interrupt(&mut self) -> Option<(Action, u64, String)> {
         if !self.turn_open() {
             return None;
@@ -977,6 +1191,38 @@ impl Core {
             "request": {"subtype": "interrupt"},
         });
         Some((Action::Write(req), self.turn, request_id))
+    }
+
+    /// The `cancel_async_message` requests of a Stop (SPEC 0.231), to be written before its
+    /// [`Core::interrupt`]: one for every line hqc wrote that the CLI has not taken (its
+    /// `command_lifecycle` is not `started`, `completed` or `cancelled`) and is not being
+    /// withdrawn. The CLI answers with `command_lifecycle` `cancelled` for each it drops, before
+    /// the turn's `result`: they come out as `dropped` of its end, unlike a withdrawn input
+    /// ([`Core::withdraw`]), and the worker writes them quiet. A line the CLI refuses to cancel
+    /// (taken or folded into the turn meanwhile) is simply taken. A quiet line is never one of
+    /// them: it is the record of an earlier Stop ([`Core::input_quiet_with_images`]). None while
+    /// no turn runs.
+    pub fn cancel_unstarted(&mut self) -> Vec<Action> {
+        if !self.turn_open() {
+            return vec![];
+        }
+        self.awaiting_echo
+            .iter()
+            .filter(|w| {
+                w.withdrawing.is_none()
+                    && !matches!(
+                        w.state.as_deref(),
+                        Some("started" | "completed" | "cancelled")
+                    )
+            })
+            .map(|w| {
+                Action::Write(json!({
+                    "type": "control_request",
+                    "request_id": format!("{CANCEL_REQUEST}{}", Uuid::now_v7()),
+                    "request": {"subtype": "cancel_async_message", "message_uuid": w.uuid},
+                }))
+            })
+            .collect()
     }
 
     /// Whether the CLI answered the `interrupt` with this id; the answer is taken out of
@@ -1031,6 +1277,32 @@ impl Core {
         }))
     }
 
+    /// Ask side question `event_id`: `control_request {subtype: side_question, question,
+    /// history}`. The CLI answers outside the conversation (a `system/control_request_progress`
+    /// `started`, then the `control_response`, 2.4 to 3.5 s on 2.1.312): no turn, no
+    /// `system/init`, no transcript line, a running turn untouched, and in a process started
+    /// with `--resume` that has run no turn yet too. Its cost is added to the process's running
+    /// total, so the next turn of the same process shows it. The answer is [`Core::on_control_response`]'s.
+    pub fn side_question(
+        &self,
+        event_id: Uuid,
+        question: &str,
+        history: &[hqc_proto::frame::SideExchange],
+    ) -> Action {
+        let mut request = json!({"subtype": "side_question", "question": question});
+        if !history.is_empty() {
+            request["history"] = history
+                .iter()
+                .map(|h| json!({"question": h.question, "response": h.response}))
+                .collect();
+        }
+        Action::Write(json!({
+            "type": "control_request",
+            "request_id": format!("{SIDE_REQUEST}{event_id}"),
+            "request": request,
+        }))
+    }
+
     /// Stop task `task_id` alone, a `stoppable` row of [`AdapterEvent::LiveSubagents`], a
     /// subagent, a command or a Monitor (2.1.312 registers a Monitor's task as `local_bash`, and
     /// `stop_task` stops a task as its type does): `control_request {subtype: stop_task,
@@ -1059,14 +1331,21 @@ impl Core {
             .pending
             .remove(request_id)
             .ok_or_else(|| anyhow!("no open approval request {request_id}"))?;
-        let (tool, input, local_rules, suggested, agent_id) = match p {
+        let (tool, input, local_rules, suggested, offered, agent_id) = match p {
+            // Only an option the card offered: the hub checks the same against its stored
+            // payload, the worker does not rely on that.
+            Pending::Approval { ref offered, .. } if !offered.iter().any(|o| o == option_id) => {
+                self.pending.insert(request_id.into(), p);
+                bail!("approval option {option_id:?} was not offered");
+            }
             Pending::Approval {
                 tool,
                 input,
                 local_rules,
                 suggested,
+                offered,
                 agent_id,
-            } => (tool, input, local_rules, suggested, agent_id),
+            } => (tool, input, local_rules, suggested, offered, agent_id),
             Pending::Clarify { .. } if option_id == "deny" => {
                 return Ok(vec![Action::Write(deny(
                     request_id,
@@ -1081,6 +1360,7 @@ impl Core {
         // A background subagent's request outlives the main turn's `result` (`on_result`): its
         // "No" must not interrupt a turn that runs by then for something else.
         let foreground = ends_with_main_turn(&self.quiet_tasks, agent_id.as_deref());
+        let server = hqc_proto::rules::unambiguous_mcp_server(&tool).map(String::from);
         let resp = match option_id {
             "once" => allow(request_id, &input, None),
             // As the VS Code tab: "No" stops the turn, a text answer lets it go on.
@@ -1091,13 +1371,21 @@ impl Core {
                     deny_with(request_id, DENY_MESSAGE, foreground)
                 }
             },
-            "always" if !self.restricted && !local_rules.is_empty() => {
-                allow(request_id, &input, Some(local_rules))
-            }
-            // `always` without a local rule to write, or in restricted mode, is `session`
-            // (SPEC §8.1).
-            "session" | "always" => {
+            // Offered only with a local rule to write and not in restricted mode.
+            "always" => allow(request_id, &input, Some(local_rules)),
+            "session" => {
                 self.rules.add(&tool, &input, &suggested);
+                allow(request_id, &input, None)
+            }
+            // All tools of the call's MCP server; for `server_always` the hub adds the
+            // folder rule `mcp__<server>` before it forwards the answer, and the session
+            // rule covers the calls until the worker has that list. The session rule lives
+            // as long as the process: a folder rule deleted later still allows the server
+            // in this session until it restarts.
+            OPTION_SERVER_SESSION | OPTION_SERVER_ALWAYS if server.is_some() => {
+                if let Some(server) = &server {
+                    self.rules.add_server(server);
+                }
                 allow(request_id, &input, None)
             }
             other => {
@@ -1108,6 +1396,7 @@ impl Core {
                         input,
                         local_rules,
                         suggested,
+                        offered,
                         agent_id,
                     },
                 );
@@ -1202,10 +1491,12 @@ impl Core {
     pub fn on_exit(&mut self) -> Vec<Action> {
         self.pending.clear();
         self.awaiting_echo.clear();
+        self.quiet.clear();
         self.in_turn = false;
         self.self_turn = false;
         self.stopping = false;
         self.interrupt_answers.clear();
+        self.cancel_answers.clear();
         let mut out: Vec<Action> = self.release_compaction(None).into_iter().collect();
         out.extend(self.flush(false));
         // A subagent end held while the subagent still counted ([`Core::held_ends`]) is its
@@ -1271,6 +1562,12 @@ impl Core {
                     Some("CronDelete") if !sub => {
                         self.cron_deletes.insert(id.to_owned());
                     }
+                    Some(tool @ ("TodoWrite" | "TaskCreate" | "TaskUpdate" | "TaskList"))
+                        if !sub =>
+                    {
+                        self.todo_calls
+                            .insert(id.to_owned(), (tool.to_owned(), b["input"].clone()));
+                    }
                     _ => {}
                 }
             }
@@ -1316,14 +1613,21 @@ impl Core {
                 self.clearing = true;
                 self.fresh = true;
                 self.cost_base = None;
-                vec![self.emit_system(CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT.into())]
+                // The new conversation holds nothing of the old one's context or task list.
+                (self.context, self.response_started) = (None, None);
+                self.todo_calls.clear();
+                let mut out = self.tasks_changed(|list| list.clear());
+                out.push(self.emit_system(CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT.into()));
+                out
             }
             "system" => match v["subtype"].as_str() {
                 Some("init") => {
                     // The CLI sends `init` before every turn; one without ours is its own, and
                     // `status running` opens it on the hub, which saw no input start it
                     // (SPEC §17.1).
-                    self.self_turn = !self.in_turn;
+                    // The `init` of a quiet line is no turn of the CLI's.
+                    let quiet = self.quiet.values().any(|q| q.started);
+                    self.self_turn = !self.in_turn && !quiet;
                     let mut out = Vec::new();
                     if self.self_turn {
                         out.push(self.emit_new(EventKind::Status {
@@ -1365,7 +1669,7 @@ impl Core {
                     out
                 }
                 Some("permission_denied") => {
-                    let mut out: Vec<Action> = self.flush(false).into_iter().collect();
+                    let mut out = self.flush(false);
                     out.extend(self.on_permission_denied(&v));
                     out
                 }
@@ -1449,6 +1753,21 @@ impl Core {
                 // record's. The event waits for the summary ([`Core::compaction`]).
                 Some("compact_boundary") => {
                     self.compacted = true;
+                    // The size after the compaction until the next response, which is in no
+                    // cache yet; a boundary that gives none (the runtime did not count it) must
+                    // not leave the size before it.
+                    let last = self.context.take();
+                    self.context = compact_metadata(&v["compact_metadata"])
+                        .and_then(|m| m.post_tokens)
+                        .map(|tokens| ContextUse {
+                            tokens,
+                            output: 0,
+                            message_id: None,
+                            model: last.and_then(|l| l.model),
+                            cache_1h: false,
+                            cache_5m: false,
+                            started: None,
+                        });
                     tracing::info!(session_id = %self.session_id, trigger = ?v["compact_metadata"]["trigger"].as_str(), "context compacted");
                     self.compaction = Some((
                         record_uuid(&v).map_or_else(Uuid::now_v7, |u| record_event_id(&u, 0)),
@@ -1529,7 +1848,13 @@ impl Core {
                             self.model = Some(m.to_owned());
                         }
                     }
-                    let mut out = self.retract(&v["retracted_message_uuids"]);
+                    // A `local` one took back no record of the conversation: its uuids are a
+                    // side question's or a subagent's.
+                    let mut out = if v["scope"] == "local" {
+                        vec![]
+                    } else {
+                        self.retract(&v["retracted_message_uuids"])
+                    };
                     out.push(self.emit_system(MODEL_REFUSAL_FALLBACK, switch_line(&v)));
                     out
                 }
@@ -1576,7 +1901,8 @@ impl Core {
     /// The CLI's answer to our `initialize` (its slash commands with their descriptions, its
     /// models and account, or an error), `set_permission_mode`, `set_model` (a refusal of the
     /// latest one is a line and the model kept, another answer logged), `background_tasks` or
-    /// `stop_task` (both logged), or `interrupt` (noted for [`Core::interrupt_answered`]);
+    /// `stop_task` (both logged), `side_question` (its answer, or why there is none, becomes a
+    /// [`AdapterEvent::SideAnswer`]), or `interrupt` (noted for [`Core::interrupt_answered`]);
     /// every other `control_response`, the echo of one of ours, is skipped.
     fn on_control_response(&mut self, v: &Value) -> Vec<Action> {
         let r = &v["response"];
@@ -1594,6 +1920,40 @@ impl Core {
         if id.starts_with(INTERRUPT_REQUEST) {
             self.interrupt_answers.insert(id.to_owned());
             return vec![];
+        }
+        if id.starts_with(CANCEL_REQUEST) {
+            return self.on_cancel_answer(id, r);
+        }
+        if let Some(event_id) = id
+            .strip_prefix(SIDE_REQUEST)
+            .and_then(|e| Uuid::parse_str(e).ok())
+        {
+            // `response` may be null; `synthetic: true` is a notice of the CLI's own, not the
+            // model's answer; an error carries its text (2.1.312).
+            let (answer, error) = if r["subtype"] != "success" {
+                (
+                    None,
+                    Some(
+                        r["error"]
+                            .as_str()
+                            .map_or_else(|| "Side question failed".into(), text),
+                    ),
+                )
+            } else {
+                match (
+                    r["response"]["response"].as_str(),
+                    &r["response"]["synthetic"],
+                ) {
+                    (Some(t), Value::Bool(true)) => (None, Some(text(t))),
+                    (Some(t), _) => (Some(text(t)), None),
+                    (None, _) => (None, Some(NO_SIDE_ANSWER.into())),
+                }
+            };
+            return vec![Action::Emit(AdapterEvent::SideAnswer {
+                event_id,
+                text: answer,
+                error,
+            })];
         }
         if id.starts_with(STOP_TASK_REQUEST) {
             if r["subtype"] == "success" {
@@ -1652,6 +2012,7 @@ impl Core {
                 fork: None,
                 compaction: None,
                 model: kept.clone(),
+                goal: None,
             })];
             out.extend(kept.map(|m| Action::Emit(AdapterEvent::ModelKept(m))));
             return out;
@@ -1664,6 +2025,55 @@ impl Core {
         }
         tracing::warn!(session_id = %self.session_id, error = %r["error"], "claude refused the permission mode switch");
         vec![]
+    }
+
+    /// The CLI's answer to a `cancel_async_message` ([`Core::withdraw`]): `cancelled: true`
+    /// drops the input from the books, any other answer leaves it waiting. Either is noted for
+    /// [`Core::withdraw_answer`].
+    fn on_cancel_answer(&mut self, id: &str, r: &Value) -> Vec<Action> {
+        let cancelled = r["subtype"] == "success" && r["response"]["cancelled"] == true;
+        self.cancel_answers.insert(id.to_owned(), cancelled);
+        let Some(i) = self
+            .awaiting_echo
+            .iter()
+            .position(|w| w.withdrawing.as_deref() == Some(id))
+        else {
+            // A turn's end dropped it already ([`Core::on_result`]).
+            return vec![];
+        };
+        if !cancelled {
+            tracing::info!(session_id = %self.session_id, request_id = id, "claude did not cancel the message; it has been taken");
+            self.awaiting_echo[i].withdrawing = None;
+            return vec![];
+        }
+        let Some(w) = self.awaiting_echo.remove(i) else {
+            return vec![];
+        };
+        tracing::info!(session_id = %self.session_id, event_id = %w.event_id, "input withdrawn from the CLI's queue");
+        if w.carried || !w.mid_turn {
+            return self.carried_gone(vec![]);
+        }
+        vec![]
+    }
+
+    /// A carried input, or the one that began the turn, left the CLI's queue without being
+    /// taken (cancelled by the CLI, or withdrawn): the turn it kept running is over, with no
+    /// `result` to come, unless other carried inputs go on. [`AdapterEvent::TurnEnded`] with
+    /// those in `carried` and `dropped` the inputs the runtime will not take.
+    fn carried_gone(&mut self, dropped: Vec<Uuid>) -> Vec<Action> {
+        let carried: Vec<Uuid> = self
+            .awaiting_echo
+            .iter()
+            .filter(|w| w.carried)
+            .map(|w| w.event_id)
+            .collect();
+        // As at `result`: the CLI goes on with the other carried inputs, in a turn nobody stops.
+        self.stopping = false;
+        self.in_turn = !carried.is_empty();
+        if self.in_turn {
+            self.turn += 1;
+        }
+        vec![Action::Emit(AdapterEvent::TurnEnded { carried, dropped })]
     }
 
     /// `system/session_writes_lost` (CLI 2.1.317): a line when the transcript is among what
@@ -1786,6 +2196,7 @@ impl Core {
             Some("message_start") => {
                 (self.streamed_chars, self.streamed_estimated, self.streamed) = (0, 0, 0);
                 self.streamed_id = ev["message"]["id"].as_str().map(str::to_owned);
+                self.response_started = self.streamed_id.clone().map(|id| (id, Instant::now()));
                 // A new request of the model after text no assistant text took up: the CLI
                 // abandoned the attempt that wrote it (a stream that broke, then a retry), as the
                 // VS Code tab takes it (`web:163707`); the hub and clients drop it, and the
@@ -1802,6 +2213,14 @@ impl Core {
             // of its deltas missed.
             Some("message_delta") => {
                 let n = ev["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                // The lines of a response carry the usage of its `message_start`, with a few
+                // output tokens: its own count is the context's.
+                if let Some(c) = self.context.as_mut().filter(|c| {
+                    c.message_id.is_some() && c.message_id.as_deref() == self.streamed_id.as_deref()
+                }) {
+                    c.tokens = c.tokens.saturating_sub(c.output) + n;
+                    c.output = n;
+                }
                 self.output_tokens += n.saturating_sub(self.streamed);
                 (self.streamed_chars, self.streamed_estimated, self.streamed) = (0, 0, 0);
             }
@@ -1860,6 +2279,21 @@ impl Core {
         // The CLI's own reply, not the model's: marked, but held and flushed like any text,
         // so it is the turn's final message when it ends the turn.
         let synthetic = v["message"]["model"] == SYNTHETIC_MODEL;
+        // The frames of one response repeat its usage: the last one stands.
+        if !synthetic {
+            let id = v["message"]["id"].as_str();
+            // A response whose `message_start` did not come here starts with its first line.
+            if id.is_some() && id != self.response_started.as_ref().map(|(i, _)| i.as_str()) {
+                self.response_started = id.map(|id| (id.to_owned(), Instant::now()));
+            }
+            let started = self
+                .response_started
+                .as_ref()
+                .map_or_else(Instant::now, |(_, t)| *t);
+            if let Some(used) = ContextUse::of_response(&v["message"], started) {
+                self.context = Some(used);
+            }
+        }
         // Cut off by an interrupt before the stream completed (2.1.312).
         let aborted = v["aborted"] == true;
         let refusal = synthetic && v["message"]["stop_reason"] == REFUSAL;
@@ -1891,10 +2325,22 @@ impl Core {
                         continue;
                     }
                     out.extend(self.flush(false));
+                    // A slash command's output, not a reply of the CLI to the model's turn: a
+                    // line of its own, as the mirror draws it from the transcript (SPEC 0.218).
+                    if synthetic && v["local_command_source"].is_string() {
+                        out.push(self.emit_system_as(
+                            Some(id),
+                            COMMAND_OUTPUT,
+                            preview(t, PREVIEW_LIMIT),
+                            None,
+                        ));
+                        continue;
+                    }
                     if synthetic {
                         tracing::info!(session_id = %self.session_id, "runtime message");
                     }
                     self.held = Some((id, text(t), synthetic, aborted, refusal));
+                    self.held_at = Some(chrono::Utc::now());
                     // A saved text ends the live thinking too, on the hub and in clients.
                     (self.live_text, self.live_thinking) = (false, false);
                 }
@@ -1933,6 +2379,10 @@ impl Core {
     /// here as by its `started`: taken into a turn the CLI began by itself, the echo comes
     /// first and `started` finds nothing left.
     fn on_echo(&mut self, v: &Value) -> Vec<Action> {
+        // A quiet line's: the `result` that names it takes it.
+        if record_uuid(v).is_some_and(|u| self.quiet.contains_key(&u)) {
+            return vec![];
+        }
         let at = record_uuid(v)
             .and_then(|u| self.awaiting_echo.iter().position(|w| w.uuid == u))
             .or_else(|| (!self.lifecycle && !self.awaiting_echo.is_empty()).then_some(0));
@@ -1983,36 +2433,42 @@ impl Core {
         else {
             return vec![];
         };
+        if let Some(q) = self.quiet.get_mut(&uuid) {
+            // The CLI failed to process the line (2.1.312 answers `cancelled` for a line it
+            // could not run): it is not in the history. The worker writes it again.
+            if v["state"] == "cancelled" {
+                let event_id = q.event_id;
+                self.quiet.remove(&uuid);
+                tracing::info!(session_id = %self.session_id, %event_id, "quiet input cancelled by the CLI");
+                return vec![Action::Emit(AdapterEvent::QuietCancelled { event_id })];
+            }
+            q.started |= v["state"] == "started";
+            return vec![];
+        }
         let Some(i) = self.awaiting_echo.iter().position(|w| w.uuid == uuid) else {
             return vec![];
         };
+        let own_turn = self.self_turn;
         let w = &mut self.awaiting_echo[i];
         let state = v["state"].as_str().unwrap_or_default();
         if state == "started" && (!w.mid_turn || w.carried) {
             self.last_input = Some(w.event_id);
         }
         w.state = Some(state.to_owned());
-        if !(w.carried && state == "cancelled") {
+        // What keeps a turn running: a carried input, or the one that began it (written when
+        // none ran), which the CLI cancelled before it started it (a Stop in the moments a
+        // process comes up): no `result` will come for that turn. Not during a turn the CLI
+        // started by itself: that one ends with its own `result`.
+        let keeps_turn = w.carried || (!w.mid_turn && !own_turn);
+        // A withdrawn input is no one's drop: its `cancel_async_message` answer closes it.
+        if !(keeps_turn && state == "cancelled") || w.withdrawing.is_some() {
             return vec![];
         }
         let Some(w) = self.awaiting_echo.remove(i) else {
             return vec![];
         };
         tracing::info!(session_id = %self.session_id, event_id = %w.event_id, "carried input cancelled by the CLI, not taken");
-        let dropped = vec![w.event_id];
-        let carried: Vec<Uuid> = self
-            .awaiting_echo
-            .iter()
-            .filter(|w| w.carried)
-            .map(|w| w.event_id)
-            .collect();
-        // As at `result`: the CLI goes on with the other carried inputs, in a turn nobody stops.
-        self.stopping = false;
-        self.in_turn = !carried.is_empty();
-        if self.in_turn {
-            self.turn += 1;
-        }
-        vec![Action::Emit(AdapterEvent::TurnEnded { carried, dropped })]
+        self.carried_gone(vec![w.event_id])
     }
 
     /// Subagent `task_id` started (`add`) or ended by the CLI's word: the new count when it
@@ -2406,11 +2862,13 @@ impl Core {
         if ids.is_empty() {
             return vec![];
         }
+        let mut out = Vec::new();
         if self.held.as_ref().is_some_and(|(id, ..)| ids.contains(id)) {
-            self.held = None;
+            out.extend(self.drop_held());
         }
         tracing::info!(session_id = %self.session_id, events = ids.len(), "events retracted");
-        vec![self.emit_new(EventKind::Retraction { event_ids: ids })]
+        out.push(self.emit_new(EventKind::Retraction { event_ids: ids }));
+        out
     }
 
     /// A line for `system/init`'s MCP servers whose `status` is not `connected` nor `disabled`
@@ -2564,6 +3022,26 @@ impl Core {
         vec![self.live_list()]
     }
 
+    /// `apply` to the task list; a `tasks` event with the whole list when it changed.
+    fn tasks_changed(&mut self, apply: impl FnOnce(&mut Vec<TaskEntry>)) -> Vec<Action> {
+        let shown = |list: &[TaskEntry]| list.iter().map(|e| e.task.clone()).collect::<Vec<_>>();
+        let before = shown(&self.task_list);
+        apply(&mut self.task_list);
+        let items = shown(&self.task_list);
+        if items == before {
+            return vec![];
+        }
+        vec![self.emit_new(EventKind::Tasks { items })]
+    }
+
+    /// The task list the CLI has after resuming the session's transcript
+    /// ([`resurrected_tasks`]); a fork starts with none. No event, the hub has the latest stored
+    /// one.
+    pub fn with_resumed_tasks(mut self, tasks: Vec<TaskEntry>) -> Self {
+        self.task_list = tasks;
+        self
+    }
+
     fn on_user(&mut self, v: &Value) -> Vec<Action> {
         // The message that asks the model again after a response whose tool call the CLI could
         // not parse names that response's records, which the CLI dropped from the conversation
@@ -2613,6 +3091,11 @@ impl Core {
             if self.cron_deletes.remove(call) && !error {
                 out.extend(self.cron_deleted(result));
             }
+            if let Some((tool, input)) = self.todo_calls.remove(call).filter(|_| !error) {
+                out.extend(self.tasks_changed(|list| {
+                    apply_task_result(list, &tool, &input, &whole, single, result)
+                }));
+            }
             let kind = EventKind::ToolResult {
                 call_id: block["tool_use_id"].as_str().unwrap_or("").into(),
                 result_preview: preview(&whole, PREVIEW_LIMIT),
@@ -2638,7 +3121,33 @@ impl Core {
         out
     }
 
+    /// The quiet inputs a `result` lists in `user_message_uuids`: [`AdapterEvent::QuietTaken`]
+    /// with them, each once whether the CLI took it alone or together with others; `None` when
+    /// it lists none.
+    fn quiet_result(&mut self, v: &Value) -> Option<Vec<Action>> {
+        let event_ids: Vec<Uuid> = v["user_message_uuids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|u| u.as_str()?.parse::<Uuid>().ok())
+            .filter_map(|u| self.quiet.remove(&u))
+            .map(|q| q.event_id)
+            .collect();
+        (!event_ids.is_empty()).then(|| vec![Action::Emit(AdapterEvent::QuietTaken { event_ids })])
+    }
+
     fn on_result(&mut self, v: &Value) -> Vec<Action> {
+        // A `result` that lists quiet lines is theirs alone: they are "later" lines, which the
+        // CLI never folds into a turn (`num_turns: 0`), and no turn runs meanwhile.
+        let Some(out) = self.quiet_result(v) else {
+            return self.end_of_turn(v);
+        };
+        tracing::info!(session_id = %self.session_id, "quiet inputs taken");
+        out
+    }
+
+    /// The end of a turn: its `result`.
+    fn end_of_turn(&mut self, v: &Value) -> Vec<Action> {
         self.self_turn = false;
         self.stopping = false;
         // The turn of `/clear` ended without an `init` naming the new transcript: the folder is
@@ -2650,7 +3159,9 @@ impl Core {
         }
         self.turn_records.clear();
         self.retracted.clear();
-        let mut out: Vec<Action> = self.flush(true).into_iter().collect();
+        // The goal events behind the final text go after the turn's `usage` and end line, which
+        // the feed draws with the answer (SPEC 0.218).
+        let mut out: Vec<Action> = self.flush_text(true).into_iter().collect();
         // A request the CLI no longer waits for: after "No" to one of two parallel calls it
         // ends the turn and drops the other. Without the cancel the hub keeps its card open
         // (Claude requests do not expire), and an answer to it finds no open request here.
@@ -2699,9 +3210,10 @@ impl Core {
         // costs, so it keeps its `usage`; its tokens are in the cumulative `modelUsage`, and are
         // the growth of it since the baseline of the cost.
         let has_tokens = input_tokens + output_tokens > 0;
+        let model_tokens = model_usage_tokens(&v["modelUsage"]);
+        let session_tokens = v["modelUsage"].is_object().then(|| model_tokens.total());
         let compaction = !has_tokens && spent && compacted;
         if has_tokens || compaction {
-            let model_tokens = model_usage_tokens(&v["modelUsage"]);
             let (input_tokens, output_tokens, cache_read, cache_write) = if compaction {
                 let grown = model_tokens.since(base.tokens);
                 (
@@ -2719,6 +3231,14 @@ impl Core {
                 )
             };
             let cost_usd = total.map(|t| self.turn_cost(t, model_tokens));
+            let context = self.context.as_ref();
+            let entry = usage_entry(
+                &v["modelUsage"],
+                self.model.as_deref(),
+                context.and_then(|c| c.model.as_deref()),
+            );
+            let context_limit = entry.and_then(context_limit);
+            let cache_ttl_s = context.and_then(|c| c.cache_ttl_s(entry));
             out.push(self.emit_new(EventKind::Usage {
                 input_tokens,
                 output_tokens,
@@ -2726,7 +3246,11 @@ impl Core {
                 cache_write,
                 cost_usd,
                 session_cost_usd: total,
+                session_tokens,
                 model,
+                context_tokens: context.map(|c| c.tokens),
+                context_limit,
+                cache_ttl_s,
             }));
         } else if spent {
             // The total grew with no tokens in the result: what background subagents spent
@@ -2740,7 +3264,11 @@ impl Core {
                 cache_write: None,
                 cost_usd: None,
                 session_cost_usd: total,
+                session_tokens,
                 model,
+                context_tokens: None,
+                context_limit: None,
+                cache_ttl_s: None,
             }));
         }
         let subtype = v["subtype"].as_str().unwrap_or("");
@@ -2748,6 +3276,7 @@ impl Core {
         if let Some((code, t)) = turn_end_line(v) {
             out.push(self.emit_system(code, t));
         }
+        out.extend(self.release_goals());
         out.push(self.emit_new(EventKind::Status {
             state: SessionState::Idle,
             // Why the turn ended early is the line above.
@@ -2770,6 +3299,9 @@ impl Core {
         let (mut carried, mut dropped, mut taken) = (Vec::new(), Vec::new(), Vec::new());
         for mut w in std::mem::take(&mut self.awaiting_echo) {
             let carry = match w.state.as_deref() {
+                // Withdrawn: the owner took it back, so it is dropped with no word to the
+                // supervisor, which has it out of its books already.
+                Some("cancelled") if w.withdrawing.is_some() => continue,
                 Some("cancelled") => {
                     tracing::info!(session_id = %self.session_id, event_id = %w.event_id, "input cancelled by the CLI, not taken");
                     dropped.push(w.event_id);
@@ -2948,6 +3480,23 @@ impl Core {
                 ..option("always", "Always allow", ApprovalCanonical::Always)
             });
         }
+        // Not for a server name another server's tools could share: the rule would cover both.
+        if let Some(server) =
+            hqc_proto::rules::unambiguous_mcp_server(&tool).filter(|_| !human_only)
+        {
+            options.push(option(
+                OPTION_SERVER_SESSION,
+                &format!("Allow all {server} tools for this session"),
+                ApprovalCanonical::Session,
+            ));
+            if self.folder.is_some() && !self.restricted {
+                options.push(option(
+                    OPTION_SERVER_ALWAYS,
+                    &format!("Always allow all {server} tools in this folder"),
+                    ApprovalCanonical::Always,
+                ));
+            }
+        }
         options.push(option("deny", "Deny", ApprovalCanonical::Deny));
 
         let description = describe(req, &input, &tool);
@@ -2958,6 +3507,7 @@ impl Core {
                 .map(|s| preview(s, limit))
         };
         let call_args = args_preview(&tool, &input);
+        let reason = field("decision_reason", REASON_LIMIT).or_else(|| ask_rule_reason(req, &tool));
         tracing::info!(session_id = %self.session_id, %tool, human_only, "approval requested");
         self.pending.insert(
             request_id.clone(),
@@ -2966,6 +3516,7 @@ impl Core {
                 input,
                 local_rules,
                 suggested,
+                offered: options.iter().map(|o| o.id.clone()).collect(),
                 agent_id: agent_of(req),
             },
         );
@@ -2979,7 +3530,7 @@ impl Core {
             policy_hint,
             rule_suggestions,
             secret: None,
-            reason: field("decision_reason", REASON_LIMIT),
+            reason,
             display_name: field("display_name", DISPLAY_NAME_LIMIT),
             human_only,
             subagent: self.subagent_of(req),
@@ -3210,6 +3761,7 @@ impl Core {
                 fork: None,
                 compaction: None,
                 model: None,
+                goal: None,
             },
         ))));
         if let Some(path) = v["output_file"].as_str().filter(|p| !p.is_empty()) {
@@ -3247,7 +3799,17 @@ impl Core {
 
     // ---- helpers -----------------------------------------------------------------------
 
-    fn flush(&mut self, r#final: bool) -> Option<Action> {
+    /// The held text, then the goal events that came after it ([`Core::on_goal`]); only
+    /// those when nothing is held.
+    fn flush(&mut self, r#final: bool) -> Vec<Action> {
+        let mut out: Vec<Action> = self.flush_text(r#final).into_iter().collect();
+        out.extend(self.release_goals());
+        out
+    }
+
+    /// The held text alone; the goal events behind it stay for [`Core::release_goals`].
+    fn flush_text(&mut self, r#final: bool) -> Option<Action> {
+        self.held_at = None;
         let (id, text, runtime, interrupted, refusal) = self.held.take()?;
         Some(self.emit(
             id,
@@ -3260,6 +3822,43 @@ impl Core {
                 refusal,
             },
         ))
+    }
+
+    /// The held text is dropped, not sent (an input written into the turn's end, a retraction):
+    /// the goal events behind it still go out, now.
+    fn drop_held(&mut self) -> Vec<Action> {
+        self.held = None;
+        self.held_at = None;
+        self.release_goals()
+    }
+
+    fn release_goals(&mut self) -> Vec<Action> {
+        std::mem::take(&mut self.goals_behind)
+            .into_iter()
+            .map(|e| Action::Emit(AdapterEvent::Event(e)))
+            .collect()
+    }
+
+    /// A goal record the CLI wrote into the transcript, read by the meter (SPEC 0.218). The
+    /// transcript is read on a clock of its own, stdout in order: a record may be read before
+    /// the next element of stdout brings out the text it judged, which is held. One written
+    /// at or after the moment that text was held (or without a readable time) follows it, so it
+    /// waits behind it; one written before it is sent now, which is before the text. The held
+    /// text is not flushed for it: the last one of a turn must reach `on_result` to be `final`.
+    pub fn on_goal(&mut self, g: &GoalRecord) -> Vec<Action> {
+        let event = goal_event(self.session_id, g);
+        let written_after_held = self.held.is_some()
+            && self.held_at.is_some_and(|at| {
+                g.timestamp
+                    .as_deref()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .is_none_or(|t| t >= at)
+            });
+        if written_after_held {
+            self.goals_behind.push(event);
+            return Vec::new();
+        }
+        vec![Action::Emit(AdapterEvent::Event(event))]
     }
 
     /// The held `context_compacted` ([`Core::compaction`]): its text is the summary's
@@ -3330,6 +3929,7 @@ impl Core {
                 fork: None,
                 compaction,
                 model: None,
+                goal: None,
             },
         );
         if let Some(id) = event_id {
@@ -3379,6 +3979,7 @@ impl Core {
                 fork: None,
                 compaction: None,
                 model: Some(kept.clone()),
+                goal: None,
             }),
             Action::Emit(AdapterEvent::ModelKept(kept)),
         ]
@@ -3472,6 +4073,31 @@ fn turn_end_line(v: &Value) -> Option<(&'static str, String)> {
 
 pub fn record_event_id(uuid: &Uuid, index: usize) -> Uuid {
     Event::id_from_claude_block(uuid, index)
+}
+
+/// The user message of stream-json: the text, or with images a content array of a text block
+/// followed by `images` (image blocks of the Messages API, SPEC §8.1). `peer_prefix` and `peer`
+/// are in `input.text` already (crate::peer, SPEC §7.1). What the owner typed (`input.human`,
+/// which the hub sets for no message of another session, room input, schedule run or note of
+/// its own) carries `origin: {kind: "human"}`, without which the CLI takes the line as
+/// unattributed and its strict `isHuman()` gates refuse it (2.1.312).
+fn user_line(uuid: Uuid, input: &SessionInput, images: Vec<Value>) -> Value {
+    let content = if images.is_empty() {
+        json!(input.text)
+    } else {
+        let mut blocks = vec![json!({"type": "text", "text": input.text})];
+        blocks.extend(images);
+        Value::Array(blocks)
+    };
+    let mut line = json!({
+        "type": "user",
+        "uuid": uuid,
+        "message": {"role": "user", "content": content},
+    });
+    if input.human {
+        line["origin"] = json!({"kind": "human"});
+    }
+    line
 }
 
 fn record_uuid(v: &Value) -> Option<Uuid> {
@@ -3584,6 +4210,108 @@ fn api_retry(v: &Value) -> ApiRetry {
             .as_u64()
             .and_then(|s| u16::try_from(s).ok()),
     }
+}
+
+/// What the main agent's context holds, as its last API response says, and what that response
+/// wrote to the prompt cache.
+#[derive(Debug, Clone)]
+struct ContextUse {
+    /// Input, cache reads, cache writes and output of the response: what the next request
+    /// starts with (the VS Code tab's `updateUsage` sums the same).
+    tokens: u64,
+    /// The output part of `tokens`: the lines of a response carry the count of its
+    /// `message_start`, and its `message_delta` the final one.
+    output: u64,
+    /// `message.id` of the response; none for a size a compaction reported.
+    message_id: Option<String>,
+    /// `message.model` of the response.
+    model: Option<String>,
+    /// The response wrote tokens to the cache with the 1-hour or the 5-minute TTL.
+    cache_1h: bool,
+    cache_5m: bool,
+    /// When the response started; none for a size a compaction reported, which is in no
+    /// cache yet.
+    started: Option<Instant>,
+}
+
+impl ContextUse {
+    /// `message` of a main agent's `assistant` line that started at `started`; `None` without
+    /// `usage`.
+    fn of_response(message: &Value, started: Instant) -> Option<Self> {
+        let usage = message["usage"].as_object()?;
+        let num = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let written = |k: &str| usage.get("cache_creation").and_then(|c| c[k].as_u64()) > Some(0);
+        Some(Self {
+            tokens: num("input_tokens")
+                + num("cache_read_input_tokens")
+                + num("cache_creation_input_tokens")
+                + num("output_tokens"),
+            output: num("output_tokens"),
+            message_id: message["id"].as_str().map(str::to_owned),
+            model: message["model"].as_str().map(str::to_owned),
+            cache_1h: written("ephemeral_1h_input_tokens"),
+            cache_5m: written("ephemeral_5m_input_tokens"),
+            started: Some(started),
+        })
+    }
+
+    /// Seconds the session's cache has left, counted from the request of the response: the
+    /// 1-hour TTL when the response or the session's `modelUsage` entry of its model shows a
+    /// write with it, else the 5-minute one when either shows that (Claude Desktop reads 1 hour
+    /// from `ephemeral_1h_input_tokens`, else 5 minutes); none when no write is seen, and none
+    /// for a size a compaction reported.
+    fn cache_ttl_s(&self, entry: Option<&Value>) -> Option<u64> {
+        let started = self.started?;
+        let seen = |k: &str| entry.is_some_and(|e| e[k].as_u64() > Some(0));
+        let ttl = if self.cache_1h || seen("cacheCreationEphemeral1hInputTokens") {
+            CACHE_TTL_1H_S
+        } else if self.cache_5m || seen("cacheCreationEphemeral5mInputTokens") {
+            CACHE_TTL_5M_S
+        } else {
+            return None;
+        };
+        Some(ttl.saturating_sub(started.elapsed().as_secs()))
+    }
+
+    /// Moves the response's start `by` into the past (tests).
+    #[cfg(test)]
+    fn rewind(&mut self, by: Duration) {
+        self.started = self.started.and_then(|t| t.checked_sub(by));
+    }
+}
+
+/// The `result.modelUsage` entry of the main agent's model. The CLI keys it by the model as
+/// requested (`claude-sonnet-4-6[1m]`, a provider's id), not as the response names it: by the
+/// model the main loop runs (`system/init`, a switch), else by `message.model`, else the entry
+/// whose `canonicalModel` is that.
+fn usage_entry<'a>(
+    model_usage: &'a Value,
+    main: Option<&str>,
+    response: Option<&str>,
+) -> Option<&'a Value> {
+    let map = model_usage.as_object()?;
+    main.and_then(|m| map.get(m))
+        .or_else(|| response.and_then(|m| map.get(m)))
+        .or_else(|| {
+            response.and_then(|m| {
+                map.values()
+                    .find(|e| e["canonicalModel"].as_str() == Some(m))
+            })
+        })
+}
+
+/// The tokens the context may hold before the CLI compacts it by itself, from a model's
+/// `result.modelUsage` entry: `contextWindow − min(maxOutputTokens, 20000) − 13000`, the
+/// threshold of the model's window. An override of the auto-compaction window
+/// (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `autoCompactWindow`, `/autocompact`) and a disabled
+/// auto-compaction are not seen in the stream; the VS Code tab computes it the same way.
+fn context_limit(entry: &Value) -> Option<u64> {
+    let window = entry["contextWindow"].as_u64()?;
+    let reserve = entry["maxOutputTokens"]
+        .as_u64()
+        .unwrap_or(0)
+        .min(AUTO_COMPACT_OUTPUT_RESERVE_MAX);
+    Some(window.saturating_sub(reserve + AUTO_COMPACT_BUFFER))
 }
 
 /// `compact_metadata` of `compact_boundary` (2.1.312: `trigger` `auto` | `manual`,
@@ -3701,6 +4429,49 @@ fn describe(req: &Value, input: &Value, tool: &str) -> String {
         return preview(&format!("{tool} {}", compact(input)), ERROR_TEXT_LIMIT);
     }
     preview(&parts.join("\n"), PREVIEW_LIMIT)
+}
+
+/// Why the CLI asks when a `permissions.ask` rule caught the call (SPEC §8.1, since 0.217).
+/// Claude Code sends no `decision_reason` text for a rule, only `decision_reason_type: "rule"`
+/// and the rule's `decision_reason_rule_source` (checked live on 2.1.329, also in
+/// `bypassPermissions`); `matched_ask_rule`, when it comes, names the rule itself. `None` when
+/// no rule caught the call.
+fn ask_rule_reason(req: &Value, tool: &str) -> Option<String> {
+    let matched = &req["matched_ask_rule"];
+    if req["decision_reason_type"] != "rule" && !matched.is_object() {
+        return None;
+    }
+    // The CLI's own names of the sources; the settings files are named as well, so the owner
+    // knows where the rule lives.
+    let place = match matched["source"]
+        .as_str()
+        .or_else(|| req["decision_reason_rule_source"].as_str())
+    {
+        Some("userSettings") => "user settings (~/.claude/settings.json)",
+        Some("projectSettings") => "shared project settings (.claude/settings.json)",
+        Some("localSettings") => "project local settings (.claude/settings.local.json)",
+        Some("policySettings") => "enterprise managed settings",
+        Some("flagSettings") => "command line arguments",
+        Some("cliArg") => "a CLI argument",
+        Some("command") => "command configuration",
+        Some("session") => "the current session",
+        Some("toolsNarrowing") => "CLI tool narrowing",
+        Some("mcpServerPolicy") => "MCP server policy",
+        Some("hostCredential") => "cloud-session credential guard",
+        Some("mcpMount") => "Remote Control server mount",
+        Some(other) => other,
+        None => "Claude Code's settings",
+    };
+    let text = match matched["tool_name"].as_str() {
+        Some(name) => match matched["rule_content"].as_str() {
+            Some(content) => {
+                format!("The ask rule {name}({content}) in {place} requires approval for this call")
+            }
+            None => format!("The ask rule {name} in {place} requires approval for this call"),
+        },
+        None => format!("An ask rule for {tool} in {place} requires approval for this call"),
+    };
+    Some(preview(&text, REASON_LIMIT))
 }
 
 pub(crate) fn parse_questions(input: &Value) -> Option<(Vec<ClarifyQuestion>, Vec<String>)> {
@@ -4000,9 +4771,263 @@ pub fn preview(s: &str, limit: usize) -> String {
     s[..end].to_owned()
 }
 
+/// `system goal` for a goal record of the transcript (SPEC 0.218): its id follows the record's
+/// `uuid`, so the hub drops one it has. The text is Claude Code's own wording of the state; the
+/// condition and the reason are cut at [`PREVIEW_LIMIT`] bytes.
+pub fn goal_event(session_id: Uuid, g: &GoalRecord) -> Event {
+    let condition = preview(&g.condition, PREVIEW_LIMIT);
+    let t = match g.state {
+        GoalState::Set => format!("Goal set: {condition}"),
+        GoalState::Unmet => "Goal not yet met… continuing".into(),
+        GoalState::Met => "Goal achieved".into(),
+        GoalState::Failed => "Goal could not be achieved".into(),
+        GoalState::Cleared => format!("Goal cleared: {condition}"),
+    };
+    let mut e = new_event(
+        session_id,
+        Author::System,
+        EventKind::System {
+            text: t,
+            code: GOAL.into(),
+            call_id: None,
+            status: None,
+            task_id: None,
+            from_session_id: None,
+            usage: None,
+            fork: None,
+            compaction: None,
+            model: None,
+            goal: Some(GoalStatus {
+                condition,
+                state: g.state.as_str().into(),
+                reason: g.reason.as_deref().map(|r| preview(r, PREVIEW_LIMIT)),
+                checks: g.checks,
+                duration_ms: g.duration_ms,
+                tokens: g.tokens,
+            }),
+        },
+    );
+    e.event_id = Event::id_from_claude_record(&g.uuid);
+    e
+}
+
 /// Now, in epoch ms.
 fn epoch_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// A task call of the main agent, `tool` with `input`, whose result did not fail, applied to the
+/// task list `list`: the result block's `text`, the record's `tool_use_result` (`toolUseResult`
+/// in a transcript) `result`, which is this call's only when the record holds one result
+/// (`single`). `TodoWrite` replaces the list, as the CLI keeps it (every task done: none);
+/// `TaskCreate` adds the task under the id and subject its text names after the CLI corrected the
+/// call (`Task #<id> created successfully: <subject>`; else the result's `task.id` when `single`
+/// and the input's subject, `title` or `name`), with the `activeForm` or `active_form` of the
+/// input (in a `task` wrapper too); `TaskUpdate` changes (its `status`, `subject`,
+/// `activeForm` or `active_form`) or, with `deleted`, removes the task whose id its text names
+/// (`Updated task #<id> …`; a task it did not find has the error or `Task #<id> not found`);
+/// `TaskList` replaces the list, a known task keeping its `active_form`, only from a `single`
+/// result with a `tasks` array. A task with a status other than `pending`, `in_progress` and
+/// `completed` is left out. Texts are cut at [`TASK_TEXT_LIMIT`] bytes and the list at
+/// [`TASKS_LIMIT`] tasks. The live process and the replay of a transcript
+/// ([`resurrected_tasks`]) both go through here.
+fn apply_task_result(
+    list: &mut Vec<TaskEntry>,
+    tool: &str,
+    input: &Value,
+    text: &str,
+    single: bool,
+    result: &Value,
+) {
+    let status = |v: &Value| match v.as_str()? {
+        "pending" => Some(TaskStatus::Pending),
+        "in_progress" => Some(TaskStatus::InProgress),
+        "completed" => Some(TaskStatus::Completed),
+        _ => None,
+    };
+    let owned = |v: &Value| v.as_str().map(|s| preview(s, TASK_TEXT_LIMIT));
+    // The fields of a call's input as the CLI corrects it before it runs (2.1.312). A
+    // `TaskCreate` input with neither `subject` nor `description` at the top takes the fields of
+    // an object in `task` (a string there is its description, which the result text covers),
+    // and `title` or `name` stand for `subject`, `active_form` for `activeForm`. A `TaskUpdate`
+    // input takes only `active_form` for `activeForm` (and `id`, `task_id` for `taskId`).
+    let unwrapped;
+    let fields = match &input["task"] {
+        Value::Object(inner)
+            if tool == "TaskCreate"
+                && input.get("subject").is_none()
+                && input.get("description").is_none() =>
+        {
+            let mut all = input.clone();
+            if let Some(o) = all.as_object_mut() {
+                o.remove("task");
+                o.extend(inner.clone());
+            }
+            unwrapped = all;
+            &unwrapped
+        }
+        _ => input,
+    };
+    let first = |keys: &[&str]| keys.iter().find_map(|k| owned(&fields[*k]));
+    let active_form = || first(&["activeForm", "active_form"]);
+    // What follows `prefix` in the text, up to the first white space.
+    let id_after = |prefix: &str, then: &str| {
+        let rest = text.strip_prefix(prefix)?;
+        let (id, tail) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        (!id.is_empty() && tail.starts_with(then)).then(|| id.to_owned())
+    };
+    match tool {
+        "TodoWrite" => {
+            let todos: Vec<TaskEntry> = input["todos"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| {
+                    Some(TaskEntry {
+                        id: None,
+                        task: AgentTask {
+                            subject: owned(&t["content"])?,
+                            status: status(&t["status"])?,
+                            active_form: owned(&t["activeForm"]),
+                        },
+                    })
+                })
+                .collect();
+            let done = todos.iter().all(|t| t.task.status == TaskStatus::Completed);
+            *list = if done { vec![] } else { todos };
+        }
+        "TaskCreate" => {
+            let named = id_after("Task #", "created successfully");
+            let subject = text
+                .split_once("created successfully:")
+                .map(|(_, s)| preview(s.trim(), TASK_TEXT_LIMIT))
+                .filter(|s| !s.is_empty())
+                .or_else(|| first(&["subject", "title", "name"]));
+            let (Some(id), Some(subject)) = (
+                named.or_else(|| single.then(|| owned(&result["task"]["id"])).flatten()),
+                subject,
+            ) else {
+                return;
+            };
+            list.retain(|e| e.id.as_deref() != Some(id.as_str()));
+            list.push(TaskEntry {
+                id: Some(id),
+                task: AgentTask {
+                    subject,
+                    status: TaskStatus::Pending,
+                    active_form: active_form(),
+                },
+            });
+        }
+        "TaskUpdate" => {
+            let Some(id) = id_after("Updated task #", "") else {
+                return;
+            };
+            if fields["status"] == "deleted" {
+                list.retain(|e| e.id.as_deref() != Some(id.as_str()));
+            } else if let Some(e) = list
+                .iter_mut()
+                .find(|e| e.id.as_deref() == Some(id.as_str()))
+            {
+                if let Some(s) = status(&fields["status"]) {
+                    e.task.status = s;
+                }
+                if let Some(s) = owned(&fields["subject"]) {
+                    e.task.subject = s;
+                }
+                if let Some(s) = active_form() {
+                    e.task.active_form = Some(s);
+                }
+            }
+        }
+        _ => {
+            // A result of another call (a `TaskGet`'s) in a record of several must not reset
+            // the list; no `tasks` array changes nothing.
+            let (true, Some(tasks)) = (single, result["tasks"].as_array()) else {
+                return;
+            };
+            let listed: Vec<TaskEntry> = tasks
+                .iter()
+                .filter_map(|t| {
+                    let id = owned(&t["id"])?;
+                    let active_form = list
+                        .iter()
+                        .find(|k| k.id.as_deref() == Some(id.as_str()))
+                        .and_then(|k| k.task.active_form.clone());
+                    Some(TaskEntry {
+                        id: Some(id),
+                        task: AgentTask {
+                            subject: owned(&t["subject"])?,
+                            status: status(&t["status"])?,
+                            active_form,
+                        },
+                    })
+                })
+                .collect();
+            *list = listed;
+        }
+    }
+    list.truncate(TASKS_LIMIT);
+}
+
+/// The task list the CLI has after resuming the session's `transcript` (a fork starts with none;
+/// a copy's resume passes only what follows its cut, SPEC §8.1): the main
+/// agent's (not a sidechain's) `TodoWrite`, `TaskCreate`, `TaskUpdate` and `TaskList` calls
+/// whose results did not fail, applied in order by [`apply_task_result`]. Only the lines that can
+/// matter are parsed, as for [`resurrected_cron_jobs`].
+pub fn resurrected_tasks(transcript: &str) -> Vec<TaskEntry> {
+    const TOOLS: [&str; 4] = ["TodoWrite", "TaskCreate", "TaskUpdate", "TaskList"];
+    let mut calls: HashMap<String, (String, Value)> = HashMap::new();
+    let mut list = Vec::new();
+    for line in transcript.lines() {
+        let is_call = TOOLS.iter().any(|t| line.contains(&format!("\"{t}\"")));
+        let is_result =
+            line.contains("\"tool_result\"") && calls.keys().any(|id| line.contains(id.as_str()));
+        if !is_call && !is_result {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v["isSidechain"] == true {
+            continue;
+        }
+        match v["type"].as_str() {
+            Some("assistant") => {
+                for b in blocks(&v).iter().filter(|b| b["type"] == "tool_use") {
+                    if let (Some(tool), Some(id)) = (
+                        b["name"].as_str().filter(|n| TOOLS.contains(n)),
+                        b["id"].as_str(),
+                    ) {
+                        calls.insert(id.to_owned(), (tool.to_owned(), b["input"].clone()));
+                    }
+                }
+            }
+            Some("user") => {
+                let results = blocks(&v)
+                    .iter()
+                    .filter(|b| b["type"] == "tool_result")
+                    .count();
+                for b in blocks(&v).iter().filter(|b| b["type"] == "tool_result") {
+                    let call = b["tool_use_id"].as_str().and_then(|id| calls.remove(id));
+                    if let Some((tool, input)) = call.filter(|_| b["is_error"] != true) {
+                        let text = result_text(&b["content"]);
+                        let one = results == 1;
+                        apply_task_result(
+                            &mut list,
+                            &tool,
+                            &input,
+                            &text,
+                            one,
+                            &v["toolUseResult"],
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    list
 }
 
 /// The cron jobs the CLI resurrects from the session's `transcript` when it resumes it or

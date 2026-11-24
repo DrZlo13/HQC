@@ -750,6 +750,12 @@ claude_bin = "/Users/me/.local/bin/claude"
 # but an agent can hand work to any local Claude session that accepts them, past hqc (SPEC §8.1).
 # allow_subagent_messages = false
 
+# Give agents Claude Code's task list tools (TaskCreate, TaskUpdate, TaskList, TaskGet), which
+# CLI 2.1.312 gives the 5.x models only with CLAUDE_CODE_ENABLE_TODO_TOOLS=1: the worker sets it
+# for every agent it starts. The client then shows the list as "Tasks: 3 of 7 completed" above the
+# input, after the goal's row and before the main agent's (SPEC §6, §14). Default false.
+# task_tools = false
+
 # The [workspace] block is gone (since T14): workspaces are hub objects added in the client
 # (project → Workspaces → "Add a workspace"). The worker ignores the old iteration 1 block and
 # logs a warning about it on start; remove it from the file.
@@ -967,6 +973,14 @@ device's `authorized_keys`). Only sessions of the worker's owner that are not re
 - The hub passes a secret through and stores it nowhere. What the agent does with a secret it
   has is up to it: give one only to a session you see asking for a reason you know.
 - Off (the default): the button is not shown, and the worker refuses `secret.put`.
+- A secret from Vaultwarden (since 0.216): with `vault = true` beside `session_secrets` and
+  [`rbw`](https://github.com/doy/rbw) 1.15 or newer (`rbw --version`) on the worker's `PATH`,
+  signed in and unlocked, an agent that knows the entry names it in `hqc_secret` (its exact name
+  or its id); the card shows it, you confirm or change it, and the worker reads the value with
+  `rbw` itself — it never passes the hub. The worker reads what that `rbw` account can, and
+  while `rbw` is unlocked the agents' own commands on that machine can read it as well, without
+  a card. When it is locked the card says so and stays open: unlock `rbw` on that machine, or
+  type the value.
 
 **The browser in a session** (SPEC §14, since 0.148). To let an agent look through pages in
 your accounts (listings on eBay, Amazon, AliExpress) in this machine's Chrome:
@@ -981,6 +995,14 @@ The agent opens its own tab group in your profile, signed in as you; drag a tab 
 give it that tab. It can read, navigate, click and type there under the session's mode, never
 upload files. Watch the tab group: a page can carry instructions, and a click there is yours.
 Every other session runs with `--no-chrome`.
+
+**The task list** (SPEC §14, since 0.223). With `task_tools = true` at the top of `worker.toml`
+(then restart the worker) the agents of that worker get Claude Code's task tools, and the chat
+shows the list they keep as a "Tasks: 3 of 7 completed" row above the input, which opens to the
+whole list; in the block above the input the goal's row (`/goal`) stands first, then the task
+list, then the main agent's row. Off (the default): the 5.x models of Claude Code have none of
+these tools, so their sessions show no row; the older models in the CLI's list (Opus 4.7 and
+4.6, Sonnet 4.6, Haiku 4.5) have the tools without the flag and their list shows.
 
 `show_in_vscode` (default `true`): the worker starts Claude Code with
 `CLAUDE_CODE_ENTRYPOINT=claude-vscode`; otherwise the CLI writes the transcript with

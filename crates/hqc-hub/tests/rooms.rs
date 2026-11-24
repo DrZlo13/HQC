@@ -321,6 +321,8 @@ async fn a_council_posts_its_agents_answers_and_shows_each_the_others_posts() {
     for (s, i) in [(a, &ia), (b, &ib), (c, &ic)] {
         assert_eq!(i["payload"]["text"], format!("{}\n\nWhich store?", line(s)));
         assert!(i["payload"].get("peer").is_none(), "{i}");
+        // The room's text stands in the owner's place: no `human` mark (SPEC 0.219).
+        assert!(i["payload"].get("human").is_none(), "{i}");
     }
     // In the agent's feed: a message from the room with the text as typed.
     let ev = hub

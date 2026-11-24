@@ -67,7 +67,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use self::engine::{resurrected_cron_jobs, Action, Core, CronJob};
+use self::engine::{resurrected_cron_jobs, resurrected_tasks, Action, Core, CronJob};
 use self::process::{CommandSpec, ExitInfo, OsSpawner, Sig, SignalFn, Spawner};
 use super::{Adapter, AdapterEvent, AdapterFactory, EventSink};
 use crate::config::{Config, StartSpec};
@@ -141,6 +141,9 @@ const STDERR_TAIL: usize = 2048;
 /// [`PROJECT_SETTING_SOURCES`].
 pub const SETTING_SOURCES: &str = "user,local";
 pub const PROJECT_SETTING_SOURCES: &str = "user,project,local";
+
+/// The variable that gives the 5.x models the task list tools (`task_tools`, SPEC §14).
+const TASK_TOOLS_ENV: &str = "CLAUDE_CODE_ENABLE_TODO_TOOLS";
 
 /// Credentials of the worker's own environment that a session with a provider does not get:
 /// the CLI would send them to the provider's endpoint.
@@ -254,6 +257,9 @@ pub struct ClaudeOptions {
     /// does not apply: this, `auto` for a session in auto or `bypassPermissions` for one in
     /// allow_all (T38).
     pub ask_mode: String,
+    /// Claude Code's task list tools for the agent (`task_tools` in the worker config): the child
+    /// gets `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`.
+    pub task_tools: bool,
     /// Claude Code's own cross-session messaging, on top of `session.start.disallowed_tools`
     /// (`allow_native_messaging` and `allow_subagent_messages` in the worker config).
     pub native_messaging: NativeMessaging,
@@ -284,6 +290,7 @@ impl Default for ClaudeOptions {
             mcp: None,
             extra_args: vec![],
             ask_mode: "default".into(),
+            task_tools: false,
             native_messaging: NativeMessaging::Off,
             stop_grace: Duration::from_secs(10),
             interrupt_answer: Duration::from_secs(2),
@@ -370,6 +377,7 @@ impl ClaudeCodeAdapters {
                 entrypoint: cfg.show_in_vscode.then(|| "claude-vscode".to_string()),
                 ask_mode,
                 ssh: cfg.ssh.clone(),
+                task_tools: cfg.task_tools,
                 native_messaging: NativeMessaging::from_config(cfg),
                 ..ClaudeOptions::default()
             },
@@ -431,6 +439,8 @@ struct Io {
     /// The transcript's uuid and the registry its records go to (SPEC §9.3).
     runtime: Mutex<Uuid>,
     own: Arc<OwnRecords>,
+    /// What has been read of the transcript for its goal records (SPEC 0.218).
+    goals: tokio::sync::Mutex<rate::GoalTail>,
 }
 
 impl Io {
@@ -670,6 +680,17 @@ impl Drop for RemoveOnDrop {
     }
 }
 
+/// The task list of resuming transcript `text`. A copy made by a fork has the source's records up
+/// to the cut, keeping their uuids, and the CLI's list of the copy only the tasks made after the
+/// fork: with `fork` set, only the records after the cut are replayed (the whole transcript when
+/// the cut is not in it).
+fn resumed_tasks(text: &str, fork: Option<&ForkFrom>) -> Vec<engine::TaskEntry> {
+    let after_cut = fork
+        .and_then(|f| fork_point(text, &f.at_event_ids))
+        .and_then(|(at, _)| line_end(text, &at));
+    resurrected_tasks(&text[after_cut.unwrap_or(0)..])
+}
+
 /// Where a fork cuts transcript `text`: the record of the first of `at` (event ids, SPEC §3)
 /// whose content block it holds, and the main-chain user/assistant records up to it, which the
 /// fork copies; `None` when no event is in it.
@@ -731,6 +752,8 @@ impl ClaudeCodeAdapter {
     ///   is in `--mcp-config` either way); [`crate::config::Environment::process_env`];
     ///   `SSH_AUTH_SOCK` only as `ssh_agent`, the socket of the process's own ssh-agent (T44);
     ///   `HQC_SECRETS` only as `secrets`, the folder of the process's secrets (SPEC 0.147);
+    ///   `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` only with `task_tools` ([`ClaudeOptions::task_tools`],
+    ///   SPEC 0.223);
     /// - `disallowed_tools` → `--disallowedTools`, `system_prompt` →
     ///   `--append-system-prompt`. Nothing of `session.start` is silently dropped.
     pub fn command(
@@ -871,7 +894,9 @@ impl ClaudeCodeAdapter {
                     }
                 }
                 // The worker's own come last.
-                env.retain(|(k, _)| k != "CLAUDE_CODE_ENTRYPOINT" && k != "MCP_TOOL_TIMEOUT");
+                env.retain(|(k, _)| {
+                    k != "CLAUDE_CODE_ENTRYPOINT" && k != "MCP_TOOL_TIMEOUT" && k != TASK_TOOLS_ENV
+                });
                 if let Some(sock) = ssh_agent {
                     env.push((crate::ssh::SSH_AUTH_SOCK.into(), sock.display().to_string()));
                 }
@@ -883,6 +908,9 @@ impl ClaudeCodeAdapter {
                 }
                 if let Some(e) = &self.opts.entrypoint {
                     env.push(("CLAUDE_CODE_ENTRYPOINT".into(), e.clone()));
+                }
+                if self.opts.task_tools {
+                    env.push((TASK_TOOLS_ENV.into(), "1".into()));
                 }
                 env.push((
                     "MCP_TOOL_TIMEOUT".into(),
@@ -901,7 +929,7 @@ impl ClaudeCodeAdapter {
     /// writer's. The transcripts of the subagents the copied part names ([`referenced_agent_ids`])
     /// are copied into the new session's folder, where the CLI looks for them and does not bring
     /// them on `--fork-session`. It returns the cron jobs the CLI resurrects in the copy
-    /// ([`resurrected_cron_jobs`] of the copied part).
+    /// ([`resurrected_cron_jobs`] of the copied part); its task list it does not (SPEC §8.1).
     fn fork(
         &self,
         spec: &StartSpec,
@@ -943,7 +971,9 @@ impl ClaudeCodeAdapter {
             &paths::subagents_dir(dir, &spec.workdir, &uuid),
             &referenced_agent_ids(&text[..end]),
         );
-        // The CLI resurrects the cron jobs of the copy's conversation as it does on a resume.
+        // The CLI resurrects the cron jobs of the copy's conversation as it does on a resume. Not
+        // its task list: the CLI keeps that per session id (`~/.claude/tasks/<id>`), so a fork
+        // starts with none (SPEC §8.1).
         let cron = resurrected_cron_jobs(&text[..end], chrono::Utc::now().timestamp_millis());
         Ok((Launch::Fork { at }, copy, cron))
     }
@@ -1007,6 +1037,8 @@ impl ClaudeCodeAdapter {
             }
             (None, false) => (Launch::New, None, Vec::new()),
         };
+        // The task list of a resumed session; a new one and a fork start with none.
+        let mut tasks = Vec::new();
         // T44: an ssh-agent of this process's own; it stops when the process has exited
         // (the monitor drops it), or right here if the spawn fails.
         // SPEC 0.147: a session that may have secrets always gets one, with the keys kept for
@@ -1083,6 +1115,7 @@ impl ClaudeCodeAdapter {
                     fork: None,
                     compaction: None,
                     model: None,
+                    goal: None,
                 },
             );
             let _ = self.events.send(AdapterEvent::Event(ev)).await;
@@ -1103,6 +1136,7 @@ impl ClaudeCodeAdapter {
                     fork: None,
                     compaction: None,
                     model: None,
+                    goal: None,
                 },
             );
             let _ = self.events.send(AdapterEvent::Event(ev)).await;
@@ -1126,6 +1160,7 @@ impl ClaudeCodeAdapter {
                     fork: None,
                     compaction: None,
                     model: None,
+                    goal: None,
                 },
             );
             let _ = self.events.send(AdapterEvent::Event(ev)).await;
@@ -1133,12 +1168,18 @@ impl ClaudeCodeAdapter {
 
         // The CLI carries the session's cost and `modelUsage` over `--resume` from the
         // transcript's last `cost-state`; per-turn costs are counted from there (T27). It
-        // resurrects the session's cron jobs from it too (SPEC §8.1). The transcript is dropped
-        // after this.
+        // resurrects the session's cron jobs from it too (SPEC §8.1), and its last goal record
+        // is told, whatever the state: a goal set or ended while hqc did not run the session
+        // shows right, and the hub drops it when it has the record (SPEC 0.218). Its task list
+        // lives in its own files, which a resume keeps, so the replay of the transcript stands
+        // in for them (SPEC §8.1). The transcript is dropped after this.
+        let mut goal = None;
         let cost_baseline = match transcript.as_ref().filter(|_| resume) {
             Some(p) => match tokio::fs::read_to_string(p).await {
                 Ok(t) => {
                     cron_jobs = resurrected_cron_jobs(&t, chrono::Utc::now().timestamp_millis());
+                    goal = hqc_claude_jsonl::last_goal_status(&t);
+                    tasks = resumed_tasks(&t, spec.fork.as_ref());
                     hqc_claude_jsonl::last_cost_state(&t)
                 }
                 Err(_) => None,
@@ -1149,13 +1190,15 @@ impl ClaudeCodeAdapter {
             .with_policy(Arc::new(Policy::new(&spec.environment.permissions)))
             .with_cost_baseline(cost_baseline)
             .with_new_conversation(launch.new_conversation())
-            .with_resumed_cron(cron_jobs);
+            .with_resumed_cron(cron_jobs)
+            .with_resumed_tasks(tasks);
         if let Some(rules) = &spec.folder_rules {
             core = core.with_folder(rules.clone(), spec.workspace.clone());
         }
         let initialize = core.initialize();
         let resumed_live = core.resumed_live();
         let core = Arc::new(Mutex::new(core));
+        let goals = tokio::sync::Mutex::new(rate::GoalTail::start(transcript.clone()).await);
         let io = Arc::new(Io {
             session_id: self.session_id,
             stdin: tokio::sync::Mutex::new(Some(spawned.stdin)),
@@ -1165,9 +1208,14 @@ impl ClaudeCodeAdapter {
             title: Mutex::new(None),
             runtime: Mutex::new(uuid),
             own: self.opts.own_records.clone(),
+            goals,
         });
         // The first list of the process: the cron jobs it resurrected.
         let _ = io.run(resumed_live).await;
+        if let Some(g) = goal {
+            let ev = engine::goal_event(self.session_id, &g);
+            let _ = self.events.send(AdapterEvent::Event(ev)).await;
+        }
         let pid = spawned.pid;
         let live = Live::new(self.opts.own_records.clone(), uuid, pid);
         let killing = Arc::new(AtomicBool::new(false));
@@ -1294,67 +1342,31 @@ pub async fn image_blocks(files: &[InboxFile]) -> Vec<serde_json::Value> {
     out
 }
 
-#[async_trait]
-impl Adapter for ClaudeCodeAdapter {
-    async fn start(&mut self, spec: &StartSpec) -> anyhow::Result<()> {
-        self.spawn(spec, "start").await
-    }
-
-    async fn resume(&mut self, spec: &StartSpec) -> anyhow::Result<()> {
-        self.spawn(spec, "resume").await
-    }
-
-    async fn input(&mut self, input: &SessionInput) -> anyhow::Result<()> {
-        self.input_with(input, &[]).await
-    }
-
-    async fn input_with(
-        &mut self,
-        input: &SessionInput,
-        files: &[InboxFile],
-    ) -> anyhow::Result<()> {
-        let images = image_blocks(files).await;
-        let p = self.running()?;
-        let actions = lock(&p.core).input_with_images(input, images);
-        // Before the write: the mirror may read the prompt's record before its echo.
-        p.io.own.sent(p.io.runtime(), &input.text);
-        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude");
-        p.io.run(actions).await
-    }
-
-    fn can_inject(&self) -> bool {
-        self.running().is_ok_and(|p| lock(&p.core).can_inject())
-    }
-
-    fn runs_own_turn(&self) -> bool {
-        self.running().is_ok_and(|p| lock(&p.core).runs_own_turn())
-    }
-
-    async fn inject_with(
-        &mut self,
-        input: &SessionInput,
-        files: &[InboxFile],
-    ) -> anyhow::Result<bool> {
-        let images = image_blocks(files).await;
-        let p = self.running()?;
-        let Some(actions) = lock(&p.core).inject_with_images(input, images) else {
-            return Ok(false);
-        };
-        p.io.own.sent(p.io.runtime(), &input.text);
-        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude during the turn");
-        p.io.run(actions).await?;
-        Ok(true)
-    }
-
-    async fn stop(&mut self) -> anyhow::Result<()> {
+impl ClaudeCodeAdapter {
+    /// The plain interrupt of the running turn; with `cancel_unstarted` the lines hqc wrote and
+    /// the CLI has not taken are cancelled first (SPEC 0.231, the owner's Stop). The CLI's own
+    /// queue is left alone.
+    async fn interrupt_turn(&mut self, cancel_unstarted: bool) -> anyhow::Result<()> {
         let Ok(p) = self.running() else {
             return Ok(());
         };
-        let Some((req, turn, request_id)) = lock(&p.core).interrupt() else {
+        let (mut actions, interrupt) = {
+            let mut core = lock(&p.core);
+            (
+                if cancel_unstarted {
+                    core.cancel_unstarted()
+                } else {
+                    vec![]
+                },
+                core.interrupt(),
+            )
+        };
+        let Some((req, turn, request_id)) = interrupt else {
             return Ok(());
         };
-        tracing::info!(session_id = %self.session_id, "interrupting the turn");
-        p.io.run(vec![req]).await?;
+        tracing::info!(session_id = %self.session_id, cancelled = actions.len(), "interrupting the turn");
+        actions.push(req);
+        p.io.run(actions).await?;
         let (core, io, grace) = (p.core.clone(), p.io.clone(), self.opts.stop_grace);
         let answer_within = self.opts.interrupt_answer;
         let mut exited = p.exited.clone();
@@ -1404,6 +1416,128 @@ impl Adapter for ClaudeCodeAdapter {
             }
         });
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Adapter for ClaudeCodeAdapter {
+    async fn start(&mut self, spec: &StartSpec) -> anyhow::Result<()> {
+        self.spawn(spec, "start").await
+    }
+
+    async fn resume(&mut self, spec: &StartSpec) -> anyhow::Result<()> {
+        self.spawn(spec, "resume").await
+    }
+
+    async fn input(&mut self, input: &SessionInput) -> anyhow::Result<()> {
+        self.input_with(input, &[]).await
+    }
+
+    async fn input_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<()> {
+        let images = image_blocks(files).await;
+        let p = self.running()?;
+        let actions = lock(&p.core).input_with_images(input, images);
+        // Before the write: the mirror may read the prompt's record before its echo.
+        p.io.own.sent(p.io.runtime(), &input.text);
+        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude");
+        p.io.run(actions).await
+    }
+
+    async fn input_quiet_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<()> {
+        let images = image_blocks(files).await;
+        let p = self.running()?;
+        let action = lock(&p.core).input_quiet_with_images(input, images);
+        // As for any input: the mirror may read the prompt's record before its echo.
+        p.io.own.sent(p.io.runtime(), &input.text);
+        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude without a turn");
+        p.io.run(vec![action]).await
+    }
+
+    fn can_inject(&self) -> bool {
+        self.running().is_ok_and(|p| lock(&p.core).can_inject())
+    }
+
+    fn runs_own_turn(&self) -> bool {
+        self.running().is_ok_and(|p| lock(&p.core).runs_own_turn())
+    }
+
+    async fn inject_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<bool> {
+        let images = image_blocks(files).await;
+        let p = self.running()?;
+        let Some(actions) = lock(&p.core).inject_with_images(input, images) else {
+            return Ok(false);
+        };
+        p.io.own.sent(p.io.runtime(), &input.text);
+        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude during the turn");
+        p.io.run(actions).await?;
+        Ok(true)
+    }
+
+    async fn inject_now_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<bool> {
+        let images = image_blocks(files).await;
+        let p = self.running()?;
+        let Some(actions) = lock(&p.core).inject_now_with_images(input, images) else {
+            return Ok(false);
+        };
+        p.io.own.sent(p.io.runtime(), &input.text);
+        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude during the turn, priority now");
+        p.io.run(actions).await?;
+        Ok(true)
+    }
+
+    async fn withdraw_input(&mut self, event_id: Uuid) -> anyhow::Result<bool> {
+        let Ok(p) = self.running() else {
+            return Ok(false);
+        };
+        let Some((actions, request_id)) = lock(&p.core).withdraw(event_id) else {
+            return Ok(false);
+        };
+        if actions.is_empty() {
+            tracing::info!(session_id = %self.session_id, %event_id, "withdrawn: the CLI cancelled it already");
+        } else {
+            tracing::info!(session_id = %self.session_id, %event_id, "asking claude to drop a message it has not taken");
+        }
+        p.io.run(actions).await?;
+        // The CLI answers at once; one that does not is hung (as for `interrupt`).
+        let deadline = tokio::time::Instant::now() + self.opts.interrupt_answer;
+        let mut exited = p.exited.clone();
+        loop {
+            if let Some(cancelled) = lock(&p.core).withdraw_answer(&request_id) {
+                return Ok(cancelled);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                lock(&p.core).withdraw_unanswered(&request_id);
+                anyhow::bail!("claude did not answer cancel_async_message");
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(INTERRUPT_POLL) => {}
+                _ = exited.wait_for(Option::is_some) => anyhow::bail!("claude exited"),
+            }
+        }
+    }
+
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        self.interrupt_turn(false).await
+    }
+
+    async fn stop_quiet(&mut self) -> anyhow::Result<()> {
+        self.interrupt_turn(true).await
     }
 
     fn pid(&self) -> Option<u32> {
@@ -1469,6 +1603,18 @@ impl Adapter for ClaudeCodeAdapter {
         p.io.run(vec![action]).await
     }
 
+    async fn side_question(
+        &mut self,
+        event_id: Uuid,
+        question: &str,
+        history: &[hqc_proto::frame::SideExchange],
+    ) -> anyhow::Result<()> {
+        let p = self.running()?;
+        tracing::info!(session_id = %self.session_id, %event_id, "asking a side question");
+        let action = lock(&p.core).side_question(event_id, question, history);
+        p.io.run(vec![action]).await
+    }
+
     async fn stop_task(&mut self, task_id: &str) -> anyhow::Result<()> {
         let Ok(p) = self.running() else {
             return Ok(());
@@ -1507,6 +1653,13 @@ async fn wait_exit(rx: &mut watch::Receiver<Option<ExitInfo>>, d: Duration) -> b
         .is_ok_and(|r| r.is_ok())
 }
 
+/// A stream-json `result` line. Its `type` is not its first key (2.1.312), so a line is parsed,
+/// and only one holding a `"result"` string: a quote inside a text is escaped.
+fn is_result(line: &str) -> bool {
+    line.contains(r#""result""#)
+        && serde_json::from_str::<serde_json::Value>(line).is_ok_and(|v| v["type"] == "result")
+}
+
 /// Reads stdout until EOF (or shortly after the process exited), then reports the exit.
 #[allow(clippy::too_many_arguments)]
 async fn monitor(
@@ -1539,6 +1692,14 @@ async fn monitor(
                 Ok(_) => {
                     let line = String::from_utf8_lossy(&buf).into_owned();
                     buf.clear();
+                    // The goal records first: the check of the turn's last text is written
+                    // before the `result`, and goes behind that text (SPEC 0.218).
+                    if is_result(&line) {
+                        let goals = rate::read_goals(&core, &io).await;
+                        if let Err(e) = io.run(goals).await {
+                            tracing::warn!(session_id = %io.session_id, "{e:#}");
+                        }
+                    }
                     let (actions, seen, cleared) = {
                         let mut c = lock(&core);
                         let a = c.on_line(&line);

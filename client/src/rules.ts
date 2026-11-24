@@ -13,7 +13,7 @@ export function ruleError(rule: string): string | null {
   if (rule !== rule.trim()) return 'The rule has spaces around it.';
   const open = rule.indexOf('(');
   if (open < 0) {
-    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(rule)) {
+    if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(rule)) {
       return 'Not a valid rule. Use Bash(command *), a tool name like Edit, or mcp__server.';
     }
     if (EXEC_TOOLS.includes(rule)) return `${rule} as a whole would allow every command: use ${rule}(command *).`;
@@ -38,5 +38,5 @@ export function ruleCommand(rule: string): string | null {
 
 /** A tool name (`Edit`, `mcp__hqc__hqc_send`) rather than a command, in the check field. */
 export function isToolName(s: string): boolean {
-  return /^(mcp__\w+|[A-Z][A-Za-z0-9_]*)$/.test(s.trim());
+  return /^(mcp__[\w-]+|[A-Z][A-Za-z0-9_]*)$/.test(s.trim());
 }

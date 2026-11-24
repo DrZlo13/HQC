@@ -5,16 +5,16 @@
 // result. The time a message was delivered comes from the event in the other session.
 
 import { Fragment, type ComponentChildren } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import type { Api } from '../api';
 import { PROJECT_COLORS } from '../theme';
 import { ARTIFACT_KINDS, type ArtifactKind, type EventOf, type HqcEvent } from '../proto';
 import { AttachmentView } from './attachments';
-import { MessageButtons, SelectionButtons, UsageParts, type ChatActions, type RoomAgent } from './cards';
+import { MessageButtons, UsageParts, type ChatActions, type RoomAgent } from './cards';
 import { askResult, hqcTool, peerArgs, sendResult, splitReply, type Block, type ReplyFile } from './feed';
 import { IconArrowIn, IconArrowOut } from './icons';
 import { formatTime, modelName } from './labels';
-import { Markdown } from './Markdown';
+import { CopyButton, Markdown } from './Markdown';
 
 /** `ChatActions.peerMessage` over the events API: the event at `seq` of a session, kept once
  *  it is delivered (it does not change after that), asked again after 15 s until then. */
@@ -52,37 +52,45 @@ function usePeerMessage(actions: ChatActions, sessionId: string | undefined, seq
   return ev;
 }
 
+/** The message's buttons as `Relay` hands them to its body: `tail`, for the end of the text's
+ *  last line (`Markdown`'s `tail`); `meta`, for the right end of a line of its own below. Both
+ *  null for an empty text. */
+interface RelayButtons {
+  tail: ComponentChildren;
+  meta: ComponentChildren;
+}
+
+/** A message from or to another session: a head (arrow, label, the other session, the time) and
+ *  the body `children` draws, given the message's buttons. */
 function Relay({
   dir,
   label,
   peer,
   when,
-  selectable,
+  text,
   children,
 }: {
   dir: 'in' | 'out';
   label: string;
   peer: ComponentChildren;
   when?: string;
-  /** The message's text, for its Search, Copy and Quote buttons by the time in the head; an
-   *  empty text has none. */
-  selectable?: { text: string; actions: ChatActions };
-  children: ComponentChildren;
+  /** The message's text, for its Copy button; an empty text has none. */
+  text: string;
+  children: (buttons: RelayButtons) => ComponentChildren;
 }) {
-  const root = useRef<HTMLElement>(null);
-  const buttons = selectable?.text ? <SelectionButtons root={root} text={selectable.text} actions={selectable.actions} /> : null;
+  const buttons = text ? <CopyButton text={text} icon /> : null;
   return (
-    <section class={`relay relay-${dir}`} aria-label={`${label} another session`} ref={root}>
+    <section class={`relay relay-${dir}`} aria-label={`${label} another session`}>
       <div class="relay-head">
         <span class="relay-arrow">{dir === 'out' ? <IconArrowOut /> : <IconArrowIn />}</span>
         <span class="relay-label">{label}</span>
         {peer}
-        <span class="relay-when meta">
-          {buttons && <MessageButtons>{buttons}</MessageButtons>}
-          {when}
-        </span>
+        <span class="relay-when meta">{when}</span>
       </div>
-      {children}
+      {children({
+        tail: buttons && <MessageButtons tail>{buttons}</MessageButtons>,
+        meta: buttons && <MessageButtons>{buttons}</MessageButtons>,
+      })}
     </section>
   );
 }
@@ -145,10 +153,14 @@ export function PeerMessageBlock({ event, actions, queued }: { event: EventOf<'p
       label={p.mode === 'ask' ? 'Question from' : 'Message from'}
       peer={<PeerLink target={p.from_session_id} label={p.from ?? `session ${p.from_session_id.slice(-8)}`} actions={actions} />}
       when={queued && event.delivery === 'pending' ? `${formatTime(event.ts)} · queued` : formatTime(event.ts)}
-      selectable={{ text: p.text, actions }}
+      text={p.text}
     >
-      <Markdown class="text" text={p.text} />
-      <Files ids={p.artifact_ids} actions={actions} />
+      {({ tail }) => (
+        <>
+          <Markdown class="text" text={p.text} tail={tail} />
+          <Files ids={p.artifact_ids} actions={actions} />
+        </>
+      )}
     </Relay>
   );
 }
@@ -166,21 +178,21 @@ function RoomPost({
 }) {
   const p = event.payload;
   const color = PROJECT_COLORS[agent.index % PROJECT_COLORS.length].hex;
-  const root = useRef<HTMLElement>(null);
-  const buttons = <SelectionButtons root={root} text={p.text} actions={actions} />;
+  const buttons = (
+    <MessageButtons tail>
+      <CopyButton text={p.text} icon />
+    </MessageButtons>
+  );
   return (
-    <article class="msg-agent room-post" ref={root}>
+    <article class="msg-agent room-post">
       <div class="room-post-head">
         <span class="room-post-name" style={{ color }}>
           {agent.name ?? p.from ?? `session ${p.from_session_id.slice(-8)}`}
         </span>
         {agent.model && <span class="room-post-model">{modelName(agent.model)}</span>}
-        <span class="room-post-when">
-          <MessageButtons>{buttons}</MessageButtons>
-          {formatTime(event.ts)}
-        </span>
+        <span class="room-post-when">{formatTime(event.ts)}</span>
       </div>
-      <Markdown class="text" text={p.text} />
+      <Markdown class="text" text={p.text} tail={buttons} />
       <Files ids={p.artifact_ids} actions={actions} />
     </article>
   );
@@ -198,35 +210,41 @@ export function ReplyToBlock({ block, actions }: { block: Extract<Block, { kind:
       label="Reply to"
       peer={<PeerLink target={asker} label={question.payload.from} actions={actions} />}
       when={at && `delivered ${formatTime(at)}`}
-      selectable={{ text: event.payload.text, actions }}
+      text={event.payload.text}
     >
-      <Markdown class="text" text={event.payload.text} />
-      {block.sends.map((s) => (
-        <JoinedSend key={s.call.seq} asker={asker} call={s.call} result={s.result} actions={actions} />
-      ))}
-      {block.files.length > 0 && (
-        <div class="relay-files">
-          {block.files.map((f) => (
-            <AttachmentView
-              key={f.seq}
-              id={f.payload.artifact_id}
-              kind={f.payload.kind}
-              name={f.payload.name}
-              caption={f.payload.caption}
-              actions={actions}
-            />
+      {({ meta }) => (
+        <>
+          <Markdown class="text" text={event.payload.text} />
+          {block.sends.map((s) => (
+            <JoinedSend key={s.call.seq} asker={asker} call={s.call} result={s.result} actions={actions} />
           ))}
-        </div>
+          {block.files.length > 0 && (
+            <div class="relay-files">
+              {block.files.map((f) => (
+                <AttachmentView
+                  key={f.seq}
+                  id={f.payload.artifact_id}
+                  kind={f.payload.kind}
+                  name={f.payload.name}
+                  caption={f.payload.caption}
+                  actions={actions}
+                />
+              ))}
+            </div>
+          )}
+          {/* The reply's own last line is the time and the usage: the buttons stand at its end. */}
+          <div class="meta">
+            {formatTime(event.ts)}
+            {usage && (
+              <span class="usage">
+                {' · '}
+                <UsageParts usage={usage} />
+              </span>
+            )}
+            {meta}
+          </div>
+        </>
       )}
-      <div class="meta">
-        {formatTime(event.ts)}
-        {usage && (
-          <span class="usage">
-            {' · '}
-            <UsageParts usage={usage} />
-          </span>
-        )}
-      </div>
     </Relay>
   );
 }
@@ -282,11 +300,15 @@ export function SentBlock({ block, actions }: { block: Extract<Block, { kind: 's
       label="Sent to"
       peer={<PeerLink target={address} actions={actions} />}
       when={when}
-      selectable={{ text: args.text, actions }}
+      text={args.text}
     >
-      <Markdown class="text" text={args.text} />
-      {msg ? <Files ids={msg.payload.artifact_ids} actions={actions} /> : <FileNames names={args.files} />}
-      {failed && <div class="relay-error">Not sent: {result.payload.error_text || result.payload.result_preview}</div>}
+      {({ tail }) => (
+        <>
+          <Markdown class="text" text={args.text} tail={tail} />
+          {msg ? <Files ids={msg.payload.artifact_ids} actions={actions} /> : <FileNames names={args.files} />}
+          {failed && <div class="relay-error">Not sent: {result.payload.error_text || result.payload.result_preview}</div>}
+        </>
+      )}
     </Relay>
   );
 }
@@ -302,21 +324,25 @@ export function ReplyFromBlock({ block, actions }: { block: Extract<Block, { kin
       label="Reply from"
       peer={<PeerLink target={res.from || peerArgs(block.call.payload.args_preview).session} actions={actions} />}
       when={formatTime(block.result.ts)}
-      selectable={{ text: [main, ...joined].join('\n\n'), actions }}
+      text={[main, ...joined].join('\n\n')}
     >
-      <Markdown class="text" text={main} />
-      {joined.map((t, i) => (
-        <Fragment key={i}>
-          <Separator />
-          <Markdown class="text" text={t} />
-        </Fragment>
-      ))}
-      {res.files.length > 0 && (
-        <div class="relay-files">
-          {res.files.map((f, i) => (
-            <ReplyFileView key={i} file={f} actions={actions} />
+      {({ tail }) => (
+        <>
+          <Markdown class="text" text={main} tail={joined.length ? undefined : tail} />
+          {joined.map((t, i) => (
+            <Fragment key={i}>
+              <Separator />
+              <Markdown class="text" text={t} tail={i === joined.length - 1 ? tail : undefined} />
+            </Fragment>
           ))}
-        </div>
+          {res.files.length > 0 && (
+            <div class="relay-files">
+              {res.files.map((f, i) => (
+                <ReplyFileView key={i} file={f} actions={actions} />
+              ))}
+            </div>
+          )}
+        </>
       )}
     </Relay>
   );

@@ -269,6 +269,10 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
         // A subagent's end, by its call or by the `agentId` of its background launch; any other
         // task's stays a "Background task" line, its output file folding inside it.
         const p = e.payload;
+        // A goal set or cleared is told by the slash command's own output line (SPEC 0.218);
+        // the row above the input shows a set one. The feed draws neither, and a group of calls
+        // goes on past it.
+        if (p.code === 'goal' && (p.goal?.state === 'set' || p.goal?.state === 'cleared')) continue;
         if (p.code !== 'task_notification') break;
         const byCall = p.call_id === undefined ? undefined : timeline.callFor(p.call_id);
         const call =

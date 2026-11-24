@@ -30,6 +30,34 @@ pub enum AllowRule {
     BashPrefix(Vec<String>),
 }
 
+/// The server of an MCP tool `mcp__<server>__<tool>`: the part between `mcp__` and the next
+/// `__`.
+pub fn mcp_server(tool: &str) -> Option<&str> {
+    tool.strip_prefix("mcp__")?
+        .split_once("__")
+        .map(|(server, _)| server)
+        .filter(|s| !s.is_empty())
+}
+
+/// [`mcp_server`] when no other server's tool can have the same name, the server whose all
+/// tools an answer of the owner may allow. Claude Code splits a tool's name at the first `__`
+/// as [`mcp_server`] does, so `mcp__hqc___x` is the tool `_x` of `hqc` or `x` of `hqc_`, and
+/// `mcp__a__b__x` the tool `b__x` of `a` or `x` of `a__b`; a rule `mcp__hqc` or `mcp__a` made
+/// for one would cover the other. None when the tool part starts with `_` or has `__`, and, as
+/// a precaution, when the server part starts or ends with `_` (with the split at the first `__`
+/// it never ends with `_`, and a leading `_` reads only one way). A rule `mcp__hqc` made for
+/// the real `hqc` still covers `mcp__hqc___x`, as Claude Code's own rule does: [`mcp_server`]
+/// is how a rule matches.
+pub fn unambiguous_mcp_server(tool: &str) -> Option<&str> {
+    let server = mcp_server(tool)?;
+    let rest = &tool["mcp__".len() + server.len() + "__".len()..];
+    (!server.starts_with('_')
+        && !server.ends_with('_')
+        && !rest.starts_with('_')
+        && !rest.contains("__"))
+    .then_some(server)
+}
+
 fn word_char(c: char) -> bool {
     c.is_alphanumeric() || "-_./=+,@%:~".contains(c)
 }
@@ -47,7 +75,9 @@ pub fn parse_allow_rule(rule: &str) -> Result<AllowRule, String> {
     }
     let Some((name, rest)) = rule.split_once('(') else {
         if !rule.starts_with(|c: char| c.is_ascii_alphabetic())
-            || !rule.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !rule
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         {
             return Err(
                 "not a valid rule: use Bash(command *), a tool name like Edit, or mcp__server"
@@ -115,6 +145,11 @@ mod tests {
             parse_allow_rule("mcp__hqc"),
             Ok(AllowRule::Tool("mcp__hqc".into()))
         );
+        // Claude Code's server names are letters, digits, `_` and `-`.
+        assert_eq!(
+            parse_allow_rule("mcp__claude-in-chrome"),
+            Ok(AllowRule::Tool("mcp__claude-in-chrome".into()))
+        );
         assert!(parse_allow_rule("Bash(./tools/conv.py --out=x *)").is_ok());
         for bad in [
             "",
@@ -137,10 +172,29 @@ mod tests {
             "WebFetch(domain:x)",
             " Edit",
             "1Tool",
-            "mcp__srv-x",
+            "mcp__srv.x",
         ] {
             assert!(parse_allow_rule(bad).is_err(), "{bad:?}");
         }
         assert!(parse_allow_rule(&format!("Bash({} *)", "a".repeat(260))).is_err());
+    }
+
+    #[test]
+    fn a_server_is_whole_only_when_its_name_is_not_ambiguous() {
+        for (tool, server) in [
+            ("mcp__hqc__hqc_send", Some("hqc")),
+            ("mcp__claude-in-chrome__navigate", Some("claude-in-chrome")),
+            ("mcp__my_srv__get_x", Some("my_srv")),
+            ("mcp__hqc___x", None),
+            ("mcp___a__x", None),
+            ("mcp__a__b__x", None),
+            ("mcp__a__x_", Some("a")),
+            ("Bash", None),
+            ("mcp__srv", None),
+        ] {
+            assert_eq!(unambiguous_mcp_server(tool), server, "{tool}");
+        }
+        // The server of a rule is still read as Claude Code reads it.
+        assert_eq!(mcp_server("mcp__hqc___x"), Some("hqc"));
     }
 }

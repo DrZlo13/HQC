@@ -349,6 +349,7 @@ impl Mirror {
                 }),
                 compaction: None,
                 model: None,
+                goal: None,
             },
             chain: None,
             client_op_id: None,
@@ -542,13 +543,16 @@ impl Mirror {
             // the adapter reported its stream-json line (`system task_notification`), which
             // has another uuid; the record is the CLI's own, not another writer's. So is a
             // message typed during a turn: only the adapter writes that process's stdin, and
-            // the hub has the input already. Also in a transcript that process wrote before its
-            // `/clear`: what it wrote there last may be read only after the switch.
+            // the hub has the input already; and a goal record, which the adapter's meter read
+            // from the transcript and reported (SPEC 0.218). Also in a transcript that process
+            // wrote before its `/clear`: what it wrote there last may be read only after the
+            // switch.
             let reported = self.own.of_live_process(runtime, end)
                 && (map::is_task_notification(&rec)
                     || map::is_queued_prompt(&rec)
                     || map::is_local_command(&rec)
-                    || map::is_compact_summary(&rec));
+                    || map::is_compact_summary(&rec)
+                    || map::is_goal_status(&rec));
             // The claim first: it uses up the input the record stands for, which would
             // otherwise later take a message with the same text from someone else.
             if self.own.claim(runtime, uuid, typed.as_deref()) || reported {

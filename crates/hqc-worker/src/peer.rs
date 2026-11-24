@@ -80,8 +80,14 @@ fn prefix_block(messages: &[PeerPrefix]) -> String {
 }
 
 /// The input as the runtime gets it: one escaped text with the block and the header,
-/// `peer_prefix` and `peer` consumed.
+/// `peer_prefix` and `peer` consumed. Text of another session in it, in front or as its own,
+/// or a schedule's run, is no longer what the owner typed (`human`, SPEC 0.219): the hub does
+/// not mark such an input, and what it marked in error is not passed on.
 pub fn runtime_input(input: &SessionInput) -> SessionInput {
+    let human = input.human
+        && input.peer.is_none()
+        && input.peer_prefix.is_empty()
+        && input.schedule_id.is_none();
     let mut text = prefix_block(&input.peer_prefix);
     if let Some(p) = &input.peer {
         text.push_str(&header(p));
@@ -92,6 +98,7 @@ pub fn runtime_input(input: &SessionInput) -> SessionInput {
         text,
         peer_prefix: vec![],
         peer: None,
+        human,
         ..input.clone()
     }
 }
@@ -111,6 +118,7 @@ mod tests {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         }
     }
 
@@ -167,6 +175,34 @@ mod tests {
         assert_eq!(out.text.lines().count(), 2, "{}", out.text);
         assert_eq!(out.text.matches('[').count(), 1);
         assert_eq!(field(&"x".repeat(500)).len(), 200);
+    }
+
+    /// SPEC 0.219: the owner's own text stays `human`; with text of another session in front of
+    /// it or in its place, or as a run of a schedule, it does not, whatever the frame said.
+    #[test]
+    fn only_the_owners_bare_text_stays_human() {
+        let mut owner = input("run it");
+        owner.human = true;
+        assert!(runtime_input(&owner).human);
+        let mut with_prefix = owner.clone();
+        with_prefix.peer_prefix = vec![PeerPrefix {
+            from: "hqc/b".into(),
+            text: "first".into(),
+            ts: "2026-10-25T10:00:00Z".parse().unwrap(),
+            event_id: None,
+            artifact_ids: vec![],
+        }];
+        assert!(!runtime_input(&with_prefix).human);
+        let mut from_peer = owner.clone();
+        from_peer.peer = Some(PeerHeader {
+            from: "hqc/a".into(),
+            mode: PeerMode::Send,
+            request_id: None,
+        });
+        assert!(!runtime_input(&from_peer).human);
+        let mut run = owner.clone();
+        run.schedule_id = Some(Uuid::now_v7());
+        assert!(!runtime_input(&run).human);
     }
 
     #[test]

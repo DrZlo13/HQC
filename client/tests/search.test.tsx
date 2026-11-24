@@ -542,10 +542,12 @@ describe('a hit opens the session at its event', () => {
     Element.prototype.scrollIntoView = function (this: Element) {
       scrolled.push((this as HTMLElement).dataset.seq ?? '');
     } as Element['scrollIntoView'];
-    await act(async () => {
-      render(<Chat app={app} sessionId="s1" focusSeq={focusSeq} />, root);
-      await new Promise((r) => setTimeout(r, 50));
-    });
+    await act(async () => render(<Chat app={app} sessionId="s1" focusSeq={focusSeq} />, root));
+    // The hit's page loads on demand, after the newest one: a run that starts with this test
+    // pays for the first imports and takes longer still.
+    for (let i = 0; i < 300 && !root.querySelector('.feed-block.is-found'); i++) {
+      await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    }
     return scrolled;
   }
 

@@ -7,6 +7,7 @@ mod common;
 
 use common::*;
 use serde_json::{json, Value};
+use std::time::Duration;
 use uuid::Uuid;
 
 const ROOT: &str = "/w/t48";
@@ -148,6 +149,87 @@ async fn rules_crud_reach_the_worker() {
         f["payload"],
         json!({"workspace_path": ROOT, "allow_rules": []})
     );
+    hub.finish().await;
+}
+
+/// The answer `server_always` of an MCP tool's approval stores the folder rule `mcp__<server>`
+/// (the server of the request's tool) once, sends the list, and only then forwards the answer;
+/// when the rule cannot be stored the answer is refused and the request stays open.
+#[tokio::test]
+async fn server_always_stores_the_server_rule() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("w").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, ROOT).await;
+    w.see_rules = true;
+    let wid = workspace(&hub).await["id"].as_str().unwrap().to_string();
+    let rules = format!("/api/workspaces/{wid}/rules");
+    let sid = hub.create_session("mcp").await;
+    ack_start(&mut w, &sid).await;
+    let ask = |id: &str, tool: &str| {
+        agent_event(
+            &sid,
+            "approval.request",
+            json!({"request_id": id, "tool": tool, "description": "x", "options": [
+                {"id": "once", "label": "Allow once", "canonical": "once"},
+                {"id": "server_always", "label": "Always allow all srv tools in this folder", "canonical": "always"},
+                {"id": "deny", "label": "Deny", "canonical": "deny"}]}),
+        )
+    };
+
+    w.event(ask("r1", "mcp__srv__one")).await;
+    hub.wait_session(&sid, "waiting", |v| v["state"] == "waiting")
+        .await;
+    let path = format!("/api/sessions/{sid}/requests/r1");
+    let (s, v) = hub.post(&path, json!({"option_id": "server_always"})).await;
+    assert_eq!(s, 200, "{v}");
+    let f = w.expect("workspace.rules").await;
+    assert_eq!(
+        f["payload"],
+        json!({"workspace_path": ROOT, "allow_rules": ["mcp__srv"]})
+    );
+    w.reply(&f["id"], "ack", json!({})).await;
+    let f = w.expect("approval.response").await;
+    assert_eq!(f["payload"]["option_id"], "server_always");
+    w.reply(&f["id"], "ack", json!({})).await;
+
+    // The same server again: no second rule.
+    w.event(ask("r2", "mcp__srv__two")).await;
+    hub.wait_session(&sid, "waiting", |v| v["state"] == "waiting")
+        .await;
+    let path = format!("/api/sessions/{sid}/requests/r2");
+    let (s, v) = hub.post(&path, json!({"option_id": "server_always"})).await;
+    assert_eq!(s, 200, "{v}");
+    let f = w.expect("workspace.rules").await;
+    assert_eq!(f["payload"]["allow_rules"], json!(["mcp__srv"]));
+    w.reply(&f["id"], "ack", json!({})).await;
+    w.expect("approval.response").await;
+    assert_eq!(texts(&hub.get(&rules).await.1), ["mcp__srv"]);
+
+    // A rule that cannot be stored: the answer is refused, nothing goes to the worker, the
+    // request is still open.
+    w.event(ask("r3", "mcp__bad.name__one")).await;
+    hub.wait_session(&sid, "waiting", |v| v["state"] == "waiting")
+        .await;
+    let path = format!("/api/sessions/{sid}/requests/r3");
+    let (s, v) = hub.post(&path, json!({"option_id": "server_always"})).await;
+    assert_eq!((s, v["error"].as_str()), (422, Some("invalid_rule")), "{v}");
+    w.expect_silence(Duration::from_millis(300)).await;
+    assert_eq!(texts(&hub.get(&rules).await.1), ["mcp__srv"]);
+    let (s, v) = hub.post(&path, json!({"option_id": "once"})).await;
+    assert_eq!(s, 200, "{v}");
+    let f = w.expect("approval.response").await;
+    w.reply(&f["id"], "ack", json!({})).await;
+
+    // A tool name another server's tool could share (`hqc_`'s `x`): no rule for `mcp__hqc`,
+    // even from a worker that offered the answer.
+    w.event(ask("r4", "mcp__hqc___x")).await;
+    hub.wait_session(&sid, "waiting", |v| v["state"] == "waiting")
+        .await;
+    let path = format!("/api/sessions/{sid}/requests/r4");
+    let (s, v) = hub.post(&path, json!({"option_id": "server_always"})).await;
+    assert_eq!(s, 400, "{v}");
+    w.expect_silence(Duration::from_millis(300)).await;
+    assert_eq!(texts(&hub.get(&rules).await.1), ["mcp__srv"]);
     hub.finish().await;
 }
 

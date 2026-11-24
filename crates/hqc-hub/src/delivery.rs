@@ -33,12 +33,25 @@ use crate::{
 /// Move the session's delivery forward on its worker's live connection, if any.
 /// `force_start` sends `session.start` even without pending input (new session).
 pub async fn kick(app: &AppState, session_id: Uuid, force_start: bool) {
-    if let Err(e) = kick_inner(app, session_id, force_start).await {
+    if let Err(e) = kick_inner(app, session_id, force_start, false).await {
         tracing::error!(%session_id, error = %e, "delivery failed");
     }
 }
 
-async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyhow::Result<()> {
+/// [`kick`] with `force_start`, for a side question (SPEC 0.232): the `session.start` it sends
+/// carries `no_wait`, so a worker with no free slot does not queue the session.
+pub async fn kick_for_side_question(app: &AppState, session_id: Uuid) {
+    if let Err(e) = kick_inner(app, session_id, true, true).await {
+        tracing::error!(%session_id, error = %e, "delivery failed");
+    }
+}
+
+async fn kick_inner(
+    app: &AppState,
+    session_id: Uuid,
+    force_start: bool,
+    no_wait: bool,
+) -> anyhow::Result<()> {
     let Some(s) = db::session(&app.db, session_id).await? else {
         return Ok(());
     };
@@ -69,7 +82,8 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
     match sc.start {
         StartState::NotStarted => {
             if force_start || !pending.is_empty() {
-                let frame = build_start(app, &s).await?;
+                let mut frame = build_start(app, &s).await?;
+                frame.no_wait = no_wait;
                 let id = conn.send(HubFrame::SessionStart(frame));
                 sc.start = StartState::Starting;
                 replies.insert(id, Reply::Start { session_id });
@@ -80,7 +94,13 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
             // The note of a resume goes ahead of the inputs typed during the pause (SPEC §17.3).
             pending.sort_by_key(|p| p.payload.get("resume") != Some(&Value::Bool(true)));
             for p in pending {
-                if sc.inflight.contains(&p.event_id) {
+                if sc.inflight.contains(&p.event_id) || sc.withdrawing.contains(&p.event_id) {
+                    continue;
+                }
+                // Marked as handed before anything else of it is done, and not sent if it is no
+                // longer pending: the owner took it back since `pending_inputs` read it. From
+                // here a withdrawal on the hub alone is refused (SPEC 0.219).
+                if !db::mark_input_handed(&app.db, p.event_id).await? {
                     continue;
                 }
                 let mut frame = input_frame(session_id, p.event_id, &p.payload, p.chain.as_ref());
@@ -89,8 +109,14 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
                 if let Some(text) = crate::rooms::input_text(app, &s, &p).await? {
                     frame.text = text;
                     frame.peer = None;
+                    frame.human = false;
                 }
                 let prefix = crate::peers::take_prefix(app, session_id, p.event_id).await?;
+                // Messages of other sessions in front of the owner's text: the line is no longer
+                // what the owner typed.
+                if !prefix.messages.is_empty() {
+                    frame.human = false;
+                }
                 frame.peer_prefix = prefix.messages;
                 // Buffered text never runs above the mode of the session that sent it (T40).
                 if let Some(cap) = prefix
@@ -123,7 +149,13 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
 }
 
 /// The input without `peer_prefix`; `peer` for a `peer.message` (SPEC §7.1); the cap of
-/// its chain, if it has one (T39); `schedule_id` of a run of a schedule (§16, §17.2).
+/// its chain, if it has one (T39); `schedule_id` of a run of a schedule (§16, §17.2); `human`
+/// only for what the owner typed in the input route (`payload.human`, SPEC 0.219) and no
+/// message of another session or schedule run. The hub's own notes, which are `user.message`
+/// too, have no such mark; the caller takes it off an input with text of a room or of other
+/// sessions put in front of it or in its place. Two notes of hqc's own stand in front of a human
+/// input and leave its mark: a fork's first-input note, put in front by the caller, and the
+/// worker's note of the background tasks a move stopped.
 fn input_frame(
     session_id: Uuid,
     event_id: Uuid,
@@ -144,6 +176,9 @@ fn input_frame(
         }),
         _ => None,
     };
+    let human = payload.get("human") == Some(&Value::Bool(true))
+        && peer.is_none()
+        && payload.get("schedule_id").is_none();
     SessionInput {
         session_id,
         event_id,
@@ -164,6 +199,7 @@ fn input_frame(
         schedule_id: payload
             .get("schedule_id")
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        human,
     }
 }
 
@@ -225,6 +261,7 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
         },
         // The worker runs it only if its worker.toml has `browser = true` (SPEC 0.148).
         browser: s.browser,
+        no_wait: false,
     })
 }
 
@@ -277,13 +314,16 @@ pub async fn on_start_failed(
     Ok(())
 }
 
-/// `joined`: the runtime took the input into the turn already running (SPEC §17.2).
+/// `joined`: the runtime took the input into the turn already running (SPEC §17.2). `quiet`:
+/// the input waited when the owner pressed Stop, and the runtime wrote it into the agent's
+/// history without a turn (SPEC 0.231).
 pub async fn on_input_ack(
     app: &AppState,
     conn: &Arc<WorkerConn>,
     session_id: Uuid,
     event_id: Uuid,
     joined: bool,
+    quiet: bool,
 ) -> anyhow::Result<()> {
     {
         let mut st = conn.st.lock().await;
@@ -291,7 +331,7 @@ pub async fn on_input_ack(
             sc.inflight.remove(&event_id);
         }
     }
-    if let Some(row) = db::mark_delivered(&app.db, event_id, joined).await? {
+    if let Some(row) = db::mark_delivered(&app.db, event_id, joined, quiet).await? {
         notify_delivery(app, &row);
         // The send buffer it carried reached the agent (SPEC §7.1).
         crate::peers::delivered(app, event_id).await?;
@@ -307,7 +347,15 @@ pub async fn on_input_ack(
         if joined && !kept {
             tracing::warn!(%session_id, %event_id, kind = %row.kind, "a worker joined an input that cannot join a turn; its turn opens");
         }
-        if kept || db::turn_answered(&app.db, session_id, event_id).await? {
+        // A quiet input has no turn at all: an `hqc_ask` it carried gets no answer, and fails
+        // with its own words (SPEC §7.1); a room's input goes on as for one that joined (SPEC
+        // §7.1.1).
+        if quiet {
+            if let Some(s) = db::session(&app.db, session_id).await? {
+                crate::peers::quiet_stopped(app, &s, event_id).await?;
+            }
+        }
+        if quiet || kept || db::turn_answered(&app.db, session_id, event_id).await? {
             // No turn opens: a room's input acked after its turn already ended goes on from
             // that turn's end (SPEC §7.1.1).
             crate::rooms::acked(app, session_id, &row).await?;
@@ -401,12 +449,19 @@ pub fn notify_delivery(app: &AppState, row: &EventRow) {
         delivery: row.delivery.clone().unwrap_or_default(),
         delivered_at: row.delivered_at,
         joined: is_joined(row),
+        joined_after: row.payload.get("joined_after").and_then(Value::as_i64),
+        quiet: is_quiet(row),
     });
 }
 
 /// `payload.joined` of a stored input: [`db::mark_delivered`] sets it (SPEC §17.2).
 fn is_joined(row: &EventRow) -> bool {
     row.payload.get("joined") == Some(&Value::Bool(true))
+}
+
+/// `payload.quiet` of a stored input: [`db::mark_delivered`] sets it (SPEC 0.231).
+fn is_quiet(row: &EventRow) -> bool {
+    row.payload.get("quiet") == Some(&Value::Bool(true))
 }
 
 /// Client frame for a delivery change (SPEC §6).
@@ -419,6 +474,8 @@ pub fn delivery_frame(n: &Notice) -> Option<ServerFrame> {
             delivery,
             delivered_at,
             joined,
+            joined_after,
+            quiet,
         } => Some(ServerFrame::Delivery {
             session_id: *session_id,
             event_id: *event_id,
@@ -426,6 +483,8 @@ pub fn delivery_frame(n: &Notice) -> Option<ServerFrame> {
             delivery: serde_json::from_value(Value::String(delivery.clone())).ok()?,
             delivered_at: *delivered_at,
             joined: *joined,
+            joined_after: *joined_after,
+            quiet: *quiet,
         }),
         _ => None,
     }

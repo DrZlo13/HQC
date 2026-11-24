@@ -827,6 +827,16 @@ async fn answer_move(
         )
         .await;
     assert_eq!(s, 200, "{v}");
+    // `once` closes the request with the owner's mark, any other answer without it.
+    let (mark, owner): (Option<String>, String) = sqlx::query_as(
+        "SELECT p.payload ->> 'allowed_by', s.owner_id::text FROM pending_requests p
+         JOIN sessions s ON s.id = p.session_id WHERE p.kind = 'move' AND p.request_id = $1",
+    )
+    .bind(rid)
+    .fetch_one(&hub.app.db)
+    .await
+    .unwrap();
+    assert_eq!(mark, (option == "once").then_some(owner));
     carried(hub, w, sid, rid).await
 }
 
@@ -1708,7 +1718,7 @@ async fn stored_result(hub: &TestHub, sid: &str, rid: &str) -> Option<Value> {
 /// PendingRequest, §7). Started again, it finds them, and carries them out only once the
 /// sessions' worker says `hello`: a move not done yet moves its session, one done before the
 /// stop answers as a repeat with the moved result; each call gets its result. A request a
-/// cancellation closed without a frame has no `once` answer and is left alone.
+/// cancellation closed without a frame has no owner's mark and is left alone.
 #[tokio::test]
 async fn an_allowed_move_is_carried_out_after_a_hub_restart() {
     let hub = TestHub::start().await;
@@ -1741,7 +1751,7 @@ async fn an_allowed_move_is_carried_out_after_a_hub_restart() {
     )
     .await;
     // What `once` leaves when the hub stops before the move is done: the answer in the feed,
-    // the request closed without a result.
+    // the request closed without a result, marked with the owner.
     hqc_hub::events::store_hub_event(
         &hub.app,
         &session,
@@ -1753,15 +1763,18 @@ async fn an_allowed_move_is_carried_out_after_a_hub_restart() {
     )
     .await
     .unwrap();
-    sqlx::query(
-        "UPDATE pending_requests SET closed_at = now()
-         WHERE session_id = $1 AND request_id = $2",
+    let row_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM pending_requests WHERE kind = 'move' AND request_id = $1",
     )
-    .bind(session.id)
     .bind(&rid)
-    .execute(&hub.app.db)
+    .fetch_one(&hub.app.db)
     .await
     .unwrap();
+    assert!(
+        hqc_hub::db::close_allowed(&hub.app.db, row_id, session.owner_id)
+            .await
+            .unwrap()
+    );
     // A second session on the worker, whose allowed move was done before the stop: only its
     // result is not stored.
     let (done_sid, done_token, done_turn) = agent_session(&hub, &mut w, "done", "auto").await;

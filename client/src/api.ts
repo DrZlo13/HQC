@@ -61,6 +61,25 @@ import {
   type WorkspaceRule,
 } from './proto';
 
+/** The page of events `raws` (oldest first); `from` is the `maxSeq` of an empty one. */
+export function eventPageOf(raws: unknown[], from: number): EventPage {
+  const page: EventPage = { events: [], invalid: [], raw: raws, maxSeq: from, minSeq: undefined, count: 0 };
+  for (const raw of raws) {
+    page.count++;
+    const seq = (raw as { seq?: unknown })?.seq;
+    if (typeof seq === 'number') {
+      page.maxSeq = Math.max(page.maxSeq, seq);
+      page.minSeq = Math.min(page.minSeq ?? seq, seq);
+    }
+    try {
+      page.events.push(parseEvent(raw));
+    } catch (e) {
+      page.invalid.push({ raw, error: (e as Error).message });
+    }
+  }
+  return page;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -140,6 +159,8 @@ export interface ProviderFields {
 export interface EventPage {
   events: HqcEvent[];
   invalid: { raw: unknown; error: string }[];
+  /** Every event as received, valid or not: what the device keeps (`HistoryCache`). */
+  raw: unknown[];
   /** Highest `seq` in the page, valid or not. */
   maxSeq: number;
   /** Lowest `seq` in the page, valid or not. */
@@ -198,7 +219,10 @@ export interface ClaudeLoginDone {
 export interface SecretFields {
   kind: 'secret' | 'ssh_key';
   name: string;
-  value: string;
+  /** The value typed, or: */
+  value?: string;
+  /** the Vaultwarden entry the worker reads it from itself (exactly one of the two). */
+  vault?: string;
   passphrase?: string;
   remember?: boolean;
 }
@@ -556,21 +580,7 @@ export class Api {
 
   private async eventPage(id: string, q: string, from: number): Promise<EventPage> {
     const data = await this.req('GET', `/api/sessions/${enc(id)}/events?${q}`);
-    const page: EventPage = { events: [], invalid: [], maxSeq: from, minSeq: undefined, count: 0 };
-    for (const raw of parseEventPage(data).events) {
-      page.count++;
-      const seq = (raw as { seq?: unknown })?.seq;
-      if (typeof seq === 'number') {
-        page.maxSeq = Math.max(page.maxSeq, seq);
-        page.minSeq = Math.min(page.minSeq ?? seq, seq);
-      }
-      try {
-        page.events.push(parseEvent(raw));
-      } catch (e) {
-        page.invalid.push({ raw, error: (e as Error).message });
-      }
-    }
-    return page;
+    return eventPageOf(parseEventPage(data).events, from);
   }
 
   /** Returns the stored `user.message`; a repeated `client_op_id` returns the same event.
@@ -582,6 +592,11 @@ export class Api {
       client_op_id: clientOpId,
     });
     return parseInputResponse(data);
+  }
+
+  /** Asks the session's agent a side question (SPEC 0.232); returns the stored `side.question`. */
+  async sideQuestion(id: string, text: string): Promise<HqcEvent> {
+    return parseInputResponse(await this.req('POST', `/api/sessions/${enc(id)}/side_question`, { text }));
   }
 
   /** `POST /api/artifacts` (multipart `file`, `kind?`); the hub derives `kind` from the type
@@ -617,13 +632,27 @@ export class Api {
     await this.req('POST', `/api/sessions/${enc(id)}/background`, { call_id: callId });
   }
 
+  /** `POST .../inputs/{eventId}/withdraw`: takes back a message of the user's that the agent has
+   *  not taken (SPEC 0.219); `409 already_taken` when it has. */
+  async withdrawInput(id: string, eventId: string): Promise<void> {
+    await this.req('POST', `/api/sessions/${enc(id)}/inputs/${enc(eventId)}/withdraw`);
+  }
+
+  /** `POST .../inputs/{eventId}/now`: sends a message of the user's that waits into the running
+   *  turn at once (SPEC 0.219); `false` when the agent had taken it already, `409 not_now` when
+   *  it cannot be taken now. */
+  async inputNow(id: string, eventId: string): Promise<boolean> {
+    const r = (await this.req('POST', `/api/sessions/${enc(id)}/inputs/${enc(eventId)}/now`)) as { sent_now?: unknown };
+    return r?.sent_now === true;
+  }
+
   /** Ends the agent's process and starts it again, resuming the conversation (SPEC §17.3). */
   async restartSession(id: string): Promise<void> {
     await this.req('POST', `/api/sessions/${enc(id)}/restart`);
   }
 
-  /** Stops the agent once its turn ends and holds input until {@link Api.resumeSession}
-   *  (SPEC §17.3). */
+  /** Stops a running turn at once, as Stop does, and the agent's process with it (at once when
+   *  no turn runs); holds input until {@link Api.resumeSession} (SPEC §17.3). */
   async pauseSession(id: string): Promise<void> {
     await this.req('POST', `/api/sessions/${enc(id)}/pause`);
   }
@@ -729,7 +758,9 @@ export class Api {
   /** A secret or an ssh key for the session's running agent (SPEC 0.147); `requestId`
    *  answers the agent's `hqc_secret`. Only the fields go: the hub refuses others. */
   async giveSecret(sessionId: string, f: SecretFields, requestId?: string): Promise<SecretGiven> {
-    const body: Record<string, unknown> = { kind: f.kind, name: f.name, value: f.value };
+    const body: Record<string, unknown> = { kind: f.kind, name: f.name };
+    if (f.value !== undefined) body.value = f.value;
+    if (f.vault !== undefined) body.vault = f.vault;
     if (f.kind === 'ssh_key') {
       if (f.passphrase) body.passphrase = f.passphrase;
       if (f.remember) body.remember = true;

@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::Utc;
 use hqc_proto::{
     api::{OpenRequest, WaitingSession},
-    event::{ApprovalOption, CancelReason, ClarifyAction, ClarifyAnswer},
+    event::{ApprovalOption, CancelReason, ClarifyAction, ClarifyAnswer, OPTION_SERVER_ALWAYS},
     frame::{worker_approval, WorkerApprovalRequest},
 };
 use serde::Deserialize;
@@ -136,10 +136,17 @@ pub async fn answer(
                     "unknown option `{option_id}`"
                 )));
             };
+            let message = answer_message(body.message, &option)?;
+            // The folder rule is stored before the answer goes on: a rule the hub did not
+            // store would leave the owner asked again.
+            if option_id == OPTION_SERVER_ALWAYS {
+                let tool = p.payload["tool"].as_str().unwrap_or_default();
+                crate::rules::allow_server(app, user, s, tool).await?;
+            }
             let mut frame =
                 json!({"session_id": s.id, "request_id": request_id, "option_id": option_id});
             let mut event = json!({"request_id": request_id, "option_id": option_id, "by": user.id.to_string()});
-            if let Some(m) = answer_message(body.message, &option)? {
+            if let Some(m) = message {
                 frame["message"] = json!(m);
                 event["message"] = json!(m);
             }
@@ -305,13 +312,20 @@ pub async fn answer(
         }
         _ => return Err(ApiError::NotFound),
     };
-    if !db::close_request(&app.db, p.id, frame.as_ref()).await? {
+    let once = ev_payload["option_id"] == worker_approval::ONCE;
+    // An allowed move or publication is closed with the owner's mark: only a marked request is
+    // carried out after a restart.
+    let closed = if once && (p.kind == crate::moves::KIND || p.kind == crate::publish::KIND) {
+        db::close_allowed(&app.db, p.id, user.id).await?
+    } else {
+        db::close_request(&app.db, p.id, frame.as_ref()).await?
+    };
+    if !closed {
         return Err(ApiError::Conflict(
             "request_closed",
             "the request is already closed".into(),
         ));
     }
-    let once = ev_payload["option_id"] == worker_approval::ONCE;
     let row = events::store_hub_event(
         app,
         s,

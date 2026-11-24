@@ -295,6 +295,97 @@ describe('the agent’s hqc_secret card', () => {
     expect(actions.approve).not.toHaveBeenCalled();
   });
 
+  describe('with a Vaultwarden entry the agent proposes', () => {
+    const asksVault = () =>
+      ev('event.approval.request', 6, (e) => {
+        e.author = { kind: 'system' };
+        e.payload = {
+          request_id: 'toolu_1',
+          tool: 'hqc_secret',
+          description: 'The Wi-Fi password to write into the camera config',
+          options: [{ id: 'deny', label: 'Decline', canonical: 'deny' }],
+          secret: { name: 'WIFI_PASS', kind: 'secret', vault: 'home-wifi' },
+        };
+      });
+    const showVault = (over: Partial<ChatActions> = {}) => {
+      const t = new Timeline();
+      t.apply(asksVault());
+      const actions: ChatActions = {
+        timeline: t,
+        approve: vi.fn(async () => {}),
+        answer: vi.fn(async () => {}),
+        resend: vi.fn(),
+        discard: vi.fn(),
+        openArtifact: vi.fn(),
+        giveSecret: vi.fn(async () => {}),
+        ...over,
+      };
+      root = document.createElement('div');
+      document.body.appendChild(root);
+      act(() => render(<ChatItems items={t.items()} actions={actions} />, root));
+      return actions;
+    };
+    const entry = () => $<HTMLInputElement>('.secret-entry')!;
+
+    it('parses the entry, and a card without one has none', () => {
+      const e = asksVault();
+      expect(e.type === 'approval.request' && e.payload.secret).toEqual({ name: 'WIFI_PASS', kind: 'secret', vault: 'home-wifi' });
+      const plain = asked();
+      expect(plain.type === 'approval.request' && plain.payload.secret?.vault).toBeUndefined();
+    });
+
+    it('shows it filled in, and gives the entry, not a value', async () => {
+      const actions = showVault();
+      const seg = (label: string) => $$('.secret-source [role="radio"]').find((b) => b.textContent === label)!;
+      expect(seg('Vaultwarden').getAttribute('aria-checked')).toBe('true');
+      expect(seg('Type it').getAttribute('aria-checked')).toBe('false');
+      expect(entry().value).toBe('home-wifi');
+      expect($('.secret-value')).toBeNull();
+      expect($('.secret-hint')!.textContent).toContain('the value does not pass through hqc');
+      await act(async () => buttonByText('Give')!.click());
+      await flush();
+      expect(actions.giveSecret).toHaveBeenCalledWith('toolu_1', { kind: 'secret', name: 'WIFI_PASS', vault: 'home-wifi' });
+    });
+
+    it('takes no focus when it opens on the entry, so a typed Enter gives nothing unseen', async () => {
+      showVault();
+      expect(document.activeElement).not.toBe(entry());
+      expect(document.activeElement?.closest('.secret-form')).toBeNull();
+    });
+
+    it('typed mode keeps the focus on the value', async () => {
+      show();
+      await flush();
+      expect(document.activeElement).toBe($('.secret-value'));
+    });
+
+    it('lets the owner change the entry, and needs one', async () => {
+      const actions = showVault();
+      await typeInto(entry(), '  ');
+      expect(buttonByText('Give')!.disabled).toBe(true);
+      await typeInto(entry(), ' wifi-camera ');
+      await act(async () => buttonByText('Give')!.click());
+      await flush();
+      expect(actions.giveSecret).toHaveBeenCalledWith('toolu_1', { kind: 'secret', name: 'WIFI_PASS', vault: 'wifi-camera' });
+    });
+
+    it('"Type it" is the usual form, and gives a value', async () => {
+      const actions = showVault();
+      await act(async () => $$('.secret-source [role="radio"]').find((b) => b.textContent === 'Type it')!.click());
+      expect($('.secret-entry')).toBeNull();
+      await typeInto($<HTMLInputElement>('.secret-value')!, PASSWORD);
+      await act(async () => buttonByText('Give')!.click());
+      await flush();
+      expect(actions.giveSecret).toHaveBeenCalledWith('toolu_1', { kind: 'secret', name: 'WIFI_PASS', value: PASSWORD });
+    });
+  });
+
+  it('has no source switch without an entry', () => {
+    show();
+    expect($('.secret-source')).toBeNull();
+    expect($('.secret-entry')).toBeNull();
+  });
+
   it('declines through the request', async () => {
     const actions = show();
     await act(async () => buttonByText('Decline')!.click());
@@ -359,6 +450,16 @@ describe('the workspace’s ssh keys', () => {
     act(() => render(<RulesScreen app={app} projectId="p1" workspaceId="w1" />, root));
     return api;
   }
+
+  it('shows a spinner and "Loading…" until the keys are in', async () => {
+    const api = setup();
+    api.workspaceKeys.mockImplementation(() => new Promise(() => {}) as never);
+    await flush();
+    await flush();
+    const loading = $('section[aria-label="SSH keys"] > .loading')!;
+    expect(loading.textContent).toBe('Loading…');
+    expect(loading.querySelector('.spinner')).not.toBeNull();
+  });
 
   it('lists them and deletes one after a confirmation', async () => {
     const api = setup();

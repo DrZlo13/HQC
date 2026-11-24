@@ -49,7 +49,8 @@ impl<T> Envelope<T> {
 /// - to `event`: `{event_id, seq}`; `seq` of the stored event for a duplicate, absent when
 ///   the event was dropped for an unknown session;
 /// - to `session.input`: `{event_id}` of the delivered input, with `joined: true` when the
-///   runtime took it into the turn already running (SPEC §17.2);
+///   runtime took it into the turn already running (SPEC §17.2), or `quiet: true` when it
+///   wrote it into the agent's history without a turn (a Stop, SPEC §8.1);
 /// - otherwise `{}`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ack {
@@ -62,6 +63,12 @@ pub struct Ack {
     /// does). It is delivered but opens no turn. Sent only when true.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub joined: bool,
+    /// To `session.input` (since SPEC 0.231): the input waited when the owner pressed Stop, and
+    /// the runtime wrote it into the agent's history without starting a turn: the agent knows
+    /// it next time and does not act on it now. It is delivered but opens no turn. Sent only
+    /// when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quiet: bool,
 }
 
 /// `skip_serializing_if` of a count whose absence means 0.
@@ -106,6 +113,9 @@ pub mod error_code {
     pub const INVALID_FRAME: &str = "invalid_frame";
     pub const AGENT_START_FAILED: &str = "agent_start_failed";
     pub const INTERNAL: &str = "internal";
+    /// `session.input_now` of an input the runtime cannot take into the running turn now (no
+    /// turn runs, a request waits for an answer): the owner's press of Send now is refused.
+    pub const NOT_NOW: &str = "not_now";
     /// `mirror.event` of a new transcript over the worker's daily limit of imported sessions
     /// (SPEC §9.1, §20); retryable: the worker reads the transcript again later.
     pub const MIRROR_QUOTA: &str = "mirror_quota";
@@ -519,9 +529,18 @@ pub enum HubFrame {
     SessionStart(SessionStart),
     #[serde(rename = "session.input")]
     SessionInput(SessionInput),
-    /// Abort the current turn.
+    /// Abort the current turn. With `quiet` (since SPEC 0.231, sent only by the owner's own Stop
+    /// of a session or room, never by a pause) what waited at the Stop (inputs held by the
+    /// worker, and those the runtime dropped from the turn) is written into the agent's history
+    /// without a turn and acked `quiet` ([`Ack::quiet`]); a slash command among them fails with
+    /// "cancelled by Stop". Without it, and with `quiet` but no turn running, nothing is marked.
+    /// A worker older than 0.231 ignores the field and stops as before.
     #[serde(rename = "session.stop")]
-    SessionStop { session_id: Uuid },
+    SessionStop {
+        session_id: Uuid,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        quiet: bool,
+    },
     /// Move the agent's running call `call_id` (the client sends one of
     /// `session.state.foreground_calls`) to the background; the agent goes on (since SPEC
     /// 0.125). Answered with `ack`, also when no agent runs or `call_id` is empty; what the
@@ -533,10 +552,34 @@ pub enum HubFrame {
     /// `ack`, also when no agent runs; what the runtime answers is the worker's log.
     #[serde(rename = "session.stop_task")]
     SessionStopTask { session_id: Uuid, task_id: String },
+    /// A side question for the session's agent (since SPEC 0.232): the runtime answers it
+    /// outside the conversation, with no turn of its own and no trace in the agent's context
+    /// (Claude Code: `side_question`), a running turn left untouched; an agent not running is
+    /// started first. `event_id` is the hub's `side.question`, named by the worker's
+    /// `side.answer`; `history` the earlier side questions that got an answer, oldest first.
+    /// Answered with `ack`; the answer, or why there is none, comes as `side.answer`.
+    #[serde(rename = "session.side_question")]
+    SessionSideQuestion {
+        session_id: Uuid,
+        event_id: Uuid,
+        question: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        history: Vec<SideExchange>,
+    },
     /// What subagent `task_id` of the session has done, read from its transcript on demand
     /// (since SPEC 0.181): answered with `result` [`SubagentHistoryResult`].
     #[serde(rename = "session.subagent_history")]
     SessionSubagentHistory(SubagentHistory),
+    /// Send the input `event_id`, which the worker holds and the agent has not taken, into the
+    /// running turn at once (since SPEC 0.219; Claude Code: `priority: "now"`, which moves the
+    /// running call to the background): answered with `result` [`InputNowResult`], or `error`
+    /// [`error_code::NOT_NOW`].
+    #[serde(rename = "session.input_now")]
+    SessionInputNow(InputRef),
+    /// Take the input `event_id` back before the agent takes it (since SPEC 0.219): answered
+    /// with `result` [`InputWithdrawnResult`]; one withdrawn is never acked and never failed.
+    #[serde(rename = "session.withdraw")]
+    SessionWithdraw(InputRef),
     /// Terminate the agent process.
     #[serde(rename = "session.kill")]
     SessionKill { session_id: Uuid },
@@ -901,9 +944,35 @@ pub enum ResultBody {
     WorkspaceKeys(WorkspaceKeysResult),
     WorkspaceKeyDeleted(WorkspaceKeyDeleteResult),
     SubagentHistory(SubagentHistoryResult),
+    InputNow(InputNowResult),
+    InputWithdrawn(InputWithdrawnResult),
     ClaudeAuth(ClaudeAuthResult),
     ClaudeLogin(ClaudeLoginResult),
     ClaudeLoginDone(ClaudeLoginDoneResult),
+}
+
+/// `session.input_now {request_id, session_id, event_id}` and `session.withdraw {…}` (since SPEC
+/// 0.219): `event_id` is the input of an earlier `session.input`; `request_id` equals the frame
+/// `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputRef {
+    pub request_id: String,
+    pub session_id: Uuid,
+    pub event_id: Uuid,
+}
+
+/// Result of `session.input_now`: `false` when the agent had taken the input already, so
+/// nothing moved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputNowResult {
+    pub sent_now: bool,
+}
+
+/// Result of `session.withdraw`: `true` when the input is gone from the worker and the agent
+/// will never see it, `false` when the agent had taken it already.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputWithdrawnResult {
+    pub withdrawn: bool,
 }
 
 /// `claude.auth {request_id}` -> `result {claude_auth}`; `claude.login {request_id}` ->
@@ -1010,13 +1079,43 @@ pub enum SecretKind {
 /// Longest secret value or private key `secret.put` takes, in bytes.
 pub const MAX_SECRET: usize = 64 * 1024;
 
-/// `secret.put {request_id, session_id, kind, name, value?, passphrase?, remember?, comment?}`
-/// -> `result` [`SecretPutResult`] or `error` (since SPEC 0.147, §5.3). `request_id` equals the
+/// A line a person is shown: no control character, no line separator, no bidirectional
+/// control that reorders what is shown.
+pub fn shown_line(s: &str) -> bool {
+    !s.chars().any(|c| {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{2028}' | '\u{2029}' | '\u{061C}' | '\u{200E}' | '\u{200F}'
+            )
+            || ('\u{202A}'..='\u{202E}').contains(&c)
+            || ('\u{2066}'..='\u{2069}').contains(&c)
+    })
+}
+
+/// Longest Vaultwarden entry name or id `secret.put` takes, in characters.
+pub const MAX_VAULT_ENTRY: usize = 200;
+
+/// Check the `vault` of `secret.put`: one shown line of 1 to [`MAX_VAULT_ENTRY`] characters.
+pub fn check_vault_entry(entry: &str) -> Result<(), String> {
+    if (1..=MAX_VAULT_ENTRY).contains(&entry.chars().count()) && shown_line(entry) {
+        Ok(())
+    } else {
+        Err(format!(
+            "vault is one line of 1 to {MAX_VAULT_ENTRY} characters, without control characters"
+        ))
+    }
+}
+
+/// `secret.put {request_id, session_id, kind, name, value?, vault?, passphrase?, remember?,
+/// comment?}` -> `result` [`SecretPutResult`] or `error` (since SPEC 0.147, §5.3). `request_id` equals the
 /// frame `id`. The worker takes it only with `session_secrets`, for a session of its owner
 /// that is not restricted and whose agent runs now; `value` is the secret (`secret`) or the
-/// private key (`ssh_key`), absent for `ssh_keygen`; `passphrase` decrypts a key and is not
-/// kept; `remember` keeps an `ssh_key` for the session's workspace (`ssh_keygen` always
-/// does); `comment` is the comment of a made key. Never logged, never in the outbox.
+/// private key (`ssh_key`), absent for `ssh_keygen`; instead of `value`, `vault` names the
+/// Vaultwarden (Bitwarden) entry that holds it, which the worker reads itself with `rbw` (only
+/// with `vault` on in its `worker.toml`): exactly one of the two for `secret` and `ssh_key`;
+/// `passphrase` decrypts a key and is not kept; `remember` keeps an `ssh_key` for the session's
+/// workspace (`ssh_keygen` always does); `comment` is the comment of a made key. Never logged, never in the outbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretPut {
     pub request_id: String,
@@ -1025,6 +1124,8 @@ pub struct SecretPut {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<SecretValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passphrase: Option<SecretValue>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1415,6 +1516,12 @@ pub struct SessionStart {
     /// off: the CLI runs with `--no-chrome`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub browser: bool,
+    /// Since SPEC 0.232: the start is for a side question, which is worth nothing later. With no
+    /// free slot (`max_sessions`) the worker does not put the session in line for one and says
+    /// nothing in the feed; the side question that follows is answered with an error. Absent
+    /// when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_wait: bool,
 }
 
 /// A model provider (SPEC §3 Provider, since 0.144): an Anthropic-compatible endpoint with one
@@ -1649,6 +1756,16 @@ pub struct SessionInput {
     /// waits for the end of a running turn instead of joining it (§17.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule_id: Option<Uuid>,
+    /// The owner typed `text` in the hub's input route, and nothing of the hub's or of another
+    /// session was put in front of it or in its place (since SPEC 0.219): the worker writes
+    /// `origin: {kind: "human"}` for such an input only, which Claude Code's strict `isHuman()`
+    /// gates ask for. A message of another session, a room's input, a run of a schedule and the
+    /// hub's own notes are not human, nor is an input with buffered `send` messages in front.
+    /// Two notes of hqc's own do stand in front of a human input: a fork's first input carries
+    /// the note that the session is a copy, and the worker puts the note of the background
+    /// tasks a move stopped in front of the first input after it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub human: bool,
 }
 
 /// `session.input.peer` (SPEC §5.3, §7.1).
@@ -1660,6 +1777,13 @@ pub struct PeerHeader {
     /// Only for `mode: ask`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+}
+
+/// An earlier side question with its answer, in `session.side_question.history` (SPEC 0.232).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SideExchange {
+    pub question: String,
+    pub response: String,
 }
 
 /// One buffered `send` message in `session.input.peer_prefix` (SPEC §5.3, §7.1).
@@ -1700,7 +1824,10 @@ mod tests {
         "session.stop",
         "session.background",
         "session.stop_task",
+        "session.side_question",
         "session.subagent_history",
+        "session.input_now",
+        "session.withdraw",
         "session.kill",
         "session.permission_mode",
         "session.model",
@@ -1768,8 +1895,16 @@ mod tests {
             include_str!("../examples/wire/hub.session.input.scheduled.json"),
         ),
         (
+            "session.input",
+            include_str!("../examples/wire/hub.session.input.human.json"),
+        ),
+        (
             "session.stop",
             include_str!("../examples/wire/hub.session.stop.json"),
+        ),
+        (
+            "session.stop",
+            include_str!("../examples/wire/hub.session.stop.quiet.json"),
         ),
         (
             "session.background",
@@ -1780,12 +1915,28 @@ mod tests {
             include_str!("../examples/wire/hub.session.stop_task.json"),
         ),
         (
+            "session.side_question",
+            include_str!("../examples/wire/hub.session.side_question.json"),
+        ),
+        (
+            "session.side_question",
+            include_str!("../examples/wire/hub.session.side_question.history.json"),
+        ),
+        (
             "session.subagent_history",
             include_str!("../examples/wire/hub.session.subagent_history.json"),
         ),
         (
             "session.subagent_history",
             include_str!("../examples/wire/hub.session.subagent_history.before.json"),
+        ),
+        (
+            "session.input_now",
+            include_str!("../examples/wire/hub.session.input_now.json"),
+        ),
+        (
+            "session.withdraw",
+            include_str!("../examples/wire/hub.session.withdraw.json"),
         ),
         (
             "session.kill",
@@ -1895,6 +2046,10 @@ mod tests {
         (
             "secret.put",
             include_str!("../examples/wire/hub.secret.put.json"),
+        ),
+        (
+            "secret.put",
+            include_str!("../examples/wire/hub.secret.put.vault.json"),
         ),
         (
             "secret.put",
@@ -2019,6 +2174,14 @@ mod tests {
             include_str!("../examples/wire/worker.result.subagent_history.json"),
         ),
         (
+            "result",
+            include_str!("../examples/wire/worker.result.input_now.json"),
+        ),
+        (
+            "result",
+            include_str!("../examples/wire/worker.result.withdrawn.json"),
+        ),
+        (
             "worker.approval.request",
             include_str!("../examples/wire/worker.worker.approval.request.json"),
         ),
@@ -2059,6 +2222,10 @@ mod tests {
             "ack",
             include_str!("../examples/wire/worker.ack.joined.json"),
         ),
+        (
+            "ack",
+            include_str!("../examples/wire/worker.ack.quiet.json"),
+        ),
         ("error", include_str!("../examples/wire/worker.error.json")),
     ];
 
@@ -2071,7 +2238,10 @@ mod tests {
             HubFrame::SessionStop { .. } => "session.stop",
             HubFrame::SessionBackground { .. } => "session.background",
             HubFrame::SessionStopTask { .. } => "session.stop_task",
+            HubFrame::SessionSideQuestion { .. } => "session.side_question",
             HubFrame::SessionSubagentHistory(_) => "session.subagent_history",
+            HubFrame::SessionInputNow(_) => "session.input_now",
+            HubFrame::SessionWithdraw(_) => "session.withdraw",
             HubFrame::SessionKill { .. } => "session.kill",
             HubFrame::SessionPermissionMode { .. } => "session.permission_mode",
             HubFrame::SessionModel { .. } => "session.model",
@@ -2322,12 +2492,35 @@ mod tests {
         assert!(serde_json::from_value::<Envelope<WorkerFrame>>(unknown).is_err());
     }
 
+    /// SPEC 0.231: `session.stop` carries `quiet` only for the owner's own Stop; a pause's Stop
+    /// leaves it out, and a frame without it (an older hub) reads as false.
+    #[test]
+    fn a_stop_names_whether_it_is_quiet() {
+        let quiet: Envelope<HubFrame> =
+            serde_json::from_str(include_str!("../examples/wire/hub.session.stop.quiet.json"))
+                .unwrap();
+        assert!(matches!(
+            quiet.body,
+            HubFrame::SessionStop { quiet: true, .. }
+        ));
+        let plain: Envelope<HubFrame> =
+            serde_json::from_str(include_str!("../examples/wire/hub.session.stop.json")).unwrap();
+        assert!(matches!(
+            plain.body,
+            HubFrame::SessionStop { quiet: false, .. }
+        ));
+        assert!(serde_json::to_value(&plain).unwrap()["payload"]
+            .get("quiet")
+            .is_none());
+    }
+
     #[test]
     fn reply_reuses_id() {
         let req = Envelope::new(
             "f-17",
             HubFrame::SessionStop {
                 session_id: Uuid::nil(),
+                quiet: false,
             },
         );
         let ack = req.reply(WorkerFrame::Ack(Ack::default()));
@@ -2353,6 +2546,7 @@ mod tests {
                 event_id: Some(si.event_id),
                 seq: None,
                 joined: false,
+                quiet: false,
             })
         );
         // The same input taken into the turn already running (SPEC §17.2).
@@ -2365,6 +2559,20 @@ mod tests {
                 event_id: Some(si.event_id),
                 seq: None,
                 joined: true,
+                quiet: false,
+            })
+        );
+        // The same input written into the history on a Stop, without a turn (SPEC §8.1).
+        let quiet: Envelope<WorkerFrame> =
+            serde_json::from_str(include_str!("../examples/wire/worker.ack.quiet.json")).unwrap();
+        assert_eq!(quiet.id, input.id);
+        assert_eq!(
+            quiet.body,
+            WorkerFrame::Ack(Ack {
+                event_id: Some(si.event_id),
+                seq: None,
+                joined: false,
+                quiet: true,
             })
         );
 
@@ -2473,6 +2681,14 @@ mod tests {
                 include_str!("../examples/wire/hub.session.subagent_history.json"),
                 include_str!("../examples/wire/worker.result.subagent_history.json"),
             ),
+            (
+                include_str!("../examples/wire/hub.session.input_now.json"),
+                include_str!("../examples/wire/worker.result.input_now.json"),
+            ),
+            (
+                include_str!("../examples/wire/hub.session.withdraw.json"),
+                include_str!("../examples/wire/worker.result.withdrawn.json"),
+            ),
         ];
         for (req, res) in pairs {
             let req: Envelope<HubFrame> = serde_json::from_str(req).unwrap();
@@ -2492,6 +2708,8 @@ mod tests {
                 HubFrame::ClaudeAuth(r) => (&r.request_id, 11),
                 HubFrame::ClaudeLogin(r) => (&r.request_id, 12),
                 HubFrame::ClaudeLoginCode(r) => (&r.request_id, 13),
+                HubFrame::SessionInputNow(r) => (&r.request_id, 14),
+                HubFrame::SessionWithdraw(r) => (&r.request_id, 15),
                 other => panic!("not a request: {other:?}"),
             };
             assert_eq!(&req.id, request_id, "request_id is the frame id");
@@ -2514,6 +2732,8 @@ mod tests {
                 ResultBody::ClaudeAuth(_) => 11,
                 ResultBody::ClaudeLogin(_) => 12,
                 ResultBody::ClaudeLoginDone(_) => 13,
+                ResultBody::InputNow(_) => 14,
+                ResultBody::InputWithdrawn(_) => 15,
             };
             assert_eq!(got, kind);
         }

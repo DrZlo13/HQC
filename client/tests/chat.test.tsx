@@ -26,11 +26,11 @@ import {
 } from '../src/proto';
 import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, modelName, shownModel } from '../src/ui/labels';
 import { limitNotice } from '../src/ui/limits';
+import { Timeline } from '../src/timeline';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
 import { Chat, withQuote } from '../src/ui/Chat';
-import { firstSentences } from '../src/ui/selection';
 import { LiveSubagents } from '../src/ui/LiveSubagents';
-import { WEB_SEARCHES, storedWebSearch } from '../src/websearch';
+import { WEB_SEARCHES } from '../src/websearch';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
 const ev = (name: string, seq: number, patch: (e: any) => void = () => {}): HqcEvent => {
@@ -50,9 +50,7 @@ afterEach(() => {
 });
 
 /** The Copy button, not the other buttons of the strip, which have the class too. */
-const COPY = '.btn-copy:not(.btn-msg-search):not(.btn-msg-quote):not(.btn-to-quick):not(.btn-fork)';
-/** A Search button that is shown (not the hidden slot a message keeps for it). */
-const SEARCH = '.btn-msg-search:not(.btn-msg-search-idle)';
+const COPY = '.btn-copy:not(.btn-to-quick):not(.btn-fork)';
 
 const HISTORY = [
   ev('event.user.message', 1, (e) => (e.payload.artifact_ids = [])),
@@ -89,6 +87,7 @@ function setup(
     model?: string;
     paused_at?: string;
     room_mode?: RoomMode;
+    provider?: SessionInfo['provider'];
   } = {},
 ) {
   const history = opts.history ?? HISTORY;
@@ -133,6 +132,9 @@ function setup(
     background: vi.fn(async () => {}),
     // POST /api/sessions/{id}/tasks/{task_id}/stop.
     stopTask: vi.fn(async () => {}),
+    // POST /api/sessions/{id}/inputs/{event_id}/withdraw and /now.
+    withdrawInput: vi.fn(async () => {}),
+    inputNow: vi.fn(async () => true),
     // POST /api/sessions/{id}/stop, /pause, /resume, /restart.
     stop: vi.fn(async () => {}),
     pauseSession: vi.fn(async () => {}),
@@ -161,6 +163,8 @@ function setup(
     onState: () => () => {},
     subscribe: (_id: string, sub: SessionSubscriber) => {
       subscriber = sub;
+      // The hub has no backfill to send: the events a test sends are live ones.
+      sub.onSubscribed?.();
       return () => {};
     },
   } as unknown as HubSocket;
@@ -183,6 +187,7 @@ function setup(
     updated_at: '2026-10-24T19:47:00Z',
     system: false,
     held_by: opts.held_by,
+    provider: opts.provider,
     commands: opts.commands,
     spawned_by: opts.spawned_by,
     permission_mode: opts.permission_mode,
@@ -209,6 +214,14 @@ async function mount(app: AppState, phone = false) {
     render(<Chat app={app} sessionId="s1" phone={phone} />, root);
     await new Promise((r) => setTimeout(r, 50));
   });
+  // On a loaded machine the effect that opens the chat now and then runs only as the act ends,
+  // and the first page then lands after it: it is waited for here, and drawn (a page that never
+  // comes, a little longer).
+  if (!app.chat('s1').loaded)
+    for (let i = 0; i < 20; i++) {
+      await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+      if (app.chat('s1').loaded) break;
+    }
 }
 
 const $ = (sel: string) => root.querySelector<HTMLElement>(sel);
@@ -1045,13 +1058,16 @@ describe('header', () => {
     await mount(app);
     expect($('.pill')!.textContent).toBe('Running');
     expect($('.pill.state-running .pulse')).not.toBeNull();
+    // No turn for Stop to stop, and Stop spares the subagent; Pause ends it with the process.
     expect(button('Stop')).toBeUndefined();
+    expect($('.btn-pause')).not.toBeNull();
     render(null, root);
 
     ({ app } = setup('idle', { subagents: 0 }));
     await mount(app);
     expect($('.pill')!.textContent).toBe('Idle');
     expect($('.pill .pulse')).toBeNull();
+    expect($('.btn-pause')).toBeNull();
   });
 
   it('says "Pausing" while a paused session\'s turn runs, Paused once it is paused', async () => {
@@ -1070,6 +1086,7 @@ describe('header', () => {
     await mount(app);
     expect($('.pill')!.textContent).toBe('Running');
     expect($('.chat-agents')).toBeNull();
+    expect($('.btn-pause')).not.toBeNull();
     const s = app.sessions.get('s1')!;
     await act(async () =>
       app.mergeSummary([
@@ -1077,6 +1094,7 @@ describe('header', () => {
       ]),
     );
     expect($('.pill')!.textContent).toBe('Idle');
+    expect($('.btn-pause')).toBeNull();
   });
 
   it('offers "Run in background" for a running call the worker reports in the foreground', async () => {
@@ -1314,7 +1332,11 @@ describe('header', () => {
     api.eventsBefore.mockImplementation(async (id: string, before?: number, limit?: number) => page(id, 0, before, limit));
     await mount(app);
     const lead = () => [...root.querySelectorAll('.live-agents-row[role="status"]')];
-    for (let i = 0; i < 20 && lead().length < 3; i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    // The rows come from the sessions' states, Opus's command from its chat's page.
+    for (let i = 0; i < 20; i++) {
+      await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+      if (lead().length === 3 && app.chat('m1').loaded) break;
+    }
     const lines = lead();
     expect(lines.map((l) => l.textContent!.replace(/\d+m \d+s$/, 'M:SS'))).toEqual(['Opus · Command: make testM:SS', 'Sonnet · Working', 'Haiku · Input queued']);
     // The room's own row is gone: it is never at work itself. The rows stand in the block, not the feed.
@@ -1500,12 +1522,14 @@ describe('header', () => {
       await mount(app);
       const pause = $('.btn-pause')!;
       expect(pause.textContent).toBe('Pause');
+      // The pause stops a running turn at once (SPEC 0.191), not after it.
+      expect(pause.title).toBe('The agent stops now; messages wait for Resume');
       expect(pause.nextElementSibling!.classList.contains('btn-stop')).toBe(true);
       await act(async () => pause.click());
       expect(api.pauseSession).toHaveBeenCalledWith('s1');
       render(null, root);
       await mount(app, true);
-      expect($('.btn-pause')!.getAttribute('aria-label')).toBe('Pause after this turn');
+      expect($('.btn-pause')!.getAttribute('aria-label')).toBe('Pause session');
       expect($('.btn-pause')!.nextElementSibling!.classList.contains('btn-stop')).toBe(true);
       render(null, root);
     }
@@ -1612,7 +1636,7 @@ describe('header', () => {
     expect([...$('.chat-head-top')!.children].map((c) => c.getAttribute('aria-label') ?? c.classList[0])).toEqual([
       'Back to sessions',
       'chat-title',
-      'Pause after this turn',
+      'Pause session',
       'Stop the agent',
       'menu-box',
     ]);
@@ -1647,6 +1671,117 @@ describe('header', () => {
     await act(async () => model.click());
     // The menu over a backdrop on a phone.
     expect($('.ctx-menu')).not.toBeNull();
+  });
+});
+
+// The agent's task list: a row above the input while a task is not done, after the goal's (SPEC
+// §6, since 0.223), from the stored `tasks` events, which are never feed items.
+describe("the agent's task list", () => {
+  // Mounted, and subscribed: the subscription of an earlier test is not this chat's.
+  const open = async (app: AppState, phone = false) => {
+    subscriber = undefined;
+    await mount(app, phone);
+    await act(async () => {
+      for (let i = 0; i < 100 && !subscriber; i++) await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(subscriber).toBeDefined();
+  };
+  const tasks = (seq: number, items: unknown[]) => ev('event.tasks', seq, (e) => (e.payload.items = items));
+  const item = (subject: string, status: string, active_form?: string) => ({ subject, status, active_form });
+  const first = () => $('.live-agents-list > li')!;
+  const text = () => first().querySelector('.live-agents-opens')!.textContent;
+  const marks = () => [...root.querySelectorAll('.live-agents-tasks > li')].map((li) => li.textContent);
+
+  it('is the first row without a goal, "Tasks: 3 of 7 completed" and what the task in progress is doing, and opens with a mark per task', async () => {
+    const { app } = setup('running', { subagents: 1 });
+    await open(app);
+    // The main agent's row and the subagents' come after it.
+    await act(async () =>
+      subscriber!.onEvent(
+        ev('event.subagents.live', 0, (e) => {
+          delete e.seq;
+        }),
+      ),
+    );
+    expect($('.live-agents-list')!.textContent).not.toContain('Tasks:');
+    await act(async () => subscriber!.onEvent(tasks(8, [
+      item('Read the test', 'completed', 'Reading the test'),
+      item('Fix the parser', 'in_progress', 'Fixing the parser'),
+      item('Run the suite', 'pending'),
+    ])));
+    expect(text()).toBe('Tasks: 1 of 3 completed · Fixing the parser▸');
+    expect($('.live-agents-list')!.children.length).toBeGreaterThan(1);
+    // Never a feed item.
+    expect(root.textContent).not.toContain('Run the suite');
+    expect(marks()).toEqual([]);
+    await act(async () => $('.live-agents-opens')!.click());
+    expect(text()).toBe('Tasks: 1 of 3 completed · Fixing the parser▾');
+    expect(marks()).toEqual(['✓Read the test', '◐Fixing the parser', '○Run the suite']);
+    expect($('.live-agents-tasks > li')!.classList.contains('live-agents-task-completed')).toBe(true);
+    await act(async () => $('.live-agents-opens')!.click());
+    expect(marks()).toEqual([]);
+  });
+
+  it('is on a phone too, and without a task in progress says only the count', async () => {
+    const { app } = setup('idle', {});
+    await open(app, true);
+    await act(async () => subscriber!.onEvent(tasks(8, [item('Read', 'completed'), item('Fix', 'pending')])));
+    expect(text()).toBe('Tasks: 1 of 2 completed▸');
+  });
+
+  it('is gone when the list is empty or every task is done', async () => {
+    const { app } = setup('idle', {});
+    await open(app);
+    await act(async () => subscriber!.onEvent(tasks(8, [item('Read', 'completed'), item('Fix', 'pending')])));
+    expect($('.live-agents')).not.toBeNull();
+    await act(async () => subscriber!.onEvent(tasks(9, [item('Read', 'completed'), item('Fix', 'completed')])));
+    expect($('.live-agents')).toBeNull();
+    await act(async () => subscriber!.onEvent(tasks(10, [item('Again', 'pending')])));
+    expect($('.live-agents')).not.toBeNull();
+    await act(async () => subscriber!.onEvent(tasks(11, [])));
+    expect($('.live-agents')).toBeNull();
+  });
+
+  it('does not open by itself: a list that comes after the row went away is closed', async () => {
+    const { app } = setup('idle', { subagents: 1 });
+    await open(app);
+    await act(async () => subscriber!.onEvent(tasks(8, [item('Read', 'pending')])));
+    await act(async () => $('.live-agents-opens')!.click());
+    expect($('.live-agents-tasks')).not.toBeNull();
+    await act(async () => subscriber!.onEvent(tasks(9, [item('Read', 'completed')])));
+    // The component stays mounted (a subagent works), so it keeps its state.
+    expect(root.textContent).not.toContain('Tasks:');
+    await act(async () => subscriber!.onEvent(tasks(10, [item('Again', 'pending')])));
+    expect($('.live-agents-tasks')).toBeNull();
+    expect(text()).toBe('Tasks: 0 of 1 completed▸');
+  });
+
+  it('is the list of the latest event, also when the hub sends it after newer history, and an older one never replaces a newer', async () => {
+    const { app } = setup('idle', {});
+    await open(app);
+    // The newest page ends at seq 7; the hub sends the list stored before it.
+    await act(async () => subscriber!.onEvent(tasks(3, [item('Old list', 'pending')])));
+    expect(text()).toBe('Tasks: 0 of 1 completed▸');
+    await act(async () => subscriber!.onEvent(tasks(9, [item('New list', 'pending'), item('More', 'pending')])));
+    expect(text()).toBe('Tasks: 0 of 2 completed▸');
+    await act(async () => subscriber!.onEvent(tasks(4, [item('Older still', 'pending')])));
+    expect(text()).toBe('Tasks: 0 of 2 completed▸');
+    // No gap, no feed item: the history is as it was.
+    expect(root.textContent).not.toContain('Old list');
+    expect(root.querySelectorAll('.feed-block[data-seq="3"]')).toHaveLength(0);
+  });
+
+  it('is kept apart from the stored history: no event, `lastSeq` not moved back, one it did not know of moves it on', () => {
+    const t = new Timeline();
+    t.apply(ev('event.agent.message', 7));
+    t.apply(tasks(3, [item('Old list', 'pending')]));
+    expect(t.tasks.map((x) => x.subject)).toEqual(['Old list']);
+    expect(t.events().map((e) => e.seq)).toEqual([7]);
+    expect(t.lastSeq).toBe(7);
+    t.apply(tasks(8, []));
+    expect(t.tasks).toEqual([]);
+    expect(t.events().map((e) => e.seq)).toEqual([7]);
+    expect(t.lastSeq).toBe(8);
   });
 });
 
@@ -1973,7 +2108,7 @@ describe('live subagents', () => {
     }
   });
 
-  it("a subagent's history has the message buttons too: Quote and Copy take the selection there, Search shows", async () => {
+  it("a subagent's history is quotable too: the Quote button over the composer takes the selection there", async () => {
     const { api, app } = setup('running', { subagents: 1, background_tasks: 1, history: HISTORY.slice(0, 3) });
     await mount(app);
     api.subagentHistory.mockImplementation(async () => ({
@@ -1993,6 +2128,7 @@ describe('live subagents', () => {
     const text = document.createTreeWalker(panel, NodeFilter.SHOW_TEXT);
     let node: Node | null = text.nextNode();
     while (node && node.textContent !== 'The import keeps the power nets.') node = text.nextNode();
+    expect($('.composer-row .btn-quote')).toBeNull();
     await act(async () => {
       const r = document.createRange();
       r.setStart(node!, 4);
@@ -2001,8 +2137,9 @@ describe('live subagents', () => {
       document.getSelection()!.addRange(r);
       document.dispatchEvent(new Event('selectionchange'));
     });
-    expect(panel.querySelector(`.msg-agent ${SEARCH}`)).not.toBeNull();
-    await act(async () => void panel.querySelector<HTMLButtonElement>('.msg-agent .btn-msg-quote')!.click());
+    // The message's own strip is Copy alone.
+    expect([...panel.querySelectorAll('.msg-agent .msg-buttons button')].map((b) => b.getAttribute('aria-label'))).toEqual(['Copy']);
+    await act(async () => void $('.composer-row .btn-quote')!.click());
     expect(($('.composer-input') as HTMLTextAreaElement).value).toBe('> import\n\n');
   });
 
@@ -2052,6 +2189,19 @@ describe('live subagents', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('shows a spinner and "Loading…" in an open history until its first page is in', async () => {
+    const { api, app } = setup('running', { subagents: 1 });
+    await mount(app);
+    api.subagentHistory.mockImplementation(() => new Promise(() => {}) as never);
+    const subagent = { task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000 };
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [subagent]))));
+    await act(async () => root.querySelector<HTMLButtonElement>('button.live-agents-opens')!.click());
+    const loading = $('.live-agents-history > .live-agents-note > .loading')!;
+    expect(loading.getAttribute('role')).toBe('status');
+    expect(loading.textContent).toBe('Loading…');
+    expect(loading.querySelector('.spinner')).not.toBeNull();
   });
 
   it('keeps the newest 200 steps of an open history and says earlier ones are not shown', async () => {
@@ -2401,6 +2551,103 @@ describe('composer', () => {
   });
 });
 
+// SPEC 0.232: `/btw <question>` and `/side <question>` in the composer ask the agent a side
+// question; the question and its answer stand as one muted block in the feed.
+describe('side questions', () => {
+  const area = () => $('.composer-input') as HTMLTextAreaElement;
+  const type = (text: string) =>
+    act(() => {
+      area().value = text;
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  const send = () => act(async () => void ($('.composer button[aria-label="Send"]') as HTMLButtonElement).click());
+  async function chat() {
+    const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+    // POST .../side_question: the stored question.
+    Object.assign(api, {
+      input: vi.fn(() => new Promise(() => {})),
+      sideQuestion: vi.fn(async () => ev('event.side.question', 8)),
+      uploadArtifact: vi.fn(async () => ({ id: 'a1' })),
+    });
+    await mount(app);
+    return api as unknown as { input: ReturnType<typeof vi.fn>; sideQuestion: ReturnType<typeof vi.fn> };
+  }
+
+  it('sends /btw and /side with a question to the side question endpoint, not as a message', async () => {
+    const api = await chat();
+    await type('/btw Which file are you editing right now?');
+    await send();
+    await type('/side  and the other one?\n');
+    await send();
+    expect(api.sideQuestion.mock.calls).toEqual([
+      ['s1', 'Which file are you editing right now?'],
+      ['s1', 'and the other one?'],
+    ]);
+    expect(api.input).not.toHaveBeenCalled();
+    expect(area().value).toBe('');
+  });
+
+  it('sends any other text as a message: /btw alone, a longer command name, a question with a file', async () => {
+    const api = await chat();
+    await type('/btw');
+    await send();
+    await type('/btwx why');
+    await send();
+    await type('/btw with a file');
+    const input = $('input[type=file]') as HTMLInputElement;
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'note.txt', { type: 'text/plain' })], configurable: true });
+    await act(async () => void input.dispatchEvent(new Event('change', { bubbles: true })));
+    await vi.waitFor(() => expect($('.composer-files .attachment-chip')?.textContent).toContain('note.txt'));
+    await send();
+    expect(api.sideQuestion).not.toHaveBeenCalled();
+    expect(api.input.mock.calls.map((c) => c[1])).toEqual(['/btw', '/btwx why', '/btw with a file']);
+  });
+
+  it('shows the stored question with "Answering…", then the answer as Markdown in the same block', async () => {
+    await chat();
+    await type('/btw Which file are you editing right now?');
+    await send();
+    const block = () => root.querySelectorAll('.side-question');
+    expect(block().length).toBe(1);
+    expect($('.side-ask')!.textContent).toBe('Which file are you editing right now?');
+    expect($('.side-wait')!.textContent).toBe('Answering…');
+    await act(async () => subscriber!.onEvent(ev('event.side.answer', 9)));
+    expect(block().length).toBe(1);
+    expect($('.side-wait')).toBeNull();
+    expect($('.side-answer code')!.textContent).toBe('src/main.rs');
+    // The answer has no block of its own: the history's blocks and the question's.
+    const before = HISTORY.slice(0, 3).filter((e) => e.type !== 'usage').length;
+    expect(root.querySelectorAll('.feed-block').length).toBe(before + 1);
+  });
+
+  it('shows why there is no answer, and is no message of the agent', async () => {
+    await chat();
+    await type('/btw Which file are you editing right now?');
+    await send();
+    await act(async () => subscriber!.onEvent(ev('event.side.answer.error', 9)));
+    expect($('.side-error')!.textContent).toBe('Side question cancelled');
+    expect($('.side-wait')).toBeNull();
+    // Neither the user's bubble nor the agent's text.
+    expect($('.side-question')!.closest('.feed-block')!.querySelector('.msg, .bubble')).toBeNull();
+  });
+
+  it('says a refusal of the hub in the notice and keeps the feed as it was', async () => {
+    const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+    Object.assign(api, {
+      sideQuestion: vi.fn(async () => {
+        throw new ApiError(409, 'the session is paused: resume it to ask its agent', 'paused');
+      }),
+    });
+    await mount(app);
+    await type('/btw anything');
+    await send();
+    await vi.waitFor(() => expect($('.notice')!.textContent).toBe('Not asked: the session is paused: resume it to ask its agent'));
+    expect($('.side-question')).toBeNull();
+    // The question is back in the field, with its prefix, to send again or edit.
+    expect(area().value).toBe('/btw anything');
+  });
+});
+
 describe('quick messages', () => {
   const MESSAGES = ['Continue', 'Run the tests\nand fix what fails'];
   const area = () => $('.composer-input') as HTMLTextAreaElement;
@@ -2540,7 +2787,7 @@ describe('quick messages', () => {
     it('a message of the user has the button right before fork; the agent\'s has none', async () => {
       await chatWith([], []);
       const acts = [...$('.msg-user .msg-buttons')!.querySelectorAll('button')];
-      expect(acts.map((b) => b.getAttribute('aria-label'))).toEqual(['Search in Google', 'Copy', 'Quote', 'Add to quick messages', 'Fork from here']);
+      expect(acts.map((b) => b.getAttribute('aria-label'))).toEqual(['Copy', 'Add to quick messages', 'Fork from here']);
       expect($('.msg-agent .btn-to-quick')).toBeNull();
     });
 
@@ -2632,6 +2879,204 @@ describe('cost (T27)', () => {
     const { app } = setup('idle', { commands: [] });
     await mount(app);
     expect($('.chat-cost')!.textContent).toBe('$0.07 this session');
+  });
+});
+
+describe('the session\'s tokens in the header (SPEC 0.229)', () => {
+  const history = [
+    ev('event.user.message', 1, (e) => (e.payload.artifact_ids = [])),
+    ev('event.agent.message', 2),
+    ev('event.usage', 3, (e) => (e.payload = { input_tokens: 2, output_tokens: 5, cost_usd: 2.25, session_cost_usd: 2.25, session_tokens: 3_412_345 })),
+  ];
+
+  it('names the tokens after the cost, with the exact number on hover', async () => {
+    const { app } = setup('idle', { history, commands: [] });
+    await mount(app);
+    expect($('.chat-cost')!.textContent).toBe('$2.25 · 3.4M tokens this session');
+    expect($('.chat-cost')!.getAttribute('title')).toBe(
+      '3,412,345 tokens: input, output, cache reads and cache writes, as Claude Code counts them for the cost',
+    );
+  });
+
+  it('shows the tokens of a session on a provider, which has no cost shown', async () => {
+    const { app } = setup('idle', { history, commands: [], provider: { id: 'pr1', label: 'Qwen' } });
+    await mount(app);
+    expect($('.chat-cost')!.textContent).toBe('3.4M tokens this session');
+  });
+
+  it('shows the cost alone, with no title, while no usage has the tokens', async () => {
+    const { app } = setup('idle', { commands: [] });
+    await mount(app);
+    expect($('.chat-cost')!.textContent).toBe('$0.07 this session');
+    expect($('.chat-cost')!.getAttribute('title')).toBeNull();
+  });
+
+  it("sums a room's agents' tokens, an agent on a provider's too", async () => {
+    const { app, api } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]] });
+    const room = app.sessions.get('s1')!;
+    const member = (id: string, more: Partial<SessionInfo> = {}) =>
+      app.sessions.set(id, { ...room, id, title: id, slug: id, room_mode: undefined, room_id: 's1', ...more });
+    member('m1');
+    member('m2', { provider: { id: 'pr1', label: 'Qwen' } });
+    const spent = (id: string, usd: number, tokens: number) => [
+      ev('event.usage', 1, (e) => ((e.session_id = id), (e.payload = { input_tokens: 1, output_tokens: 1, cost_usd: usd, session_tokens: tokens }))),
+    ];
+    const own = (id: string) => (id === 'm1' ? spent(id, 0.3, 1_000_000) : id === 'm2' ? spent(id, 5, 500_000) : id === 's1' ? [HISTORY[0]] : []);
+    const page = (id: string) => {
+      const events = own(id);
+      return { events, invalid: [], maxSeq: events.length ? 1 : 0, minSeq: events.length ? 1 : 0, count: events.length };
+    };
+    api.events.mockImplementation(async (id: string) => page(id));
+    api.eventsBefore.mockImplementation(async (id: string) => page(id));
+    await mount(app);
+    for (let i = 0; i < 20 && !$('.chat-cost'); i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    expect($('.chat-cost')!.textContent).toBe('$0.30 · 1.5M tokens this room');
+  });
+
+  it('says the same in the phone\'s "More" menu', async () => {
+    const { app } = setup('idle', { history, commands: [] });
+    await mount(app, true);
+    await act(async () => $('.btn-more')!.click());
+    expect($('.menu-info')!.textContent).toContain('$2.25 · 3.4M tokens this session');
+  });
+});
+
+describe('context and cache in the header (SPEC 0.222)', () => {
+  const T0 = Date.parse('2026-11-20T12:00:00Z');
+  const usage = (seq: number, at: number, fields: Record<string, number>) =>
+    ev('event.usage', seq, (e) => {
+      e.ts = new Date(at).toISOString();
+      e.payload = { input_tokens: 2, output_tokens: 5, cost_usd: 0.05, ...fields };
+    });
+  const FULL = { context_tokens: 329_000, context_limit: 967_000, cache_ttl_s: 3600 };
+  // The cache ends an hour after the turn: 40 minutes from "now", 20 minutes after it.
+  const history = (extra: HqcEvent[] = []) => [HISTORY[0], HISTORY[1], usage(3, T0 - 20 * 60_000, FULL), ...extra];
+  const withClock = async (run: () => Promise<void>) => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(T0);
+    try {
+      await run();
+    } finally {
+      vi.useRealTimers();
+    }
+  };
+  // Mounted, with the effects that start the clock run (preact runs them after a frame).
+  const show = async (app: AppState, phone = false) => {
+    await mount(app, phone);
+    await act(async () => void (await new Promise((r) => setTimeout(r, 150))));
+  };
+  const row = () => $('.chat-meta .chat-context');
+  const endsAt = new Date(T0 + 40 * 60_000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+
+  it('shows how full the context is and the cache countdown after the cost; the countdown ticks and ends', async () => {
+    await withClock(async () => {
+      const { app } = setup('idle', { history: history(), commands: [] });
+      await show(app);
+      expect([...$('.chat-meta')!.children].map((c) => c.classList[0]).slice(-3)).toEqual(['chat-cost', 'sep', 'chat-context']);
+      expect(row()!.textContent).toBe('34% context · cache 40:00');
+      expect(row()!.getAttribute('title')).toBe(
+        `329k of 967k tokens before auto-compaction\nClaude's cache of this session ends at ${endsAt}; a message after that reads the whole context again`,
+      );
+      await act(async () => void vi.advanceTimersByTime(1000));
+      expect(row()!.textContent).toBe('34% context · cache 39:59');
+      // A tick re-renders the item and not the chat: the chat does not read the timeline again.
+      const reads = vi.spyOn(Timeline.prototype, 'contextUse');
+      await act(async () => void vi.advanceTimersByTime(3000));
+      expect(row()!.textContent).toBe('34% context · cache 39:56');
+      expect(reads).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      reads.mockRestore();
+      vi.setSystemTime(T0 + 40 * 60_000);
+      await act(async () => void vi.advanceTimersByTime(1000));
+      expect(row()!.textContent).toBe('34% context · cache expired');
+      // Nothing ticks any more once it is over.
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
+  it('shows neither part while VS Code holds the session: its turns are not reported', async () => {
+    await withClock(async () => {
+      const { app } = setup('locked_vscode', { history: history(), commands: [], held_by: { entrypoint: 'claude-vscode', status: 'idle' } });
+      await show(app);
+      expect(row()).toBeNull();
+    });
+  });
+
+  it('leaves out a cache end the date cannot hold, and keeps the chat', async () => {
+    await withClock(async () => {
+      const bad = [HISTORY[0], usage(3, T0 - 60_000, { ...FULL, cache_ttl_s: 1e300 })];
+      const { app } = setup('idle', { history: bad, commands: [] });
+      await show(app);
+      expect(row()!.textContent).toBe('34% context');
+      expect(row()!.getAttribute('title')).toBe('329k of 967k tokens before auto-compaction');
+    });
+  });
+
+  it('keeps the earlier context through a later usage that gives none (the total only)', async () => {
+    await withClock(async () => {
+      const totalOnly = ev('event.usage', 4, (e) => {
+        e.ts = new Date(T0 - 5 * 60_000).toISOString();
+        e.payload = { input_tokens: 0, output_tokens: 0, session_cost_usd: 1.5 };
+      });
+      const { app } = setup('idle', { history: history([totalOnly]), commands: [] });
+      await show(app);
+      expect(row()!.textContent).toBe('34% context · cache 40:00');
+    });
+  });
+
+  it('is more than 100 % over the limit, and has no cache part without a TTL', async () => {
+    await withClock(async () => {
+      const h = [HISTORY[0], usage(3, T0 - 60_000, { context_tokens: 1_000_000, context_limit: 967_000 })];
+      const { app } = setup('idle', { history: h, commands: [] });
+      await show(app);
+      expect(row()!.textContent).toBe('103% context');
+      expect(row()!.getAttribute('title')).toBe('1M of 967k tokens before auto-compaction');
+    });
+  });
+
+  it('hides the cache part while the agent works: the context stays', async () => {
+    await withClock(async () => {
+      const { app } = setup('running', { history: history(), commands: [] });
+      await show(app);
+      expect(row()!.textContent).toBe('34% context');
+      expect(row()!.getAttribute('title')).toBe('329k of 967k tokens before auto-compaction');
+    });
+  });
+
+  it('on a phone is short and stands next to the state', async () => {
+    await withClock(async () => {
+      const { app } = setup('idle', { history: history(), commands: [] });
+      await show(app, true);
+      expect(row()!.textContent).toBe('34% · cache 40:00');
+      expect([...$('.chat-meta')!.children].map((c) => c.classList[0])).toEqual(['state', 'chat-context']);
+    });
+  });
+
+  it('has no cache part for a session on a provider, and nothing in a room', async () => {
+    await withClock(async () => {
+      const { app } = setup('idle', { history: history(), commands: [], provider: { id: 'pr1', label: 'Proxy' } });
+      await show(app);
+      expect(row()!.textContent).toBe('34% context');
+    });
+    await withClock(async () => {
+      const { app } = setup('idle', { history: history(), commands: [], room_mode: 'council' });
+      await show(app);
+      expect(row()).toBeNull();
+    });
+  });
+
+  it('forgets the context after /clear, and takes the last usage that gives one', async () => {
+    await withClock(async () => {
+      const cleared = ev('event.system', 4, (e) => (e.payload = { text: 'Conversation cleared', code: 'conversation_cleared' }));
+      const { app } = setup('idle', { history: history([cleared]), commands: [] });
+      await show(app);
+      expect(row()).toBeNull();
+      const later = usage(5, T0 - 10 * 60_000, { context_tokens: 500_000, context_limit: 1_000_000 });
+      const { app: next } = setup('idle', { history: history([cleared, later]), commands: [] });
+      render(null, root);
+      await show(next);
+      expect(row()!.textContent).toBe('50% context');
+    });
   });
 });
 
@@ -2742,39 +3187,32 @@ describe('slash command completion (T27)', () => {
 });
 
 describe('an image in the feed', () => {
-  it('a chat opened again shows it by the link it had; after the hub reconnects, by a new one', async () => {
-    const pic = ev('event.attachment', 4, (e) => (e.payload.artifact_id = 'img'));
-    const { api, app } = setup('idle', { history: [...HISTORY.slice(0, 3), pic] });
-    const artifactLink = vi.fn(async (id: string) => ({
-      url: `/artifacts/${id}?sig=${artifactLink.mock.calls.length}`,
-      expires_at: new Date(Date.now() + 600_000).toISOString(),
-    }));
-    const artifact = vi.fn(async (id: string) => ({ id, kind: 'image', name: 'screen.png', mime: 'image/png', size: 10, sha256: '', created_at: '' }));
-    Object.assign(api, { artifact, artifactLink });
-    let opened!: (s: 'open') => void;
-    Object.assign(app.socket, {
-      onState: (fn: (s: 'open') => void) => {
-        opened = fn;
-        return () => {};
-      },
-    });
-    const src = () => $('.attachment-image img')?.getAttribute('src');
-    /** The chat, its history and its image link in. */
-    const open = async () => {
+  it('is shown from the bytes downloaded, as a data: URL', async () => {
+    // happy-dom's observer never fires; a browser without one loads the image at once.
+    vi.stubGlobal('IntersectionObserver', undefined);
+    const png = new Uint8Array([137, 80, 78, 71]);
+    // happy-dom's FileReader reads only its own Blob.
+    const fetchImpl = vi.fn(async () =>
+      Object.assign(new Response(png), { ok: true, blob: async () => new Blob([png], { type: 'image/png' }) }),
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const pic = ev('event.attachment', 4, (e) => (e.payload.artifact_id = 'img'));
+      const { api, app } = setup('idle', { history: [...HISTORY.slice(0, 3), pic] });
+      const artifactLink = vi.fn(async (id: string) => ({
+        url: `/artifacts/${id}?sig=1`,
+        expires_at: new Date(Date.now() + 600_000).toISOString(),
+      }));
+      const artifact = vi.fn(async (id: string) => ({ id, kind: 'image', name: 'screen.png', mime: 'image/png', size: 10, sha256: '', created_at: '' }));
+      Object.assign(api, { artifact, artifactLink });
+      const src = () => $('.attachment-image img')?.getAttribute('src');
       await mount(app);
       for (let i = 0; i < 20 && !src(); i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
-    };
-    await open();
-    expect(src()).toBe('/artifacts/img?sig=1');
-    render(null, root);
-    await open();
-    expect(src()).toBe('/artifacts/img?sig=1');
-    expect(artifactLink).toHaveBeenCalledTimes(1);
-    render(null, root);
-    // A restarted hub may sign with another key: the links are asked for again.
-    opened('open');
-    await open();
-    expect(src()).toBe('/artifacts/img?sig=2');
+      expect(src()).toBe('data:image/png;base64,iVBORw==');
+      expect(fetchImpl).toHaveBeenCalledWith('/artifacts/img?sig=1');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -2893,14 +3331,20 @@ describe('history', () => {
       await new Promise((r) => setTimeout(r, 20));
     });
   const blocks = () => [...root.querySelectorAll<HTMLElement>('.feed-block')];
+  /** Past the pages the feed asks for one after another. */
+  const until = async (cond: () => boolean) => {
+    for (let i = 0; i < 300 && !cond(); i++) await settle();
+  };
 
   it('a feed shorter than its window renders the older history until the window is full', async () => {
     blockHigh();
     const { app } = setup('idle', { history: long });
     await mount(app);
-    await settle();
-    expect(blocks().length).toBe(120);
-    expect(blocks()[0].textContent).toContain('answer 331');
+    await until(() => blocks().length >= 160);
+    // The newest page holds 100 blocks, which do not fill the window: an older page of 200 loads
+    // behind them and 60 more blocks render, past what fills it.
+    expect(blocks().length).toBe(160);
+    expect(blocks()[0].textContent).toContain('answer 291');
   });
 
   it('"Requests only" there and back renders the last blocks of the log, not all of it', async () => {
@@ -2909,13 +3353,14 @@ describe('history', () => {
     const { app } = setup('idle', { history: log });
     app.sessions.get('s1')!.system = true;
     await mount(app);
-    await settle();
-    expect(blocks().length).toBe(120);
+    await until(() => blocks().length >= 160);
+    expect(blocks().length).toBe(160);
     await act(async () => button('Requests only')!.click());
-    await settle();
+    await until(() => !!root.querySelector('.perm'));
     expect(root.querySelector('.perm')).not.toBeNull();
+    expect(root.querySelector('.feed-note')).toBeNull();
     await act(async () => button('Requests only')!.click());
-    await settle();
+    await until(() => blocks().length === 120);
     expect(blocks().length).toBe(120);
     expect(blocks().at(-1)!.textContent).toContain('answer 450');
   });
@@ -3292,8 +3737,9 @@ describe('an input that came while the agent writes (SPEC §6)', () => {
   async function writing(history: HqcEvent[]) {
     const { app, api } = setup('running', { history });
     let push!: (e: HqcEvent) => void;
-    (app.socket as unknown as { subscribe: unknown }).subscribe = (_id: string, s: { onEvent: (e: HqcEvent) => void }) => {
+    (app.socket as unknown as { subscribe: unknown }).subscribe = (_id: string, s: SessionSubscriber) => {
       push = s.onEvent;
+      s.onSubscribed?.();
       return () => {};
     };
     await mount(app);
@@ -3306,6 +3752,16 @@ describe('an input that came while the agent writes (SPEC §6)', () => {
   it('stands under the text being written', async () => {
     const { push } = await writing([first]);
     await act(async () => push(meanwhile(2)));
+    expect(under(block('written meanwhile'))).toBe(true);
+  });
+
+  it('a side question asked meanwhile stands under the text being written, as a message does (SPEC 0.232)', async () => {
+    const { push } = await writing([first]);
+    await act(async () =>
+      push(ev('event.side.question', 2, (e) => (e.payload = { text: 'a side question meanwhile', during_text: true }))),
+    );
+    expect(under(block('a side question meanwhile'))).toBe(true);
+    await act(async () => push(meanwhile(3)));
     expect(under(block('written meanwhile'))).toBe(true);
   });
 
@@ -3376,6 +3832,7 @@ describe('switching chats', () => {
     const subs: SessionSubscriber[] = [];
     const subscribe = vi.fn((_id: string, sub: SessionSubscriber) => {
       subs.push(sub);
+      sub.onSubscribed?.();
       return () => {};
     });
     Object.assign(app.socket, { subscribe });
@@ -3387,6 +3844,36 @@ describe('switching chats', () => {
     await mount(app);
     await act(async () => void (await new Promise((r) => setTimeout(r, 20))));
   }
+
+  it('a chat whose first page is not in yet shows a spinner and "Loading…" in the empty feed', async () => {
+    const { api, app } = setup('idle');
+    api.eventsBefore.mockReturnValue(new Promise(() => {}) as never);
+    await mountChat(app);
+    const loading = root.querySelector('.feed > .feed-note > .loading.loading-center')!;
+    expect(loading.getAttribute('role')).toBe('status');
+    expect(loading.textContent).toBe('Loading…');
+    expect(loading.querySelector('.spinner')!.getAttribute('aria-hidden')).toBe('true');
+    expect(root.querySelectorAll('.feed > .feed-note')).toHaveLength(1);
+  });
+
+  it('"Requests only" of a log without requests says "No requests" in the middle of the feed, and not while its first page loads', async () => {
+    const { api, app } = setup('idle', { history: [HISTORY[0], HISTORY[1]] });
+    app.sessions.get('s1')!.system = true;
+    const page = api.eventsBefore.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    api.eventsBefore.mockImplementation(async (...a: Parameters<typeof page>) => {
+      await held;
+      return page(...a);
+    });
+    await mountChat(app);
+    await act(async () => button('Requests only')!.click());
+    const notes = () => [...root.querySelectorAll('.feed > .feed-note')].map((n) => n.textContent);
+    expect(notes()).toEqual(['Loading…']);
+    await act(async () => release());
+    await act(async () => void (await new Promise((r) => setTimeout(r, 20))));
+    expect(notes()).toEqual(['No requests']);
+  });
 
   it('a chat opened before shows its feed in the first frame, resubscribes after its last seq, then fetches its newest page again', async () => {
     const { api, app } = setup('idle');
@@ -3465,6 +3952,7 @@ describe('switching chats', () => {
     const first = chat.open();
     chat.close();
     const second = chat.open();
+    await vi.waitFor(() => expect(page).toBeTypeOf('function'));
     page();
     await Promise.all([first, second]);
     expect(subscribe).toHaveBeenCalledTimes(1);
@@ -3486,6 +3974,8 @@ describe('fork', () => {
   it('forks before a message of the user: the new session opens with the message as its draft', async () => {
     const { app, api } = setup('idle');
     await mount(app);
+    // The history comes after the device's copy of it was asked for: a few steps more.
+    await act(async () => void (await new Promise((r) => setTimeout(r, 20))));
     const forks = [...root.querySelectorAll<HTMLButtonElement>('.btn-fork')];
     // The user's two messages; none on the agent's.
     expect(forks).toHaveLength(2);
@@ -3607,58 +4097,74 @@ describe('Quote', () => {
       }
       document.dispatchEvent(new Event('selectionchange'));
     });
-  const agentButton = (cls: string) => $(`.msg-agent .msg-buttons ${cls}`) as HTMLButtonElement | null;
-  const withAgentText = (text: string) => [HISTORY[0], ev('event.agent.message', 2, (e) => (e.payload.text = text)), ...HISTORY.slice(2, 3)];
+  /** The Quote button over the composer's field. */
+  const quoteButton = () => $('.composer-row .btn-quote') as HTMLButtonElement | null;
   const clipboard = () => {
     const writeText = vi.fn(async (_: string) => {});
     vi.stubGlobal('isSecureContext', true);
     Object.defineProperty(window.navigator, 'clipboard', { value: { writeText }, configurable: true });
     return writeText;
   };
-
-  it('quotes the text selected in a message from its Quote icon, after the draft, and focuses the field', async () => {
-    const { app } = setup('idle');
-    await mount(app);
-    await act(() => {
-      area().value = 'Look at this';
+  const typeDraft = (text: string) =>
+    act(() => {
+      area().value = text;
       area().dispatchEvent(new Event('input', { bubbles: true }));
     });
+
+  it('quotes the text selected in the feed from the Quote button over the composer, after the draft, and focuses the field', async () => {
+    const { app } = setup('idle');
+    await mount(app);
+    await typeDraft('Look at this');
+    // Nothing selected: no button.
+    expect(quoteButton()).toBeNull();
     await select(textNode('All tests pass.'), 4, 9);
-    expect(agentButton('.btn-msg-quote')!.getAttribute('aria-label')).toBe('Quote');
-    await act(() => agentButton('.btn-msg-quote')!.click());
+    expect(quoteButton()!.textContent).toBe('Quote');
+    // Over the field, taking no room: in the row, not a flex item.
+    expect(quoteButton()!.parentElement!.classList.contains('composer-row')).toBe(true);
+    await act(() => quoteButton()!.click());
     expect(area().value).toBe('Look at this\n\n> tests\n\n');
     expect(document.activeElement).toBe(area());
     expect(area().selectionStart).toBe(area().value.length);
     expect(document.getSelection()!.rangeCount).toBe(0);
+    expect(quoteButton(), 'gone with the selection').toBeNull();
     // The next quote goes after the first.
     await select(textNode('All tests pass.'));
-    await act(() => agentButton('.btn-msg-quote')!.click());
+    await act(() => quoteButton()!.click());
     expect(area().value).toBe('Look at this\n\n> tests\n\n> All tests pass.\n\n');
-    // The pill and the menu of the old Quote are gone.
-    expect($('.btn-quote')).toBeNull();
-    expect($('.ctx-menu')).toBeNull();
   });
 
-  it('quotes the first two sentences of a message with nothing selected, with «…» when more follows', async () => {
-    const { app } = setup('idle', { history: withAgentText('First one. Second one! Third one? Fourth.') });
+  it('shows the button for a selection in the user\'s message too, and none for one that starts outside the feed', async () => {
+    const { app } = setup('idle');
     await mount(app);
-    await act(() => agentButton('.btn-msg-quote')!.click());
-    expect(area().value).toBe('> First one. Second one! …\n\n');
-    await act(() => {
-      area().value = '';
-      area().dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    // A selection in another message does not count: this one is quoted by its text.
     await select(textNode('Run the tests', '.msg-user'), 0, 3);
-    await act(() => agentButton('.btn-msg-quote')!.click());
-    expect(area().value).toBe('> First one. Second one! …\n\n');
+    expect(quoteButton()).not.toBeNull();
+    // The header is no feed's.
+    await select(textNode('test 12', '.chat-head'));
+    expect(quoteButton()).toBeNull();
+    // A selection that starts in the header and ends in the feed starts outside it.
+    await selectRange([textNode('test 12', '.chat-head'), 0], [textNode('All tests pass.'), 5]);
+    expect(quoteButton()).toBeNull();
+    // The text of the composer's own field.
+    await typeDraft('draft text');
+    area().setSelectionRange(0, 5);
+    await act(() => void document.dispatchEvent(new Event('selectionchange')));
+    expect(quoteButton()).toBeNull();
   });
 
-  it('quotes a short message whole, without «…»', async () => {
-    const { app } = setup('idle', { history: withAgentText('One. Two.') });
+  it('is not shown where there is no input to quote into', async () => {
+    const locked = setup('locked_vscode');
+    await mount(locked.app);
+    await select(textNode('All tests pass.'));
+    expect(quoteButton()).toBeNull();
+    expect($('.composer-row')).toBeNull();
+  });
+
+  it('is not shown on an archived session, where there is nothing to quote into', async () => {
+    const { app } = setup('idle');
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true, state: 'archived' });
     await mount(app);
-    await act(() => agentButton('.btn-msg-quote')!.click());
-    expect(area().value).toBe('> One. Two.\n\n');
+    await select(textNode('All tests pass.'));
+    expect(quoteButton()).toBeNull();
   });
 
   const twoParagraphs = () => [HISTORY[0], ev('event.agent.message', 2, (e) => (e.payload.text = 'Para one.\n\nPara two.')), HISTORY[3]];
@@ -3672,19 +4178,38 @@ describe('Quote', () => {
       document.dispatchEvent(new Event('selectionchange'));
     });
 
-  it('a triple click, which ends at the start of the next block, is the message\'s paragraph only', async () => {
-    const writeText = clipboard();
+  it('a triple click, which ends at the start of the next block, quotes the message\'s paragraph only', async () => {
     const { app } = setup('idle', { history: twoParagraphs() });
     await mount(app);
     const next = $('.msg-agent')!.closest('.feed-block')!.nextElementSibling!;
     await selectRange([textNode('Para two.'), 0], [next, 0]);
-    expect(document.querySelectorAll(SEARCH).length).toBe(1);
-    expect(agentButton(SEARCH)).not.toBeNull();
-    await act(async () => agentButton(COPY)!.click());
-    expect(writeText).toHaveBeenLastCalledWith('Para two.');
-    await act(() => agentButton('.btn-msg-quote')!.click());
+    await act(() => quoteButton()!.click());
     expect(area().value).toBe('> Para two.\n\n');
-    vi.unstubAllGlobals();
+  });
+
+  it('a range from the last paragraph of the last message into the rows after the feed quotes that paragraph only', async () => {
+    const { app } = setup('running', {
+      subagents: 1,
+      background_tasks: 1,
+      history: [HISTORY[0], ev('event.agent.message', 2, (e) => (e.payload.text = 'Para one.\n\nPara two.'))],
+    });
+    await mount(app);
+    await act(async () =>
+      subscriber!.onEvent(
+        ev('event.subagents.live', 0, (e) => {
+          delete e.seq;
+          e.payload.agents = [{ task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000, call_id: 'toolu_ag' }];
+        }),
+      ),
+    );
+    // The row of the subagent stands after the feed, outside it; a triple click on the last
+    // paragraph ends in what follows the feed.
+    const row = textNode('Fix the nets', '.live-agents');
+    expect(row.parentElement!.closest('.feed')).toBeNull();
+    await selectRange([textNode('Para two.'), 0], [row, 3]);
+    expect(quoteButton()).not.toBeNull();
+    await act(() => quoteButton()!.click());
+    expect(area().value).toBe('> Para two.\n\n');
   });
 
   it('quotes the paragraphs of a clipped range on separate lines, and a range that enters a message leaves its time out', async () => {
@@ -3692,23 +4217,13 @@ describe('Quote', () => {
     await mount(app);
     const next = $('.msg-agent')!.closest('.feed-block')!.nextElementSibling!;
     await selectRange([textNode('Para one.'), 0], [next, 0]);
-    await act(() => agentButton('.btn-msg-quote')!.click());
+    await act(() => quoteButton()!.click());
     expect(area().value).toBe('> Para one.\n>\n> Para two.\n\n');
-    await act(() => {
-      area().value = '';
-      area().dispatchEvent(new Event('input', { bubbles: true }));
-    });
+    await typeDraft('');
     // From outside any message into the middle of one: its time (and buttons) are not text.
-    await selectRange([$('.feed')!, 0], [textNode('Para two.'), 4]);
-    await act(() => agentButton('.btn-msg-quote')!.click());
+    await selectRange([$('.msg-agent')!.closest('.feed-block')!, 0], [textNode('Para two.'), 4]);
+    await act(() => quoteButton()!.click());
     expect(area().value).toBe('> Para one.\n>\n> Para\n\n');
-  });
-
-  it('puts a space before «…» after a sentence mark, and skips the blank line between paragraphs', () => {
-    expect(firstSentences('Done.\n\nThe tests pass. Next.')).toBe('Done.\n\nThe tests pass. …');
-    expect(firstSentences('Done.\n\nThe tests pass.')).toBe('Done.\n\nThe tests pass.');
-    expect(firstSentences('One. Two. Three')).toBe('One. Two. …');
-    expect(firstSentences('one\n\ntwo\n\nthree')).toBe('one\n\ntwo…');
   });
 
   it('lets go of a held press the browser took over (pointercancel), and reads the selection anew at a press', async () => {
@@ -3716,36 +4231,55 @@ describe('Quote', () => {
     vi.stubGlobal('matchMedia', (media: string) => ({ matches: true, media, addEventListener: () => {}, removeEventListener: () => {} }));
     try {
       const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
-      // The chat never hears of the selection changing: only a press tells it.
+      // The chat hears of the selection once, as it changed; what the test does after is not heard.
+      let heard: (() => void) | undefined;
       const add = document.addEventListener.bind(document);
       vi.spyOn(document, 'addEventListener').mockImplementation(((type: string, ...rest: [any]) => {
-        if (type !== 'selectionchange') add(type, ...rest);
+        if (type === 'selectionchange') heard = rest[0];
+        else add(type, ...rest);
       }) as typeof document.addEventListener);
       await mount(app, true);
-      const row = $('.msg-agent .msg-buttons')!;
-      const press = () =>
-        act(() => void row.querySelector('.btn-msg-quote, .btn-copy')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
-      // A selection the chat has not heard of: the press reads it.
+      await act(() => {
+        const r = document.createRange();
+        r.setStart(textNode('All tests pass.'), 0);
+        r.setEnd(textNode('All tests pass.'), 3);
+        document.getSelection()!.removeAllRanges();
+        document.getSelection()!.addRange(r);
+        heard!();
+      });
+      expect(quoteButton(), 'heard').not.toBeNull();
+      // The selection moves, unheard: the press reads it anew.
       await act(() => {
         const r = document.createRange();
         r.selectNodeContents(textNode('All tests pass.'));
         document.getSelection()!.removeAllRanges();
         document.getSelection()!.addRange(r);
       });
-      expect(row.querySelector(SEARCH)).toBeNull();
-      await press();
-      expect(row.querySelector(SEARCH)).not.toBeNull();
+      await act(() => void quoteButton()!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
       await select(null);
-      expect(row.querySelector(SEARCH), 'held').not.toBeNull();
+      expect(quoteButton(), 'held').not.toBeNull();
+      // The press read the whole line, not the part the chat had heard of.
+      await act(() => quoteButton()!.click());
+      expect(area().value).toBe('> All tests pass.\n\n');
+      // A press the browser took over has no click: it is let go.
+      await act(() => {
+        const r = document.createRange();
+        r.selectNodeContents(textNode('All tests pass.'));
+        document.getSelection()!.addRange(r);
+        heard!();
+      });
+      await act(() => void quoteButton()!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
+      await select(null);
+      expect(quoteButton(), 'held').not.toBeNull();
       await act(() => void document.dispatchEvent(new Event('pointercancel')));
-      expect(row.querySelector(SEARCH), 'let go').toBeNull();
+      expect(quoteButton(), 'let go').toBeNull();
     } finally {
       vi.restoreAllMocks();
       vi.unstubAllGlobals();
     }
   });
 
-  it('quotes the earlier selection when iOS has cleared it before the press', async () => {
+  it('quotes the earlier selection when iOS has cleared it before the click, and keeps the button until it', async () => {
     vi.stubGlobal('matchMedia', (media: string) => ({ matches: true, media, addEventListener: () => {}, removeEventListener: () => {} }));
     // The chat hears of the selection once, as it changed; what the test does after is not heard.
     let heard: (() => void) | undefined;
@@ -3757,7 +4291,6 @@ describe('Quote', () => {
     try {
       const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
       await mount(app, true);
-      const row = $('.msg-agent .msg-buttons')!;
       await act(() => {
         const r = document.createRange();
         r.setStart(textNode('All tests pass.'), 4);
@@ -3766,12 +4299,16 @@ describe('Quote', () => {
         document.getSelection()!.addRange(r);
         heard!();
       });
-      expect(row.querySelector(SEARCH)).not.toBeNull();
+      expect(quoteButton()).not.toBeNull();
       // Cleared before the pointerdown reached the page.
       document.getSelection()!.removeAllRanges();
-      await act(() => void row.querySelector('.btn-msg-quote')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
-      expect(row.querySelector(SEARCH), 'still offered').not.toBeNull();
-      await act(() => row.querySelector<HTMLButtonElement>('.btn-msg-quote')!.click());
+      let cancelled = false;
+      await act(() => {
+        cancelled = !quoteButton()!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+      });
+      expect(cancelled, 'a press keeps the field\'s focus').toBe(true);
+      expect(quoteButton(), 'still offered').not.toBeNull();
+      await act(() => quoteButton()!.click());
       expect(area().value).toBe('> tests\n\n');
     } finally {
       vi.restoreAllMocks();
@@ -3779,133 +4316,315 @@ describe('Quote', () => {
     }
   });
 
-  it('a range across two messages is the first one\'s part, held by the first only', async () => {
+  it('quotes a cleared selection of two paragraphs of one message on lines of their own', async () => {
+    // The chat hears of the selection once, as it changed; what the test does after is not heard.
+    let heard: (() => void) | undefined;
+    const add = document.addEventListener.bind(document);
+    vi.spyOn(document, 'addEventListener').mockImplementation(((type: string, ...rest: [any]) => {
+      if (type === 'selectionchange') heard = rest[0];
+      else add(type, ...rest);
+    }) as typeof document.addEventListener);
+    try {
+      const { app } = setup('idle', { history: twoParagraphs() });
+      await mount(app);
+      await act(() => {
+        const r = document.createRange();
+        r.setStart(textNode('Para one.'), 0);
+        r.setEnd(textNode('Para two.'), 9);
+        document.getSelection()!.removeAllRanges();
+        document.getSelection()!.addRange(r);
+        heard!();
+      });
+      // Cleared before the press (iOS): the copy of the range is quoted, by lines.
+      document.getSelection()!.removeAllRanges();
+      await act(() => void quoteButton()!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
+      await act(() => quoteButton()!.click());
+      expect(area().value).toBe('> Para one.\n>\n> Para two.\n\n');
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('keeps a pressed button while the selection goes (a phone\'s tap), and a press elsewhere lets it go', async () => {
+    const { app } = setup('idle');
+    await mount(app);
+    await select(textNode('All tests pass.'), 4, 9);
+    await act(() => void quoteButton()!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
+    await select(null);
+    expect(quoteButton(), 'held though the selection is gone').not.toBeNull();
+    await act(() => void $('.chat-head')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })));
+    expect(quoteButton()).toBeNull();
+  });
+
+  it('a range across two messages is quoted whole, from the first message\'s part to the second\'s', async () => {
     const { app } = setup('idle', { history: twoParagraphs() });
     await mount(app);
     await selectRange([textNode('Para two.'), 5], [[...root.querySelectorAll('.msg-user .msg-text')].pop()!.firstChild!, 3]);
-    expect(document.querySelectorAll(SEARCH).length).toBe(1);
-    expect(agentButton(SEARCH)).not.toBeNull();
-    await act(() => agentButton('.btn-msg-quote')!.click());
-    expect(area().value).toBe('> two.\n\n');
+    await act(() => quoteButton()!.click());
+    expect(area().value).toBe('> two.\n>\n> Run\n\n');
   });
 
-  it('has Search, Copy and Quote on the user\'s message, the Search slot hidden until it holds a selection', async () => {
+  it('has Copy on the message, with the buttons of the user\'s own message, and no Search or Quote', async () => {
     const { app } = setup('idle');
     await mount(app);
-    const labels = () =>
-      [...$('.msg-user .msg-buttons')!.querySelectorAll('button')].map((b) => b.getAttribute('aria-label')).filter((l) => l !== 'Fork from here');
-    const slot = () => $('.msg-user .btn-msg-search') as HTMLElement;
-    expect(labels()).toEqual(['Search in Google', 'Copy', 'Quote']);
-    expect(slot().classList.contains('btn-msg-search-idle')).toBe(true);
+    const labels = (sel: string) => [...$(sel)!.querySelectorAll('button')].map((b) => b.getAttribute('aria-label'));
+    expect(labels('.msg-user .msg-buttons')).toEqual(['Copy', 'Fork from here']);
+    expect(labels('.msg-agent .msg-buttons')).toEqual(['Copy']);
     await select(textNode('Run the tests', '.msg-user'));
-    expect(labels()).toEqual(['Search in Google', 'Copy', 'Quote']);
-    expect(slot().classList.contains('btn-msg-search-idle')).toBe(false);
+    expect(labels('.msg-user .msg-buttons')).toEqual(['Copy', 'Fork from here']);
   });
 
-  it('copies the text selected in the message, else the whole message', async () => {
+  it('copies the whole message, whatever is selected in it', async () => {
     const writeText = clipboard();
     const { app } = setup('idle');
     await mount(app);
-    await act(async () => agentButton(COPY)!.click());
+    const copy = () => $(`.msg-agent .msg-buttons ${COPY}`) as HTMLButtonElement;
+    await act(async () => copy().click());
     expect(writeText).toHaveBeenLastCalledWith('All tests pass.');
     await select(textNode('All tests pass.'), 4, 9);
-    await act(async () => agentButton(COPY)!.click());
-    expect(writeText).toHaveBeenLastCalledWith('tests');
+    await act(async () => copy().click());
+    expect(writeText).toHaveBeenLastCalledWith('All tests pass.');
     vi.unstubAllGlobals();
   });
 
-  it('offers Search only in the message that holds the selection, with the search picked in Settings', async () => {
+  /** A right click on `node` (its parent for a text): the press first, then `between` (what a Mac
+   *  does: it selects the word under the pointer), then `contextmenu`; whether the browser keeps
+   *  its own menu (not prevented). All in one act: no `selectionchange` is heard in between. */
+  const rightClick = async (node: Node, x = 300, y = 200, between?: () => void) => {
+    let kept = true;
+    await act(() => {
+      const el = node instanceof Element ? node : node.parentElement!;
+      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 2 }));
+      between?.();
+      kept = el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+    });
+    return kept;
+  };
+  const selecting = (node: Node, from: number, to: number) => () => {
+    const r = document.createRange();
+    r.setStart(node, from);
+    r.setEnd(node, to);
+    document.getSelection()!.removeAllRanges();
+    document.getSelection()!.addRange(r);
+  };
+  /** `document.caretRangeFromPoint` that finds the click in `node`, at its third character. */
+  const pointAt = (node: Node) => () => {
+    const r = document.createRange();
+    r.setStart(node, 2);
+    r.collapse(true);
+    return r;
+  };
+
+  it('opens the client\'s menu on a right click of selected text: Quote, Copy, Search in …', async () => {
+    const writeText = clipboard();
     const open = vi.fn();
     vi.stubGlobal('open', open);
     const { app } = setup('idle');
     await mount(app);
-    expect($(SEARCH)).toBeNull();
     await select(textNode('All tests pass.'), 4, 9);
-    expect(document.querySelectorAll(SEARCH).length).toBe(1);
-    expect(agentButton(SEARCH)!.title).toBe('Search in Google');
-    await act(async () => agentButton(SEARCH)!.click());
+    expect(await rightClick(textNode('All tests pass.')), 'the browser\'s menu is prevented').toBe(false);
+    expect([...document.querySelectorAll('.ctx-menu .menu-item')].map((b) => b.textContent!.trim())).toEqual(['Quote', 'Copy', 'Search in Google']);
+    // Quote puts the text selected into the input and clears the selection.
+    await act(async () => $('.ctx-menu .menu-quote')!.click());
+    expect(area().value).toBe('> tests\n\n');
+    expect(document.getSelection()!.rangeCount).toBe(0);
+    expect($('.ctx-menu')).toBeNull();
+    // Copy: the same text.
+    await select(textNode('All tests pass.'), 4, 9);
+    await rightClick(textNode('All tests pass.'));
+    await act(async () => $('.ctx-menu .btn-copy-selection')!.click());
+    expect(writeText).toHaveBeenLastCalledWith('tests');
+    // Search: in a new tab, without the opener.
+    await select(textNode('All tests pass.'), 4, 9);
+    await rightClick(textNode('All tests pass.'));
+    await act(async () => $('.ctx-menu .menu-web-search')!.click());
     expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=tests', '_blank', 'noopener');
-    // Text outside the feed is not a message's.
-    await select(textNode('test 12', '.chat-head'));
-    expect($(SEARCH)).toBeNull();
+    // The search picked in Settings.
     await act(() => app.setWebSearch(WEB_SEARCHES.find((w) => w.id === 'yandex')!));
-    await select(textNode('All tests pass.'));
-    expect(agentButton(SEARCH)!.title).toBe('Search in Yandex');
-    await act(async () => agentButton(SEARCH)!.click());
-    expect(open).toHaveBeenLastCalledWith('https://yandex.ru/search/?text=All%20tests%20pass.', '_blank', 'noopener');
-    // Kept on this device: a reload starts with it.
-    expect(storedWebSearch().id).toBe('yandex');
+    await select(textNode('All tests pass.'), 4, 9);
+    await rightClick(textNode('All tests pass.'));
+    expect($('.ctx-menu .menu-web-search')!.textContent!.trim()).toBe('Search in Yandex');
     act(() => app.setWebSearch(WEB_SEARCHES[0]));
     vi.unstubAllGlobals();
   });
 
-  it('keeps a press that clears the selection (a phone\'s tap): the buttons stay and act on the text held', async () => {
+  it('takes any selection in the feed on a right click, and has no Quote where there is no input', async () => {
+    const call = ev('event.tool.call', 3, (e) => ((e.payload.call_id = 'toolu_x'), (e.payload.args_preview = '{"command":"ls /"}')));
+    const result = ev('event.tool.result', 4, (e) => ((e.payload.call_id = 'toolu_x'), (e.payload.error = false), (e.payload.result_preview = 'bin etc')));
+    const { app } = setup('locked_vscode', { history: [HISTORY[0], HISTORY[1], call, result] });
+    await mount(app);
+    // A tool call's line is no message: the selection as the browser has it.
+    const peek = document.createTreeWalker($('.feed .tool-group .tool-peek')!, NodeFilter.SHOW_TEXT).nextNode()!;
+    expect(peek.parentElement!.closest('.msg-agent, .msg-user, .relay, .thinking')).toBeNull();
+    await select(peek, 0, 1);
+    expect(await rightClick(peek)).toBe(false);
+    expect([...document.querySelectorAll('.ctx-menu .menu-item')].map((b) => b.textContent!.trim())).toEqual(['Copy', 'Search in Google']);
+  });
+
+  it('leaves the browser\'s menu to a right click with no selection, in the composer, in the header and on a phone', async () => {
+    const { app } = setup('idle');
+    await mount(app);
+    expect(await rightClick(textNode('All tests pass.')), 'no selection').toBe(true);
+    expect($('.ctx-menu')).toBeNull();
+    // A selection in the composer's text is the field's own.
+    await act(() => {
+      area().value = 'draft text';
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+      area().setSelectionRange(0, 5);
+    });
+    await select(textNode('All tests pass.'), 4, 9);
+    expect(await rightClick(area()), 'in the composer').toBe(true);
+    // Text outside the feed (the header) is not a message's.
+    await select(textNode('test 12', '.chat-head'));
+    expect(await rightClick(textNode('test 12', '.chat-head')), 'in the header').toBe(true);
+    expect($('.ctx-menu')).toBeNull();
+    vi.stubGlobal('matchMedia', (media: string) => ({ matches: true, media, addEventListener: () => {}, removeEventListener: () => {} }));
     try {
-      const open = vi.fn();
-      vi.stubGlobal('open', open);
-      // The message's buttons are a phone's row where the screen is narrow (`useIsPhone`).
-      vi.stubGlobal('matchMedia', (media: string) => ({ matches: true, media, addEventListener: () => {}, removeEventListener: () => {} }));
-      // Without the open request of HISTORY: on a phone it would take the composer's place.
-      const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
-      await mount(app, true);
-      const row = $('.msg-agent .msg-buttons')!;
-      // A phone's usage line holds them, the time line none.
-      expect($('.msg-agent .msg-time .msg-buttons')).toBeNull();
-      expect($('.msg-agent > .meta .msg-buttons')).not.toBeNull();
+      const phone = setup('idle', { history: HISTORY.slice(0, 3) });
+      await mount(phone.app, true);
       await select(textNode('All tests pass.'), 4, 9);
-      const search = row.querySelector<HTMLButtonElement>(SEARCH)!;
-      const quote = row.querySelector<HTMLButtonElement>('.btn-msg-quote')!;
-      /** A pointer press on `el`: whether it was cancelled, which keeps a mouse's selection. */
-      const press = async (el: Element) => {
-        let cancelled = false;
-        await act(() => {
-          cancelled = !el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
-        });
-        return cancelled;
-      };
-      expect(await press(quote), 'a mouse press keeps the selection and the focus').toBe(true);
-      await select(null);
-      expect(row.querySelector(SEARCH), 'still there, though the selection is gone').toBe(search);
-      await act(() => quote.click());
-      expect(area().value).toBe('> tests\n\n');
-      expect(row.querySelector(SEARCH), 'gone with the selection after the click').toBeNull();
-      await select(textNode('All tests pass.'), 4, 9);
-      await press(row.querySelector(SEARCH)!);
-      await select(null);
-      await act(() => row.querySelector<HTMLButtonElement>(SEARCH)!.click());
-      expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=tests', '_blank', 'noopener');
-      // A press elsewhere lets go of the held text.
-      await select(textNode('All tests pass.'), 0, 3);
-      await press(quote);
-      await select(null);
-      await act(() => void $('.chat-head')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })));
-      expect(row.querySelector(SEARCH)).toBeNull();
+      expect(await rightClick(textNode('All tests pass.')), 'on a phone').toBe(true);
+      expect($('.ctx-menu')).toBeNull();
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it('has no Quote without a composer, but Search, and no pill or client menu anywhere', async () => {
-    const locked = setup('locked_vscode');
-    await mount(locked.app);
-    await select(textNode('All tests pass.'));
-    expect(agentButton(COPY)).not.toBeNull();
-    expect(agentButton('.btn-msg-quote')).toBeNull();
-    // Search needs no input.
-    expect(agentButton(SEARCH)).not.toBeNull();
-    expect($('.btn-quote')).toBeNull();
+  const twoAgents = () => [
+    HISTORY[0],
+    ev('event.agent.message', 2, (e) => (e.payload.text = 'First part.')),
+    ev('event.agent.message', 3, (e) => ((e.payload.text = 'Second part.'), (e.payload.final = true))),
+  ];
+
+  it('leaves the browser\'s menu when the press moved the selection (a Mac selects the word under the pointer)', async () => {
+    const { app } = setup('idle', { history: twoAgents() });
+    await mount(app);
+    await select(textNode('First part.'), 0, 5);
+    // The press lands on another message, and the browser selects the word there before `contextmenu`.
+    const other = textNode('Second part.');
+    expect(await rightClick(other, 300, 200, selecting(other, 0, 6))).toBe(true);
+    expect($('.ctx-menu')).toBeNull();
   });
 
-  it('leaves the browser\'s menu to a right click, on a selection too', async () => {
-    const { app } = setup('idle');
+  it('leaves the browser\'s menu when there was no selection at the press, though one is made before the menu', async () => {
+    const { app } = setup('idle', { history: twoAgents() });
     await mount(app);
-    await select(textNode('All tests pass.'));
-    let kept = false;
-    await act(() => {
-      kept = textNode('All tests pass.').parentElement!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
-    });
-    expect(kept, 'not prevented').toBe(true);
+    await select(null);
+    const node = textNode('First part.');
+    expect(await rightClick(node, 300, 200, selecting(node, 0, 5))).toBe(true);
     expect($('.ctx-menu')).toBeNull();
+  });
+
+  it('takes the whole selection across messages, without their times', async () => {
+    const writeText = clipboard();
+    const { app } = setup('idle', { history: twoAgents() });
+    await mount(app);
+    await selectRange([textNode('First part.'), 0], [textNode('Second part.'), 6]);
+    expect(await rightClick(textNode('Second part.'))).toBe(false);
+    await act(async () => $('.ctx-menu .btn-copy-selection')!.click());
+    expect(writeText).toHaveBeenLastCalledWith('First part.\n\nSecond');
+    vi.unstubAllGlobals();
+  });
+
+  it('leaves the hidden text of a folded block out of a selection across messages', async () => {
+    const writeText = clipboard();
+    const history = [
+      HISTORY[0],
+      ev('event.agent.message', 2, (e) => (e.payload.text = 'First part.')),
+      ev('event.agent.thinking', 3, (e) => (e.payload.text = 'Hidden reasoning.')),
+      ev('event.agent.message', 4, (e) => ((e.payload.text = 'Second part.'), (e.payload.final = true))),
+    ];
+    const { app } = setup('idle', { history });
+    await mount(app);
+    expect($('.feed .thinking:not([open])')).not.toBeNull();
+    await selectRange([textNode('First part.'), 0], [textNode('Second part.'), 6]);
+    expect(await rightClick(textNode('Second part.'))).toBe(false);
+    await act(async () => $('.ctx-menu .btn-copy-selection')!.click());
+    expect(writeText).toHaveBeenLastCalledWith('First part.\n\nSecond');
+    vi.unstubAllGlobals();
+  });
+
+  it('leaves the browser\'s menu to a click outside the selection that did not move it', async () => {
+    const { app } = setup('idle', { history: twoAgents() });
+    await mount(app);
+    const first = textNode('First part.');
+    const second = textNode('Second part.');
+    try {
+      await select(first, 0, 5);
+      Object.defineProperty(document, 'caretRangeFromPoint', { value: pointAt(second), configurable: true });
+      expect(await rightClick(second), 'outside the selection').toBe(true);
+      expect($('.ctx-menu')).toBeNull();
+      Object.defineProperty(document, 'caretRangeFromPoint', { value: pointAt(first), configurable: true });
+      expect(await rightClick(first), 'on the selection').toBe(false);
+      expect($('.ctx-menu')).not.toBeNull();
+    } finally {
+      delete (document as { caretRangeFromPoint?: unknown }).caretRangeFromPoint;
+    }
+  });
+
+  it('gives the selection back and opens the menu when the press cleared it and the click is inside it (WebKit off a Mac)', async () => {
+    const writeText = clipboard();
+    const { app } = setup('idle', { history: twoAgents() });
+    await mount(app);
+    const first = textNode('First part.');
+    const clear = () => document.getSelection()!.removeAllRanges();
+    try {
+      await select(first, 0, 5);
+      // Without the point under the pointer (Firefox) inside cannot be told: the browser's menu.
+      expect(await rightClick(first, 300, 200, clear), 'no point').toBe(true);
+      expect($('.ctx-menu')).toBeNull();
+      Object.defineProperty(document, 'caretRangeFromPoint', { value: pointAt(first), configurable: true });
+      await select(first, 0, 5);
+      expect(await rightClick(first, 300, 200, clear), 'inside').toBe(false);
+      expect(document.getSelection()!.toString()).toBe('First');
+      await act(async () => $('.ctx-menu .btn-copy-selection')!.click());
+      expect(writeText).toHaveBeenLastCalledWith('First');
+    } finally {
+      delete (document as { caretRangeFromPoint?: unknown }).caretRangeFromPoint;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('leaves the browser\'s menu on the head, the composer\'s buttons and the rows above it, though the feed has a selection', async () => {
+    const { app } = setup('idle', { history: twoAgents() });
+    await mount(app);
+    await select(textNode('First part.'), 0, 5);
+    expect(await rightClick($('.chat-head')!), 'head').toBe(true);
+    await select(textNode('First part.'), 0, 5);
+    expect(await rightClick($('.composer button')!), 'a composer button').toBe(true);
+    expect($('.ctx-menu')).toBeNull();
+  });
+
+  it("opens it on text selected in a subagent's history too", async () => {
+    const { api, app } = setup('running', { subagents: 1, background_tasks: 1, history: HISTORY.slice(0, 3) });
+    await mount(app);
+    api.subagentHistory.mockImplementation(async () => ({
+      events: [
+        ev('event.agent.message', 0, (e) => {
+          delete e.seq;
+          e.event_id = '0199f3a2-7c10-7000-8000-0000000002e4';
+          e.payload = { text: 'The import keeps the power nets.', final: false };
+        }),
+      ],
+      truncated: false,
+    }));
+    const subagent = { task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000, call_id: 'toolu_ag' };
+    await act(async () =>
+      subscriber!.onEvent(
+        ev('event.subagents.live', 0, (e) => {
+          delete e.seq;
+          e.payload.agents = [subagent];
+        }),
+      ),
+    );
+    await act(async () => $('button.live-agents-opens')!.click());
+    await act(async () => {});
+    const node = textNode('The import keeps the power nets.', '.live-agents');
+    await select(node, 4, 10);
+    expect(await rightClick(node)).toBe(false);
+    expect($('.ctx-menu .menu-quote')).not.toBeNull();
+    await act(async () => $('.ctx-menu .menu-quote')!.click());
+    expect(area().value).toBe('> import\n\n');
   });
 
   it('quotes every line, a blank one as a bare «>», after a blank line', () => {
@@ -3957,5 +4676,260 @@ describe('picked files', () => {
       decode.mockRestore();
       vi.unstubAllGlobals();
     }
+  });
+});
+
+// The goal's row first in the block above the input (SPEC 0.218).
+describe('goal banner', () => {
+  const goalEv = (seq: number, state: string, extra: Record<string, unknown> = {}) =>
+    ev('event.system.goal', seq, (e) => {
+      e.event_id = `0199f3a2-7c10-7000-8000-0000000005${String(seq).padStart(2, '0')}`;
+      e.payload = { text: 'x', code: 'goal', goal: { condition: 'all tests in packages/api pass', state, ...extra } };
+    });
+  const withGoal = (state: SessionState) => {
+    const ctx = setup(state, {
+      history: [goalEv(1, 'set'), goalEv(2, 'unmet', { reason: 'The suite has 2 failing tests.' }), goalEv(3, 'unmet', { reason: 'One test still fails.' })],
+    });
+    Object.assign(ctx.api, { input: vi.fn(() => new Promise(() => {})) });
+    return ctx as typeof ctx & { api: { input: ReturnType<typeof vi.fn> } };
+  };
+
+  it('shows the goal as the first row while the session idles: the condition, the checks, the chevron opens it whole with the last reason', async () => {
+    const { app } = withGoal('idle');
+    await mount(app);
+    const row = $('.live-goal .live-agents-row')!;
+    expect($('.live-agents + .composer-wrap')).not.toBeNull();
+    expect(row.querySelector('.live-agents-what')!.textContent).toBe('Goal: all tests in packages/api pass');
+    expect(row.querySelector('.live-agents-stats')!.textContent).toBe('2 checks');
+    expect($('.live-goal-detail')).toBeNull();
+    const chevron = row.querySelector<HTMLButtonElement>('button[aria-expanded]')!;
+    await act(async () => chevron.click());
+    expect(chevron.getAttribute('aria-expanded')).toBe('true');
+    expect($('.live-goal-detail')!.textContent).toBe('all tests in packages/api passLast check: One test still fails.');
+    await act(async () => chevron.click());
+    expect($('.live-goal-detail')).toBeNull();
+  });
+
+  it('is the first row before the main agent\'s, and goes with the goal\'s end', async () => {
+    const { app } = withGoal('running');
+    await mount(app);
+    const rows = [...root.querySelectorAll('.live-agents-list > li')];
+    expect(rows[0].classList.contains('live-goal')).toBe(true);
+    expect(rows[1].textContent).toContain('Main agent:');
+    await act(async () => subscriber!.onEvent(goalEv(4, 'met', { checks: 3 })));
+    expect($('.live-goal')).toBeNull();
+  });
+
+  it('stands in the order goal, tasks, main agent', async () => {
+    const { app } = withGoal('running');
+    // Mounted, and subscribed: the subscription of an earlier test is not this chat's.
+    subscriber = undefined;
+    await mount(app);
+    await act(async () => {
+      for (let i = 0; i < 100 && !subscriber; i++) await new Promise((r) => setTimeout(r, 20));
+    });
+    await act(async () =>
+      subscriber!.onEvent(
+        ev('event.tasks', 8, (e) => {
+          e.payload.items = [
+            { subject: 'Fix the parser', status: 'in_progress', active_form: 'Fixing the parser' },
+          ];
+        }),
+      ),
+    );
+    const rows = [...root.querySelectorAll('.live-agents-list > li')];
+    expect(rows[0].classList.contains('live-goal')).toBe(true);
+    expect(rows[1].textContent).toContain('Tasks: 0 of 1 completed');
+    expect(rows[2].textContent).toContain('Main agent:');
+  });
+
+  it('has no checks word before the first check, and no goal row in a service session', async () => {
+    const { app } = setup('idle', { history: [goalEv(1, 'set')] });
+    await mount(app);
+    expect($('.live-goal')).not.toBeNull();
+    expect($('.live-goal .live-agents-stats')).toBeNull();
+    render(null, root);
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    await act(async () => {
+      render(<Chat app={app} sessionId="sys" phone={false} />, root);
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect($('.live-goal')).toBeNull();
+  });
+
+  it('Clear while a turn runs stops it first, then sends /goal clear', async () => {
+    const { api, app } = withGoal('running');
+    await mount(app);
+    const clear = $('button[aria-label="Clear goal"]') as HTMLButtonElement;
+    expect(clear.title).toBe('Stop the turn and clear the goal');
+    await act(async () => clear.click());
+    await vi.waitFor(() => expect(api.input).toHaveBeenCalledTimes(1));
+    expect(api.stop).toHaveBeenCalledWith('s1');
+    expect(api.input).toHaveBeenCalledWith('s1', '/goal clear', expect.any(String), []);
+    expect(api.stop.mock.invocationCallOrder[0]).toBeLessThan(api.input.mock.invocationCallOrder[0]);
+  });
+
+  it('Clear while idle only sends /goal clear', async () => {
+    const { api, app } = withGoal('idle');
+    await mount(app);
+    const clear = $('button[aria-label="Clear goal"]') as HTMLButtonElement;
+    expect(clear.title).toBe('Clear the goal');
+    await act(async () => clear.click());
+    await vi.waitFor(() => expect(api.input).toHaveBeenCalledWith('s1', '/goal clear', expect.any(String), []));
+    expect(api.stop).not.toHaveBeenCalled();
+  });
+
+  it('a failed stop leaves the goal and says so; no Clear where the composer is not shown', async () => {
+    const { api, app } = withGoal('running');
+    api.stop.mockRejectedValueOnce(new Error('offline'));
+    await mount(app);
+    await act(async () => ($('button[aria-label="Clear goal"]') as HTMLButtonElement).click());
+    await vi.waitFor(() => expect($('.notice')!.textContent).toBe('Goal not cleared: offline'));
+    expect(api.input).not.toHaveBeenCalled();
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true });
+    render(null, root);
+    await mount(app);
+    expect($('.live-goal')).not.toBeNull();
+    expect($('button[aria-label="Clear goal"]')).toBeNull();
+  });
+});
+
+// SPEC 0.219: the user's message that waits for the agent has Take back (its text and files return
+// to the input) and, while a turn runs, Send now.
+describe('a message that waits for the agent', () => {
+  const WAITING = '0199f3a2-7c10-7000-8000-0000000001c8';
+  const FILE = '0199f3a2-7c10-7000-8000-0000000000f1';
+  const waiting = (artifacts: string[] = []) =>
+    ev('event.user.message', 8, (e) => {
+      e.event_id = WAITING;
+      e.delivery = 'pending';
+      delete e.delivered_at;
+      e.payload = { text: 'Run it again', artifact_ids: artifacts, human: true };
+    });
+  const history = (artifacts: string[] = []) => [...HISTORY.slice(0, 3), waiting(artifacts)];
+  const withdraw = () => $('.msg-user .btn-withdraw') as HTMLButtonElement | null;
+  const sendNow = () => $('.msg-user .btn-send-now') as HTMLButtonElement | null;
+  const press = (b: HTMLButtonElement | null) => act(async () => void b!.click());
+  const area = () => $('.composer textarea') as HTMLTextAreaElement;
+  const typeInto = (text: string) =>
+    act(() => {
+      area().value = text;
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+  it('has Take back whatever the state, and Send now only while a turn runs', async () => {
+    for (const [state, now] of [['running', true], ['idle', false], ['waiting', false]] as const) {
+      const { app } = setup(state, { history: history() });
+      await mount(app);
+      expect(withdraw()!.getAttribute('aria-label'), state).toBe('Take back');
+      expect(sendNow() !== null, state).toBe(now);
+      // Only the waiting message has them.
+      expect(root.querySelectorAll('.btn-withdraw')).toHaveLength(1);
+      render(null, root);
+    }
+  });
+
+  it('is taken back: the bubble goes and its text stands in the input after what was typed', async () => {
+    const { app, api } = setup('running', { history: history() });
+    await mount(app);
+    await typeInto('Also the logs');
+    await press(withdraw());
+    expect(api.withdrawInput).toHaveBeenCalledWith('s1', WAITING);
+    await vi.waitFor(() => expect(area().value).toBe('Also the logs\n\nRun it again'));
+    expect(root.textContent).not.toContain('awaiting delivery');
+    expect([...root.querySelectorAll('.msg-user .msg-text')].map((t) => t.textContent)).not.toContain('Run it again');
+  });
+
+  it('is taken back into an empty input as it is', async () => {
+    const { app } = setup('running', { history: history() });
+    await mount(app);
+    await press(withdraw());
+    await vi.waitFor(() => expect(area().value).toBe('Run it again'));
+  });
+
+  it("returns the files too: read from the hub again, into the input's files", async () => {
+    const { app, api } = setup('running', { history: history([FILE]) });
+    Object.assign(api, {
+      artifact: vi.fn(async () => ({ id: FILE, kind: 'file', name: 'notes.txt', mime: 'text/plain', size: 5, sha256: '', created_at: '2026-10-22T10:00:00Z' })),
+      artifactLink: vi.fn(async () => ({ url: 'https://hub.test/a/notes', expires_at: new Date(Date.now() + 600_000).toISOString() })),
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('hello', { status: 200 })));
+    await mount(app);
+    await press(withdraw());
+    await vi.waitFor(() => expect($('.composer-files')?.textContent).toContain('notes.txt'));
+    expect(area().value).toBe('Run it again');
+  });
+
+  it('says so when the agent took the message already, and leaves it and the input as they are', async () => {
+    const { app, api } = setup('running', { history: history() });
+    api.withdrawInput.mockRejectedValueOnce(new ApiError(409, 'the agent already took this message', 'already_taken'));
+    await mount(app);
+    await typeInto('typed');
+    await press(withdraw());
+    await vi.waitFor(() => expect($('.notice')?.textContent).toBe('The agent already took this message'));
+    expect(area().value).toBe('typed');
+    expect(withdraw()).not.toBeNull();
+  });
+
+  it('puts the text back of a message taken back already, as on success', async () => {
+    const { app, api } = setup('running', { history: history() });
+    api.withdrawInput.mockRejectedValueOnce(new ApiError(409, 'this message was taken back already', 'withdrawn'));
+    await mount(app);
+    await typeInto('typed');
+    await press(withdraw());
+    await vi.waitFor(() => expect(area().value).toBe('typed\n\nRun it again'));
+    expect($('.notice')).toBeNull();
+  });
+
+  it('puts the text into the draft when the input is not shown (a request sheet on a phone)', async () => {
+    const { app } = setup('waiting', { history: [...HISTORY, waiting()] });
+    await mount(app, true);
+    expect($('.composer textarea')).toBeNull();
+    await press(withdraw());
+    await vi.waitFor(() => expect(app.draft('s1')).toBe('Run it again'));
+  });
+
+  it('sends now, and a refusal of the hub is said', async () => {
+    const { app, api } = setup('running', { history: history() });
+    await mount(app);
+    await press(sendNow());
+    expect(api.inputNow).toHaveBeenCalledWith('s1', WAITING);
+    expect($('.notice')).toBeNull();
+    // The button is disabled while its call is out.
+    await vi.waitFor(() => expect(sendNow()!.disabled).toBe(false));
+    api.inputNow.mockRejectedValueOnce(new ApiError(409, 'the agent cannot take this message into its turn now', 'not_now'));
+    await press(sendNow());
+    await vi.waitFor(() => expect($('.notice')?.textContent).toBe('The agent cannot take this message into its turn now'));
+    expect(withdraw()).not.toBeNull();
+    // The agent had taken it: the hub says `sent_now: false`, and so does the notice.
+    await vi.waitFor(() => expect(sendNow()!.disabled).toBe(false));
+    api.inputNow.mockResolvedValueOnce(false);
+    await press(sendNow());
+    await vi.waitFor(() => expect($('.notice')?.textContent).toBe('Not sent now: the agent took it already, or it goes next'));
+  });
+
+  it('has neither button on a message of the hub or a schedule that is not the user\'s own', async () => {
+    const note = ev('event.user.message', 8, (e) => {
+      e.event_id = WAITING;
+      e.delivery = 'pending';
+      delete e.delivered_at;
+      e.payload = { text: 'You were paused', artifact_ids: [] };
+    });
+    const { app } = setup('running', { history: [...HISTORY.slice(0, 3), note] });
+    await mount(app);
+    expect(withdraw()).toBeNull();
+    expect(sendNow()).toBeNull();
+  });
+
+  it('is gone from the chat when the hub says it is withdrawn, from this device or another', async () => {
+    const { app } = setup('running', { history: history() });
+    await mount(app);
+    expect(withdraw()).not.toBeNull();
+    await act(async () => subscriber!.onDelivery({ session_id: 's1', event_id: WAITING, seq: 8, delivery: 'withdrawn' }));
+    expect(withdraw()).toBeNull();
+    expect([...root.querySelectorAll('.msg-user .msg-text')].map((t) => t.textContent)).not.toContain('Run it again');
+    // And the hub's copy of it does not bring it back.
+    expect(area().value).toBe('');
   });
 });

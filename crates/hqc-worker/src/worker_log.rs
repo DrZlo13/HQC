@@ -247,6 +247,7 @@ pub fn event(session_id: Uuid, line: &LogLine) -> serde_json::Value {
             fork: None,
             compaction: None,
             model: None,
+            goal: None,
         },
     );
     ev.ts = line.ts;

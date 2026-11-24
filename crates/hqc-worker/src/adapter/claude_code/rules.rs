@@ -10,6 +10,8 @@
 //!   `touch x; rm -rf ~` does not ride on a `touch x *` rule;
 //! - Bash `ruleContent` without `*` — that exact command.
 //!
+//! The answer "all tools of this MCP server" adds a rule for every `mcp__<server>__*` tool.
+//!
 //! Other `ruleContent` forms (path globs of file tools, `domain:` of WebFetch, ...) are not
 //! interpreted here; for them only the exact input matches.
 
@@ -17,8 +19,13 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Rule {
-    Exact { tool: String, input: Value },
+    Exact {
+        tool: String,
+        input: Value,
+    },
     Tool(String),
+    /// Every tool of an MCP server: `mcp__<server>__*`.
+    McpServer(String),
     BashPrefix(String),
     BashExact(String),
 }
@@ -47,11 +54,17 @@ impl SessionRules {
         }
     }
 
+    /// Remember every tool of the MCP server `server`.
+    pub fn add_server(&mut self, server: &str) {
+        self.push(Rule::McpServer(server.into()));
+    }
+
     pub fn matches(&self, tool: &str, input: &Value) -> bool {
         let command = input["command"].as_str();
         self.0.iter().any(|r| match r {
             Rule::Exact { tool: t, input: i } => t == tool && i == input,
             Rule::Tool(t) => t == tool,
+            Rule::McpServer(srv) => hqc_proto::rules::mcp_server(tool) == Some(srv.as_str()),
             Rule::BashPrefix(p) => {
                 tool == "Bash"
                     && command.is_some_and(|c| {
@@ -101,7 +114,8 @@ pub fn shown(tool: &str, suggested: &[Value]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for rule in suggested.iter().filter_map(|s| taken(tool, s)) {
         let text = match rule {
-            Rule::Exact { .. } => continue,
+            // `taken` never makes a server rule; it comes only from the server answers.
+            Rule::Exact { .. } | Rule::McpServer(_) => continue,
             Rule::Tool(t) => t,
             Rule::BashPrefix(p) => format!("Bash({p} *)"),
             Rule::BashExact(e) => format!("Bash({e})"),

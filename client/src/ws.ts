@@ -1,7 +1,9 @@
 // WebSocket /api/ws (SPEC §6): `subscribe {session_id, after_seq}` per open chat,
 // `subscribe_summary` for the session list and the open requests. Frames are flat JSON (crates/hqc-proto
 // client_frame). On every (re)connect the client repeats each subscription from the last
-// `seq` it has seen.
+// `seq` it has seen. Where the browser can inflate, the connection asks for `?deflate=raw`: the
+// hub then sends binary messages, one raw DEFLATE stream with a sync flush after each frame, each
+// frame's JSON followed by "\n" (`Inflater`); a text message is a frame as it is.
 
 import {
   parseServerFrame,
@@ -17,13 +19,19 @@ export type ConnState = 'connecting' | 'open' | 'closed';
 export interface SessionSubscriber {
   /** The `seq` to resume after; read at each (re)subscribe. */
   afterSeq(): number;
-  onEvent(ev: HqcEvent): void;
+  /** `raw` is the event object of the frame as the hub sent it, which the device keeps. */
+  onEvent(ev: HqcEvent, raw?: unknown): void;
   /** `delivery` of a stored input changed (the event itself is not sent again). */
   onDelivery(d: DeliveryChange): void;
   onInvalid(raw: unknown, error: string): void;
   /** The socket dropped: transport-only state (agent.delta, subagents.live, schedules.live)
    *  is gone. */
   onReset(): void;
+  /** The hub has answered the `subscribe`: the history after `afterSeq` is sent (frame
+   *  `subscribed`, after the backfill, the live text, `subagents.live`, `schedules.live` and
+   *  `tasks`) and the live stream follows, or the subscription was refused (an `error` naming the
+   *  session). */
+  onSubscribed?(): void;
 }
 
 type WsCtor = new (url: string) => WebSocket;
@@ -35,12 +43,81 @@ export interface HubSocketOptions {
   maxDelayMs?: number;
 }
 
+/** Whether this browser inflates raw DEFLATE (`DecompressionStream`). */
+function canInflate(): boolean {
+  try {
+    new DecompressionStream('deflate-raw');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** One connection's compressed stream: the binary messages go in in order, each complete line
+ *  of the inflated text comes out through `onLine`. A broken stream calls `onError`; after
+ *  `close` nothing comes out. */
+class Inflater {
+  private readonly writer: WritableStreamDefaultWriter<BufferSource>;
+  private readonly reader: ReadableStreamDefaultReader<string>;
+  private closed = false;
+
+  constructor(
+    private readonly onLine: (line: string) => void,
+    private readonly onError: () => void,
+  ) {
+    const inflate = new DecompressionStream('deflate-raw');
+    this.writer = inflate.writable.getWriter();
+    this.reader = inflate.readable.pipeThrough(new TextDecoderStream()).getReader();
+    void this.read().catch(() => this.fail());
+  }
+
+  write(data: ArrayBuffer): void {
+    this.writer.write(new Uint8Array(data)).catch(() => this.fail());
+  }
+
+  close(): void {
+    this.closed = true;
+    this.writer.abort().catch(() => {});
+    this.reader.cancel().catch(() => {});
+  }
+
+  private fail(): void {
+    if (!this.closed) this.onError();
+  }
+
+  private async read(): Promise<void> {
+    let rest = '';
+    for (;;) {
+      const { done, value } = await this.reader.read();
+      if (done) return;
+      rest += value;
+      for (let i = rest.indexOf('\n'); i >= 0; i = rest.indexOf('\n')) {
+        const line = rest.slice(0, i);
+        rest = rest.slice(i + 1);
+        if (this.closed) return;
+        // A listener that throws loses its frame, as on a text socket; the stream goes on.
+        try {
+          this.onLine(line);
+        } catch (e) {
+          console.error(e);
+        }
+      }
+    }
+  }
+}
+
 export class HubSocket {
   private ws: WebSocket | null = null;
+  private inflater: Inflater | null = null;
   private readonly subs = new Map<string, SessionSubscriber>();
-  private readonly summaryListeners = new Set<(s: SessionSummary[]) => void>();
+  private readonly summaryListeners = new Set<(s: SessionSummary[], whole: boolean) => void>();
   private readonly requestListeners = new Set<(r: OpenRequest[]) => void>();
   private readonly stateListeners = new Set<(s: ConnState) => void>();
+  /** Per session, the `subscribe` frames sent on this socket that the hub has not answered yet:
+   *  it answers each, also one of a subscription that was left meanwhile, so an old answer must
+   *  not end the catch-up of the new one. The answer is `subscribed`, or an `error` naming the
+   *  session for a refused one (`not_found`, a failed lookup). */
+  private readonly unanswered = new Map<string, number>();
   private attempt = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = true;
@@ -60,6 +137,9 @@ export class HubSocket {
     this.timer = null;
     this.ws?.close();
     this.ws = null;
+    this.unanswered.clear();
+    this.inflater?.close();
+    this.inflater = null;
     this.setState('closed');
   }
 
@@ -74,7 +154,7 @@ export class HubSocket {
 
   subscribe(sessionId: string, sub: SessionSubscriber): () => void {
     this.subs.set(sessionId, sub);
-    this.send({ type: 'subscribe', session_id: sessionId, after_seq: sub.afterSeq() });
+    this.sendSubscribe(sessionId, sub);
     return () => {
       if (this.subs.get(sessionId) !== sub) return;
       this.subs.delete(sessionId);
@@ -82,8 +162,8 @@ export class HubSocket {
     };
   }
 
-  /** `summary` (every session) and `session.summary` (one changed) both come as a list. */
-  onSummary(fn: (s: SessionSummary[]) => void): () => void {
+  /** `summary` (every session, `whole`) and `session.summary` (one changed) both come as a list. */
+  onSummary(fn: (s: SessionSummary[], whole: boolean) => void): () => void {
     this.summaryListeners.add(fn);
     if (this.summaryListeners.size === 1) this.send({ type: 'subscribe_summary' });
     return () => this.summaryListeners.delete(fn);
@@ -101,8 +181,15 @@ export class HubSocket {
     return () => this.stateListeners.delete(fn);
   }
 
-  private send(frame: ClientFrame): void {
-    if (this.ws?.readyState === 1) this.ws.send(JSON.stringify(frame));
+  private send(frame: ClientFrame): boolean {
+    if (this.ws?.readyState !== 1) return false;
+    this.ws.send(JSON.stringify(frame));
+    return true;
+  }
+
+  private sendSubscribe(id: string, sub: SessionSubscriber): void {
+    if (this.send({ type: 'subscribe', session_id: id, after_seq: sub.afterSeq() }))
+      this.unanswered.set(id, (this.unanswered.get(id) ?? 0) + 1);
   }
 
   private setState(s: ConnState): void {
@@ -114,24 +201,38 @@ export class HubSocket {
   private open(): void {
     const Ctor = this.opts.WebSocketImpl ?? WebSocket;
     this.setState('connecting');
-    const ws = new Ctor(this.opts.url);
+    const inflate = canInflate();
+    const url = inflate ? `${this.opts.url}${this.opts.url.includes('?') ? '&' : '?'}deflate=raw` : this.opts.url;
+    const ws = new Ctor(url);
     this.ws = ws;
+    this.unanswered.clear();
+    this.inflater?.close();
+    this.inflater = null;
+    if (inflate) ws.binaryType = 'arraybuffer';
     ws.onopen = () => {
       if (this.ws !== ws) return;
       this.attempt = 0;
       this.setState('open');
       if (this.summaryListeners.size) this.send({ type: 'subscribe_summary' });
-      for (const [id, sub] of this.subs) {
-        this.send({ type: 'subscribe', session_id: id, after_seq: sub.afterSeq() });
-      }
+      for (const [id, sub] of this.subs) this.sendSubscribe(id, sub);
     };
     ws.onmessage = (m) => {
       if (this.ws !== ws) return;
-      this.dispatch(m.data);
+      if (typeof m.data === 'string') {
+        this.dispatch(m.data);
+        return;
+      }
+      // A frame comes out of the stream a moment later; `close` of the inflater, on every path
+      // that replaces the socket, stops the ones still on their way.
+      this.inflater ??= new Inflater((line) => this.dispatch(line), () => ws.close());
+      this.inflater.write(m.data as ArrayBuffer);
     };
     ws.onclose = () => {
       if (this.ws !== ws) return;
       this.ws = null;
+      this.unanswered.clear();
+      this.inflater?.close();
+      this.inflater = null;
       for (const sub of this.subs.values()) sub.onReset();
       this.setState('closed');
       this.schedule();
@@ -151,6 +252,16 @@ export class HubSocket {
     }, delay);
   }
 
+  /** The hub answered a `subscribe` of the session; the last answer ends its catch-up. */
+  private answered(id: string): void {
+    const left = (this.unanswered.get(id) ?? 1) - 1;
+    if (left > 0) this.unanswered.set(id, left);
+    else {
+      this.unanswered.delete(id);
+      this.subs.get(id)?.onSubscribed?.();
+    }
+  }
+
   private dispatch(data: unknown): void {
     let json: unknown;
     try {
@@ -166,7 +277,7 @@ export class HubSocket {
     }
     switch (frame.type) {
       case 'event':
-        this.subs.get(frame.event.session_id)?.onEvent(frame.event);
+        this.subs.get(frame.event.session_id)?.onEvent(frame.event, (json as { event?: unknown }).event);
         break;
       case 'event.invalid': {
         const sid = (frame.raw as { session_id?: unknown })?.session_id;
@@ -177,18 +288,23 @@ export class HubSocket {
         this.subs.get(frame.session_id)?.onDelivery(frame);
         break;
       case 'summary':
-        for (const fn of this.summaryListeners) fn(frame.sessions);
+        for (const fn of this.summaryListeners) fn(frame.sessions, true);
         break;
       case 'session.summary':
-        for (const fn of this.summaryListeners) fn([frame.session]);
+        for (const fn of this.summaryListeners) fn([frame.session], false);
         break;
       case 'requests':
         for (const fn of this.requestListeners) fn(frame.requests);
         break;
       case 'error':
         console.warn('hub ws error', frame.code, frame.message, frame.session_id ?? '');
+        // Only a refused `subscribe` gets an error naming a session.
+        if (frame.session_id) this.answered(frame.session_id);
         break;
-      // `subscribed`, `pong` and unknown frames need no action.
+      case 'subscribed':
+        this.answered(frame.session_id);
+        break;
+      // `pong` and unknown frames need no action.
     }
   }
 }

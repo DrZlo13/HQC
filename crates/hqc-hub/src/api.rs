@@ -21,8 +21,8 @@ use hqc_proto::{
     },
     event::CancelReason,
     frame::{
-        FsListDirs, FsStat, FsStatResult, HubFrame, ListCandidates, PermissionMode, ResultBody,
-        SessionCleanup, SubagentHistory,
+        error_code, FsListDirs, FsStat, FsStatResult, HubFrame, InputRef, ListCandidates,
+        PermissionMode, ResultBody, SessionCleanup, SubagentHistory,
     },
 };
 use serde::Deserialize;
@@ -1690,8 +1690,17 @@ pub async fn session_events(
     let s = session_for(&app, &user, id, Action::Read).await?;
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     let rows = match q.before_seq {
-        Some(b) => db::events_before(&app.db, id, b, limit).await?,
-        None => db::events_after(&app.db, id, q.after_seq.unwrap_or(0), limit).await?,
+        Some(b) => db::events_before(&app.db, id, b, limit, db::Withdrawn::Included).await?,
+        None => {
+            db::events_after(
+                &app.db,
+                id,
+                q.after_seq.unwrap_or(0),
+                limit,
+                db::Withdrawn::Included,
+            )
+            .await?
+        }
     };
     Ok(Json(EventPage {
         events: db::events_for_clients(&app.db, &rows).await?,
@@ -1871,7 +1880,9 @@ pub async fn input(
         &s,
         user_author(user.id),
         "user.message",
-        json!({"text": b.text, "artifact_ids": b.artifact_ids}),
+        // `human`: typed by the owner in this route; the worker writes Claude Code's
+        // `origin: human` for such an input only (SPEC 0.219). No other writer marks it.
+        json!({"text": b.text, "artifact_ids": b.artifact_ids, "human": true}),
         op.clone(),
         delivery,
     )
@@ -1910,6 +1921,288 @@ pub async fn input(
     Ok(reply(StatusCode::CREATED, &row))
 }
 
+/// The owner's own message `event_id` of session `s` that waits for its delivery, for
+/// [`withdraw`] and [`input_now`]: another event, one of another session, one the owner did not
+/// type in the input route (`payload.human`: not a pause's resume note, a run of a schedule, a
+/// message of another session, a note of the hub's own) is `404`; a room (its agents get the
+/// message as posts of the room) `409 room`; one the agent took already `409 already_taken`;
+/// one taken back already `409 withdrawn`.
+async fn own_waiting_input(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<()> {
+    if s.room_mode.is_some() {
+        return Err(ApiError::Conflict(
+            "room",
+            "a room has no agent of its own: its agents get its messages".into(),
+        ));
+    }
+    let e = db::event_by_id(&app.db, event_id)
+        .await?
+        .filter(|e| {
+            e.session_id == s.id
+                && e.kind == "user.message"
+                && e.payload.get("human") == Some(&Value::Bool(true))
+        })
+        .ok_or(ApiError::NotFound)?;
+    match e.delivery.as_deref() {
+        Some("pending") => Ok(()),
+        Some("withdrawn") => Err(ApiError::Conflict(
+            "withdrawn",
+            "this message was taken back already".into(),
+        )),
+        _ => Err(already_taken()),
+    }
+}
+
+fn already_taken() -> ApiError {
+    ApiError::Conflict(
+        "already_taken",
+        "the agent already took this message".into(),
+    )
+}
+
+/// The worker connection of `s`, when it is started for the session and holds the input
+/// `event_id` (sent and not acknowledged): the one to ask about it. Asked on this very
+/// connection: another one, which the worker may have opened meanwhile, holds nothing of it.
+/// For [`input_now`]: a message of a session that is not started has no turn to join.
+async fn holding_conn(
+    app: &AppState,
+    s: &SessionRow,
+    event_id: Uuid,
+) -> Option<std::sync::Arc<crate::worker_ws::WorkerConn>> {
+    let conn = s.worker_id.and_then(|w| app.workers.get(w))?;
+    let holds = conn.st.lock().await.sessions.get(&s.id).is_some_and(|sc| {
+        sc.start == crate::worker_ws::StartState::Started && sc.inflight.contains(&event_id)
+    });
+    holds.then_some(conn)
+}
+
+/// A request about an input to the worker connection `conn` (SPEC 0.219): a worker's answer of
+/// `error` comes back as `502` with the worker's own code and message, not as the `400
+/// invalid_path` the shared [`ask_worker_for`] makes of it.
+async fn ask_input(
+    conn: &crate::worker_ws::WorkerConn,
+    frame: impl FnOnce(String) -> HubFrame,
+) -> ApiResult<ResultBody> {
+    let offline = || ApiError::Conflict("worker_offline", "the worker is offline".into());
+    let Ok(_slot) = conn.fs_slots.try_acquire() else {
+        return Err(ApiError::Limited(
+            "worker_busy",
+            "too many requests to this worker in flight, retry later".into(),
+        ));
+    };
+    match conn.request(frame, WORKER_REQUEST_TIMEOUT).await {
+        Ok(body) => Ok(body),
+        Err(RequestError::Offline) => Err(offline()),
+        Err(RequestError::Timeout) => Err(ApiError::WorkerTimeout),
+        Err(RequestError::Worker(e)) if e.code == error_code::NOT_NOW => {
+            Err(ApiError::Conflict("not_now", e.message))
+        }
+        Err(RequestError::Worker(e)) => Err(ApiError::WorkerError(e.code, e.message)),
+    }
+}
+
+/// `session.withdraw` for `event_id` asked of `conn` by a task of its own, which settles the
+/// answer ([`withdraw_settle`]) and sends the outcome on the channel, so that a handler dropped
+/// at any point (the owner's connection broke) leaves no message half done. The caller has put
+/// the id in `withdrawing` already. An answer after [`WORKER_REQUEST_TIMEOUT`] is not waited
+/// for: the owner gets `504` (SPEC 0.219, §6 limitations).
+fn ask_withdraw(
+    app: &AppState,
+    conn: &std::sync::Arc<crate::worker_ws::WorkerConn>,
+    session_id: Uuid,
+    event_id: Uuid,
+) -> tokio::sync::oneshot::Receiver<ApiResult<()>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (app, conn) = (app.clone(), conn.clone());
+    tokio::spawn(async move {
+        let answer = ask_input(&conn, |request_id| {
+            HubFrame::SessionWithdraw(InputRef {
+                request_id,
+                session_id,
+                event_id,
+            })
+        })
+        .await;
+        let _ = tx.send(withdraw_settle(&app, &conn, session_id, event_id, answer).await);
+    });
+    rx
+}
+
+/// The worker's answer to a `session.withdraw`, or its absence (a timeout, an error, the
+/// connection closed): `withdrawn: true` withdraws the message (out of `inflight`, its `ack` slot
+/// dropped, the clients told), `false` is `409 already_taken`; the message leaves `withdrawing`
+/// either way.
+async fn withdraw_settle(
+    app: &AppState,
+    conn: &crate::worker_ws::WorkerConn,
+    id: Uuid,
+    event_id: Uuid,
+    answer: ApiResult<ResultBody>,
+) -> ApiResult<()> {
+    let withdrawn = matches!(&answer, Ok(ResultBody::InputWithdrawn(r)) if r.withdrawn);
+    let row = if withdrawn {
+        db::mark_input_withdrawn(&app.db, event_id, false).await
+    } else {
+        Ok(None)
+    };
+    {
+        let mut st = conn.st.lock().await;
+        if let Some(sc) = st.sessions.get_mut(&id) {
+            sc.withdrawing.remove(&event_id);
+            if withdrawn {
+                sc.inflight.remove(&event_id);
+            }
+        }
+        if withdrawn {
+            // Its `ack` never comes.
+            forget_input_reply(&mut st.replies, event_id);
+        }
+    }
+    if withdrawn && row.is_err() {
+        // The worker let go of it and the hub could not mark it: it waits again, to be handed.
+        delivery::kick(app, id, false).await;
+    }
+    match answer? {
+        ResultBody::InputWithdrawn(r) if r.withdrawn => match row? {
+            Some(row) => {
+                delivery::notify_delivery(app, &row);
+                app.session_changed(id);
+                Ok(())
+            }
+            // The worker let go of it, yet the hub has it not pending: it is no longer waiting.
+            None => Err(already_taken()),
+        },
+        ResultBody::InputWithdrawn(_) => Err(already_taken()),
+        _ => Err(anyhow::anyhow!("session.withdraw answered with another result").into()),
+    }
+}
+
+/// An input's `ack` slot: its `ack` never comes once the worker dropped the input.
+fn forget_input_reply(
+    replies: &mut std::collections::HashMap<String, crate::worker_ws::Reply>,
+    event_id: Uuid,
+) {
+    replies.retain(
+        |_, r| !matches!(r, crate::worker_ws::Reply::Input { event_id: e, .. } if *e == event_id),
+    );
+}
+
+/// `POST /api/sessions/{id}/inputs/{event_id}/withdraw` (SPEC 0.219): the owner takes back a
+/// message of theirs the agent has not taken. The message becomes `delivery: withdrawn`: it is
+/// delivered to nobody and shown by no client (a `delivery` frame tells the open ones). One the
+/// hub never handed to a worker (`handed_at` null) is withdrawn here: no worker holds it. One
+/// that was handed is asked about at the worker connection, in whatever start state (a kill
+/// clears the hub's books and the worker's queue, and the worker then holds nothing and says so):
+/// its `session.withdraw` says whether the agent had taken the message already, which is `409
+/// already_taken` and leaves the message as it is. With no connection a handed message is `409
+/// worker_offline`: the worker may keep it and give it to the agent. While the request is
+/// outstanding the message is in the connection's `withdrawing`, which `kick` skips, and a
+/// second take-back is `409 withdrawing`. The answer is settled by a task of its own
+/// ([`ask_withdraw`]), also when this request is gone. Answers `{withdrawn: true}`.
+pub async fn withdraw(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path((id, event_id)): Path<(Uuid, Uuid)>,
+) -> ApiResult<Json<Value>> {
+    let s = session_for(&app, &user, id, Action::Write).await?;
+    not_system(&s)?;
+    driven_from_hqc(&s)?;
+    own_waiting_input(&app, &s, event_id).await?;
+    match db::mark_input_withdrawn(&app.db, event_id, true).await? {
+        Some(row) => {
+            delivery::notify_delivery(&app, &row);
+            app.session_changed(id);
+        }
+        None => {
+            // Handed, or the agent took it, or it was taken back since the check above.
+            own_waiting_input(&app, &s, event_id).await?;
+            let Some(conn) = s.worker_id.and_then(|w| app.workers.get(w)) else {
+                return Err(ApiError::Conflict(
+                    "worker_offline",
+                    "the worker holds this message; try again when it is connected".into(),
+                ));
+            };
+            // The clients are told by the task that settles the answer.
+            ask_and_withdraw(&app, &conn, id, event_id).await?;
+        }
+    }
+    Ok(Json(json!({"withdrawn": true})))
+}
+
+/// Ask the worker of `conn` to let go of the handed input `event_id` and withdraw it when it
+/// has. The wait is the usual one; a later answer is not acted on.
+async fn ask_and_withdraw(
+    app: &AppState,
+    conn: &std::sync::Arc<crate::worker_ws::WorkerConn>,
+    id: Uuid,
+    event_id: Uuid,
+) -> ApiResult<()> {
+    let first = conn
+        .st
+        .lock()
+        .await
+        .sessions
+        .entry(id)
+        .or_default()
+        .withdrawing
+        .insert(event_id);
+    if !first {
+        return Err(ApiError::Conflict(
+            "withdrawing",
+            "this message is being taken back already".into(),
+        ));
+    }
+    match ask_withdraw(app, conn, id, event_id).await {
+        Ok(outcome) => outcome,
+        // The task is gone with no word: nothing is outstanding.
+        Err(_) => {
+            clear_withdrawing(conn, id, event_id).await;
+            Err(anyhow::anyhow!("session.withdraw was not asked").into())
+        }
+    }
+}
+
+async fn clear_withdrawing(conn: &crate::worker_ws::WorkerConn, id: Uuid, event_id: Uuid) {
+    if let Some(sc) = conn.st.lock().await.sessions.get_mut(&id) {
+        sc.withdrawing.remove(&event_id);
+    }
+}
+
+/// `POST /api/sessions/{id}/inputs/{event_id}/now` (SPEC 0.219): the owner sends a message of
+/// theirs that waits for the agent into the running turn at once (Claude Code moves the call
+/// the agent is in, a Bash command, an MCP call or a subagent, to the background and takes the
+/// message into the same turn). Answers `{sent_now}`: `false` when the agent had taken it
+/// already. `409 not_now` when the runtime cannot take it now (no turn runs, the agent waits
+/// for an answer to a request, the message waits on the hub and not at the worker, the worker
+/// holds no such message).
+pub async fn input_now(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path((id, event_id)): Path<(Uuid, Uuid)>,
+) -> ApiResult<Json<Value>> {
+    let s = session_for(&app, &user, id, Action::Write).await?;
+    not_system(&s)?;
+    driven_from_hqc(&s)?;
+    own_waiting_input(&app, &s, event_id).await?;
+    let conn = holding_conn(&app, &s, event_id).await.ok_or_else(|| {
+        ApiError::Conflict(
+            "not_now",
+            "the agent cannot take this message into its turn now".into(),
+        )
+    })?;
+    let ResultBody::InputNow(r) = ask_input(&conn, |request_id| {
+        HubFrame::SessionInputNow(InputRef {
+            request_id,
+            session_id: id,
+            event_id,
+        })
+    })
+    .await?
+    else {
+        return Err(anyhow::anyhow!("session.input_now answered with another result").into());
+    };
+    Ok(Json(json!({"sent_now": r.sent_now})))
+}
+
 /// Abort the current turn. The hub's own open requests (a move, a secret) are cancelled with
 /// `stopped`. The runtime's (approvals, questions) are the worker's to close: it cancels those
 /// of the interrupted turn when the turn ends, and a background subagent's stay open, since the
@@ -1925,7 +2218,7 @@ pub async fn stop(
     let sent = if s.room_mode.is_some() {
         stop_room(&app, &s).await?
     } else {
-        stop_session(&app, &s).await?
+        stop_session(&app, &s, true).await?
     };
     Ok(Json(json!({ "sent": sent })))
 }
@@ -1933,14 +2226,23 @@ pub async fn stop(
 /// Stop of session `s`: its open requests other than the runtime's cancelled with `stopped`,
 /// `session.stop` to its worker, and the runtime's approvals and questions cancelled too only
 /// when the worker is not connected (a connected worker keeps those of background subagents
-/// open, SPEC §10.1); `true` when the frame went out.
-pub(crate) async fn stop_session(app: &AppState, s: &SessionRow) -> ApiResult<bool> {
+/// open, SPEC §10.1); `true` when the frame went out. `quiet` (the owner's own Stop, since 0.231)
+/// asks the worker to write what waited into the agent's history without a turn; a pause's stop
+/// does not.
+pub(crate) async fn stop_session(app: &AppState, s: &SessionRow, quiet: bool) -> ApiResult<bool> {
     let open = db::open_requests_of_session(&app.db, s.id).await?;
     let runtimes = |kind: &str| matches!(kind, "approval" | "clarify");
     for p in open.iter().filter(|p| !runtimes(&p.kind)) {
         requests::cancel(app, p, CancelReason::Stopped).await?;
     }
-    let sent = send_to_worker(app, s, HubFrame::SessionStop { session_id: s.id });
+    let sent = send_to_worker(
+        app,
+        s,
+        HubFrame::SessionStop {
+            session_id: s.id,
+            quiet,
+        },
+    );
     if !sent {
         for p in open.iter().filter(|p| runtimes(&p.kind)) {
             requests::cancel(app, p, CancelReason::Stopped).await?;
@@ -1954,13 +2256,14 @@ pub(crate) async fn stop_session(app: &AppState, s: &SessionRow) -> ApiResult<bo
 /// the senders' notice ([`crate::rooms::round_ended`]); `true` when a frame went out.
 async fn stop_room(app: &AppState, room: &SessionRow) -> ApiResult<bool> {
     let _room = crate::rooms::lock(app, room.id).await;
-    // The agents' inputs stay as they are: the worker keeps the ones it has after a stop. A final
-    // message on an input whose message is from before this line, the part of the turn the stop
-    // cut included, posts nothing and wakes nobody (`rooms::on_final`).
+    // The agents' inputs are not failed: the worker of an agent whose turn runs at the stop
+    // writes what waited into its history without a turn and acks each `quiet` (SPEC 0.231).
+    // A final message on an input whose message is from before this line, the part of the
+    // turn the stop cut included, posts nothing and wakes nobody (`rooms::on_final`).
     events::system(app, room, crate::rooms::ROOM_STOPPED, crate::rooms::STOPPED).await?;
     let mut sent = false;
     for m in db::room_members(&app.db, room.id).await? {
-        sent |= stop_session(app, &m).await?;
+        sent |= stop_session(app, &m, true).await?;
         app.session_changed(m.id);
     }
     // After the agents are stopped: the senders of the room's messages are told how it ended, and

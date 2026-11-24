@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // The feed's look (SPEC §6, the feed): a message's time at the right end of its first line,
-// inside a bubble or a plate; its search, copy, quote and fork buttons, always shown, left of
-// the time; "joined the turn" on a message that went into the turn already running; the marks
+// inside a bubble or a plate; its copy and fork buttons, always shown, at its
+// bottom right: the end of its usage line, else of its text's last line; "joined the turn" on a message that went into the turn already running; the marks
 // of the one-column gutter ("Settings" → "Feed" → "One column").
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -11,11 +11,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseEvent, type HqcEvent } from '../src/proto';
 import { Timeline } from '../src/timeline';
-import { useRef } from 'preact/hooks';
 import { ChatItems, type ChatActions } from '../src/ui/cards';
-import { SelectionContext, useChatSelection } from '../src/ui/selection';
+import { useRef } from 'preact/hooks';
+import { selectedText, useQuoteSelection } from '../src/ui/selection';
 import { formatTime } from '../src/ui/labels';
-import { WEB_SEARCHES } from '../src/websearch';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
 const CSS = readFileSync(join(import.meta.dirname, '../src/styles.css'), 'utf8');
@@ -116,28 +115,22 @@ describe('the time on the first line', () => {
 });
 
 describe('the text of a clipped selection', () => {
-  /** The chat's selection around the feed, as Chat has it. */
-  function Scope({ children }: { children: preact.ComponentChildren }) {
-    const ref = useRef<HTMLDivElement>(null);
-    return (
-      <SelectionContext.Provider value={useChatSelection(ref)}>
-        <div ref={ref}>{children}</div>
-      </SelectionContext.Provider>
-    );
-  }
-  /** Draws `events`, selects from `from` to `to(root)` and clicks the Quote of the message that holds it: what it quotes. */
+  /** Draws `events` in a chat's feed, selects from `from` to `to(root)`: the text of the selection
+   *  (selection.ts: what the Quote button over the composer and the right-click menu take). */
   async function quoted(events: HqcEvent[], from: (r: HTMLElement) => [Node, number], to: (r: HTMLElement) => [Node, number], over: Partial<ChatActions> = {}) {
     const timeline = new Timeline();
     for (const e of events) timeline.apply(e);
-    const quote = vi.fn();
-    const actions: ChatActions = { timeline, approve: vi.fn(async () => {}), answer: vi.fn(async () => {}), resend: vi.fn(), discard: vi.fn(), openArtifact: vi.fn(), quote, webSearch: WEB_SEARCHES[0], ...over };
+    const actions: ChatActions = { timeline, approve: vi.fn(async () => {}), answer: vi.fn(async () => {}), resend: vi.fn(), discard: vi.fn(), openArtifact: vi.fn(), ...over };
     root = document.createElement('div');
     document.body.appendChild(root);
     await act(() =>
       render(
-        <Scope>
-          <ChatItems items={timeline.items()} actions={actions} />
-        </Scope>,
+        <section class="scope">
+          <div class="feed">
+            <ChatItems items={timeline.items()} actions={actions} />
+          </div>
+          <footer>After the feed</footer>
+        </section>,
         root,
       ),
     );
@@ -147,11 +140,8 @@ describe('the text of a clipped selection', () => {
       r.setEnd(...to(root));
       document.getSelection()!.removeAllRanges();
       document.getSelection()!.addRange(r);
-      document.dispatchEvent(new Event('selectionchange'));
     });
-    // The Quote beside the Search: the message that holds the selection.
-    await act(async () => root.querySelector('.btn-msg-search:not(.btn-msg-search-idle)')!.parentElement!.querySelector<HTMLButtonElement>('.btn-msg-quote')!.click());
-    return quote.mock.calls[0][0] as string;
+    return selectedText(root.querySelector('.scope'));
   }
   const textOf = (r: HTMLElement, text: string) => {
     const w = document.createTreeWalker(r, NodeFilter.SHOW_TEXT);
@@ -184,6 +174,15 @@ describe('the text of a clipped selection', () => {
     expect(got).toBe('Para two.');
   });
 
+  it('cuts a range that ends outside the feed it starts in at the feed\'s end', async () => {
+    const got = await quoted(
+      [agent(1, 'Para one.\n\nPara two.', 0, true)],
+      (r) => [textOf(r, 'Para two.'), 0],
+      (r) => [textOf(r, 'After the feed'), 5],
+    );
+    expect(got).toBe('Para two.');
+  });
+
   it("leaves a code block's caption (its language and Copy) out", async () => {
     const got = await quoted(
       [agent(1, 'Intro\n\n```rust\nfn main() {}\n```\n\nOutro', 0, true), user(2, 'next')],
@@ -211,42 +210,35 @@ describe('the text of a clipped selection', () => {
     });
     const got = await quoted(
       [user(1, 'Question'), post],
-      (r) => [r, 0],
+      (r) => [textOf(r, 'Question'), 8],
       (r) => [textOf(r, 'Opening statement.'), 7],
       { roomAgent: (sid) => (sid === id(77) ? { index: 0, name: 'Optimist', model: 'claude-sonnet-5-5' } : undefined) },
     );
     expect(got).toBe('Opening');
   });
 
-  it('keeps the Search slot in place, hidden, until the message holds a selection, then shows it', async () => {
-    const timeline = new Timeline();
-    timeline.apply(agent(1, 'All tests pass.', 0, true));
-    const actions: ChatActions = { timeline, approve: vi.fn(async () => {}), answer: vi.fn(async () => {}), resend: vi.fn(), discard: vi.fn(), openArtifact: vi.fn(), quote: vi.fn(), webSearch: WEB_SEARCHES[0] };
-    root = document.createElement('div');
-    document.body.appendChild(root);
-    await act(() =>
-      render(
-        <Scope>
-          <ChatItems items={timeline.items()} actions={actions} />
-        </Scope>,
-        root,
-      ),
+  it('takes exactly the text of a selection that runs to the end of a message, the buttons at the end of its last line left out', async () => {
+    const got = await quoted(
+      [agent(1, 'Para one.\n\nPara two.', 0, true), user(2, 'next')],
+      (r) => [textOf(r, 'Para two.'), 5],
+      (r) => [r.querySelector('.msg-user')!, 0],
     );
-    const slot = () => root.querySelector<HTMLButtonElement>('.btn-msg-search')!;
-    expect(root.querySelector('.msg-buttons')!.firstElementChild).toBe(slot());
-    expect(slot().classList.contains('btn-msg-search-idle')).toBe(true);
-    expect(slot().getAttribute('aria-hidden')).toBe('true');
-    expect(slot().tabIndex).toBe(-1);
-    await act(async () => {
-      const r = document.createRange();
-      r.selectNodeContents(textOf(root, 'All tests pass.'));
-      document.getSelection()!.removeAllRanges();
-      document.getSelection()!.addRange(r);
-      document.dispatchEvent(new Event('selectionchange'));
-    });
-    expect(slot().classList.contains('btn-msg-search-idle')).toBe(false);
-    expect(slot().getAttribute('aria-hidden')).toBeNull();
-    expect(slot().tabIndex).toBe(0);
+    expect(got).toBe('two.');
+    // Inside the last paragraph, up to the strip: the browser's own text (happy-dom joins the
+    // paragraphs without a break).
+    const inside = await quoted(
+      [agent(1, 'Para one.\n\nPara two.', 0, true)],
+      (r) => [textOf(r, 'Para one.'), 0],
+      (r) => [r.querySelector('.msg-agent p:last-child')!, 1],
+    );
+    expect(inside).toBe('Para one.Para two.');
+    // A list: the strip is in the last item.
+    const list = await quoted(
+      [agent(1, '- one\n- two', 0, true), user(2, 'next')],
+      (r) => [textOf(r, 'one'), 0],
+      (r) => [r.querySelector('.msg-user')!, 0],
+    );
+    expect(list).toBe('one\ntwo');
   });
 
   const thinking = (text: string) =>
@@ -257,15 +249,8 @@ describe('the text of a clipped selection', () => {
       e.payload = { text };
     });
 
-  it("quotes only the visible line of a folded reasoning when the range runs out of it, the whole text of an open one", async () => {
+  it("takes the whole text of an open reasoning when the range runs out of it", async () => {
     const text = 'Idea one.\nIdea two.';
-    const got = await quoted(
-      [thinking(text), user(2, 'next')],
-      (r) => [r.querySelector('.thinking-peek')!, 0],
-      (r) => [r.querySelector('.msg-user')!, 0],
-    );
-    // The line as it is shown, without its "Thinking · ", not the hidden text.
-    expect(got).toBe('Idea one. Idea two.');
     const open = await quoted(
       [thinking(text), user(2, 'next')],
       (r) => {
@@ -277,28 +262,64 @@ describe('the text of a clipped selection', () => {
     expect(open).toBe('Idea one.\nIdea two.');
   });
 
-  it("quotes a reasoning's selection, else its first two sentences; its buttons do not fold it", async () => {
+  it("copies a reasoning's whole text from its Copy, which does not fold it", async () => {
     const text = 'First idea. Second idea. Third idea.';
-    const got = await quoted(
-      [thinking(text)],
-      (r) => [textOf(r, text), 12],
-      (r) => [textOf(r, text), 23],
-    );
-    expect(got).toBe('Second idea');
+    const writeText = vi.fn(async (_: string) => {});
+    vi.stubGlobal('isSecureContext', true);
+    Object.defineProperty(window.navigator, 'clipboard', { value: { writeText }, configurable: true });
     const timeline = new Timeline();
     timeline.apply(thinking(text));
-    const quote = vi.fn();
-    const actions: ChatActions = { timeline, approve: vi.fn(async () => {}), answer: vi.fn(async () => {}), resend: vi.fn(), discard: vi.fn(), openArtifact: vi.fn(), quote, webSearch: WEB_SEARCHES[0] };
+    const actions: ChatActions = { timeline, approve: vi.fn(async () => {}), answer: vi.fn(async () => {}), resend: vi.fn(), discard: vi.fn(), openArtifact: vi.fn() };
     root = document.createElement('div');
     document.body.appendChild(root);
     await act(() => render(<ChatItems items={timeline.items()} actions={actions} />, root));
     expect(root.querySelector('.thinking summary .msg-buttons')).not.toBeNull();
-    await act(async () => root.querySelector<HTMLButtonElement>('.thinking .btn-msg-quote')!.click());
-    expect(quote).toHaveBeenLastCalledWith('First idea. Second idea. …');
-    const details = root.querySelector('details')!;
-    expect(details.open).toBe(false);
-    await act(async () => root.querySelector<HTMLButtonElement>('.thinking .btn-copy:not(.btn-msg-search):not(.btn-msg-quote)')!.click());
-    expect(details.open).toBe(false);
+    // Part of the text selected: the whole text is copied.
+    const r = document.createRange();
+    r.setStart(textOf(root, text), 12);
+    r.setEnd(textOf(root, text), 23);
+    document.getSelection()!.removeAllRanges();
+    document.getSelection()!.addRange(r);
+    await act(async () => {
+      root.querySelector<HTMLButtonElement>('.thinking .btn-copy')!.click();
+      await new Promise((res) => setTimeout(res, 0));
+    });
+    expect(writeText).toHaveBeenLastCalledWith(text);
+    expect(root.querySelector('details')!.open).toBe(false);
+  });
+
+  it("begins with the selected part of the line a folded reasoning shows when the range starts in it, and leaves the line out when it only passes through", async () => {
+    const text = 'Idea one.\nIdea two.';
+    // From the middle of the visible line (past its "Thinking · ") to the start of the next message.
+    const head = await quoted(
+      [thinking(text), user(2, 'next')],
+      (r) => [r.querySelector('.thinking-peek')!.lastChild!, 5],
+      (r) => [r.querySelector('.msg-user')!, 0],
+    );
+    expect(head).toBe('one. Idea two.');
+    // On into the next message: the line's part, then the message's.
+    const more = await quoted(
+      [thinking(text), user(2, 'next')],
+      (r) => [r.querySelector('.thinking-peek')!.lastChild!, 0],
+      (r) => [textOf(r, 'next'), 2],
+    );
+    expect(more).toBe('Idea one. Idea two.\n\nne');
+    // A range from before it to after it: the line is not in it.
+    const through = await quoted(
+      [
+        agent(1, 'First.', 0),
+        ev('event.agent.thinking', (e) => {
+          e.seq = 2;
+          e.event_id = id(2);
+          e.ts = at(2);
+          e.payload = { text };
+        }),
+        user(3, 'next'),
+      ],
+      (r) => [textOf(r, 'First.'), 0],
+      (r) => [textOf(r, 'next'), 2],
+    );
+    expect(through).toBe('First.\n\nne');
   });
 
   it("leaves the head of a message from another session out too", async () => {
@@ -310,10 +331,76 @@ describe('the text of a clipped selection', () => {
     });
     const got = await quoted(
       [user(1, 'Question'), peer],
-      (r) => [r, 0],
+      (r) => [textOf(r, 'Question'), 8],
       (r) => [textOf(r, 'Is the build green?'), 6],
     );
     expect(got).toBe('Is the');
+  });
+});
+
+describe('the chat follows its selection for the Quote button', () => {
+  it('renders when a quotable selection comes and goes, not on every step of a drag, and not for one outside a feed', async () => {
+    let renders = 0;
+    let shown = false;
+    function Chat() {
+      const ref = useRef<HTMLElement>(null);
+      shown = useQuoteSelection(ref, true).shown;
+      renders++;
+      return (
+        <section ref={ref}>
+          <header>Title</header>
+          <div class="feed">All tests pass.</div>
+        </section>
+      );
+    }
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    await act(() => render(<Chat />, root));
+    const select = (node: Node, from: number, to: number) =>
+      act(async () => {
+        const r = document.createRange();
+        r.setStart(node, from);
+        r.setEnd(node, to);
+        document.getSelection()!.removeAllRanges();
+        document.getSelection()!.addRange(r);
+        document.dispatchEvent(new Event('selectionchange'));
+      });
+    const feed = root.querySelector('.feed')!.firstChild!;
+    const before = renders;
+    await select(feed, 0, 2);
+    expect(shown).toBe(true);
+    const shownAt = renders;
+    expect(shownAt - before).toBeGreaterThan(0);
+    // A drag grows the selection step by step.
+    for (const to of [3, 4, 5, 6, 7, 8]) await select(feed, 0, to);
+    expect(renders).toBe(shownAt);
+    // One that starts in the header is none.
+    await select(root.querySelector('header')!.firstChild!, 0, 3);
+    expect(shown).toBe(false);
+  });
+
+  it('is off while disabled', async () => {
+    let shown = true;
+    function Chat() {
+      const ref = useRef<HTMLElement>(null);
+      shown = useQuoteSelection(ref, false).shown;
+      return (
+        <section ref={ref}>
+          <div class="feed">All tests pass.</div>
+        </section>
+      );
+    }
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    await act(() => render(<Chat />, root));
+    await act(async () => {
+      const r = document.createRange();
+      r.selectNodeContents(root.querySelector('.feed')!);
+      document.getSelection()!.removeAllRanges();
+      document.getSelection()!.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    expect(shown).toBe(false);
   });
 });
 
@@ -335,53 +422,145 @@ describe('the message buttons', () => {
       e.ts = at(seq);
       e.payload = { input_tokens: 2, output_tokens: 234, cost_usd: 0.163 };
     });
-  const search = { webSearch: WEB_SEARCHES[0] };
 
-  it("are Search, Copy, Quote and the user's Fork in the time's line of a message, left of the time", async () => {
-    const fork = vi.fn();
-    show([user(1, 'Run the tests'), agent(2, 'All tests pass.', 1, true), answer(3)], { fork, quote: vi.fn(), ...search });
-    const strip = (sel: string) => root.querySelector(`${sel} > .msg-time`)!.firstElementChild!;
-    const mine = strip('.msg-user:not(.msg-answer) .msg-bubble');
-    expect(mine.className).toBe('msg-buttons');
-    expect(mine.nextElementSibling!.tagName).toBe('TIME');
-    expect(labels(mine)).toEqual(['Search in Google', 'Copy', 'Quote', 'Fork from here']);
-    const its = strip('.msg-agent');
-    expect(its.className).toBe('msg-buttons');
-    expect(its.nextElementSibling!.tagName).toBe('TIME');
-    expect(labels(its)).toEqual(['Search in Google', 'Copy', 'Quote']);
-    expect(labels(strip('.msg-answer .msg-bubble'))).toEqual(['Search in Google', 'Copy', 'Quote']);
-    expect(root.querySelector('.msg-actions')).toBeNull();
-    await act(async () => mine.querySelector<HTMLButtonElement>('.btn-fork')!.click());
-    expect(fork).toHaveBeenCalledWith(expect.objectContaining({ seq: 1 }));
-  });
+  for (const phone of [false, true]) {
+    const where = phone ? 'on a phone' : 'on a computer';
+    const maybePhone = () => phone && phoneMedia();
 
-  it('are in the head of a message from another session, a reply to one and a room post, the same on a phone', () => {
-    const peer = ev('event.peer.message', (e) => {
-      e.seq = 1;
-      e.event_id = id(1);
-      e.ts = at(1);
-    });
-    const room = ev('event.peer.message', (e) => {
-      e.seq = 2;
-      e.event_id = id(2);
-      e.ts = at(2);
-      e.payload = { ...e.payload, from_session_id: id(77), text: 'Opening.' };
-    });
-    const strips = () => [...root.querySelectorAll('.relay-when .msg-buttons, .room-post-when .msg-buttons')].map(labels);
-    const over = { quote: vi.fn(), ...search, roomAgent: (sid: string) => (sid === id(77) ? { index: 0, name: 'Optimist' } : undefined) };
-    show([peer, room], over);
-    expect(strips()).toEqual([['Search in Google', 'Copy', 'Quote'], ['Search in Google', 'Copy', 'Quote']]);
-    phoneMedia();
-    try {
-      show([peer, room], over);
-      expect(strips()).toHaveLength(2);
+    it(`are at the end of the text's last line of a message, not by its time, ${where}`, async () => {
+      maybePhone();
+      const fork = vi.fn();
+      show([user(1, 'Run the tests'), agent(2, 'All tests pass.', 1, true), answer(3)], { fork });
+      const mine = root.querySelector('.msg-user:not(.msg-answer) .msg-bubble > .msg-text')!.lastElementChild!;
+      expect(mine.className).toBe('msg-buttons msg-tail');
+      expect(labels(mine)).toEqual(['Copy', 'Fork from here']);
+      const its = root.querySelector('.msg-agent .md > p')!.lastElementChild!;
+      expect(its.className).toBe('msg-buttons msg-tail');
+      expect(labels(its)).toEqual(['Copy']);
+      expect(labels(root.querySelector('.msg-answer .msg-bubble > .msg-text')!.lastElementChild!)).toEqual(['Copy']);
+      // None by the time, nor under the message.
+      expect(root.querySelector('.msg-time .msg-buttons')).toBeNull();
       expect(root.querySelector('.msg-actions')).toBeNull();
-    } finally {
-      vi.unstubAllGlobals();
+      await act(async () => mine.querySelector<HTMLButtonElement>('.btn-fork')!.click());
+      expect(fork).toHaveBeenCalledWith(expect.objectContaining({ seq: 1 }));
+    });
+
+    it(`are at the right end of the usage line of an agent message that has one, ${where}`, () => {
+      maybePhone();
+      show([user(1, 'Run the tests'), agent(2, 'All tests pass.', 1, true), usage(3)], {});
+      const meta = root.querySelector('.msg-agent > .meta')!;
+      expect(meta.lastElementChild!.className).toBe('msg-buttons');
+      expect(labels(meta.lastElementChild!)).toEqual(['Copy']);
+      // Not also at the end of the text, nor by the time.
+      expect(root.querySelectorAll('.msg-agent .msg-buttons')).toHaveLength(1);
+      expect(root.querySelector('.msg-agent .msg-time .msg-buttons')).toBeNull();
+      expect(root.querySelector('.msg-agent .msg-tail')).toBeNull();
+    });
+
+    it(`are by the time of a bubble that has no text, ${where}`, () => {
+      maybePhone();
+      show([user(1, '', (e) => (e.payload.artifact_ids = [id(50)]))], { fork: vi.fn() });
+      expect(root.querySelectorAll('.msg-buttons'), 'one strip, not wrapped twice').toHaveLength(1);
+      const strip = root.querySelector('.msg-bubble > .msg-time > .msg-buttons')!;
+      expect(strip.className).toBe('msg-buttons');
+      expect(strip.nextElementSibling!.tagName).toBe('TIME');
+      expect(root.querySelector('.msg-tail')).toBeNull();
+    });
+
+    it(`are at the end of the text of a message from another session and of a room post, none in their heads, ${where}`, () => {
+      maybePhone();
+      const peer = ev('event.peer.message', (e) => {
+        e.seq = 1;
+        e.event_id = id(1);
+        e.ts = at(1);
+        e.payload = { ...e.payload, text: 'Is the build green?' };
+      });
+      const room = ev('event.peer.message', (e) => {
+        e.seq = 2;
+        e.event_id = id(2);
+        e.ts = at(2);
+        e.payload = { ...e.payload, from_session_id: id(77), text: 'Opening.' };
+      });
+      show([peer, room], { roomAgent: (sid: string) => (sid === id(77) ? { index: 0, name: 'Optimist' } : undefined) });
+      for (const sel of ['.relay .md > p', '.room-post .md > p']) {
+        const tail = root.querySelector(sel)!.lastElementChild!;
+        expect(tail.className, sel).toBe('msg-buttons msg-tail');
+        expect(labels(tail), sel).toEqual(['Copy']);
+      }
+      expect(root.querySelector('.relay-head .msg-buttons, .room-post-head .msg-buttons')).toBeNull();
+    });
+  }
+
+  it('are at the end of an interim agent message\'s last line, inside the last list item, or on a line after a code block or a table', () => {
+    show([agent(1, 'Steps:\n\n- one\n- two', 0), agent(2, 'Run:\n\n```sh\nls\n```', 0), agent(3, 'Table:\n\n| a |\n|---|\n| 1 |', 0)], {});
+    const [list, code, table] = [...root.querySelectorAll('.msg-agent')];
+    expect(list.querySelector('.md > ul > li:last-child')!.lastElementChild!.lastElementChild!.className).toBe('msg-buttons msg-tail');
+    expect(list.querySelectorAll('.msg-buttons')).toHaveLength(1);
+    for (const m of [code, table]) {
+      const line = m.querySelector('.md')!.lastElementChild!;
+      expect(line.className).toBe('msg-tail-line');
+      expect(line.firstElementChild!.className).toBe('msg-buttons msg-tail');
+      expect(m.querySelectorAll('.msg-buttons')).toHaveLength(1);
     }
   });
 
-  it('are Copy alone where the chat has no input and no search', () => {
+  it("are in a reasoning's summary while it is folded and at the end of its text, the summary's hidden by the CSS when it is open", () => {
+    show([
+      ev('event.agent.thinking', (e) => {
+        e.seq = 1;
+        e.event_id = id(1);
+        e.ts = at(1);
+        e.payload = { text: 'Idea one.' };
+      }),
+    ], {});
+    const summary = root.querySelector('.thinking > summary')!;
+    expect(summary.lastElementChild!.className).toBe('msg-buttons');
+    const text = root.querySelector('.thinking-text')!;
+    expect(text.lastElementChild!.className).toBe('msg-buttons msg-tail');
+    expect(labels(text.lastElementChild!)).toEqual(['Copy']);
+  });
+
+  it("stand on the last line of a reasoning or a user's text that ends in blank lines, not below them", async () => {
+    const copied = vi.fn(async (_: string) => {});
+    vi.stubGlobal('isSecureContext', true);
+    Object.defineProperty(window.navigator, 'clipboard', { value: { writeText: copied }, configurable: true });
+    show([
+      user(1, 'Run the tests\n\n'),
+      ev('event.agent.thinking', (e) => {
+        e.seq = 2;
+        e.event_id = id(2);
+        e.ts = at(2);
+        e.payload = { text: 'Idea one.\n\n' };
+      }),
+    ], {});
+    for (const sel of ['.msg-text', '.thinking-text']) {
+      const tail = root.querySelector(`${sel} > .msg-tail`)!;
+      expect(tail.previousSibling!.textContent, sel).toMatch(/\S$/);
+    }
+    // Copy still gives the text as it came.
+    await act(async () => {
+      root.querySelector<HTMLButtonElement>('.msg-text button[aria-label="Copy"]')!.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(copied).toHaveBeenCalledWith('Run the tests\n\n');
+  });
+
+  it('do not take the focus from the input: a press on a button is cancelled', () => {
+    show([user(1, 'Run the tests'), agent(2, 'All tests pass.', 1, true)], { fork: vi.fn(), quickMessages: { has: () => false, add: vi.fn(async () => {}) } });
+    const buttons = [...root.querySelectorAll('.msg-buttons button')];
+    expect(buttons.length).toBeGreaterThan(2);
+    for (const b of buttons) expect(b.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })), b.getAttribute('aria-label')!).toBe(false);
+  });
+
+  it('keep the Quote button over the input out of the layout: absolute in a positioned row, as tall as the buttons', () => {
+    expect(rule('.btn-quote')).toMatch(/position: absolute;/);
+    expect(rule('.composer-row')).toMatch(/position: relative;/);
+    const wide = rule(':root.feed-column .composer:not(.composer-phone) .btn-quote');
+    expect(wide).toMatch(/right: 32px;/);
+    expect(wide).toMatch(/height: 28px;/);
+  });
+
+  it('are Copy alone on a message that has no fork or quick messages', () => {
     show([user(1, 'Run the tests'), agent(2, 'All tests pass.', 1, true)]);
     expect(labels(root.querySelector('.msg-agent .msg-buttons')!)).toEqual(['Copy']);
     expect(labels(root.querySelector('.msg-user .msg-buttons')!)).toEqual(['Copy']);
@@ -402,8 +581,24 @@ describe('the message buttons', () => {
     expect(CSS).toMatch(/\.thinking\[open\] summary > \.icon \{/);
     expect(CSS).not.toMatch(/\.thinking\[open\] summary \.icon/);
     expect(rule('.chat:not(.chat-phone) .msg-buttons .btn-copy-idle')).toMatch(/height: 18px;/);
-    expect(rule('.msg-agent > .meta .msg-buttons,\n.thinking summary .msg-buttons')).toMatch(/margin-left: auto;/);
-    expect(rule('.btn-msg-search-idle')).toMatch(/visibility: hidden;/);
+    expect(rule('.msg-agent > .meta .msg-buttons,\n.relay > .meta .msg-buttons,\n.thinking summary .msg-buttons')).toMatch(/margin-left: auto;/);
+  });
+
+  it('styles.css floats the buttons at the end of the text to the right, a pixel less than a text line, in message roots that hold floats and text blocks that do not', () => {
+    const tail = rule('.msg-tail');
+    expect(tail).toMatch(/float: right;/);
+    expect(tail).toMatch(/height: calc\(var\(--feed-line\) - 1px\);/);
+    expect(tail).toMatch(/align-items: center;/);
+    expect(tail).toMatch(/margin: 0 0 0 12px;/);
+    // The roots hold the tail a full last line pushed down; the text blocks must not, or their
+    // first line would not wrap around the time.
+    expect(rule('.msg-agent,\n.msg-bubble,\n.thinking-text')).toMatch(/display: flow-root;/);
+    expect(CSS.match(/display: flow-root;/g), 'no other rule makes a block a formatting context of its own').toHaveLength(1);
+    // What follows a text starts under that tail; a bubble of attachments only is not moved.
+    expect(rule('.msg-text ~ .attachments,\n.msg-agent > .md ~ .relay-files')).toMatch(/clear: right;/);
+    expect(rule('.msg-tail-line')).toMatch(/justify-content: flex-end;/);
+    // A reasoning's summary holds them while folded, its text when open.
+    expect(rule('.thinking[open] summary .msg-buttons')).toMatch(/display: none;/);
   });
 
   it('leave no hover rules, no phone row, no margin column and no panel background behind', () => {
@@ -412,37 +607,8 @@ describe('the message buttons', () => {
     expect(CSS).not.toMatch(/:hover \.msg-buttons/);
     expect(CSS).not.toMatch(/--msg-bg/);
     expect(CSS).not.toMatch(/\.meta \.btn-copy/);
-    expect(CSS).not.toMatch(/\.btn-quote \{/);
     expect(rule('.msg-bubble > .msg-time')).not.toMatch(/position: relative;/);
     expect(CSS).not.toMatch(/\.msg-agent > \.msg-time \{/);
-  });
-
-  it("on a phone are at the end of the agent message's usage line, and not in its time line", () => {
-    phoneMedia();
-    try {
-      show([user(1, 'Run the tests'), agent(2, 'All tests pass.', 1, true), usage(3)], { quote: vi.fn(), ...search });
-      expect(root.querySelector('.msg-agent .msg-time .msg-buttons')).toBeNull();
-      const inUsage = root.querySelector('.msg-agent > .meta')!;
-      expect(labels(inUsage.querySelector('.msg-buttons')!)).toEqual(['Search in Google', 'Copy', 'Quote']);
-      expect(inUsage.lastElementChild!.className).toBe('msg-buttons');
-      expect(root.querySelector('.msg-agent > .msg-actions')).toBeNull();
-      // The user's message keeps them by its time.
-      expect(root.querySelector('.msg-user .msg-time .msg-buttons')).not.toBeNull();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it('on a phone are by the time of a message without a usage line, and of the user\'s and the answer', () => {
-    phoneMedia();
-    try {
-      show([user(1, 'Run the tests'), agent(2, 'All tests pass.', 1, true), answer(3)], { fork: vi.fn(), quote: vi.fn(), ...search });
-      for (const sel of ['.msg-user:not(.msg-answer) .msg-bubble', '.msg-agent', '.msg-answer .msg-bubble'])
-        expect(root.querySelector(`${sel} > .msg-time .msg-buttons`), sel).not.toBeNull();
-      expect(root.querySelector('.msg-actions')).toBeNull();
-    } finally {
-      vi.unstubAllGlobals();
-    }
   });
 
   it('add to quick messages where fork is: not on a message waiting for delivery or not delivered', () => {
@@ -454,6 +620,58 @@ describe('the message buttons', () => {
       show([user(1, 'go', (e) => (e.delivery = delivery))], { fork: vi.fn(), quickMessages });
       expect(labels()).toEqual(['Copy']);
     }
+  });
+
+  it('take back and send now where the user\'s message waits for the agent, before fork and the others', () => {
+    const withdraw = vi.fn(async () => {});
+    const sendNow = vi.fn(async () => {});
+    const labels = () => [...root.querySelectorAll('.msg-user .msg-buttons button')].map((b) => b.getAttribute('aria-label'));
+    const pending = (patch: (e: any) => void = () => {}) =>
+      user(1, 'go', (e) => {
+        e.delivery = 'pending';
+        e.payload.human = true;
+        patch(e);
+      });
+    show([pending()], { withdraw, sendNow, fork: vi.fn() });
+    expect(labels()).toEqual(['Copy', 'Take back', 'Send now']);
+    root.querySelector<HTMLButtonElement>('.msg-user .btn-withdraw')!.click();
+    expect(withdraw).toHaveBeenCalledWith(expect.objectContaining({ event_id: id(1) }));
+    root.querySelector<HTMLButtonElement>('.msg-user .btn-send-now')!.click();
+    expect(sendNow).toHaveBeenCalledWith(expect.objectContaining({ event_id: id(1) }));
+    // Send now is offered only while a turn runs.
+    show([pending()], { withdraw });
+    expect(labels()).toEqual(['Copy', 'Take back']);
+    // Not on a message the agent took, one that failed, one the user did not type (a schedule's
+    // run, a note of the hub's own: none of them has `human`).
+    for (const patch of [
+      (e: any) => (e.delivery = 'delivered'),
+      (e: any) => (e.delivery = 'failed'),
+      (e: any) => delete e.payload.human,
+      (e: any) => (e.payload.schedule_id = id(99)) && delete e.payload.human,
+      (e: any) => (e.payload.resume = true) && delete e.payload.human,
+    ]) {
+      show([pending(patch)], { withdraw, sendNow });
+      expect(labels()).toEqual(['Copy']);
+    }
+    // A slash command is taken back, but not sent now: the runtime runs it by itself.
+    show([user(1, '  /compact now', (e) => ((e.delivery = 'pending'), (e.payload.human = true)))], { withdraw, sendNow });
+    expect(labels()).toEqual(['Copy', 'Take back']);
+    // No input to put it back into: no button.
+    show([pending()], {});
+    expect(labels()).toEqual(['Copy']);
+  });
+
+  it('a message withdrawn is no part of the feed, however it came', () => {
+    const { timeline, draw } = show([user(1, 'go', (e) => (e.delivery = 'pending')), user(2, 'next')]);
+    expect(root.querySelectorAll('.msg-user')).toHaveLength(2);
+    timeline.applyDelivery({ session_id: 's1', event_id: id(1), seq: 1, delivery: 'withdrawn' });
+    draw();
+    expect([...root.querySelectorAll('.msg-user .msg-text')].map((t) => t.textContent)).toEqual(['next']);
+    // The hub's copy of the event (a reload) with the delivery it has now.
+    const fresh = new Timeline();
+    fresh.apply(user(1, 'go', (e) => (e.delivery = 'withdrawn')));
+    fresh.apply(user(2, 'next'));
+    expect(fresh.events().map((e) => e.seq)).toEqual([2]);
   });
 
   it("keep the phone size: the smaller buttons are a computer's only", () => {

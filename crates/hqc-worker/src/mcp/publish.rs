@@ -7,6 +7,9 @@
 //! session's workspace and `allowed_roots` after resolving symlinks. Beyond them:
 //! - a folder needs an `index.html` (a regular file, possibly through a link inside the
 //!   folder); a single file becomes an archive of that one file;
+//! - the folders and files named [`NEVER_PACKED`] are left out wherever they are in the folder
+//!   (the published path itself is not checked); a link whose target lies in such a folder is
+//!   left out too;
 //! - every entry is resolved to its canonical path, which must stay inside the folder and
 //!   `allowed_roots`: a symlink inside pointing out is `invalid_args` naming the entry, never
 //!   its target; a link to a folder that contains it is left out (it would never end);
@@ -164,6 +167,12 @@ struct Walk<'a> {
     stack: Vec<PathBuf>,
 }
 
+/// Names of entries the walk never packs, at any depth (a folder, or a file: the `.git` of a
+/// linked worktree is one): `.git` is git's repository with its config and remote URL, `.hqc` is
+/// hqc's own folder in the workspace. The owner's card names only some of the files of
+/// hidden folders, so whatever lies in them would be public without being seen.
+const NEVER_PACKED: [&str; 2] = [".git", ".hqc"];
+
 impl Walk<'_> {
     fn dir(&mut self, dir: &Path, prefix: &str) -> Result<(), McpError> {
         let given = self.given;
@@ -183,6 +192,10 @@ impl Walk<'_> {
         // Sorted, so that what the walk meets first does not depend on the file system.
         names.sort();
         for name in names {
+            // Case-blind: on a case-insensitive volume `.GIT` is the repository too.
+            if NEVER_PACKED.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                continue;
+            }
             let rel = format!("{prefix}{name}");
             if rel.len() > MAX_SITE_NAME {
                 return Err(invalid(format!(
@@ -199,6 +212,17 @@ impl Walk<'_> {
                 return Err(invalid(format!(
                     "{given}/{rel} is a link that points outside {given}"
                 )));
+            }
+            // A link whose target lies in such a folder (`repo -> .git`, `cfg -> .git/config`) is
+            // left out as well; the canonical path's components are compared, not the link's name.
+            if let Ok(inside) = real.strip_prefix(self.root) {
+                if inside.components().any(|c| {
+                    NEVER_PACKED
+                        .iter()
+                        .any(|n| c.as_os_str().eq_ignore_ascii_case(n))
+                }) {
+                    continue;
+                }
             }
             let md =
                 std::fs::metadata(&real).map_err(|e| invalid(format!("{given}/{rel}: {e}")))?;
@@ -366,6 +390,40 @@ mod tests {
                 (f.name().unwrap().to_string(), v)
             })
             .collect()
+    }
+
+    #[test]
+    fn git_and_hqc_are_never_packed() {
+        let (_t, roots, site) = setup();
+        // Only `index.html` of the folder `setup` makes.
+        std::fs::remove_dir_all(site.join("css")).unwrap();
+        std::fs::remove_dir_all(site.join("img")).unwrap();
+        for d in [".git", ".hqc/out", "a/.hqc", "sub"] {
+            std::fs::create_dir_all(site.join(d)).unwrap();
+        }
+        std::fs::write(site.join(".git/config"), b"url=https://token@host").unwrap();
+        // A linked worktree's `.git` is a file; a broken link of that name is skipped, not refused.
+        std::fs::write(site.join("sub/.git"), b"gitdir: /elsewhere").unwrap();
+        std::os::unix::fs::symlink("/nowhere", site.join("a/.git")).unwrap();
+        std::fs::write(site.join(".hqc/out/x"), b"x").unwrap();
+        std::fs::write(site.join("a/.hqc/y"), b"y").unwrap();
+        std::fs::write(site.join(".gitignore"), b"target").unwrap();
+        std::fs::write(site.join("a/b.txt"), b"b").unwrap();
+        let p = pack(&roots, &site, "site", 1 << 20).unwrap();
+        assert_eq!(p.entries, [".gitignore", "a/b.txt", "index.html"]);
+    }
+
+    #[test]
+    fn a_link_into_git_is_not_packed() {
+        let (_t, roots, site) = setup();
+        std::fs::remove_dir_all(site.join("css")).unwrap();
+        std::fs::remove_dir_all(site.join("img")).unwrap();
+        std::fs::create_dir_all(site.join(".git")).unwrap();
+        std::fs::write(site.join(".git/config"), b"url=https://token@host").unwrap();
+        std::os::unix::fs::symlink(".git", site.join("repo")).unwrap();
+        std::os::unix::fs::symlink(".git/config", site.join("cfg")).unwrap();
+        let p = pack(&roots, &site, "site", 1 << 20).unwrap();
+        assert_eq!(p.entries, ["index.html"]);
     }
 
     #[test]

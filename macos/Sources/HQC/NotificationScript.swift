@@ -1,7 +1,8 @@
 // The page script behind the app's notifications, injected at document start into every tab's
 // main frame. WKWebView has no service worker, so the browser's Web Push (client/public/sw.js)
 // never reaches the app; instead the script watches the frames of the page's own `/api/ws`
-// sockets. It keeps every session's `unread` and `last_seq` from `summary` and
+// sockets, inflating them on a stream of its own where the client asked the hub to compress them
+// (`?deflate=raw`, SPEC §6). It keeps every session's `unread` and `last_seq` from `summary` and
 // `session.summary` (each socket's first `summary` is a fresh baseline: what happened while
 // it was not connected is not notified); when both grew, it reads the new events and posts
 // each one the hub sends a push for (crates/hqc-hub/src/push.rs on_event; all of them count
@@ -308,16 +309,14 @@ enum NotificationScript {
           // included (the client publishes on a click on a button, as the card's Allow is),
           // carries the options of the card's Allow and Deny buttons.
           // A publication's text (the hub's publish.rs card()) for the card's few lines: its
-          // fixed sentence gives way to the path, and the hidden files and folders (a part of the
-          // name starting with `.`) come before the rest, so they are on the card first. Text of
-          // another form stays as it is.
+          // fixed sentence gives way to the path; the files stay in the hub's order, which puts
+          // the names that look like a secret first and the hidden files next, so
+          // they are on the card first. Text of another form stays as it is.
           const publication = (d) => {
             const lines = d.split('\\n');
             const head = /^The agent asks to publish (.*) at a public link:/.exec(lines[0]);
             if (!head || lines.length < 2) return d;
-            const files = lines.slice(2);
-            const hidden = (l) => l.split('/').some((c) => c.startsWith('.'));
-            return [head[1], lines[1], ...files.filter(hidden), ...files.filter((l) => !hidden(l))].join('\\n');
+            return [head[1], ...lines.slice(1)].join('\\n');
           };
 
           // The arguments of a call, as the client's callArgs() (client/src/ui/feed.ts):
@@ -533,13 +532,43 @@ enum NotificationScript {
             }
           };
 
+          // A compressed socket (`?deflate=raw`, SPEC §6) brings binary messages of one raw DEFLATE
+          // stream, each frame's JSON followed by a newline; they go through an inflating stream of
+          // the socket's own, in order, as the client's ws.ts reads them. A frame that `watch`
+          // fails on is lost alone.
+          const inflating = (onLine) => {
+            const z = new DecompressionStream('deflate-raw');
+            const writer = z.writable.getWriter();
+            const reader = z.readable.pipeThrough(new TextDecoderStream()).getReader();
+            (async () => {
+              let rest = '';
+              for (;;) {
+                const { done, value } = await reader.read();
+                if (done) return;
+                rest += value;
+                for (let i = rest.indexOf('\\n'); i >= 0; i = rest.indexOf('\\n')) {
+                  const line = rest.slice(0, i);
+                  rest = rest.slice(i + 1);
+                  try { onLine(line); } catch (e) { console.error(e); }
+                }
+              }
+            })().catch(() => {});
+            return (data) => { writer.write(new Uint8Array(data)).catch(() => {}); };
+          };
+
           class HqcWebSocket extends Native {
             constructor(url, protocols) {
               if (protocols === undefined) super(url);
               else super(url, protocols);
-              if (String(url).endsWith('/api/ws')) {
+              let path = '';
+              try { path = new URL(String(url), location.href).pathname; } catch {}
+              if (path === '/api/ws') {
                 const socket = { baseline: true };
-                this.addEventListener('message', (m) => watch(m.data, socket));
+                let feed = null;
+                this.addEventListener('message', (m) => {
+                  if (typeof m.data === 'string') watch(m.data, socket);
+                  else if (m.data instanceof ArrayBuffer) (feed ??= inflating((line) => watch(line, socket)))(m.data);
+                });
               }
             }
           }

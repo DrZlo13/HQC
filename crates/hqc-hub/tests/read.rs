@@ -198,6 +198,49 @@ fn seqs(r: &Value) -> Vec<i64> {
         .collect()
 }
 
+/// SPEC 0.219: a message the owner took back never reached the agent, and `hqc_read` leaves it
+/// out, in the pages and in what it says of more events before and after (the feed pages of a
+/// client return it as withdrawn).
+#[tokio::test]
+async fn hqc_read_leaves_out_a_withdrawn_input() {
+    let mut rig = Rig::start().await;
+    let db = rig.hub.app.db.clone();
+    let s = session(&db, rig.owner, rig.project, "notes", "Notes").await;
+    let events: [(&str, &str, Option<&str>); 4] = [
+        ("user.message", "Taken back, first", Some("withdrawn")),
+        ("agent.message", "kept", None),
+        ("user.message", "Taken back, last", Some("withdrawn")),
+        ("user.message", "Pending", Some("pending")),
+    ];
+    for (n, (kind, text, delivery)) in events.into_iter().enumerate() {
+        let e = NewEvent {
+            event_id: Uuid::now_v7(),
+            session_id: s,
+            ts: t(n as i64),
+            author: json!({"kind": "system"}),
+            kind: kind.into(),
+            payload: json!({"text": text, "final": true}),
+            chain: None,
+            client_op_id: None,
+            delivery: delivery.map(str::to_string),
+            delivered_at: None,
+        };
+        db::insert_event(&db, &e).await.unwrap();
+    }
+    let r = rig.read(json!({"session": "personal/notes"})).await;
+    assert_eq!(texts(&r), ["kept", "Pending"], "{r}");
+    // Nothing earlier than the first one shown, but a withdrawn one.
+    assert!(r["result"].get("earlier").is_none(), "{r}");
+    let r = rig
+        .read(json!({"session": "personal/notes", "after_seq": 2}))
+        .await;
+    assert_eq!(texts(&r), ["Pending"], "{r}");
+    // The client's page of the same session has all four.
+    let (st, v) = rig.hub.get(&format!("/api/sessions/{s}/events")).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["events"].as_array().unwrap().len(), 4, "{v}");
+}
+
 #[tokio::test]
 async fn the_last_events_and_the_pages_around_them() {
     let mut rig = Rig::start().await;
@@ -255,6 +298,60 @@ async fn the_last_events_and_the_pages_around_them() {
         .await
         .unwrap();
     assert_eq!(n, 250);
+    rig.hub.finish().await;
+}
+
+/// SPEC 0.232: `hqc_read` leaves out the side questions and their answers, also in the
+/// caller's own session: the agent never sees them.
+#[tokio::test]
+async fn a_side_question_and_its_answer_are_not_read() {
+    let mut rig = Rig::start().await;
+    let db = rig.hub.app.db.clone();
+    let sid: Uuid = rig.sid.parse().unwrap();
+    let put = |kind: &'static str, payload: Value, n: i64| {
+        let db = db.clone();
+        async move {
+            let e = NewEvent {
+                event_id: Uuid::now_v7(),
+                session_id: sid,
+                ts: t(n),
+                author: json!({"kind": "system"}),
+                kind: kind.into(),
+                payload,
+                chain: None,
+                client_op_id: None,
+                delivery: None,
+                delivered_at: None,
+            };
+            match db::insert_event(&db, &e).await.unwrap() {
+                Inserted::New(r) => r.event_id,
+                other => panic!("{other:?}"),
+            }
+        }
+    };
+    put("agent.message", json!({"text": "m1", "final": true}), 1).await;
+    let q = put("side.question", json!({"text": "Secret?"}), 2).await;
+    put("side.answer", json!({"question": q, "text": "Hidden."}), 3).await;
+    put("agent.message", json!({"text": "m2", "final": true}), 4).await;
+    // By its address and by the caller's own, by pages in both directions.
+    for args in [
+        json!({"session": rig.sid}),
+        json!({"session": rig.sid, "after_seq": 0}),
+        json!({"session": rig.sid, "before_seq": 100}),
+    ] {
+        let r = rig.read(args).await;
+        let types: Vec<&str> = r["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["type"].as_str())
+            .collect();
+        assert!(
+            !types.iter().any(|t| t.starts_with("side.")),
+            "{types:?} {r}"
+        );
+        assert_eq!(types.iter().filter(|t| **t == "agent.message").count(), 2);
+    }
     rig.hub.finish().await;
 }
 

@@ -4,8 +4,8 @@
 // machine, the project rail with its "needs you" badge. T50: the order on the hub (State /
 // Recent / Custom, Reorder by the keyboard), the delayed archive with Undo, archive mode. The
 // one row menu (a right click; a long press on a phone), the row's archive and favorites
-// buttons, the one-row header with the order and project menus, the pinned favorites, the
-// column's width.
+// buttons, the one-row header with the order and project menus, the favorites as a group of the
+// scrolling list, the column's width.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'preact';
@@ -25,7 +25,7 @@ import { ChatItems, type ChatActions } from '../src/ui/cards';
 import { Chat } from '../src/ui/Chat';
 import { tileBackground } from '../src/ui/Appearance';
 import { PhoneHome } from '../src/ui/PhoneHome';
-import { ProjectRail, onMac, runSpeed, runningTitle } from '../src/ui/ProjectRail';
+import { ProjectRail, RailRun, onMac, runSpeed, runningTitle } from '../src/ui/ProjectRail';
 import { ProjectSettings } from '../src/ui/ProjectSettings';
 import { LIST_WIDTH_MAX, LIST_WIDTH_MIN, LIST_WIDTH_STEP, SESSION_DRAG, SessionList, WidthGrip } from '../src/ui/SessionList';
 import { ALLOW_ALL_CONFIRM } from '../src/ui/labels';
@@ -463,14 +463,14 @@ describe('SessionList (desktop column)', () => {
       expect(fav()!.classList.contains('is-on')).toBe(false);
       await click(fav());
       expect(api.setSessionFavorite).toHaveBeenLastCalledWith('cave', true);
-      expect(root.querySelector('.fav-pinned')!.textContent).toContain('Cave scene port');
+      expect(root.querySelector('.group-favorites')!.textContent).toContain('Cave scene port');
       expect(bar()).toBeNull();
       await ev(rowOf('Cave scene port'), 'pointerenter');
       expect(fav()!.getAttribute('aria-label')).toBe('Remove from favorites «Cave scene port»');
       expect(fav()!.classList.contains('is-on')).toBe(true);
       await click(fav());
       expect(api.setSessionFavorite).toHaveBeenLastCalledWith('cave', false);
-      expect(root.querySelector('.fav-pinned')).toBeNull();
+      expect(root.querySelector('.group-favorites')).toBeNull();
 
       // Not for a touch, not while the row's menu is open.
       await ev(rowOf('Stone textures'), 'pointerenter', 'touch');
@@ -834,7 +834,11 @@ describe('archive from the row (T50)', () => {
       sent.push({ method: init?.method, url: String(input) });
       return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
     };
-    const list = [...LIST, sess('held', 'Held build', 'paused', at(1), { paused_at: at(1) })];
+    const list = [
+      ...LIST,
+      sess('held', 'Held build', 'paused', at(1), { paused_at: at(1) }),
+      sess('bg', 'Background audit', 'idle', at(2), { subagents: 1 }),
+    ];
     await mount(<SessionList app={makeApp(list, Object.assign(new Api('', fetchHub), hubApi()))} />);
     await menuOf('Network sync');
     await click(root.querySelector('.menu .btn-pause'));
@@ -846,10 +850,13 @@ describe('archive from the row (T50)', () => {
     await click(root.querySelector('.menu .btn-resume'));
     expect(sent.filter((r) => r.url.endsWith('/resume'))).toEqual([{ method: 'POST', url: '/api/sessions/held/resume' }]);
 
-    // Pause only while the agent works, as beside Stop in the chat: an idle one has none.
+    // Pause only while the agent works, as in the chat's header: an idle one has none, one whose
+    // background subagent works after its turn has it.
     await menuOf('Collision profiling');
     expect(menuItems()).not.toContain('Pause session');
     expect(menuItems()).toContain('Restart session');
+    await menuOf('Background audit');
+    expect(menuItems()).toContain('Pause session');
   });
 
   it('the menu: a link to a new tab, no folder rules (in the chat\'s "More"), the move form in the column; Esc or a press away closes it', async () => {
@@ -1302,6 +1309,34 @@ describe('ProjectRail', () => {
     // Its hover text: the agents at work and their tokens per second.
     expect(runningTitle('hqc', 1, 0)).toBe('hqc · 1 agent · 0 tokens/s');
     expect(runningTitle('hqc', 3, 120)).toBe('hqc · 3 agents · 120 tokens/s');
+  });
+
+  it("passes the speed to the turn of the stripe's ::before, which only a subtree lookup finds, as the lap's duration from where the turn is", async () => {
+    // A quarter of the way round at the slowest lap. No `updatePlaybackRate` or `playbackRate`:
+    // a rate other than 1 takes the animation off WebKit's compositor.
+    // The fake counts the turn from its time and lap, as a browser does, so reading the turn after
+    // the new lap is set would land the stripe elsewhere.
+    let lap = 18000;
+    const updateTiming = vi.fn((t: { duration: number }) => {
+      lap = t.duration;
+    });
+    const anim = {
+      currentTime: 4500,
+      effect: { getComputedTiming: (): { progress: number } => ({ progress: (anim.currentTime % lap) / lap }), updateTiming },
+    };
+    const own = Element.prototype.getAnimations;
+    // As a browser answers: the span itself has no animation, its pseudo-element has the turn.
+    Element.prototype.getAnimations = function (o?: GetAnimationsOptions) {
+      return (o?.subtree ? [anim] : []) as unknown as Animation[];
+    };
+    try {
+      await mount(<RailRun rate={40} />);
+      // Twice as fast: a 9 s lap, and still a quarter of the way round.
+      expect(updateTiming).toHaveBeenCalledWith({ duration: 9000 });
+      expect(anim.currentTime).toBe(2250);
+    } finally {
+      Element.prototype.getAnimations = own;
+    }
   });
 
   it('in the Compact look: the same marks on the icon, an unread project in bold', async () => {
@@ -2169,6 +2204,7 @@ describe('loading a chat ahead', () => {
     expect(api.eventsBefore).toHaveBeenCalledTimes(1);
     // A press loads at once.
     link('Cave scene port').dispatchEvent(pointer('pointerdown'));
+    await wait(0);
     expect(api.eventsBefore).toHaveBeenLastCalledWith('cave', undefined, 100);
 
     render(null, root);
@@ -2403,11 +2439,11 @@ describe('favorites', () => {
     const rows = [...root.querySelectorAll<HTMLElement>('.group-favorites .session-item')];
     expect(rows[0].querySelector('.session-row')!.getAttribute('href')).toBe('#/s/prof');
     expect(rows[0].querySelector('.session-row')!.classList.contains('is-current')).toBe(true);
-    // Pinned over the list on a desktop: not in its scroll.
-    expect(root.querySelector('.fav-pinned.group-favorites')).not.toBeNull();
-    expect(root.querySelector('.session-scroll .group-favorites')).toBeNull();
+    // The first group of the list's one scroll, not a block of its own over it.
+    expect(root.querySelector('.session-scroll > .session-group')!.classList.contains('group-favorites')).toBe(true);
+    expect(root.querySelector('.sessions > .group-favorites')).toBeNull();
     // Its head is the name alone, as every group's.
-    expect(root.querySelector('.fav-pinned .group-head svg, .group-pin')).toBeNull();
+    expect(root.querySelector('.group-favorites .group-head svg, .group-pin')).toBeNull();
     // In its own project the other one is listed.
     await act(() => app.selectProject('p0'));
     expect(favoriteTitles()).toEqual(['Migration plan']);
@@ -2419,11 +2455,33 @@ describe('favorites', () => {
     expect(root.querySelector('.group-favorites')).toBeNull();
   });
 
-  it("on a phone's project screen too they are pinned over the scrolling list", async () => {
+  it('a new session open in the project stands above them: its current row in sight however many they are', async () => {
+    const app = makeApp(LIST.map((s) => (s.id === 'cave' ? { ...s, favorite_at: at(30) } : s)));
+    app.openNewSession('p1');
+    await mount(<SessionList app={app} />);
+    expect(groups().slice(0, 2).map((g) => g[0])).toEqual(['Draft', 'Favorites']);
+  });
+
+  it('another project opens at the top of its list, its favorites in sight: the scroll left behind does not carry over', async () => {
+    const app = makeApp([
+      ...LIST.map((s) => (s.id === 'cave' ? { ...s, favorite_at: at(30) } : s)),
+      sess('plan', 'Migration plan', 'idle', at(50), { project_id: 'p0', favorite_at: at(0.1) }),
+    ]);
+    await mount(<SessionList app={app} />);
+    const scroller = root.querySelector<HTMLElement>('.session-scroll')!;
+    scroller.scrollTop = 500;
+    await act(() => app.selectProject('p0'));
+    // The same column, not mounted again.
+    expect(root.querySelector('.session-scroll')).toBe(scroller);
+    expect(favoriteTitles()).toEqual(['Migration plan']);
+    expect(scroller.scrollTop).toBe(0);
+  });
+
+  it("on a phone's project screen too they scroll with the list, its first group", async () => {
     await mount(<SessionList app={makeApp(LIST.map((s) => (s.id === 'cave' ? { ...s, favorite_at: at(30) } : s)))} phone />);
-    expect(root.querySelector('.sessions-phone > .fav-pinned.group-favorites')).not.toBeNull();
-    expect(root.querySelector('.session-scroll .group-favorites')).toBeNull();
-    expect(root.querySelector('.fav-pinned .group-head svg, .group-pin')).toBeNull();
+    expect(root.querySelector('.sessions-phone > .session-scroll > .session-group')!.classList.contains('group-favorites')).toBe(true);
+    expect(root.querySelector('.sessions-phone > .group-favorites')).toBeNull();
+    expect(root.querySelector('.group-favorites .group-head svg, .group-pin')).toBeNull();
   });
 
   it("the row's menu adds a session to the favorites and takes it out; the summary of another device too", async () => {
@@ -3200,7 +3258,7 @@ describe('a new session', () => {
     expect(api.createSession).toHaveBeenCalledWith('p1', undefined, { workspace_id: 'w1', cwd: 'net', permission_mode: 'ask', model: 'haiku' });
     // On its way: shown as being sent, the input clear, the chips holding what was sent.
     expect(win()!.querySelector('.msg-pending')!.textContent).toContain('Hello there');
-    expect(win()!.querySelector('.msg-pending')!.textContent).toContain('sending…');
+    expect(win()!.querySelector('.msg-pending .msg-bubble .msg-sending')!.getAttribute('aria-label')).toBe('Sending');
     expect(input().value).toBe('');
     expect([...root.querySelectorAll<HTMLButtonElement>('.new-chip')].every((c) => c.disabled)).toBe(true);
 
@@ -4522,12 +4580,12 @@ describe('a phone (< 900 px)', () => {
     expect(phoneAll()).toHaveLength(4);
   });
 
-  it('`#/p/<id>` is the project: its favorites pinned over the groups; "+" opens its new session', async () => {
+  it('`#/p/<id>` is the project: its favorites the first group; "+" opens its new session', async () => {
     const { app } = phoneApp();
     app.sessions.set('cave', { ...app.sessions.get('cave')!, favorite_at: at(1) });
     await open(app, '#/p/p1');
     expect(root.querySelector('.layout > .sessions-phone > .side-head .project-title')!.textContent).toBe('physics-mp');
-    expect(root.querySelector('.sessions-phone > .fav-pinned .session-title')!.textContent).toBe('Cave scene port');
+    expect(root.querySelector('.sessions-phone > .session-scroll > .group-favorites .session-title')!.textContent).toBe('Cave scene port');
     expect(groups().map((g) => g[0])).toEqual(['Favorites', 'Needs you', 'Running', 'Idle · Yesterday']);
     expect(root.querySelector('.phone-home, .chips, .fab, .wline')).toBeNull();
     await click(root.querySelector('.side-head .btn-new-session'));
@@ -4655,5 +4713,28 @@ describe('the browser of a session (SPEC 0.149)', () => {
     await mount(<PhoneHome app={app} />);
     const tile = (n: string) => phoneRow(n).querySelector('.phone-tile-wrap')!.classList.contains('has-browser');
     expect([tile('physics-mp'), tile('Personal')]).toEqual([true, false]);
+  });
+});
+
+describe("the projects' marks", () => {
+  it('are counted once per change of the sessions, not per project and mark on every render', async () => {
+    const app = makeApp([...LIST, sess('notes', 'Notes', 'idle', at(0.5), { project_id: 'p0', unread: 1 })]);
+    const shown = vi.spyOn(app, 'shown');
+    await mount(<ProjectRail app={app} />);
+    // One pass over the six sessions the marks count: LIST and Notes, not the service sessions.
+    expect(shown).toHaveBeenCalledTimes(6);
+    expect([app.projectWaiting('p1'), app.projectRunning('p1'), app.projectUnread('p0')]).toEqual([1, true, true]);
+    shown.mockClear();
+    // A render with the same sessions (a change of anything else: a project picked, a menu
+    // opened) counts nothing again. A hub's summary sets its session, so it is one pass.
+    await mount(<ProjectRail app={app} />);
+    expect(shown).not.toHaveBeenCalled();
+    // A change of a session: one more pass, and the marks see it.
+    app.sessions.set('prof', { ...app.sessions.get('prof')!, state: 'waiting' });
+    expect(app.projectWaiting('p1')).toBe(2);
+    expect(shown).toHaveBeenCalledTimes(6);
+    // A session gone: the same.
+    app.sessions.delete('net');
+    expect(app.projectWaiting('p1')).toBe(1);
   });
 });

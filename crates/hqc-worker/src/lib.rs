@@ -27,6 +27,7 @@ pub mod ssh;
 pub mod supervisor;
 pub mod title;
 pub mod token;
+pub mod vault;
 pub mod worker_log;
 pub mod workspaces;
 
@@ -98,11 +99,19 @@ pub struct MirrorOptions {
 
 impl Worker {
     pub fn hello(&self) -> Hello {
+        // `vault` reaches the hub only with `session_secrets` too: the hub offers the vault to
+        // a card where this is set.
+        let mut capabilities = self.capabilities.clone();
+        if self.config.session_secrets && self.config.vault {
+            if let Some(o) = capabilities.as_object_mut() {
+                o.insert("vault".into(), true.into());
+            }
+        }
         // Workspaces are hub objects (SPEC §3); only `allowed_roots` bounds them here.
         Hello {
             protocol_version: hqc_proto::PROTOCOL_VERSION,
             boot_id: self.boot_id,
-            capabilities: self.capabilities.clone(),
+            capabilities,
             // Names, bindings and rules; never the values of `env` (SPEC §14).
             environments: self.config.environments.iter().map(|e| e.info()).collect(),
             env_bindings: self.config.env_bindings.clone(),

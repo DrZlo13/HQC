@@ -198,9 +198,9 @@ impl Permissions {
     }
 }
 
-/// `Tool` or `Tool(content)`: a tool name of letters, digits and `_` (`mcp__hqc`,
-/// `mcp__srv__tool`, optionally ending in `*`), non-empty content in one pair of
-/// parentheses closing the rule. The CLI silently ignores a settings file it cannot
+/// `Tool` or `Tool(content)`: a tool name of letters, digits, `_` and `-` (`mcp__hqc`,
+/// `mcp__srv__tool`, `mcp__claude-in-chrome`, optionally ending in `*`), non-empty content in
+/// one pair of parentheses closing the rule. The CLI silently ignores a settings file it cannot
 /// validate in `-p`, which would drop every deny rule, so anything unusual is refused here.
 pub fn check_rule(rule: &str) -> anyhow::Result<()> {
     let bad = |why: &str| -> anyhow::Result<()> {
@@ -221,9 +221,11 @@ pub fn check_rule(rule: &str) -> anyhow::Result<()> {
     };
     let base = name.strip_suffix('*').unwrap_or(name);
     if !base.starts_with(|c: char| c.is_ascii_alphabetic())
-        || !base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        || !base
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        return bad("the tool name must be letters, digits and _");
+        return bad("the tool name must be letters, digits, _ and -");
     }
     if content.is_some_and(|c| c.trim().is_empty()) {
         return bad("empty parentheses");
@@ -1012,6 +1014,7 @@ mod tests {
             "mcp__hqc",
             "mcp__hqc__*",
             "mcp__hqc__hqc_send",
+            "mcp__claude-in-chrome",
             "Read(./secrets/**)",
         ] {
             check_rule(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));

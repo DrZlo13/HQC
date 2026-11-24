@@ -57,8 +57,13 @@ use crate::{
 pub const KIND: &str = "publish";
 /// The page a published folder opens with, and a path ending in `/` names.
 pub const INDEX: &str = "index.html";
-/// Files the owner's card names; the rest are counted.
+/// How many of the files that are neither hidden nor look like a secret the owner's card names;
+/// the rest are counted.
 pub const MAX_LISTED: usize = 50;
+/// How many of the files that look like a secret the owner's card names.
+pub const MAX_SECRETS_LISTED: usize = 20;
+/// How many of the other hidden files the owner's card names.
+pub const MAX_HIDDEN_LISTED: usize = 20;
 /// Longest `path` of the call shown on the card, in bytes.
 const MAX_PATH: usize = 4096;
 /// The longest pause before the result of an allowed publication is stored again.
@@ -340,8 +345,20 @@ fn check_name(name: &str, dir: bool) -> Result<(), String> {
             name.escape_debug()
         ));
     }
+    // The worker never packs them (SPEC §7); an archive that has them did not come from its
+    // packing, and the card would show such a folder as one line.
+    if body
+        .split('/')
+        .any(|c| NEVER_PUBLISHED.iter().any(|n| n.eq_ignore_ascii_case(c)))
+    {
+        return Err(format!("{name:?} is in a `.git` or `.hqc` folder"));
+    }
     Ok(())
 }
+
+/// Folders and files that are never published, in any case (`.GIT` on a case-insensitive
+/// volume is the repository too).
+const NEVER_PUBLISHED: [&str; 2] = [".git", ".hqc"];
 
 /// What the link of an archive with these files opens: `None` for a folder with `index.html`,
 /// the name of the one file of an archive of a file; otherwise the archive is refused.
@@ -391,10 +408,85 @@ fn hidden_dir(name: &str) -> Option<&str> {
     None
 }
 
-/// The owner's card (SPEC §10.1): what is published, that the link is public, the files: the
-/// first [`MAX_LISTED`] that are not hidden, every hidden file (a name starting with `.`), and
-/// every hidden folder as one line with its count, so that a `.env` cannot hide in the count of
-/// the rest and a `.git` does not fill the card.
+/// What the last component of a path must look like to count as a secret ([`card`] names such
+/// files first, at most [`MAX_SECRETS_LISTED`] and always the first of each glob), each a glob
+/// with at most one `*`: `.env*` (environment files), `credentials*`,
+/// `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*` (ssh private keys and their `.pub`),
+/// `*.pem`, `*.key` (keys and certificates), `*.p12`, `*.pfx`, `*.ppk`, `*.jks`, `*.keystore`
+/// (key bundles and stores), `*.kdbx` (a password database), `*.gpg`, `.netrc`, `.npmrc`,
+/// `.git-credentials` (tokens and passwords of tools), `secrets.*`, `service-account*.json`;
+/// the case does not matter.
+const SECRET_GLOBS: [&str; 20] = [
+    ".env*",
+    "credentials*",
+    "id_rsa*",
+    "id_dsa*",
+    "id_ecdsa*",
+    "id_ed25519*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.ppk",
+    "*.jks",
+    "*.keystore",
+    "*.kdbx",
+    "*.gpg",
+    ".netrc",
+    ".npmrc",
+    ".git-credentials",
+    "secrets.*",
+    "service-account*.json",
+];
+// The card names the first file of each glob only while the globs fit its cap.
+const _: () = assert!(SECRET_GLOBS.len() <= MAX_SECRETS_LISTED);
+
+/// The index in [`SECRET_GLOBS`] of the first glob the name matches, if any. A glob without `*`
+/// is the whole name; with one, the name starts with what is before it, ends with what is after
+/// it, and is at least as long as both together.
+fn secret_kind(name: &str) -> Option<usize> {
+    let name = name.to_ascii_lowercase();
+    SECRET_GLOBS.iter().position(|g| match g.split_once('*') {
+        None => name == *g,
+        Some((head, tail)) => {
+            name.len() >= head.len() + tail.len() && name.starts_with(head) && name.ends_with(tail)
+        }
+    })
+}
+
+/// The lines of `items` (a group key and a name each, in the archive's order) one group at a
+/// time round and round: the first name of each group, then the second of each, and so on; the
+/// groups in the order their first name came in. At most `max` lines.
+fn round_robin<'a, K: std::hash::Hash + Eq>(
+    items: impl Iterator<Item = (K, &'a str)>,
+    max: usize,
+) -> Vec<&'a str> {
+    let mut at: HashMap<K, usize> = HashMap::new();
+    let mut groups: Vec<Vec<&str>> = Vec::new();
+    for (key, name) in items {
+        let i = *at.entry(key).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[i].push(name);
+    }
+    let rounds = groups.iter().map(Vec::len).max().unwrap_or(0);
+    (0..rounds)
+        .flat_map(|r| groups.iter().filter_map(move |g| g.get(r).copied()))
+        .take(max)
+        .collect()
+}
+
+/// The owner's card (SPEC §10.1): what is published, that the link is public, the files, in
+/// three groups: every file whose name looks like a secret ([`secret_kind`]), wherever it is,
+/// also inside a hidden folder, at most [`MAX_SECRETS_LISTED`] lines, one kind after another
+/// round and round; every other hidden file (a name starting with `.`, or any file inside a
+/// folder whose name starts with `.`) by its full path, at most [`MAX_HIDDEN_LISTED`] lines, one
+/// hidden folder (or one hidden file outside them) after another round and round; the first
+/// [`MAX_LISTED`] of the other files in the archive's order. A hundred `*.key` cannot push an
+/// `id_rsa` off the first lines, nor a big hidden folder the files of another one, also where
+/// the card is cut to a few lines (the macOS app's notification), and what matters most comes
+/// first. "and N more" counts the files on no line.
 pub fn card(path: &str, site: &Site) -> String {
     let n = site.files.len();
     let mut d = format!(
@@ -404,46 +496,26 @@ pub fn card(path: &str, site: &Site) -> String {
         if n == 1 { "file" } else { "files" },
         size_text(site.unpacked)
     );
-    // A line per named file or per hidden folder (an index into `dirs`), in the archive's order.
-    enum Line<'a> {
-        File(&'a str),
-        Dir(usize),
-    }
-    let mut lines = Vec::new();
-    let mut dirs: Vec<(&str, usize)> = Vec::new();
-    let mut dir_line: HashMap<&str, usize> = HashMap::new();
-    let (mut regular, mut shown) = (0, 0);
+    let (mut secrets, mut hidden, mut regular) = (Vec::new(), Vec::new(), Vec::new());
     for (name, _) in &site.files {
         let name = name.as_str();
-        if let Some(dir) = hidden_dir(name) {
-            let i = *dir_line.entry(dir).or_insert_with(|| {
-                lines.push(Line::Dir(dirs.len()));
-                dirs.push((dir, 0));
-                dirs.len() - 1
-            });
-            dirs[i].1 += 1;
-        } else if name.rsplit('/').next().is_some_and(|f| f.starts_with('.')) {
-            lines.push(Line::File(name));
-        } else if regular < MAX_LISTED {
-            regular += 1;
-            lines.push(Line::File(name));
-        } else {
-            continue;
+        let last = name.rsplit('/').next().unwrap_or(name);
+        if let Some(kind) = secret_kind(last) {
+            secrets.push((kind, name));
+        } else if let Some(dir) = hidden_dir(name) {
+            hidden.push((dir, name));
+        } else if last.starts_with('.') {
+            hidden.push((name, name));
+        } else if regular.len() < MAX_LISTED {
+            regular.push(name);
         }
-        shown += 1;
     }
-    for line in &lines {
+    let secrets = round_robin(secrets.into_iter(), MAX_SECRETS_LISTED);
+    let hidden = round_robin(hidden.into_iter(), MAX_HIDDEN_LISTED);
+    let shown = secrets.len() + hidden.len() + regular.len();
+    for name in secrets.into_iter().chain(hidden).chain(regular) {
         d.push('\n');
-        match line {
-            Line::File(name) => d.push_str(name),
-            Line::Dir(i) => {
-                let (dir, k) = dirs[*i];
-                d.push_str(&format!(
-                    "{dir}/ ({k} {})",
-                    if k == 1 { "file" } else { "files" }
-                ));
-            }
-        }
+        d.push_str(name);
     }
     if n > shown {
         d.push_str(&format!("\nand {} more", n - shown));
@@ -548,9 +620,10 @@ pub fn allowed(app: &AppState, p: PendingRow) {
 }
 
 /// On hub start, before it serves anything (SPEC §3 PendingRequest): the publications the owner
-/// allowed whose result the previous process did not store are carried out again at once
-/// ([`allowed`]); one done before the stop answers as a repeat. The result reaches the worker
-/// when it is connected, or after its `hello`.
+/// allowed (the request carries the owner's mark, [`db::close_allowed`]) whose result the
+/// previous process did not store are carried out again at once ([`allowed`]); one done before
+/// the stop answers as a repeat. The result reaches the worker when it is connected, or after
+/// its `hello`.
 pub async fn left_on_start(app: &AppState) {
     let rows = match db::allowed_without_result(&app.db, KIND).await {
         Ok(rows) => rows,
@@ -949,6 +1022,29 @@ async fn open_entry(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_and_hqc_folders_are_refused_in_any_case() {
+        for bad in [
+            ".git/config",
+            "a/.git/HEAD",
+            ".GIT/config",
+            "x/.Hqc/out.png",
+            ".git",
+            ".hqc/",
+        ] {
+            assert!(super::check_name(bad, bad.ends_with('/')).is_err(), "{bad}");
+        }
+        for ok in [
+            "index.html",
+            ".gitignore",
+            "a/.github/x.yml",
+            "git/x",
+            ".hqcx",
+        ] {
+            assert!(super::check_name(ok, false).is_ok(), "{ok}");
+        }
+    }
+
     use super::*;
     use std::io::Write;
 
@@ -1052,27 +1148,166 @@ mod tests {
         assert!(d.contains("60 files, 3.0 MB:"), "{d}");
         assert!(d.contains("\nf49.html\nand 10 more"), "{d}");
         assert!(!d.contains("f50.html"), "{d}");
-        // Hidden files are named wherever they are, a hidden folder is one line with its count,
-        // and neither is counted in the rest.
+        // Hidden files are named by their full path, also inside a hidden folder, and none is
+        // counted in the rest; a secret (`.env`) comes first, the hidden ones next, then the
+        // other files.
         let mut hidden = many.clone();
         hidden.files[3].0 = ".htaccess".into();
         hidden.files[55].0 = ".env".into();
-        hidden.files[57].0 = "assets/.git/HEAD".into();
-        hidden.files[58].0 = "assets/.git/config".into();
+        hidden.files[57].0 = "assets/.cache/a".into();
+        hidden.files[58].0 = "assets/.cache/b".into();
         let d = card("/w/site", &hidden);
         assert!(
-            d.contains("\nf50.html\n.env\nassets/.git/ (2 files)\nand 6 more"),
+            d.contains(":\n.env\n.htaccess\nassets/.cache/a\nassets/.cache/b\nf0.html\n"),
             "{d}"
         );
-        assert!(
-            d.contains("\n.htaccess\n") && !d.contains("f55.html") && !d.contains("config"),
-            "{d}"
-        );
+        assert!(d.ends_with("\nf50.html\nand 6 more"), "{d}");
+        assert!(!d.contains("f55.html"), "{d}");
         assert_eq!(hidden_dir("a/.b/.c"), Some("a/.b"));
         assert_eq!(hidden_dir("assets/.htaccess"), None);
         assert!(!card("/w/site", &many).contains(".env"));
         assert_eq!(size_text(1023), "1023 B");
         assert_eq!(size_text(1536), "1.5 KB");
+    }
+
+    #[test]
+    fn the_card_names_the_secrets_first() {
+        // Sixty regular files, then the secrets past the fiftieth name, two of them in a hidden
+        // folder, one of which has another file next to it.
+        let mut files: Vec<(String, u64)> = (0..60).map(|i| (format!("f{i:02}.html"), 1)).collect();
+        for name in [
+            "id_rsa",
+            "deploy/credentials.json",
+            "certs/server.PEM",
+            ".ssh/id_ed25519",
+            ".config/.env.local",
+            ".config/plain.txt",
+        ] {
+            files.push((name.into(), 1));
+        }
+        let site = Site {
+            files,
+            unpacked: 66,
+            entry: None,
+        };
+        let d = card("/w/site", &site);
+        // The secrets first (one of each kind, in the archive's order), then the hidden file,
+        // then the first 50 other files.
+        assert!(
+            d.contains(
+                "66 files, 66 B:\nid_rsa\ndeploy/credentials.json\ncerts/server.PEM\n\
+                 .ssh/id_ed25519\n.config/.env.local\n.config/plain.txt\nf00.html\n"
+            ),
+            "{d}"
+        );
+        // Not named: f50..f59.
+        assert!(d.ends_with("\nf49.html\nand 10 more"), "{d}");
+    }
+
+    #[test]
+    fn a_secret_kind_is_the_first_glob_that_matches() {
+        for (name, kind) in [
+            (".env", Some(0)),
+            (".ENV.production", Some(0)),
+            ("Credentials.JSON", Some(1)),
+            ("id_rsa.pub", Some(2)),
+            ("id_dsa", Some(3)),
+            ("id_ecdsa", Some(4)),
+            ("id_ed25519", Some(5)),
+            ("server.pem", Some(6)),
+            ("a.key", Some(7)),
+            ("a.p12", Some(8)),
+            ("a.pfx", Some(9)),
+            ("a.ppk", Some(10)),
+            ("a.jks", Some(11)),
+            ("a.keystore", Some(12)),
+            ("a.kdbx", Some(13)),
+            ("a.GPG", Some(14)),
+            (".netrc", Some(15)),
+            (".npmrc", Some(16)),
+            (".git-credentials", Some(17)),
+            ("secrets.json", Some(18)),
+            ("Secrets.yml", Some(18)),
+            ("service-account.json", Some(19)),
+            ("service-account-prod.json", Some(19)),
+            ("index.html", None),
+            ("keyboard.js", None),
+            ("environment.txt", None),
+            ("my_credentials", None),
+            ("my-secrets.json", None),
+            ("secrets", None),
+            ("service-account.txt", None),
+            ("service-account", None),
+            ("x.netrc", None),
+            ("x.npmrc", None),
+            ("netrc", None),
+            (".key", Some(7)),
+            ("a.gpg.txt", None),
+            ("a.jksx", None),
+        ] {
+            assert_eq!(secret_kind(name), kind, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_hundred_keys_do_not_push_a_private_key_off_the_card() {
+        let mut files: Vec<(String, u64)> =
+            (1..=100).map(|i| (format!("a{i:04}.key"), 1)).collect();
+        files.push(("id_rsa".into(), 1));
+        files.push(("index.html".into(), 1));
+        let site = Site {
+            files,
+            unpacked: 102,
+            entry: None,
+        };
+        let d = card("/w/site", &site);
+        let lines: Vec<&str> = d.lines().collect();
+        // The sentence, the count line, then the secrets: the first of each kind, round and
+        // round.
+        let secrets = &lines[2..22];
+        assert_eq!(secrets[0], "a0001.key");
+        assert_eq!(secrets[1], "id_rsa", "{d}");
+        assert_eq!(secrets[2], "a0002.key");
+        assert_eq!(secrets[19], "a0019.key");
+        assert_eq!(lines[22], "index.html");
+        assert_eq!(lines.len(), 24, "{d}");
+        assert_eq!(lines[23], "and 81 more");
+    }
+
+    #[test]
+    fn the_card_names_files_in_hidden_folders_and_a_big_one_does_not_hide_the_rest() {
+        let mut files: Vec<(String, u64)> =
+            (0..100).map(|i| (format!(".cache/f{i:03}"), 1)).collect();
+        for name in [
+            ".kube/config",
+            ".aws/config",
+            ".docker/config.json",
+            ".config/gh/hosts.yml",
+        ] {
+            files.push((name.into(), 1));
+        }
+        let site = Site {
+            files,
+            unpacked: 104,
+            entry: None,
+        };
+        let d = card("/w/site", &site);
+        let lines: Vec<&str> = d.lines().collect();
+        let hidden = &lines[2..22];
+        assert_eq!(
+            &hidden[..5],
+            [
+                ".cache/f000",
+                ".kube/config",
+                ".aws/config",
+                ".docker/config.json",
+                ".config/gh/hosts.yml"
+            ],
+            "{d}"
+        );
+        assert_eq!(hidden[5], ".cache/f001");
+        assert_eq!(lines.len(), 23, "{d}");
+        assert_eq!(lines[22], "and 84 more");
     }
 
     #[test]

@@ -142,7 +142,7 @@ it('runs the iteration 1 scenario through the UI', async () => {
   // The final answer carries the turn's usage, the header the model and the cost.
   expect($$('.msg-final').at(-1)!.querySelector('.usage')!.textContent).toContain('tokens');
   expect($('.chat-meta .btn-model-pill')!.textContent).toBe('Sonnet 5.5');
-  expect($('.chat-cost')!.textContent).toMatch(/^\$0\.\d+ this session$/);
+  expect($('.chat-cost')!.textContent).toMatch(/^\$0\.\d+ · 52k tokens this session$/);
   expect($('.chat-path')!.textContent).toContain('~/work/hqc');
 });
 

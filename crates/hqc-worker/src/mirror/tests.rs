@@ -5,7 +5,7 @@
 use std::io::Write;
 
 use hqc_claude_jsonl::{parse_str, Record};
-use hqc_proto::event::EventKind;
+use hqc_proto::event::{Event, EventKind};
 
 use super::*;
 
@@ -802,6 +802,7 @@ fn task_notification_is_the_adapters_while_it_runs() {
             fork: None,
             compaction: None,
             model: None,
+            goal: None,
         }
     );
     // `PONG` answers the person's prompt, not the notification.
@@ -812,6 +813,60 @@ fn task_notification_is_the_adapters_while_it_runs() {
         unreachable!()
     };
     assert_eq!(*in_reply_to, Some(p.event.event_id));
+}
+
+/// A transcript of one `goal_status` record (what the CLI writes about the session's goal).
+fn goal_transcript() -> (String, Uuid) {
+    let u = Uuid::new_v4();
+    let line = serde_json::json!({"parentUuid": null, "isSidechain": false, "uuid": u,
+        "timestamp": "2026-11-22T19:33:57.895Z", "cwd": "/tmp/hqc-fixture/goal",
+        "sessionId": MIDTURN_SESSION, "version": "2.1.318", "type": "attachment",
+        "attachment": {"type": "goal_status", "met": false, "condition": "C", "reason": "R",
+            "iterations": 2, "durationMs": 10, "tokens": 3}})
+    .to_string();
+    (line + "\n", u)
+}
+
+/// SPEC 0.218: a goal record of a session the worker's own process does not run (a VS Code
+/// tab, an import) is `system goal`, the event the adapter sends for the same record, at the
+/// record's own time.
+#[test]
+fn a_goal_record_of_another_writer_is_a_goal_line() {
+    let (transcript, u) = goal_transcript();
+    let mut s = setup("goal", &transcript);
+    append(&s.file, &transcript);
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    let [Output::Event(e)] = &out[..] else {
+        panic!("{:?}", labels(&out));
+    };
+    let g = hqc_claude_jsonl::goal_record(transcript.trim()).unwrap();
+    let mut want = crate::adapter::claude_code::engine::goal_event(Uuid::nil(), &g);
+    want.ts = "2026-11-22T19:33:57.895Z".parse().unwrap();
+    assert_eq!(e.event, want);
+    assert_eq!(e.event.event_id, Event::id_from_claude_record(&u));
+    assert!(matches!(
+        &e.event.kind,
+        EventKind::System { code, goal: Some(g), .. } if code == "goal" && g.state == "unmet"
+    ));
+}
+
+/// SPEC 0.218: while the worker's own process runs the session the adapter reported the goal
+/// record: the mirror neither emits it nor takes it for another writer.
+#[test]
+fn a_goal_record_is_the_adapters_while_it_runs() {
+    let (transcript, _) = goal_transcript();
+    let mut s = setup("goal", &transcript);
+    s.own.begin(s.runtime, None);
+    append(&s.file, &transcript);
+    let t0 = Instant::now();
+    for later in [0, 10] {
+        let out = s
+            .mirror
+            .poll(t0 + Duration::from_secs(later), SystemTime::now());
+        assert!(out.is_empty(), "{later} s: {:?}", labels(&out));
+    }
+    let row = s.mirror.store.get(&s.file).unwrap().unwrap();
+    assert_eq!(row.offset, transcript.len() as u64, "read past it at once");
 }
 
 const MIDTURN_SESSION: &str = "5e1f0c4a-8d3b-4c7e-9a21-3f6b8d0e2c17";
@@ -1246,6 +1301,7 @@ fn a_compaction_is_one_line_with_its_summary() {
             fork: None,
             compaction: None,
             model: None,
+            goal: None,
         }
     );
 }

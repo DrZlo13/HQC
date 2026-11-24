@@ -19,7 +19,10 @@
 //! # allow_subagent_messages = false # keep SendMessage for own subagents, refuse other sessions'
 //! # show_in_vscode = true          # sessions run by hqc appear in VS Code's history
 //! # session_secrets = false        # take secrets and ssh keys for a session from the chat
+//! # vault = false                  # true: an hqc_secret card may take its value from Vaultwarden (Bitwarden) through this machine's rbw
 //! # browser = false                # a session the owner gives it to drives Chrome here
+//! # task_tools = false             # true: give the agent Claude Code's task tools
+//!                                  # (TaskCreate, TaskUpdate, TaskList, TaskGet)
 //!
 //! [permissions]                  # optional, see crate::permissions
 //! mode = "ask"                   # "ask" | "auto" | "allow_all": sessions that ask for none
@@ -111,7 +114,11 @@ struct RawConfig {
     #[serde(default)]
     session_secrets: bool,
     #[serde(default)]
+    vault: bool,
+    #[serde(default)]
     browser: bool,
+    #[serde(default)]
+    task_tools: bool,
     #[serde(default)]
     permissions: Option<RawPermissions>,
     #[serde(default)]
@@ -423,10 +430,21 @@ pub struct Config {
     /// restricted (SPEC §14, since 0.147): a secret becomes a file of the agent's process, a key
     /// goes into its ssh-agent and may be kept for the workspace. Off by default.
     pub session_secrets: bool,
+    /// An `hqc_secret` card may take its value from Vaultwarden (Bitwarden): the worker reads
+    /// the entry the owner confirms with `rbw` on this machine, and the value does not pass
+    /// through the hub. Effective only with `session_secrets`. Off by default.
+    pub vault: bool,
+    /// The `rbw` the worker runs to read the vault: `rbw` from `PATH`; set by [`Config::parse`]
+    /// (not a `worker.toml` key), a test points it at a fake script.
+    pub rbw_bin: PathBuf,
     /// A session its owner gives the browser runs Claude Code with `--chrome`: the user's
     /// Chrome on this machine, through the Claude in Chrome extension (SPEC §14, since 0.148).
     /// Off by default; every other session runs with `--no-chrome`.
     pub browser: bool,
+    /// Claude Code's task list tools (`CLAUDE_CODE_ENABLE_TODO_TOOLS=1`): without it CLI
+    /// 2.1.312 gives the 5.x models none, and the chat has no task list to show (SPEC §14, §8.1,
+    /// since 0.223). Off by default.
+    pub task_tools: bool,
     /// `[permissions]`: the worker's allow/deny rules and the ask/auto mode (SPEC §14). A
     /// session runs with its environment's [`Environment::permissions`], built on these.
     pub permissions: Permissions,
@@ -447,12 +465,14 @@ pub struct Config {
     pub secrets: crate::secrets::Stores,
 }
 
-/// What a session that may have secrets gets (SPEC §14, since 0.147): the stores, and the keys
-/// kept for its workspace (none for a session without one).
+/// What a session that may have secrets gets (SPEC §14, since 0.147): the stores, the keys
+/// kept for its workspace (none for a session without one) and, with `vault` on, the `rbw` its
+/// secrets may be read from Vaultwarden with.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionSecrets {
     pub stores: crate::secrets::Stores,
     pub workspace: Option<crate::secrets::WorkspaceKeys>,
+    pub rbw: Option<PathBuf>,
 }
 
 /// What a session may be started with, after checking `session.start` against the config.
@@ -623,7 +643,10 @@ impl Config {
             allow_subagent_messages: raw.allow_subagent_messages,
             show_in_vscode: raw.show_in_vscode,
             session_secrets: raw.session_secrets,
+            vault: raw.vault,
+            rbw_bin: PathBuf::from("rbw"),
             browser: raw.browser,
+            task_tools: raw.task_tools,
             default_environment: Arc::new(Environment::default_of(&permissions)),
             permissions,
             environments,
@@ -700,6 +723,7 @@ impl Config {
                     .workspace_path
                     .as_ref()
                     .map(|_| self.secrets.workspace(&ws)),
+                rbw: self.vault.then(|| self.rbw_bin.clone()),
             });
         Ok(StartSpec {
             session_id: s.session_id,
@@ -962,6 +986,8 @@ mod tests {
         assert!(!off.session_secrets);
         let ws = dir.path().join("ws");
         assert!(off.check_start(&start(&ws)).unwrap().secrets.is_none());
+        assert!(!off.vault && off.rbw_bin == Path::new("rbw"));
+        assert!(Config::parse(&toml("vault = true\n")).unwrap().vault);
         let on = Config::parse(&toml("session_secrets = true\n")).unwrap();
         let mut s = start(&ws);
         s.owner_is_worker_owner = true;
@@ -975,6 +1001,24 @@ mod tests {
         let mut foreign = s.clone();
         foreign.owner_is_worker_owner = false;
         assert!(on.check_start(&foreign).unwrap().secrets.is_none());
+    }
+
+    /// SPEC 0.223: `task_tools` is off unless `task_tools = true` is written.
+    #[test]
+    fn the_task_tools_are_off_unless_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = |extra: &str| {
+            format!(
+                "hub_url = \"http://127.0.0.1:1/\"\nallowed_roots = [{:?}]\n{extra}",
+                dir.path().display().to_string(),
+            )
+        };
+        assert!(!Config::parse(&toml("")).unwrap().task_tools);
+        assert!(
+            Config::parse(&toml("task_tools = true\n"))
+                .unwrap()
+                .task_tools
+        );
     }
 
     /// SPEC 0.148: the browser only with `browser = true`, for the owner's unrestricted

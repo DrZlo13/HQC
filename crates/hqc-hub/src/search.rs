@@ -389,6 +389,7 @@ async fn hits(
              FROM events e JOIN s ON s.id = e.session_id
              WHERE e.search_words IS NOT NULL AND e.search_words @@ $5::tsquery
                  AND NOT (e.type = 'peer.message' AND e.payload ? 'room')
+                 AND e.delivery IS DISTINCT FROM 'withdrawn'
                  AND ($8::text[] IS NULL OR e.type = ANY($8::text[]))
                  AND ($9::timestamptz IS NULL OR e.ts >= $9::timestamptz)
              UNION ALL
@@ -477,6 +478,7 @@ async fn counts(
              FROM events e JOIN s ON s.id = e.session_id JOIN k ON k.type = e.type
              WHERE e.search_words IS NOT NULL AND e.search_words @@ $4::tsquery
                  AND NOT (e.type = 'peer.message' AND e.payload ? 'room')
+                 AND e.delivery IS DISTINCT FROM 'withdrawn'
                  AND ($5::timestamptz IS NULL OR e.ts >= $5::timestamptz)
              UNION ALL
              SELECT s.id, 'title' FROM s

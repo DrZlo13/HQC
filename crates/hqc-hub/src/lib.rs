@@ -43,6 +43,7 @@ pub mod schedules;
 pub mod search;
 pub mod secrets;
 pub mod security;
+pub mod side;
 pub mod spawn;
 pub mod state;
 pub mod titles;
@@ -119,6 +120,18 @@ pub fn router(app: AppState) -> Router {
         .route("/api/sessions/{id}/input", post(api::input))
         .route("/api/sessions/{id}/stop", post(api::stop))
         .route("/api/sessions/{id}/background", post(api::background))
+        .route(
+            "/api/sessions/{id}/inputs/{event_id}/withdraw",
+            post(api::withdraw),
+        )
+        .route(
+            "/api/sessions/{id}/inputs/{event_id}/now",
+            post(api::input_now),
+        )
+        .route(
+            "/api/sessions/{id}/side_question",
+            post(side::side_question),
+        )
         .route("/api/sessions/{id}/restart", post(api::restart))
         .route("/api/sessions/{id}/pause", post(pause::pause))
         .route("/api/sessions/{id}/resume", post(pause::resume))

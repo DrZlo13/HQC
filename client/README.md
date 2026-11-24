@@ -89,7 +89,7 @@ A 12-megapixel photo takes about a second. libheif is LGPL-3.0; its license is i
     takes a session row dropped on it;
   - `SessionList.tsx` + `sessions.ts` — the session column: a head of one row (name, search, "⋯"
     with the list's order, Reorder, a new room and the project's items, "+"), the project's
-    favorites pinned over the list, the groups (Needs you,
+    favorites as a group of the list, the groups (Needs you,
     Running, idle by age), one menu per row on a right click, archive and favorites buttons past
     the column's edge on hover, a desktop row dragged onto a project on the bar to move it there,
     the workers line at the bottom; `PhoneHome.tsx` — a

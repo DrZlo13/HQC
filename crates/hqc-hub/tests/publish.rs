@@ -128,6 +128,16 @@ async fn answer(hub: &TestHub, w: &mut FakeWorker, sid: &str, rid: &str, option:
         )
         .await;
     assert_eq!(s, 200, "{v}");
+    // `once` closes the request with the owner's mark, any other answer without it.
+    let (mark, owner): (Option<String>, String) = sqlx::query_as(
+        "SELECT p.payload ->> 'allowed_by', s.owner_id::text FROM pending_requests p
+         JOIN sessions s ON s.id = p.session_id WHERE p.kind = 'publish' AND p.request_id = $1",
+    )
+    .bind(rid)
+    .fetch_one(&hub.app.db)
+    .await
+    .unwrap();
+    assert_eq!(mark, (option == "once").then_some(owner));
     let f = w.expect("mcp.result").await;
     w.reply(&f["id"], "ack", json!({})).await;
     assert_eq!(f["payload"]["request_id"], rid, "{f}");
@@ -925,6 +935,110 @@ async fn stored_result(hub: &TestHub, rid: &str) -> Option<Value> {
         .unwrap()
 }
 
+/// A worker's own approval may reuse the request id of its publication call, and the feed then
+/// has an `approval.response` with `once` for that id: the hub's own (`auto`) or the owner's
+/// click on the worker's card. Neither is the owner's answer to the publication, so a call
+/// cancelled afterwards is not published when the hub starts again; one the owner allowed is.
+#[tokio::test]
+async fn a_look_alike_answer_does_not_publish_after_a_hub_restart() {
+    let hub = hub().await;
+    let (worker, mut w, sid, token) = agent(&hub).await;
+    let session = hqc_hub::db::session(&hub.app.db, sid.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let a = upload_site(&hub, &worker, &sid, &page()).await;
+    let aid = a["id"].as_str().unwrap().to_string();
+    let cancelled = rid();
+    let f = publish(
+        &mut w,
+        &token,
+        &cancelled,
+        json!({"artifact_id": aid, "path": "/w/hqc/report"}),
+    )
+    .await;
+    assert_eq!(f["type"], "ack", "{f}");
+    for (author, by) in [
+        (json!({"kind": "system"}), "auto".to_string()),
+        (
+            hqc_hub::events::user_author(session.owner_id),
+            session.owner_id.to_string(),
+        ),
+    ] {
+        hqc_hub::events::store_hub_event(
+            &hub.app,
+            &session,
+            author,
+            "approval.response",
+            json!({"request_id": cancelled, "option_id": "once", "by": by}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    let id = w
+        .send(
+            "mcp.cancel",
+            json!({"request_id": cancelled, "reason": "eof"}),
+        )
+        .await;
+    assert_eq!(w.expect("ack").await["id"], id.as_str());
+    // A publication the owner allowed, whose result only is not stored.
+    let b = upload_site(&hub, &worker, &sid, &page()).await;
+    let allowed = rid();
+    let f = publish(
+        &mut w,
+        &token,
+        &allowed,
+        json!({"artifact_id": b["id"], "path": "/w/hqc/report"}),
+    )
+    .await;
+    assert_eq!(f["type"], "ack", "{f}");
+    hqc_hub::events::store_hub_event(
+        &hub.app,
+        &session,
+        hqc_hub::events::user_author(session.owner_id),
+        "approval.response",
+        json!({"request_id": allowed, "option_id": "once", "by": session.owner_id.to_string()}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    close_allowed(&hub, "publish", &allowed, session.owner_id).await;
+
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let hub = hub.restart().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while stored_result(&hub, &allowed).await.is_none() {
+        assert!(tokio::time::Instant::now() < deadline, "no result stored");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(row(&hub, &aid).await, (None, None));
+    assert_eq!(stored_result(&hub, &cancelled).await, None);
+    let (at, public_id) = row(&hub, b["id"].as_str().unwrap()).await;
+    assert!(at.is_some() && public_id.is_some());
+    hub.finish().await;
+}
+
+/// What the owner's `once` leaves on the request of `kind` when the hub stops before the
+/// result is stored: the row closed without a result, with the owner's mark.
+async fn close_allowed(hub: &TestHub, kind: &str, rid: &str, by: Uuid) {
+    let id: Uuid =
+        sqlx::query_scalar("SELECT id FROM pending_requests WHERE kind = $1 AND request_id = $2")
+            .bind(kind)
+            .bind(rid)
+            .fetch_one(&hub.app.db)
+            .await
+            .unwrap();
+    assert!(hqc_hub::db::close_allowed(&hub.app.db, id, by)
+        .await
+        .unwrap());
+}
+
 /// The hub stopped after the owner allowed publications, before their results were stored
 /// (SPEC §3 PendingRequest). Started again, it carries them out at once, the worker away: one
 /// not done yet is published, one done before the stop answers from its attachment with the
@@ -949,7 +1063,7 @@ async fn an_allowed_publication_is_carried_out_after_a_hub_restart() {
     .await;
     assert_eq!(f["type"], "ack", "{f}");
     // What `once` leaves when the hub stops before the publication: the answer in the feed,
-    // the request closed without a result.
+    // the request closed without a result, marked with the owner.
     hqc_hub::events::store_hub_event(
         &hub.app,
         &session,
@@ -961,11 +1075,7 @@ async fn an_allowed_publication_is_carried_out_after_a_hub_restart() {
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE pending_requests SET closed_at = now() WHERE request_id = $1")
-        .bind(&later)
-        .execute(&hub.app.db)
-        .await
-        .unwrap();
+    close_allowed(&hub, "publish", &later, session.owner_id).await;
     // One published before the stop, whose result only is not stored.
     let (done_aid, done_url) = published(&hub, &mut w, &worker, &sid, &token).await;
     let done: String = sqlx::query_scalar(

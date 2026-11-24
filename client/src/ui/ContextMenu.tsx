@@ -1,6 +1,7 @@
-// One context menu for the session column, the project bar and the chat header: a session row's
-// right click and a phone's long press, the column header's order and project menus, a project's
-// right click on the bar, the header's mode and model pills. It stands at the point it was opened
+// One context menu for the session column, the project bar, the chat header and the feed: a
+// session row's right click and a phone's long press, the column header's order and project
+// menus, a project's right click on the bar, the header's mode and model pills, a right click on
+// text selected in the chat. It stands at the point it was opened
 // from, kept inside the window. An item may hold a second level (a model family's versions): on a
 // computer a flyout beside the item, on a phone unfolded under it.
 

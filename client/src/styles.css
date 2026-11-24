@@ -620,31 +620,36 @@ select.input {
   pointer-events: none;
 }
 /* No one waits, but a session works: a stripe that runs around the tile. The ring is the
-   padding left by the mask; the stripe is a conic gradient whose start angle turns. It turns
-   under prefers-reduced-motion too: the motion is the mark, and a still arc does not read as
-   work. */
-@property --rail-run-turn {
-  syntax: '<angle>';
-  inherits: false;
-  initial-value: 0deg;
-}
+   padding left by the mask; the stripe is a conic gradient on a square twice the size of the
+   stripe's box behind it, and that square turns. `overflow: hidden` rounds the ring's corners
+   and keeps the square out of the bar's scroll. A turn is a transform, which the browser
+   animates on its own layer: an animated gradient angle repainted the page on every frame, a
+   quarter of a CPU core in the macOS app's WebKit. It turns under prefers-reduced-motion too:
+   the motion is the mark, and a still arc does not read as work. */
 .rail-run {
   position: absolute;
   inset: -5px;
   border-radius: 16px;
   padding: 2px;
-  background: conic-gradient(from var(--rail-run-turn), transparent 0deg 220deg, var(--text2) 360deg);
+  overflow: hidden;
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
-  /* The slowest lap, while the project's agents write no tokens; the more output tokens per
-     second they write, the faster it runs (RailRun, runSpeed). */
-  animation: rail-run 18s linear infinite;
   pointer-events: none;
+}
+.rail-run::before {
+  content: '';
+  position: absolute;
+  inset: -50%;
+  background: conic-gradient(transparent 0deg 220deg, var(--text2) 360deg);
+  /* The slowest lap, while the project's agents write no tokens; the more output tokens per
+     second they write, the faster it runs (RailRun, runSpeed). RailRun sets the lap itself from
+     RUN_LAP_MS (ProjectRail.tsx), which repeats these 18 s: change both. */
+  animation: rail-run 18s linear infinite;
 }
 @keyframes rail-run {
   to {
-    --rail-run-turn: 360deg;
+    transform: rotate(360deg);
   }
 }
 

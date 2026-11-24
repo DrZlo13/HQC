@@ -386,8 +386,16 @@ export function Chat({
     fn().catch((e: Error) => setNotice(`${failed}: ${e.message}`));
 
   const showRetry = !system && (state === 'error' || t.hasFailedDelivery());
-  const items = !loaded ? [] : requestsOnly ? onlyRequests(t.items()) : t.items();
-  const blocks = buildFeed(items, t);
+  // The feed is rebuilt only when what it is built from changed (`Timeline.revision`, which the
+  // answer's text and the live lists do not move): a render caused by a summary, a request list
+  // or the text being written leaves it as it was. `blocks` below is spliced, so it is a copy of
+  // the memoized array.
+  const built = useMemo(() => {
+    const items = !loaded ? [] : requestsOnly ? onlyRequests(t.items()) : t.items();
+    return { items, blocks: buildFeed(items, t) };
+  }, [t, t.revision, loaded, requestsOnly]);
+  const items = built.items;
+  const blocks = [...built.blocks];
   // While the agent's text is being written, the inputs that came meanwhile and the messages
   // not stored yet stand under it (SPEC §6), and so does the thinking being written.
   const under = t.streaming ? blocks.splice(underText(blocks, t)) : [];
@@ -1182,7 +1190,7 @@ export function Chat({
         )}
         {sheet && (
           <div class="sheet-wrap">
-            <PermissionBlock event={sheet} call={approvalCall(items, t, sheet.payload.request_id)} actions={actions} sheet />
+            <PermissionBlock event={sheet} call={approvalCall(built.blocks, sheet.payload.request_id)} actions={actions} sheet />
           </div>
         )}
         {inputShown && (
@@ -1305,8 +1313,8 @@ export function withText(draft: string, text: string): string {
 }
 
 /** The `tool.call` an approval card shows (feed.ts), for the sheet. */
-function approvalCall(items: ReturnType<Timeline['items']>, t: Timeline, requestId: string) {
-  const b = buildFeed(items, t).find((x) => x.kind === 'approval' && x.event.payload.request_id === requestId);
+function approvalCall(blocks: ReturnType<typeof buildFeed>, requestId: string) {
+  const b = blocks.find((x) => x.kind === 'approval' && x.event.payload.request_id === requestId);
   return b?.kind === 'approval' ? b.call : undefined;
 }
 

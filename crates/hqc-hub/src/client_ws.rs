@@ -16,6 +16,10 @@
 //!   waiting on one does (T37);
 //! - `ping` -> `pong`.
 //!
+//! `/api/ws?deflate=raw` asks for compression: the hub then sends each frame as a binary
+//! message, one raw DEFLATE stream for the whole connection, a sync flush after each frame,
+//! the frame's JSON followed by `\n`. Without it every frame is a text message.
+//!
 //! An `event` frame carries the event exactly as stored (SPEC §3 Event); `client_op_id`
 //! echoes the input that created it. Errors: `error {code, message, session_id?}`.
 
@@ -24,11 +28,13 @@ use std::collections::HashMap;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        State, WebSocketUpgrade,
+        Query, State, WebSocketUpgrade,
     },
     response::Response,
 };
+use flate2::{Compress, Compression, FlushCompress};
 use hqc_proto::client_frame::{ClientFrame, ServerFrame};
+use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
 
@@ -42,15 +48,24 @@ use crate::{
 
 const BACKFILL_PAGE: i64 = 500;
 
+#[derive(Deserialize)]
+pub struct WsQuery {
+    /// `raw` asks for the compressed stream; any other value or none, text frames.
+    deflate: Option<String>,
+}
+
 pub async fn handler(
     State(app): State<AppState>,
     user: CurrentUser,
+    Query(query): Query<WsQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let deflate = (query.deflate.as_deref() == Some("raw"))
+        .then(|| Compress::new(Compression::new(2), false));
     // Origin was checked by `security::guard` (SPEC §20).
     ws.max_message_size(MAX_WS_MESSAGE)
         .max_frame_size(MAX_WS_MESSAGE)
-        .on_upgrade(move |socket| run(app, user, socket))
+        .on_upgrade(move |socket| run(app, user, socket, deflate))
 }
 
 struct Client {
@@ -63,9 +78,35 @@ struct Client {
     /// ([`AppState::live_text`]).
     live_from: HashMap<Uuid, u64>,
     summary: bool,
+    /// The connection's one compression stream (raw DEFLATE, no zlib header), when the client
+    /// asked for `?deflate=raw`.
+    deflate: Option<Compress>,
 }
 
-async fn run(app: AppState, user: CurrentUser, socket: WebSocket) {
+/// Compresses one frame into the connection's stream and ends it with a sync flush, so the
+/// client can inflate it at once. `\n` ends the JSON: serde_json's compact output has no raw
+/// newline (one inside a string is escaped), so the client splits the inflated text on it.
+fn deflate_frame(z: &mut Compress, json: &str) -> Result<Vec<u8>, flate2::CompressError> {
+    let mut input = Vec::with_capacity(json.len() + 1);
+    input.extend_from_slice(json.as_bytes());
+    input.push(b'\n');
+    let start = z.total_in();
+    let mut out = Vec::with_capacity(input.len() / 2 + 64);
+    loop {
+        // `compress_vec` writes into the spare capacity only.
+        if out.len() == out.capacity() {
+            out.reserve(4096);
+        }
+        let used = (z.total_in() - start) as usize;
+        z.compress_vec(&input[used..], &mut out, FlushCompress::Sync)?;
+        // The flush is complete once all input is taken and the output did not fill up.
+        if (z.total_in() - start) as usize == input.len() && out.len() < out.capacity() {
+            return Ok(out);
+        }
+    }
+}
+
+async fn run(app: AppState, user: CurrentUser, socket: WebSocket, deflate: Option<Compress>) {
     let mut rx = app.bus.subscribe();
     let mut ping = tokio::time::interval(app.config.timing.heartbeat);
     ping.tick().await;
@@ -76,6 +117,7 @@ async fn run(app: AppState, user: CurrentUser, socket: WebSocket) {
         subs: HashMap::new(),
         live_from: HashMap::new(),
         summary: false,
+        deflate,
     };
     loop {
         let ok = tokio::select! {
@@ -109,7 +151,18 @@ impl Client {
                 return true;
             }
         };
-        self.socket.send(Message::Text(text.into())).await.is_ok()
+        let message = match self.deflate.as_mut() {
+            Some(z) => match deflate_frame(z, &text) {
+                Ok(bytes) => Message::Binary(bytes.into()),
+                // The stream is in an unknown state: the client reconnects with a new one.
+                Err(e) => {
+                    tracing::error!(error = %e, "compress client frame");
+                    return false;
+                }
+            },
+            None => Message::Text(text.into()),
+        };
+        self.socket.send(message).await.is_ok()
     }
 
     async fn error(&mut self, code: &str, message: &str, session_id: Option<Uuid>) -> bool {
@@ -216,10 +269,11 @@ impl Client {
             let (rows, events) = match page {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::error!(error = %e, "backfill");
-                    return self
-                        .error("internal", "internal error", Some(session_id))
-                        .await;
+                    // No session in the frame: an error that names one is the client's answer to
+                    // a refused `subscribe` (SPEC §6), and a backfill runs on a gap and after a
+                    // lagged bus too.
+                    tracing::error!(error = %e, %session_id, "backfill");
+                    return self.error("internal", "internal error", None).await;
                 }
             };
             let n = rows.len() as i64;

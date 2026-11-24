@@ -1467,6 +1467,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "croner",
+ "flate2",
  "futures-util",
  "hmac",
  "hqc-proto",

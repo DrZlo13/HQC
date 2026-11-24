@@ -123,6 +123,34 @@ function loadList(): {
   }
 }
 
+/** The sessions by id; `version` moves on every change, so what is derived from all of them is
+ *  kept until then (`AppState.marked`). A session is never changed in place, only replaced. */
+class SessionMap extends Map<string, SessionInfo> {
+  version = 0;
+  set(id: string, s: SessionInfo): this {
+    this.version++;
+    return super.set(id, s);
+  }
+  delete(id: string): boolean {
+    this.version++;
+    return super.delete(id);
+  }
+  clear(): void {
+    this.version++;
+    super.clear();
+  }
+}
+
+/** What the projects' marks count, from one pass over the sessions: the bar asks every
+ *  project on every render, and a hub's summary renders it again, so a pass per project and per
+ *  mark was quadratic in a long list. */
+interface Marked {
+  version: number;
+  counted: readonly SessionInfo[];
+  byProject: Map<string, SessionInfo[]>;
+  browser: Set<string>;
+}
+
 export class AppState {
   me: Me | null = null;
   /** The session column's dragged width, on this device; the look itself is the user's
@@ -130,7 +158,9 @@ export class AppState {
   device: DeviceLayout = loadDevice();
   error: string | null = null;
   readonly projects = new Map<string, Project>();
-  readonly sessions = new Map<string, SessionInfo>();
+  readonly sessions: Map<string, SessionInfo> = new SessionMap();
+  /** `countedSessions` and `projectBrowser` of the sessions' current version. */
+  private marked: Marked | null = null;
   /** By project id; filled by `loadWorkspaces`. */
   readonly workspaces = new Map<string, Workspace[]>();
   /** The project shown in the left column; the personal one until another is picked. */
@@ -189,6 +219,9 @@ export class AppState {
   private refreshing: Promise<void> | null = null;
   /** The sessions the hub pushed a summary of while the lists were on their way. */
   private pushedWhileRefreshing = new Set<string>();
+  /** The sessions being fetched alone (`fetchNewSession`), each with the newest summary that
+   *  came for it meanwhile, which is merged once it lands. */
+  private readonly fetchingSessions = new Map<string, SessionSummary | null>();
   /** Counts the user's changes to projects and sessions (`edited`), for `refreshSessions`. */
   private edits = 0;
   /** By session id, the least recently used first. */
@@ -331,7 +364,7 @@ export class AppState {
       this.userKnown.resolve();
     }
     this.socket.onRequests((list) => this.setRequests(list));
-    this.socket.onSummary((list) => this.mergeSummary(list));
+    this.socket.onSummary((list, whole) => this.mergeSummary(list, whole));
     this.socket.start();
     this.watchPageLeave(globalThis as unknown as Window);
     this.changed();
@@ -440,13 +473,20 @@ export class AppState {
     }
   }
 
-  mergeSummary(list: SessionSummary[]): void {
+  /** `whole`: the list is the hub's `summary` of every session, not one changed. */
+  mergeSummary(list: SessionSummary[], whole = false): void {
     let unknown = false;
     for (const s of list) {
       if (this.refreshing) this.pushedWhileRefreshing.add(s.session_id);
       const known = this.sessions.get(s.session_id);
       if (!known) {
-        unknown = true;
+        // A session created elsewhere: when one session's frame names it in a project this
+        // client knows, it alone is fetched (for its title and folder); a frame of every
+        // session (after a reconnect) may name many, and another project needs the list too.
+        if (whole) unknown = true;
+        else if (this.fetchingSessions.has(s.session_id)) this.fetchingSessions.set(s.session_id, s);
+        else if (this.project(s.project_id)) void this.fetchNewSession(s.session_id);
+        else unknown = true;
         continue;
       }
       // Archived or restored elsewhere: `archived_at` is not in the summary (T50).
@@ -482,9 +522,34 @@ export class AppState {
         paused_at: s.paused_at,
       });
     }
-    // A session created elsewhere: fetch the list again for its title.
+    // A session of a project this client does not know, or moved into one: the lists again.
     if (unknown) void this.refreshSessions().catch(() => {});
     this.changed();
+  }
+
+  /** A session created elsewhere, in a project on this page: the session alone, not the whole
+   *  list. A summary that came meanwhile is newer than the answer, but older than whatever else
+   *  brought the session here first (a list, the reply to this client's own request), so it is
+   *  merged only into the session this fetch added. Errors are dropped, the next summary of the
+   *  session tries again. */
+  private async fetchNewSession(id: string): Promise<void> {
+    this.fetchingSessions.set(id, null);
+    let added = false;
+    try {
+      const info = await this.api.session(id);
+      if (!this.sessions.has(id)) {
+        this.sessions.set(id, this.keepRead(info));
+        added = true;
+        // Moved meanwhile into a project this page does not have: the lists bring it.
+        if (!this.project(info.project_id)) void this.refreshSessions().catch(() => {});
+      }
+    } catch {
+      // Offline or gone.
+    }
+    const later = this.fetchingSessions.get(id);
+    this.fetchingSessions.delete(id);
+    if (later && added) this.mergeSummary([later]);
+    else this.changed();
   }
 
   setRequests(list: OpenRequest[]): void {
@@ -798,10 +863,31 @@ export class AppState {
 
   /** The sessions the projects' marks count (of project `projectId`, else of all), each as the
    *  lists show it: not archived, not a service session, not a room's member. */
-  countedSessions(projectId?: string): SessionInfo[] {
-    return [...this.sessions.values()]
-      .filter((s) => (projectId === undefined || s.project_id === projectId) && !s.archived && !s.system && !s.room_id)
-      .map((s) => this.shown(s));
+  countedSessions(projectId?: string): readonly SessionInfo[] {
+    const m = this.marks();
+    return projectId === undefined ? m.counted : (m.byProject.get(projectId) ?? []);
+  }
+
+  /** `countedSessions` and the projects with a browser, computed once per version of the
+   *  sessions. */
+  private marks(): Marked {
+    const version = (this.sessions as SessionMap).version;
+    if (this.marked?.version === version) return this.marked;
+    const counted: SessionInfo[] = [];
+    const byProject = new Map<string, SessionInfo[]>();
+    const browser = new Set<string>();
+    for (const s of this.sessions.values()) {
+      if (s.archived || s.system) continue;
+      if (s.browser) browser.add(s.project_id);
+      if (s.room_id) continue;
+      const shown = this.shown(s);
+      counted.push(shown);
+      const list = byProject.get(s.project_id);
+      if (list) list.push(shown);
+      else byProject.set(s.project_id, [shown]);
+    }
+    this.marked = { version, counted, byProject, browser };
+    return this.marked;
   }
 
   /** The user's favorite sessions of the project (the current one by default), the newest
@@ -1003,10 +1089,7 @@ export class AppState {
 
   /** Whether one of the project's sessions has the browser (SPEC 0.148). */
   projectBrowser(projectId: string): boolean {
-    for (const s of this.sessions.values()) {
-      if (s.project_id === projectId && !s.archived && !s.system && s.browser) return true;
-    }
-    return false;
+    return this.marks().browser.has(projectId);
   }
 
   /** Whether one of the project's sessions has unread events, among the ones

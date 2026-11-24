@@ -111,6 +111,15 @@ export class Timeline {
    *  `agent.thinking`, `agent.message` or `reset`, with the text of all of them (SPEC §6). */
   thinking: EventOf<"agent.delta"> | null = null;
   version = 0;
+  /** Grows with every change of what `items()` and the feed built from them (`buildFeed`) read:
+   *  a stored event (new, or one whose fields changed), the thinking being written, the invalid
+   *  events, the messages not stored yet. It does not grow with the answer's text
+   *  (`streaming`, drawn on its own), `subagents.live` or `schedules.live` (read by the cards
+   *  when they render, not by `buildFeed`), or the answers to requests (`markAnswered`, read by
+   *  the header and the request cards), which only `version` follows. */
+  revision = 0;
+  private itemsAt = -1;
+  private itemsCache: Item[] = [];
 
   onChange(fn: () => void): () => void {
     this.listeners.add(fn);
@@ -139,15 +148,19 @@ export class Timeline {
     this.changed();
   }
 
-  private applyQuiet(ev: HqcEvent, advance = true): void {
+  /** Applies `ev` without telling the listeners: the caller calls `changed()` after a batch.
+   *  `advance` false leaves `lastSeq` where it is (`applyReply`). */
+  applyQuiet(ev: HqcEvent, advance = true): void {
     if (ev.type === "agent.delta") {
       // `reset`: the runtime abandoned the attempt that wrote the text so far, and the thinking
       // with it (SPEC §4).
       if (ev.payload.reset) {
+        if (this.thinking) this.revision++;
         this.streaming = "";
         this.thinking = null;
       } else if (!ev.payload.thinking) this.streaming += ev.payload.text;
       else {
+        this.revision++;
         if (!this.thinking) this.thinkingKey = `t${++this.thinkings}`;
         const text = (this.thinking?.payload.text ?? "") + ev.payload.text;
         this.thinking = { ...(this.thinking ?? ev), payload: { ...ev.payload, text } };
@@ -204,12 +217,14 @@ export class Timeline {
             ),
           );
           this.sorted = null;
+          this.revision++;
         }
       }
       return;
     }
     this.bySeq.set(ev.seq, ev);
     this.sorted = null;
+    this.revision++;
     // An older page loaded behind the live tail ends no stream.
     const fresh = ev.seq > this.lastSeq;
     if (advance) this.lastSeq = Math.max(this.lastSeq, ev.seq);
@@ -301,6 +316,7 @@ export class Timeline {
       withJoined({ ...ev, delivery: d.delivery, delivered_at: d.delivered_at }, d.joined === true, d.joined_after),
     );
     this.sorted = null;
+    this.revision++;
     this.changed();
   }
 
@@ -335,6 +351,7 @@ export class Timeline {
     }
     if (!changed) return;
     this.sorted = null;
+    this.revision++;
     this.changed();
   }
 
@@ -349,6 +366,7 @@ export class Timeline {
       error,
       raw,
     });
+    this.revision++;
     this.changed();
   }
 
@@ -567,6 +585,7 @@ export class Timeline {
     };
     if (attachments?.length) p.attachments = attachments;
     this.pending.set(clientOpId, p);
+    this.revision++;
     this.changed();
   }
 
@@ -574,12 +593,14 @@ export class Timeline {
     const p = this.pending.get(clientOpId);
     if (!p) return;
     this.pending.set(clientOpId, { ...p, status: "failed", error });
+    this.revision++;
     this.changed();
   }
 
   dropPending(clientOpId: string): PendingMessage | undefined {
     const p = this.pending.get(clientOpId);
     this.pending.delete(clientOpId);
+    this.revision++;
     this.changed();
     return p;
   }
@@ -604,6 +625,7 @@ export class Timeline {
     this.sorted = null;
     this.lastSeq = 0;
     this.olderFrom = 0;
+    this.revision++;
     this.changed();
   }
 
@@ -612,6 +634,7 @@ export class Timeline {
    *  lists). */
   reset(): void {
     if (!this.streaming && !this.thinking && !this.liveAgents.length && !this.liveSchedules.length) return;
+    if (this.thinking) this.revision++;
     this.streaming = "";
     this.thinking = null;
     this.liveAgents = [];
@@ -629,7 +652,16 @@ export class Timeline {
     return this.sorted;
   }
 
+  /** The feed's items; the same array while `revision` stays, so callers do not change it. */
   items(): Item[] {
+    if (this.itemsAt !== this.revision) {
+      this.itemsCache = this.buildItems();
+      this.itemsAt = this.revision;
+    }
+    return this.itemsCache;
+  }
+
+  private buildItems(): Item[] {
     const bySeq: Item[] = this.events().map((e) => ({
       kind: "event",
       key: this.keys.get(e.seq!) ?? `e${e.seq}`,

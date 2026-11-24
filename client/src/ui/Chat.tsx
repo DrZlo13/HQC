@@ -42,7 +42,7 @@ import { MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatTime, f
 import { hasOpenTasks, LiveSubagents } from './LiveSubagents';
 import { Loading } from './Loading';
 import { CopyButton } from './Markdown';
-import { SelectionContext, selectedText, useChatSelection } from './selection';
+import { selectedText, useQuoteSelection, type QuoteSelection } from './selection';
 import { PermissionBlock, SECRET_GIVEN } from './permission';
 import { MoveSession } from './ProjectSettings';
 import { WaitedRequests } from './requests';
@@ -312,7 +312,6 @@ export function Chat({
       !system && !info?.archived && state !== 'locked_vscode' && !sheetRequest
         ? (text) => insertQuote.current?.(text)
         : undefined,
-    webSearch: app.webSearch,
     // Where the input is (as `send`; a room's messages are not queued for an agent of the room's own).
     withdraw:
       !system && !room && !info?.archived && state !== 'locked_vscode'
@@ -634,12 +633,12 @@ export function Chat({
     o.observe(el);
     return () => o.disconnect();
   }, []);
-  // The buttons of a message (Copy, Quote, Search) take the text selected in it, in the feed and in a subagent's history alike (selection.ts).
+  // The Quote button over the composer takes the text selected in the feed or in a subagent's history (selection.ts).
   const section = useRef<HTMLElement>(null);
-  const selection = useChatSelection(section);
+  const quoteSelection = useQuoteSelection(section, !!actions.quote);
   const pressed = useRef<Range | null>(null);
   // A right click on selected text (a computer's; a phone has its own menu for it): Quote, Copy
-  // and Search in one place, besides the message's buttons.
+  // and Search in one place.
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const insertQuote = useRef<((text: string) => void) | null>(null);
   const insertText = useRef<((text: string) => void) | null>(null);
@@ -992,290 +991,289 @@ export function Chat({
     </>
   );
   return (
-    <SelectionContext.Provider value={selection}>
-      <section
-        ref={section}
-        // On a Mac a right click outside the selection selects the word or link under the pointer
-        // before `contextmenu`: the selection as it was at the press tells whether the click is on
-        // selected text.
-        onPointerDownCapture={() => {
-          const sel = document.getSelection();
-          pressed.current = sel && !sel.isCollapsed && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
-        }}
-        onContextMenu={(e) => {
-          // Our menu is the feed's and a subagent's history's, on a click on text selected before
-          // it (still selected, or cleared by the press and selected again); elsewhere (the head,
-          // the composer and its buttons, the rows above it), with nothing selected and on a click
-          // outside the selection the browser's menu stays.
-          const was = pressed.current;
-          const sel = document.getSelection();
-          if (phone || !was || !sel || !(e.target as Element).closest('.feed')) return;
-          // A click outside the selection: on an image or a margin, or on any text where the
-          // browser does not select the word under the pointer (not a Mac).
-          const at = document.caretRangeFromPoint?.(e.clientX, e.clientY);
-          if (at && !was.isPointInRange(at.startContainer, at.startOffset)) return;
-          const now = sel.rangeCount ? sel.getRangeAt(0) : null;
-          if (!now || now.collapsed) {
-            // WebKit off a Mac clears the selection on the press: a click inside it gets it back.
-            // Where the point cannot be found (Firefox), inside cannot be told.
-            if (!at) return;
-            sel.removeAllRanges();
-            sel.addRange(was);
-          } else if (was.compareBoundaryPoints(Range.START_TO_START, now) !== 0 || was.compareBoundaryPoints(Range.END_TO_END, now) !== 0) return;
-          const text = selectedText(section.current);
-          if (!text) return;
-          e.preventDefault();
-          setSelectionMenu({ x: e.clientX, y: e.clientY, text });
-        }}
-        class={`chat ${dragging ? 'chat-dragging' : ''} ${phone ? 'chat-phone' : ''} ${archived ? 'chat-archived' : ''}`}
-        onDragOver={(e) => {
-          if (disabled || !e.dataTransfer?.types.includes('Files')) return;
-          e.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={(e) => {
-          if (e.currentTarget === e.target) setDragging(false);
-        }}
-        onDrop={(e) => {
-          setDragging(false);
-          if (disabled || !e.dataTransfer?.files.length) return;
-          e.preventDefault();
-          addFiles(e.dataTransfer.files);
+    <section
+      ref={section}
+      // On a Mac a right click outside the selection selects the word or link under the pointer
+      // before `contextmenu`: the selection as it was at the press tells whether the click is on
+      // selected text.
+      onPointerDownCapture={() => {
+        const sel = document.getSelection();
+        pressed.current = sel && !sel.isCollapsed && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+      }}
+      onContextMenu={(e) => {
+        // Our menu is the feed's and a subagent's history's, on a click on text selected before
+        // it (still selected, or cleared by the press and selected again); elsewhere (the head,
+        // the composer and its buttons, the rows above it), with nothing selected and on a click
+        // outside the selection the browser's menu stays.
+        const was = pressed.current;
+        const sel = document.getSelection();
+        if (phone || !was || !sel || !(e.target as Element).closest('.feed')) return;
+        // A click outside the selection: on an image or a margin, or on any text where the
+        // browser does not select the word under the pointer (not a Mac).
+        const at = document.caretRangeFromPoint?.(e.clientX, e.clientY);
+        if (at && !was.isPointInRange(at.startContainer, at.startOffset)) return;
+        const now = sel.rangeCount ? sel.getRangeAt(0) : null;
+        if (!now || now.collapsed) {
+          // WebKit off a Mac clears the selection on the press: a click inside it gets it back.
+          // Where the point cannot be found (Firefox), inside cannot be told.
+          if (!at) return;
+          sel.removeAllRanges();
+          sel.addRange(was);
+        } else if (was.compareBoundaryPoints(Range.START_TO_START, now) !== 0 || was.compareBoundaryPoints(Range.END_TO_END, now) !== 0) return;
+        const text = selectedText(section.current);
+        if (!text) return;
+        e.preventDefault();
+        setSelectionMenu({ x: e.clientX, y: e.clientY, text });
+      }}
+      class={`chat ${dragging ? 'chat-dragging' : ''} ${phone ? 'chat-phone' : ''} ${archived ? 'chat-archived' : ''}`}
+      onDragOver={(e) => {
+        if (disabled || !e.dataTransfer?.types.includes('Files')) return;
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) setDragging(false);
+      }}
+      onDrop={(e) => {
+        setDragging(false);
+        if (disabled || !e.dataTransfer?.files.length) return;
+        e.preventDefault();
+        addFiles(e.dataTransfer.files);
+      }}
+    >
+      <header class="chat-head">
+        {phone ? (
+          <>
+            {/* Line 1: "‹", the title up to the first button, and the buttons; the lines under
+                it are as wide as the header past "‹". */}
+            <div class="chat-head-top">
+              <a class="icon-btn icon-btn-round back" href={up} aria-label="Back to sessions" onClick={(e) => onBack(e, up)}>
+                <IconBack />
+              </a>
+              {title}
+              {buttons}
+            </div>
+            {meta}
+            {/* A room's agents stay right under its state, as on a computer. */}
+            {roomAgents}
+            {/* Each pill at its full text, then "started by" (alone where there are no pills),
+                whose address gives way first. */}
+            {(pills || spawned) && (
+              <div class="chat-pills">
+                {pills}
+                {spawned}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            {sessions && <SessionsButton sessions={sessions} />}
+            <div class="chat-head-main">
+              {title}
+              {meta}
+              {roomAgents}
+            </div>
+            {buttons}
+          </>
+        )}
+      </header>
+      {archived && info && (
+        <div class="archived-band stripes">
+          <IconArchive />
+          <span>
+            {archivedLabel(info, Date.now())} · read-only. Restore or delete it from {phone ? 'the archive' : 'the list on the left'}.
+          </span>
+        </div>
+      )}
+      {schedules && <SchedulesPanel api={app.api} sessionId={sessionId} onClose={() => setSchedules(false)} />}
+      {moving && info && (
+        <div class="move-panel" role="region" aria-label="Move to project">
+          <MoveSession app={app} session={info} onDone={() => setMoving(false)} />
+        </div>
+      )}
+      <div
+        class="timeline"
+        ref={scroller}
+        onScroll={(e) => {
+          const el = e.currentTarget as HTMLDivElement;
+          // A scroll event while the user's scroll goes on is its momentum or its bounce.
+          const user = userScrolling();
+          if (user) userScrolled();
+          const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+          const range = el.scrollHeight - el.clientHeight;
+          if (near || (el.scrollTop < lastTop.current && ((user && upward.current) || range === lastRange.current))) stick.current = near;
+          lastTop.current = el.scrollTop;
+          lastRange.current = range;
+          if (el.scrollTop < 400 && start > 0) {
+            if (holding()) more.current = true;
+            else showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
+          } else if (loaded && el.scrollTop < 400 && t.olderFrom > 0) {
+            asked.current = true;
+            void chat.loadOlder();
+          }
         }}
       >
-        <header class="chat-head">
-          {phone ? (
-            <>
-              {/* Line 1: "‹", the title up to the first button, and the buttons; the lines under
-                  it are as wide as the header past "‹". */}
-              <div class="chat-head-top">
-                <a class="icon-btn icon-btn-round back" href={up} aria-label="Back to sessions" onClick={(e) => onBack(e, up)}>
-                  <IconBack />
-                </a>
-                {title}
-                {buttons}
-              </div>
-              {meta}
-              {/* A room's agents stay right under its state, as on a computer. */}
-              {roomAgents}
-              {/* Each pill at its full text, then "started by" (alone where there are no pills),
-                  whose address gives way first. */}
-              {(pills || spawned) && (
-                <div class="chat-pills">
-                  {pills}
-                  {spawned}
-                </div>
-              )}
-            </>
-          ) : (
-            <>
-              {sessions && <SessionsButton sessions={sessions} />}
-              <div class="chat-head-main">
-                {title}
-                {meta}
-                {roomAgents}
-              </div>
-              {buttons}
-            </>
+        <div class="feed" ref={feed}>
+          {/* The empty feed's note in its middle: the first page on its way, or no requests
+              once it is in (before, the feed has no items either). */}
+          {!loaded && (
+            <div class="feed-note">
+              <Loading center />
+            </div>
           )}
-        </header>
-        {archived && info && (
-          <div class="archived-band stripes">
-            <IconArchive />
-            <span>
-              {archivedLabel(info, Date.now())} · read-only. Restore or delete it from {phone ? 'the archive' : 'the list on the left'}.
-            </span>
-          </div>
-        )}
-        {schedules && <SchedulesPanel api={app.api} sessionId={sessionId} onClose={() => setSchedules(false)} />}
-        {moving && info && (
-          <div class="move-panel" role="region" aria-label="Move to project">
-            <MoveSession app={app} session={info} onDone={() => setMoving(false)} />
-          </div>
-        )}
-        <div
-          class="timeline"
-          ref={scroller}
-          onScroll={(e) => {
-            const el = e.currentTarget as HTMLDivElement;
-            // A scroll event while the user's scroll goes on is its momentum or its bounce.
-            const user = userScrolling();
-            if (user) userScrolled();
-            const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-            const range = el.scrollHeight - el.clientHeight;
-            if (near || (el.scrollTop < lastTop.current && ((user && upward.current) || range === lastRange.current))) stick.current = near;
-            lastTop.current = el.scrollTop;
-            lastRange.current = range;
-            if (el.scrollTop < 400 && start > 0) {
-              if (holding()) more.current = true;
-              else showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
-            } else if (loaded && el.scrollTop < 400 && t.olderFrom > 0) {
-              asked.current = true;
-              void chat.loadOlder();
-            }
+          {chat.loadingOlder && start === 0 && (
+            <div class="feed-older">
+              <Loading />
+            </div>
+          )}
+          <FeedBlocks blocks={start ? blocks.slice(start) : blocks} actions={actions} />
+          {requestsOnly && loaded && items.length === 0 && <div class="feed-note">No requests</div>}
+          {t.streaming && <StreamingMessage text={t.streaming} />}
+          <FeedBlocks blocks={under} actions={actions} />
+          {!system && <WaitedRequests app={app} sessionId={sessionId} />}
+        </div>
+      </div>
+      {notice && (
+        <div class="notice" role="alert" onClick={() => setNotice(null)}>
+          {notice}
+        </div>
+      )}
+      {/* A session on a provider does not run on the subscription the limits are of; a hub with
+          HQC_LIMIT_NOTICE_PERCENT=0 shows no bar. */}
+      {!system && info?.worker_id && !info.provider && limitPercent > 0 && (
+        <LimitBar load={loadLimits} refresh={`${info.worker_id} ${state}`} percent={limitPercent} />
+      )}
+      {/* The list also holds the agent's background commands, which only background_tasks counts. */}
+      {/* The wakeups and cron jobs of the agent and the session's schedules wait while it is idle. */}
+      {/* The task list while a task is not done. */}
+      {(goal !== null ||
+        lead.length > 0 ||
+        hasOpenTasks(t.tasks) ||
+        (info?.subagents ?? 0) > 0 ||
+        (info?.background_tasks ?? 0) > 0 ||
+        t.liveAgents.some((a) => a.kind === 'wakeup' || a.kind === 'cron') ||
+        t.liveSchedules.length > 0) && (
+        <LiveSubagents
+          goal={goal ? { ...goal, running: STOPPABLE.has(state), onClear: inputShown ? clearGoal : undefined } : undefined}
+          tasks={t.tasks}
+          lead={lead}
+          agents={t.liveAgents}
+          receivedAt={t.liveAgentsAt}
+          schedules={t.liveSchedules}
+          schedulesAt={t.liveSchedulesAt}
+          onSchedules={() => setSchedules(true)}
+          onStop={stopTask}
+          asking={new Set(open.flatMap((r) => (r.type === 'approval.request' && r.payload.subagent ? [r.payload.subagent.task_id] : [])))}
+          history={{
+            load: (taskId, after) => app.api.subagentHistory(sessionId, taskId, after),
+            actions,
           }}
-        >
-          <div class="feed" ref={feed}>
-            {/* The empty feed's note in its middle: the first page on its way, or no requests
-                once it is in (before, the feed has no items either). */}
-            {!loaded && (
-              <div class="feed-note">
-                <Loading center />
-              </div>
+        />
+      )}
+      {locked && (
+        <div class="composer-wrap">
+          {/* In place of the composer it says only what to do; where it is open, the pill. */}
+          <div class={`lockbar ${held ? 'lockbar-held' : ''}`}>
+            <IconLock />
+            <span class="lockbar-text">
+              {held ? `Close the session in ${holder} to write from here.` : `${holder} was the last to run this session.`}
+            </span>
+            {!held && (
+              <button type="button" class="btn btn-small btn-primary btn-takeover" onClick={() => void takeover()}>
+                Take over here
+              </button>
             )}
-            {chat.loadingOlder && start === 0 && (
-              <div class="feed-older">
-                <Loading />
-              </div>
-            )}
-            <FeedBlocks blocks={start ? blocks.slice(start) : blocks} actions={actions} />
-            {requestsOnly && loaded && items.length === 0 && <div class="feed-note">No requests</div>}
-            {t.streaming && <StreamingMessage text={t.streaming} />}
-            <FeedBlocks blocks={under} actions={actions} />
-            {!system && <WaitedRequests app={app} sessionId={sessionId} />}
           </div>
         </div>
-        {notice && (
-          <div class="notice" role="alert" onClick={() => setNotice(null)}>
-            {notice}
-          </div>
-        )}
-        {/* A session on a provider does not run on the subscription the limits are of; a hub with
-            HQC_LIMIT_NOTICE_PERCENT=0 shows no bar. */}
-        {!system && info?.worker_id && !info.provider && limitPercent > 0 && (
-          <LimitBar load={loadLimits} refresh={`${info.worker_id} ${state}`} percent={limitPercent} />
-        )}
-        {/* The list also holds the agent's background commands, which only background_tasks counts. */}
-        {/* The wakeups and cron jobs of the agent and the session's schedules wait while it is idle. */}
-        {/* The task list while a task is not done. */}
-        {(goal !== null ||
-          lead.length > 0 ||
-          hasOpenTasks(t.tasks) ||
-          (info?.subagents ?? 0) > 0 ||
-          (info?.background_tasks ?? 0) > 0 ||
-          t.liveAgents.some((a) => a.kind === 'wakeup' || a.kind === 'cron') ||
-          t.liveSchedules.length > 0) && (
-          <LiveSubagents
-            goal={goal ? { ...goal, running: STOPPABLE.has(state), onClear: inputShown ? clearGoal : undefined } : undefined}
-            tasks={t.tasks}
-            lead={lead}
-            agents={t.liveAgents}
-            receivedAt={t.liveAgentsAt}
-            schedules={t.liveSchedules}
-            schedulesAt={t.liveSchedulesAt}
-            onSchedules={() => setSchedules(true)}
-            onStop={stopTask}
-            asking={new Set(open.flatMap((r) => (r.type === 'approval.request' && r.payload.subagent ? [r.payload.subagent.task_id] : [])))}
-            history={{
-              load: (taskId, after) => app.api.subagentHistory(sessionId, taskId, after),
-              actions,
-            }}
-          />
-        )}
-        {locked && (
-          <div class="composer-wrap">
-            {/* In place of the composer it says only what to do; where it is open, the pill. */}
-            <div class={`lockbar ${held ? 'lockbar-held' : ''}`}>
-              <IconLock />
-              <span class="lockbar-text">
-                {held ? `Close the session in ${holder} to write from here.` : `${holder} was the last to run this session.`}
-              </span>
-              {!held && (
-                <button type="button" class="btn btn-small btn-primary btn-takeover" onClick={() => void takeover()}>
-                  Take over here
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-        {sheet && (
-          <div class="sheet-wrap">
-            <PermissionBlock event={sheet} call={approvalCall(built.blocks, sheet.payload.request_id)} actions={actions} sheet />
-          </div>
-        )}
-        {inputShown && (
-          <Composer
-            initial={app.draft(sessionId)}
-            onDraft={(text) => app.setDraft(sessionId, text)}
-            autoFocus={focusInput}
-            insertQuote={insertQuote}
-            insertText={insertText}
-            phone={phone}
-            commands={info?.commands}
-            commandInfo={info?.command_info}
-            files={files}
-            reading={reading}
-            onFiles={addFiles}
-            onRemove={(i) => setFiles((cur) => cur.filter((_, j) => j !== i))}
-            onSend={(text) => {
-              stick.current = true;
-              // Files cannot go with a side question: such a text goes as any message.
-              const side = files.length === 0 ? sideQuestionOf(text) : undefined;
-              if (side !== undefined) {
-                // Refused: the notice says why, and the Composer puts the text back.
-                return chat.sideQuestion(side).catch((e: Error) => {
-                  setNotice(`Not asked: ${e.message}`);
-                  throw e;
-                });
-              }
-              chat.send(text, files);
-              setFiles([]);
-            }}
-            giveSecret={!system && app.takesSecrets(info?.worker_id) ? (f) => app.api.giveSecret(sessionId, f) : undefined}
-            quick={
-              project && {
-                messages: project.quick_messages ?? [],
-                refresh: () => void app.refreshProject(project.id).catch(() => {}),
-                send: (text) => {
-                  stick.current = true;
-                  chat.send(text, []);
-                },
-                settingsHref: `#/p/${project.id}/settings`,
-              }
+      )}
+      {sheet && (
+        <div class="sheet-wrap">
+          <PermissionBlock event={sheet} call={approvalCall(built.blocks, sheet.payload.request_id)} actions={actions} sheet />
+        </div>
+      )}
+      {inputShown && (
+        <Composer
+          initial={app.draft(sessionId)}
+          onDraft={(text) => app.setDraft(sessionId, text)}
+          autoFocus={focusInput}
+          insertQuote={insertQuote}
+          insertText={insertText}
+          quoteSelection={actions.quote ? quoteSelection : undefined}
+          phone={phone}
+          commands={info?.commands}
+          commandInfo={info?.command_info}
+          files={files}
+          reading={reading}
+          onFiles={addFiles}
+          onRemove={(i) => setFiles((cur) => cur.filter((_, j) => j !== i))}
+          onSend={(text) => {
+            stick.current = true;
+            // Files cannot go with a side question: such a text goes as any message.
+            const side = files.length === 0 ? sideQuestionOf(text) : undefined;
+            if (side !== undefined) {
+              // Refused: the notice says why, and the Composer puts the text back.
+              return chat.sideQuestion(side).catch((e: Error) => {
+                setNotice(`Not asked: ${e.message}`);
+                throw e;
+              });
             }
-          />
-        )}
-        {viewing && (
-          <ArtifactViewer
-            {...viewing}
-            store={artifacts}
-            phone={phone}
-            onClose={() => setViewing(null)}
-            onDownload={() => actions.openArtifact(viewing.id, true)}
-          />
-        )}
-        {selectionMenu && (
-          <ContextMenu
-            x={selectionMenu.x}
-            y={selectionMenu.y}
-            label="Selected text"
-            items={[
-              ...(actions.quote
-                ? [
-                    {
-                      label: 'Quote',
-                      icon: <IconQuote />,
-                      cls: 'menu-quote',
-                      onSelect: () => {
-                        actions.quote!(selectionMenu.text);
-                        document.getSelection()?.removeAllRanges();
-                      },
-                    },
-                  ]
-                : []),
-              { label: 'Copy', icon: <IconCopy size={16} />, cls: 'btn-copy-selection', onSelect: () => void copyText(selectionMenu.text).catch(() => {}) },
-              {
-                label: `Search in ${app.webSearch.label}`,
-                icon: <IconSearch size={16} />,
-                cls: 'menu-web-search',
-                onSelect: () => void window.open(app.webSearch.url(selectionMenu.text), '_blank', 'noopener'),
+            chat.send(text, files);
+            setFiles([]);
+          }}
+          giveSecret={!system && app.takesSecrets(info?.worker_id) ? (f) => app.api.giveSecret(sessionId, f) : undefined}
+          quick={
+            project && {
+              messages: project.quick_messages ?? [],
+              refresh: () => void app.refreshProject(project.id).catch(() => {}),
+              send: (text) => {
+                stick.current = true;
+                chat.send(text, []);
               },
-            ]}
-            onClose={() => setSelectionMenu(null)}
-          />
-        )}
-      </section>
-    </SelectionContext.Provider>
+              settingsHref: `#/p/${project.id}/settings`,
+            }
+          }
+        />
+      )}
+      {viewing && (
+        <ArtifactViewer
+          {...viewing}
+          store={artifacts}
+          phone={phone}
+          onClose={() => setViewing(null)}
+          onDownload={() => actions.openArtifact(viewing.id, true)}
+        />
+      )}
+      {selectionMenu && (
+        <ContextMenu
+          x={selectionMenu.x}
+          y={selectionMenu.y}
+          label="Selected text"
+          items={[
+            ...(actions.quote
+              ? [
+                  {
+                    label: 'Quote',
+                    icon: <IconQuote />,
+                    cls: 'menu-quote',
+                    onSelect: () => {
+                      actions.quote!(selectionMenu.text);
+                      document.getSelection()?.removeAllRanges();
+                    },
+                  },
+                ]
+              : []),
+            { label: 'Copy', icon: <IconCopy size={16} />, cls: 'btn-copy-selection', onSelect: () => void copyText(selectionMenu.text).catch(() => {}) },
+            {
+              label: `Search in ${app.webSearch.label}`,
+              icon: <IconSearch size={16} />,
+              cls: 'menu-web-search',
+              onSelect: () => void window.open(app.webSearch.url(selectionMenu.text), '_blank', 'noopener'),
+            },
+          ]}
+          onClose={() => setSelectionMenu(null)}
+        />
+      )}
+    </section>
   );
 }
 
@@ -1894,6 +1892,7 @@ export function Composer({
   onFiles = () => {},
   onRemove = () => {},
   insertQuote,
+  quoteSelection,
   insertText,
   initial = '',
   onDraft,
@@ -1919,6 +1918,9 @@ export function Composer({
   /** Set here to a function that puts a quote of the feed into the message (`withQuote`),
    *  focused, the caret at its end. */
   insertQuote?: { current: ((text: string) => void) | null };
+  /** The chat's selection: with it set, "Quote" shows over the field's right end while the chat
+   *  holds a selection to quote, and a press puts the text in as `insertQuote` does. */
+  quoteSelection?: QuoteSelection;
   /** Set here to a function that adds a text to the message (`withText`), focused, the caret at
    *  its end: a message the user took back. */
   insertText?: { current: ((text: string) => void) | null };
@@ -1957,13 +1959,14 @@ export function Composer({
     area.current?.focus();
   }, [autoFocus]);
   const caretToEnd = useRef(false);
+  const putQuote = (q: string) => {
+    caretToEnd.current = true;
+    setText((cur) => withQuote(cur, q));
+    area.current?.focus();
+  };
   useEffect(() => {
     if (!insertQuote) return;
-    insertQuote.current = (q) => {
-      caretToEnd.current = true;
-      setText((cur) => withQuote(cur, q));
-      area.current?.focus();
-    };
+    insertQuote.current = putQuote;
     return () => {
       insertQuote.current = null;
     };
@@ -2271,6 +2274,26 @@ export function Composer({
           {secretButton}
           {quickButtonEl}
           {textarea}
+          {quoteSelection?.shown && (
+            <button
+              type="button"
+              class="btn-quote"
+              title="Quote the selected text into the message"
+              // The press takes the text before it clears the selection; the form keeps the field's focus.
+              onPointerDown={(e) => {
+                e.preventDefault();
+                quoteSelection.press();
+              }}
+              onClick={() => {
+                const q = quoteSelection.text();
+                if (q) putQuote(q);
+                document.getSelection()?.removeAllRanges();
+                quoteSelection.release();
+              }}
+            >
+              Quote
+            </button>
+          )}
           {send}
         </div>
       </form>

@@ -5,16 +5,16 @@
 // result. The time a message was delivered comes from the event in the other session.
 
 import { Fragment, type ComponentChildren } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import type { Api } from '../api';
 import { PROJECT_COLORS } from '../theme';
 import { ARTIFACT_KINDS, type ArtifactKind, type EventOf, type HqcEvent } from '../proto';
 import { AttachmentView } from './attachments';
-import { MessageButtons, SelectionButtons, UsageParts, type ChatActions, type RoomAgent } from './cards';
+import { MessageButtons, UsageParts, type ChatActions, type RoomAgent } from './cards';
 import { askResult, hqcTool, peerArgs, sendResult, splitReply, type Block, type ReplyFile } from './feed';
 import { IconArrowIn, IconArrowOut } from './icons';
 import { formatTime, modelName } from './labels';
-import { Markdown } from './Markdown';
+import { CopyButton, Markdown } from './Markdown';
 
 /** `ChatActions.peerMessage` over the events API: the event at `seq` of a session, kept once
  *  it is delivered (it does not change after that), asked again after 15 s until then. */
@@ -67,21 +67,20 @@ function Relay({
   label,
   peer,
   when,
-  selectable,
+  text,
   children,
 }: {
   dir: 'in' | 'out';
   label: string;
   peer: ComponentChildren;
   when?: string;
-  /** The message's text, for its Search, Copy and Quote buttons; an empty text has none. */
-  selectable: { text: string; actions: ChatActions };
+  /** The message's text, for its Copy button; an empty text has none. */
+  text: string;
   children: (buttons: RelayButtons) => ComponentChildren;
 }) {
-  const root = useRef<HTMLElement>(null);
-  const buttons = selectable.text ? <SelectionButtons root={root} text={selectable.text} actions={selectable.actions} /> : null;
+  const buttons = text ? <CopyButton text={text} icon /> : null;
   return (
-    <section class={`relay relay-${dir}`} aria-label={`${label} another session`} ref={root}>
+    <section class={`relay relay-${dir}`} aria-label={`${label} another session`}>
       <div class="relay-head">
         <span class="relay-arrow">{dir === 'out' ? <IconArrowOut /> : <IconArrowIn />}</span>
         <span class="relay-label">{label}</span>
@@ -154,7 +153,7 @@ export function PeerMessageBlock({ event, actions, queued }: { event: EventOf<'p
       label={p.mode === 'ask' ? 'Question from' : 'Message from'}
       peer={<PeerLink target={p.from_session_id} label={p.from ?? `session ${p.from_session_id.slice(-8)}`} actions={actions} />}
       when={queued && event.delivery === 'pending' ? `${formatTime(event.ts)} · queued` : formatTime(event.ts)}
-      selectable={{ text: p.text, actions }}
+      text={p.text}
     >
       {({ tail }) => (
         <>
@@ -179,14 +178,13 @@ function RoomPost({
 }) {
   const p = event.payload;
   const color = PROJECT_COLORS[agent.index % PROJECT_COLORS.length].hex;
-  const root = useRef<HTMLElement>(null);
   const buttons = (
     <MessageButtons tail>
-      <SelectionButtons root={root} text={p.text} actions={actions} />
+      <CopyButton text={p.text} icon />
     </MessageButtons>
   );
   return (
-    <article class="msg-agent room-post" ref={root}>
+    <article class="msg-agent room-post">
       <div class="room-post-head">
         <span class="room-post-name" style={{ color }}>
           {agent.name ?? p.from ?? `session ${p.from_session_id.slice(-8)}`}
@@ -212,7 +210,7 @@ export function ReplyToBlock({ block, actions }: { block: Extract<Block, { kind:
       label="Reply to"
       peer={<PeerLink target={asker} label={question.payload.from} actions={actions} />}
       when={at && `delivered ${formatTime(at)}`}
-      selectable={{ text: event.payload.text, actions }}
+      text={event.payload.text}
     >
       {({ meta }) => (
         <>
@@ -302,7 +300,7 @@ export function SentBlock({ block, actions }: { block: Extract<Block, { kind: 's
       label="Sent to"
       peer={<PeerLink target={address} actions={actions} />}
       when={when}
-      selectable={{ text: args.text, actions }}
+      text={args.text}
     >
       {({ tail }) => (
         <>
@@ -326,7 +324,7 @@ export function ReplyFromBlock({ block, actions }: { block: Extract<Block, { kin
       label="Reply from"
       peer={<PeerLink target={res.from || peerArgs(block.call.payload.args_preview).session} actions={actions} />}
       when={formatTime(block.result.ts)}
-      selectable={{ text: [main, ...joined].join('\n\n'), actions }}
+      text={[main, ...joined].join('\n\n')}
     >
       {({ tail }) => (
         <>

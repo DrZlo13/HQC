@@ -13,7 +13,6 @@ import { parseEvent, type HqcEvent } from '../src/proto';
 import { Timeline } from '../src/timeline';
 import { ChatItems, type ChatActions } from '../src/ui/cards';
 import { formatTime } from '../src/ui/labels';
-import { WEB_SEARCHES } from '../src/websearch';
 
 interface Fixture {
   asker_id: string;
@@ -125,27 +124,27 @@ describe('the answering session (esp/session-5)', () => {
 });
 
 describe('the asking session (esp/session-4)', () => {
-  it('the sent message and its reply have Search, Copy and Quote, in this order, at the end of their text, none in their heads', async () => {
-    const { el } = await feed(exchange.asker, { findSession: sessions(exchange, 'esp/session-4', 'esp/session-5'), quote: vi.fn(), webSearch: WEB_SEARCHES[0] });
+  it('the sent message and its reply have Copy at the end of their text, none in their heads', async () => {
+    const { el } = await feed(exchange.asker, { findSession: sessions(exchange, 'esp/session-4', 'esp/session-5') });
     const [s, r] = blocks(el);
     for (const b of [s, r]) {
       expect(b.querySelector('.relay-head .msg-buttons')).toBeNull();
       const tails = b.querySelectorAll('.md .msg-tail');
       expect(tails, b.className).toHaveLength(1);
-      expect([...tails[0].querySelectorAll('button')].map((x) => x.getAttribute('aria-label'))).toEqual(['Search in Google', 'Copy', 'Quote']);
+      expect([...tails[0].querySelectorAll('button')].map((x) => x.getAttribute('aria-label'))).toEqual(['Copy']);
       expect(b.querySelectorAll('.msg-buttons')).toHaveLength(1);
     }
   });
 
   it('the reply to a question has them at the right end of its time and usage line', async () => {
-    const { el } = await feed(exchange.helper, { findSession: sessions(exchange, 'esp/session-4', 'esp/session-5'), quote: vi.fn(), webSearch: WEB_SEARCHES[0] });
+    const { el } = await feed(exchange.helper, { findSession: sessions(exchange, 'esp/session-4', 'esp/session-5') });
     const [q, r] = blocks(el);
     // The question: at the end of its text. The reply: in the line under it.
     expect(q.querySelector('.md .msg-tail')).not.toBeNull();
     expect(r.querySelector('.msg-tail')).toBeNull();
     const meta = r.querySelector(':scope > .meta')!;
     expect(meta.lastElementChild!.className).toBe('msg-buttons');
-    expect([...meta.lastElementChild!.querySelectorAll('button')].map((x) => x.getAttribute('aria-label'))).toEqual(['Search in Google', 'Copy', 'Quote']);
+    expect([...meta.lastElementChild!.querySelectorAll('button')].map((x) => x.getAttribute('aria-label'))).toEqual(['Copy']);
     expect(r.querySelectorAll('.msg-buttons')).toHaveLength(1);
   });
 
@@ -197,7 +196,7 @@ describe('the asking session (esp/session-4)', () => {
   });
 
   it('the buttons of a reply with a send that went with it stand at the end of that send, the last text', async () => {
-    const { el } = await feed(replySend.asker, { findSession: sessions(replySend, 'live/asker', 'live/helper'), quote: vi.fn(), webSearch: WEB_SEARCHES[0] });
+    const { el } = await feed(replySend.asker, { findSession: sessions(replySend, 'live/asker', 'live/helper') });
     const r = blocks(el)[1];
     const texts = [...r.querySelectorAll('.text')];
     expect(texts.map((t) => t.querySelectorAll('.msg-tail').length)).toEqual([0, 1]);

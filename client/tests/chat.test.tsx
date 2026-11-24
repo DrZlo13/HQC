@@ -29,9 +29,8 @@ import { limitNotice } from '../src/ui/limits';
 import { Timeline } from '../src/timeline';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
 import { Chat, withQuote } from '../src/ui/Chat';
-import { firstSentences } from '../src/ui/selection';
 import { LiveSubagents } from '../src/ui/LiveSubagents';
-import { WEB_SEARCHES, storedWebSearch } from '../src/websearch';
+import { WEB_SEARCHES } from '../src/websearch';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
 const ev = (name: string, seq: number, patch: (e: any) => void = () => {}): HqcEvent => {
@@ -51,9 +50,7 @@ afterEach(() => {
 });
 
 /** The Copy button, not the other buttons of the strip, which have the class too. */
-const COPY = '.btn-copy:not(.btn-msg-search):not(.btn-msg-quote):not(.btn-to-quick):not(.btn-fork)';
-/** A Search button that is shown (not the hidden slot a message keeps for it). */
-const SEARCH = '.btn-msg-search:not(.btn-msg-search-idle)';
+const COPY = '.btn-copy:not(.btn-to-quick):not(.btn-fork)';
 
 const HISTORY = [
   ev('event.user.message', 1, (e) => (e.payload.artifact_ids = [])),
@@ -2111,7 +2108,7 @@ describe('live subagents', () => {
     }
   });
 
-  it("a subagent's history has the message buttons too: Quote and Copy take the selection there, Search shows", async () => {
+  it("a subagent's history is quotable too: the Quote button over the composer takes the selection there", async () => {
     const { api, app } = setup('running', { subagents: 1, background_tasks: 1, history: HISTORY.slice(0, 3) });
     await mount(app);
     api.subagentHistory.mockImplementation(async () => ({
@@ -2131,6 +2128,7 @@ describe('live subagents', () => {
     const text = document.createTreeWalker(panel, NodeFilter.SHOW_TEXT);
     let node: Node | null = text.nextNode();
     while (node && node.textContent !== 'The import keeps the power nets.') node = text.nextNode();
+    expect($('.composer-row .btn-quote')).toBeNull();
     await act(async () => {
       const r = document.createRange();
       r.setStart(node!, 4);
@@ -2139,8 +2137,9 @@ describe('live subagents', () => {
       document.getSelection()!.addRange(r);
       document.dispatchEvent(new Event('selectionchange'));
     });
-    expect(panel.querySelector(`.msg-agent ${SEARCH}`)).not.toBeNull();
-    await act(async () => void panel.querySelector<HTMLButtonElement>('.msg-agent .btn-msg-quote')!.click());
+    // The message's own strip is Copy alone.
+    expect([...panel.querySelectorAll('.msg-agent .msg-buttons button')].map((b) => b.getAttribute('aria-label'))).toEqual(['Copy']);
+    await act(async () => void $('.composer-row .btn-quote')!.click());
     expect(($('.composer-input') as HTMLTextAreaElement).value).toBe('> import\n\n');
   });
 
@@ -2788,7 +2787,7 @@ describe('quick messages', () => {
     it('a message of the user has the button right before fork; the agent\'s has none', async () => {
       await chatWith([], []);
       const acts = [...$('.msg-user .msg-buttons')!.querySelectorAll('button')];
-      expect(acts.map((b) => b.getAttribute('aria-label'))).toEqual(['Search in Google', 'Copy', 'Quote', 'Add to quick messages', 'Fork from here']);
+      expect(acts.map((b) => b.getAttribute('aria-label'))).toEqual(['Copy', 'Add to quick messages', 'Fork from here']);
       expect($('.msg-agent .btn-to-quick')).toBeNull();
     });
 
@@ -4098,58 +4097,74 @@ describe('Quote', () => {
       }
       document.dispatchEvent(new Event('selectionchange'));
     });
-  const agentButton = (cls: string) => $(`.msg-agent .msg-buttons ${cls}`) as HTMLButtonElement | null;
-  const withAgentText = (text: string) => [HISTORY[0], ev('event.agent.message', 2, (e) => (e.payload.text = text)), ...HISTORY.slice(2, 3)];
+  /** The Quote button over the composer's field. */
+  const quoteButton = () => $('.composer-row .btn-quote') as HTMLButtonElement | null;
   const clipboard = () => {
     const writeText = vi.fn(async (_: string) => {});
     vi.stubGlobal('isSecureContext', true);
     Object.defineProperty(window.navigator, 'clipboard', { value: { writeText }, configurable: true });
     return writeText;
   };
-
-  it('quotes the text selected in a message from its Quote icon, after the draft, and focuses the field', async () => {
-    const { app } = setup('idle');
-    await mount(app);
-    await act(() => {
-      area().value = 'Look at this';
+  const typeDraft = (text: string) =>
+    act(() => {
+      area().value = text;
       area().dispatchEvent(new Event('input', { bubbles: true }));
     });
+
+  it('quotes the text selected in the feed from the Quote button over the composer, after the draft, and focuses the field', async () => {
+    const { app } = setup('idle');
+    await mount(app);
+    await typeDraft('Look at this');
+    // Nothing selected: no button.
+    expect(quoteButton()).toBeNull();
     await select(textNode('All tests pass.'), 4, 9);
-    expect(agentButton('.btn-msg-quote')!.getAttribute('aria-label')).toBe('Quote');
-    await act(() => agentButton('.btn-msg-quote')!.click());
+    expect(quoteButton()!.textContent).toBe('Quote');
+    // Over the field, taking no room: in the row, not a flex item.
+    expect(quoteButton()!.parentElement!.classList.contains('composer-row')).toBe(true);
+    await act(() => quoteButton()!.click());
     expect(area().value).toBe('Look at this\n\n> tests\n\n');
     expect(document.activeElement).toBe(area());
     expect(area().selectionStart).toBe(area().value.length);
     expect(document.getSelection()!.rangeCount).toBe(0);
+    expect(quoteButton(), 'gone with the selection').toBeNull();
     // The next quote goes after the first.
     await select(textNode('All tests pass.'));
-    await act(() => agentButton('.btn-msg-quote')!.click());
+    await act(() => quoteButton()!.click());
     expect(area().value).toBe('Look at this\n\n> tests\n\n> All tests pass.\n\n');
-    // The pill and the menu of the old Quote are gone.
-    expect($('.btn-quote')).toBeNull();
-    expect($('.ctx-menu')).toBeNull();
   });
 
-  it('quotes the first two sentences of a message with nothing selected, with «…» when more follows', async () => {
-    const { app } = setup('idle', { history: withAgentText('First one. Second one! Third one? Fourth.') });
+  it('shows the button for a selection in the user\'s message too, and none for one that starts outside the feed', async () => {
+    const { app } = setup('idle');
     await mount(app);
-    await act(() => agentButton('.btn-msg-quote')!.click());
-    expect(area().value).toBe('> First one. Second one! …\n\n');
-    await act(() => {
-      area().value = '';
-      area().dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    // A selection in another message does not count: this one is quoted by its text.
     await select(textNode('Run the tests', '.msg-user'), 0, 3);
-    await act(() => agentButton('.btn-msg-quote')!.click());
-    expect(area().value).toBe('> First one. Second one! …\n\n');
+    expect(quoteButton()).not.toBeNull();
+    // The header is no feed's.
+    await select(textNode('test 12', '.chat-head'));
+    expect(quoteButton()).toBeNull();
+    // A selection that starts in the header and ends in the feed starts outside it.
+    await selectRange([textNode('test 12', '.chat-head'), 0], [textNode('All tests pass.'), 5]);
+    expect(quoteButton()).toBeNull();
+    // The text of the composer's own field.
+    await typeDraft('draft text');
+    area().setSelectionRange(0, 5);
+    await act(() => void document.dispatchEvent(new Event('selectionchange')));
+    expect(quoteButton()).toBeNull();
   });
 
-  it('quotes a short message whole, without «…»', async () => {
-    const { app } = setup('idle', { history: withAgentText('One. Two.') });
+  it('is not shown where there is no input to quote into', async () => {
+    const locked = setup('locked_vscode');
+    await mount(locked.app);
+    await select(textNode('All tests pass.'));
+    expect(quoteButton()).toBeNull();
+    expect($('.composer-row')).toBeNull();
+  });
+
+  it('is not shown on an archived session, where there is nothing to quote into', async () => {
+    const { app } = setup('idle');
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true, state: 'archived' });
     await mount(app);
-    await act(() => agentButton('.btn-msg-quote')!.click());
-    expect(area().value).toBe('> One. Two.\n\n');
+    await select(textNode('All tests pass.'));
+    expect(quoteButton()).toBeNull();
   });
 
   const twoParagraphs = () => [HISTORY[0], ev('event.agent.message', 2, (e) => (e.payload.text = 'Para one.\n\nPara two.')), HISTORY[3]];
@@ -4163,19 +4178,38 @@ describe('Quote', () => {
       document.dispatchEvent(new Event('selectionchange'));
     });
 
-  it('a triple click, which ends at the start of the next block, is the message\'s paragraph only', async () => {
-    const writeText = clipboard();
+  it('a triple click, which ends at the start of the next block, quotes the message\'s paragraph only', async () => {
     const { app } = setup('idle', { history: twoParagraphs() });
     await mount(app);
     const next = $('.msg-agent')!.closest('.feed-block')!.nextElementSibling!;
     await selectRange([textNode('Para two.'), 0], [next, 0]);
-    expect(document.querySelectorAll(SEARCH).length).toBe(1);
-    expect(agentButton(SEARCH)).not.toBeNull();
-    await act(async () => agentButton(COPY)!.click());
-    expect(writeText).toHaveBeenLastCalledWith('Para two.');
-    await act(() => agentButton('.btn-msg-quote')!.click());
+    await act(() => quoteButton()!.click());
     expect(area().value).toBe('> Para two.\n\n');
-    vi.unstubAllGlobals();
+  });
+
+  it('a range from the last paragraph of the last message into the rows after the feed quotes that paragraph only', async () => {
+    const { app } = setup('running', {
+      subagents: 1,
+      background_tasks: 1,
+      history: [HISTORY[0], ev('event.agent.message', 2, (e) => (e.payload.text = 'Para one.\n\nPara two.'))],
+    });
+    await mount(app);
+    await act(async () =>
+      subscriber!.onEvent(
+        ev('event.subagents.live', 0, (e) => {
+          delete e.seq;
+          e.payload.agents = [{ task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000, call_id: 'toolu_ag' }];
+        }),
+      ),
+    );
+    // The row of the subagent stands after the feed, outside it; a triple click on the last
+    // paragraph ends in what follows the feed.
+    const row = textNode('Fix the nets', '.live-agents');
+    expect(row.parentElement!.closest('.feed')).toBeNull();
+    await selectRange([textNode('Para two.'), 0], [row, 3]);
+    expect(quoteButton()).not.toBeNull();
+    await act(() => quoteButton()!.click());
+    expect(area().value).toBe('> Para two.\n\n');
   });
 
   it('quotes the paragraphs of a clipped range on separate lines, and a range that enters a message leaves its time out', async () => {
@@ -4183,23 +4217,13 @@ describe('Quote', () => {
     await mount(app);
     const next = $('.msg-agent')!.closest('.feed-block')!.nextElementSibling!;
     await selectRange([textNode('Para one.'), 0], [next, 0]);
-    await act(() => agentButton('.btn-msg-quote')!.click());
+    await act(() => quoteButton()!.click());
     expect(area().value).toBe('> Para one.\n>\n> Para two.\n\n');
-    await act(() => {
-      area().value = '';
-      area().dispatchEvent(new Event('input', { bubbles: true }));
-    });
+    await typeDraft('');
     // From outside any message into the middle of one: its time (and buttons) are not text.
-    await selectRange([$('.feed')!, 0], [textNode('Para two.'), 4]);
-    await act(() => agentButton('.btn-msg-quote')!.click());
+    await selectRange([$('.msg-agent')!.closest('.feed-block')!, 0], [textNode('Para two.'), 4]);
+    await act(() => quoteButton()!.click());
     expect(area().value).toBe('> Para one.\n>\n> Para\n\n');
-  });
-
-  it('puts a space before «…» after a sentence mark, and skips the blank line between paragraphs', () => {
-    expect(firstSentences('Done.\n\nThe tests pass. Next.')).toBe('Done.\n\nThe tests pass. …');
-    expect(firstSentences('Done.\n\nThe tests pass.')).toBe('Done.\n\nThe tests pass.');
-    expect(firstSentences('One. Two. Three')).toBe('One. Two. …');
-    expect(firstSentences('one\n\ntwo\n\nthree')).toBe('one\n\ntwo…');
   });
 
   it('lets go of a held press the browser took over (pointercancel), and reads the selection anew at a press', async () => {
@@ -4207,36 +4231,55 @@ describe('Quote', () => {
     vi.stubGlobal('matchMedia', (media: string) => ({ matches: true, media, addEventListener: () => {}, removeEventListener: () => {} }));
     try {
       const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
-      // The chat never hears of the selection changing: only a press tells it.
+      // The chat hears of the selection once, as it changed; what the test does after is not heard.
+      let heard: (() => void) | undefined;
       const add = document.addEventListener.bind(document);
       vi.spyOn(document, 'addEventListener').mockImplementation(((type: string, ...rest: [any]) => {
-        if (type !== 'selectionchange') add(type, ...rest);
+        if (type === 'selectionchange') heard = rest[0];
+        else add(type, ...rest);
       }) as typeof document.addEventListener);
       await mount(app, true);
-      const row = $('.msg-agent .msg-buttons')!;
-      const press = () =>
-        act(() => void row.querySelector('.btn-msg-quote, .btn-copy')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
-      // A selection the chat has not heard of: the press reads it.
+      await act(() => {
+        const r = document.createRange();
+        r.setStart(textNode('All tests pass.'), 0);
+        r.setEnd(textNode('All tests pass.'), 3);
+        document.getSelection()!.removeAllRanges();
+        document.getSelection()!.addRange(r);
+        heard!();
+      });
+      expect(quoteButton(), 'heard').not.toBeNull();
+      // The selection moves, unheard: the press reads it anew.
       await act(() => {
         const r = document.createRange();
         r.selectNodeContents(textNode('All tests pass.'));
         document.getSelection()!.removeAllRanges();
         document.getSelection()!.addRange(r);
       });
-      expect(row.querySelector(SEARCH)).toBeNull();
-      await press();
-      expect(row.querySelector(SEARCH)).not.toBeNull();
+      await act(() => void quoteButton()!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
       await select(null);
-      expect(row.querySelector(SEARCH), 'held').not.toBeNull();
+      expect(quoteButton(), 'held').not.toBeNull();
+      // The press read the whole line, not the part the chat had heard of.
+      await act(() => quoteButton()!.click());
+      expect(area().value).toBe('> All tests pass.\n\n');
+      // A press the browser took over has no click: it is let go.
+      await act(() => {
+        const r = document.createRange();
+        r.selectNodeContents(textNode('All tests pass.'));
+        document.getSelection()!.addRange(r);
+        heard!();
+      });
+      await act(() => void quoteButton()!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
+      await select(null);
+      expect(quoteButton(), 'held').not.toBeNull();
       await act(() => void document.dispatchEvent(new Event('pointercancel')));
-      expect(row.querySelector(SEARCH), 'let go').toBeNull();
+      expect(quoteButton(), 'let go').toBeNull();
     } finally {
       vi.restoreAllMocks();
       vi.unstubAllGlobals();
     }
   });
 
-  it('quotes the earlier selection when iOS has cleared it before the press', async () => {
+  it('quotes the earlier selection when iOS has cleared it before the click, and keeps the button until it', async () => {
     vi.stubGlobal('matchMedia', (media: string) => ({ matches: true, media, addEventListener: () => {}, removeEventListener: () => {} }));
     // The chat hears of the selection once, as it changed; what the test does after is not heard.
     let heard: (() => void) | undefined;
@@ -4248,7 +4291,6 @@ describe('Quote', () => {
     try {
       const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
       await mount(app, true);
-      const row = $('.msg-agent .msg-buttons')!;
       await act(() => {
         const r = document.createRange();
         r.setStart(textNode('All tests pass.'), 4);
@@ -4257,12 +4299,16 @@ describe('Quote', () => {
         document.getSelection()!.addRange(r);
         heard!();
       });
-      expect(row.querySelector(SEARCH)).not.toBeNull();
+      expect(quoteButton()).not.toBeNull();
       // Cleared before the pointerdown reached the page.
       document.getSelection()!.removeAllRanges();
-      await act(() => void row.querySelector('.btn-msg-quote')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
-      expect(row.querySelector(SEARCH), 'still offered').not.toBeNull();
-      await act(() => row.querySelector<HTMLButtonElement>('.btn-msg-quote')!.click());
+      let cancelled = false;
+      await act(() => {
+        cancelled = !quoteButton()!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+      });
+      expect(cancelled, 'a press keeps the field\'s focus').toBe(true);
+      expect(quoteButton(), 'still offered').not.toBeNull();
+      await act(() => quoteButton()!.click());
       expect(area().value).toBe('> tests\n\n');
     } finally {
       vi.restoreAllMocks();
@@ -4270,120 +4316,75 @@ describe('Quote', () => {
     }
   });
 
-  it('a range across two messages is the first one\'s part, held by the first only', async () => {
-    const { app } = setup('idle', { history: twoParagraphs() });
-    await mount(app);
-    await selectRange([textNode('Para two.'), 5], [[...root.querySelectorAll('.msg-user .msg-text')].pop()!.firstChild!, 3]);
-    expect(document.querySelectorAll(SEARCH).length).toBe(1);
-    expect(agentButton(SEARCH)).not.toBeNull();
-    await act(() => agentButton('.btn-msg-quote')!.click());
-    expect(area().value).toBe('> two.\n\n');
-  });
-
-  it('has Search, Copy and Quote on the user\'s message, the Search slot hidden until it holds a selection', async () => {
-    const { app } = setup('idle');
-    await mount(app);
-    const labels = () =>
-      [...$('.msg-user .msg-buttons')!.querySelectorAll('button')].map((b) => b.getAttribute('aria-label')).filter((l) => l !== 'Fork from here');
-    const slot = () => $('.msg-user .btn-msg-search') as HTMLElement;
-    expect(labels()).toEqual(['Search in Google', 'Copy', 'Quote']);
-    expect(slot().classList.contains('btn-msg-search-idle')).toBe(true);
-    await select(textNode('Run the tests', '.msg-user'));
-    expect(labels()).toEqual(['Search in Google', 'Copy', 'Quote']);
-    expect(slot().classList.contains('btn-msg-search-idle')).toBe(false);
-  });
-
-  it('copies the text selected in the message, else the whole message', async () => {
-    const writeText = clipboard();
-    const { app } = setup('idle');
-    await mount(app);
-    await act(async () => agentButton(COPY)!.click());
-    expect(writeText).toHaveBeenLastCalledWith('All tests pass.');
-    await select(textNode('All tests pass.'), 4, 9);
-    await act(async () => agentButton(COPY)!.click());
-    expect(writeText).toHaveBeenLastCalledWith('tests');
-    vi.unstubAllGlobals();
-  });
-
-  it('offers Search only in the message that holds the selection, with the search picked in Settings', async () => {
-    const open = vi.fn();
-    vi.stubGlobal('open', open);
-    const { app } = setup('idle');
-    await mount(app);
-    expect($(SEARCH)).toBeNull();
-    await select(textNode('All tests pass.'), 4, 9);
-    expect(document.querySelectorAll(SEARCH).length).toBe(1);
-    expect(agentButton(SEARCH)!.title).toBe('Search in Google');
-    await act(async () => agentButton(SEARCH)!.click());
-    expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=tests', '_blank', 'noopener');
-    // Text outside the feed is not a message's.
-    await select(textNode('test 12', '.chat-head'));
-    expect($(SEARCH)).toBeNull();
-    await act(() => app.setWebSearch(WEB_SEARCHES.find((w) => w.id === 'yandex')!));
-    await select(textNode('All tests pass.'));
-    expect(agentButton(SEARCH)!.title).toBe('Search in Yandex');
-    await act(async () => agentButton(SEARCH)!.click());
-    expect(open).toHaveBeenLastCalledWith('https://yandex.ru/search/?text=All%20tests%20pass.', '_blank', 'noopener');
-    // Kept on this device: a reload starts with it.
-    expect(storedWebSearch().id).toBe('yandex');
-    act(() => app.setWebSearch(WEB_SEARCHES[0]));
-    vi.unstubAllGlobals();
-  });
-
-  it('keeps a press that clears the selection (a phone\'s tap): the buttons stay and act on the text held', async () => {
+  it('quotes a cleared selection of two paragraphs of one message on lines of their own', async () => {
+    // The chat hears of the selection once, as it changed; what the test does after is not heard.
+    let heard: (() => void) | undefined;
+    const add = document.addEventListener.bind(document);
+    vi.spyOn(document, 'addEventListener').mockImplementation(((type: string, ...rest: [any]) => {
+      if (type === 'selectionchange') heard = rest[0];
+      else add(type, ...rest);
+    }) as typeof document.addEventListener);
     try {
-      const open = vi.fn();
-      vi.stubGlobal('open', open);
-      vi.stubGlobal('matchMedia', (media: string) => ({ matches: true, media, addEventListener: () => {}, removeEventListener: () => {} }));
-      // Without the open request of HISTORY: on a phone it would take the composer's place.
-      const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
-      await mount(app, true);
-      const row = $('.msg-agent .msg-buttons')!;
-      // The usage line holds them, the time line none.
-      expect($('.msg-agent .msg-time .msg-buttons')).toBeNull();
-      expect($('.msg-agent > .meta > .msg-buttons')).not.toBeNull();
-      await select(textNode('All tests pass.'), 4, 9);
-      const search = row.querySelector<HTMLButtonElement>(SEARCH)!;
-      const quote = row.querySelector<HTMLButtonElement>('.btn-msg-quote')!;
-      /** A pointer press on `el`: whether it was cancelled, which keeps a mouse's selection. */
-      const press = async (el: Element) => {
-        let cancelled = false;
-        await act(() => {
-          cancelled = !el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
-        });
-        return cancelled;
-      };
-      expect(await press(quote), 'a mouse press keeps the selection and the focus').toBe(true);
-      await select(null);
-      expect(row.querySelector(SEARCH), 'still there, though the selection is gone').toBe(search);
-      await act(() => quote.click());
-      expect(area().value).toBe('> tests\n\n');
-      expect(row.querySelector(SEARCH), 'gone with the selection after the click').toBeNull();
-      await select(textNode('All tests pass.'), 4, 9);
-      await press(row.querySelector(SEARCH)!);
-      await select(null);
-      await act(() => row.querySelector<HTMLButtonElement>(SEARCH)!.click());
-      expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=tests', '_blank', 'noopener');
-      // A press elsewhere lets go of the held text.
-      await select(textNode('All tests pass.'), 0, 3);
-      await press(quote);
-      await select(null);
-      await act(() => void $('.chat-head')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })));
-      expect(row.querySelector(SEARCH)).toBeNull();
+      const { app } = setup('idle', { history: twoParagraphs() });
+      await mount(app);
+      await act(() => {
+        const r = document.createRange();
+        r.setStart(textNode('Para one.'), 0);
+        r.setEnd(textNode('Para two.'), 9);
+        document.getSelection()!.removeAllRanges();
+        document.getSelection()!.addRange(r);
+        heard!();
+      });
+      // Cleared before the press (iOS): the copy of the range is quoted, by lines.
+      document.getSelection()!.removeAllRanges();
+      await act(() => void quoteButton()!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
+      await act(() => quoteButton()!.click());
+      expect(area().value).toBe('> Para one.\n>\n> Para two.\n\n');
     } finally {
-      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
     }
   });
 
-  it('has no Quote without a composer, but Search, and no pill or client menu anywhere', async () => {
-    const locked = setup('locked_vscode');
-    await mount(locked.app);
-    await select(textNode('All tests pass.'));
-    expect(agentButton(COPY)).not.toBeNull();
-    expect(agentButton('.btn-msg-quote')).toBeNull();
-    // Search needs no input.
-    expect(agentButton(SEARCH)).not.toBeNull();
-    expect($('.btn-quote')).toBeNull();
+  it('keeps a pressed button while the selection goes (a phone\'s tap), and a press elsewhere lets it go', async () => {
+    const { app } = setup('idle');
+    await mount(app);
+    await select(textNode('All tests pass.'), 4, 9);
+    await act(() => void quoteButton()!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
+    await select(null);
+    expect(quoteButton(), 'held though the selection is gone').not.toBeNull();
+    await act(() => void $('.chat-head')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })));
+    expect(quoteButton()).toBeNull();
+  });
+
+  it('a range across two messages is quoted whole, from the first message\'s part to the second\'s', async () => {
+    const { app } = setup('idle', { history: twoParagraphs() });
+    await mount(app);
+    await selectRange([textNode('Para two.'), 5], [[...root.querySelectorAll('.msg-user .msg-text')].pop()!.firstChild!, 3]);
+    await act(() => quoteButton()!.click());
+    expect(area().value).toBe('> two.\n>\n> Run\n\n');
+  });
+
+  it('has Copy on the message, with the buttons of the user\'s own message, and no Search or Quote', async () => {
+    const { app } = setup('idle');
+    await mount(app);
+    const labels = (sel: string) => [...$(sel)!.querySelectorAll('button')].map((b) => b.getAttribute('aria-label'));
+    expect(labels('.msg-user .msg-buttons')).toEqual(['Copy', 'Fork from here']);
+    expect(labels('.msg-agent .msg-buttons')).toEqual(['Copy']);
+    await select(textNode('Run the tests', '.msg-user'));
+    expect(labels('.msg-user .msg-buttons')).toEqual(['Copy', 'Fork from here']);
+  });
+
+  it('copies the whole message, whatever is selected in it', async () => {
+    const writeText = clipboard();
+    const { app } = setup('idle');
+    await mount(app);
+    const copy = () => $(`.msg-agent .msg-buttons ${COPY}`) as HTMLButtonElement;
+    await act(async () => copy().click());
+    expect(writeText).toHaveBeenLastCalledWith('All tests pass.');
+    await select(textNode('All tests pass.'), 4, 9);
+    await act(async () => copy().click());
+    expect(writeText).toHaveBeenLastCalledWith('All tests pass.');
+    vi.unstubAllGlobals();
   });
 
   /** A right click on `node` (its parent for a text): the press first, then `between` (what a Mac

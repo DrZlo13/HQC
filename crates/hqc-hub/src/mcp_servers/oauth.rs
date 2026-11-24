@@ -45,6 +45,11 @@ pub(super) struct Pending {
     verifier: String,
     redirect_uri: String,
     at: Instant,
+    /// What this sign-in discovered and registered: stored only when it succeeds, so that a
+    /// sign-in started and dropped does not change where tokens go.
+    meta: Meta,
+    client_id: String,
+    registered_secret: Option<String>,
 }
 
 const PENDING_FOR: Duration = Duration::from_secs(600);
@@ -67,6 +72,12 @@ struct Secrets {
 /// The authorization server as discovered.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Meta {
+    /// The authorization server's issuer, as its metadata names it and as asked for.
+    #[serde(default)]
+    issuer: String,
+    /// It sends `iss` back with the code (RFC 9207): the callback then requires it.
+    #[serde(default)]
+    iss_supported: bool,
     authorization_endpoint: String,
     token_endpoint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -255,12 +266,11 @@ async fn token_request(
         .await
         .map_err(|e| UpErr::Unavailable(super::short(&e)))?;
     let status = resp.status();
-    let body: Value = resp
-        .json()
+    let body: Value = capped_json(resp)
         .await
-        .map_err(|_| UpErr::Unavailable(format!("the token endpoint answered {status}")))?;
+        .ok_or_else(|| UpErr::Unavailable(format!("the token endpoint answered {status}")))?;
     if !status.is_success() {
-        let err = body.get("error").and_then(Value::as_str).unwrap_or("error");
+        let err = word(body.get("error").and_then(Value::as_str).unwrap_or("error"));
         return Err(UpErr::SignIn(format!(
             "the authorization server refused: {err}"
         )));
@@ -281,10 +291,41 @@ async fn get_json(app: &AppState, url: &str) -> Option<Value> {
     if !r.status().is_success() {
         return None;
     }
-    if r.content_length().is_some_and(|n| n > 1024 * 1024) {
+    capped_json(r).await
+}
+
+/// The JSON body of an answer from a server that may not be honest, at most 1 MiB.
+async fn capped_json(mut r: reqwest::Response) -> Option<Value> {
+    const MAX: usize = 1024 * 1024;
+    if r.content_length().is_some_and(|n| n > MAX as u64) {
         return None;
     }
-    r.json().await.ok()
+    let mut buf = Vec::new();
+    while let Some(chunk) = r.chunk().await.ok()? {
+        if buf.len() + chunk.len() > MAX {
+            return None;
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&buf).ok()
+}
+
+/// An error code of the authorization server as hqc repeats it: a short word, nothing else.
+fn word(s: &str) -> String {
+    let w: String = s
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .take(60)
+        .collect();
+    if w.is_empty() {
+        "error".into()
+    } else {
+        w
+    }
+}
+
+fn same_issuer(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
 }
 
 /// `https://host/a/b` -> (`https://host`, `/a/b`, or "" for `/`).
@@ -354,6 +395,14 @@ async fn discover(app: &AppState, r: &Row) -> Result<Meta, UpErr> {
         }
     }
     let m = as_meta.ok_or_else(|| no("the server names no authorization server metadata"))?;
+    // RFC 8414 §3.3: the metadata must be the issuer's that was asked for, else another server
+    // could hand out a third one's endpoints (a mix-up).
+    let named = m.get("issuer").and_then(Value::as_str).unwrap_or_default();
+    if !same_issuer(named, &issuer) {
+        return Err(no(
+            "the authorization server's metadata names another issuer",
+        ));
+    }
     let url = |k: &str| -> Result<String, UpErr> {
         let u = m
             .get(k)
@@ -375,6 +424,11 @@ async fn discover(app: &AppState, r: &Row) -> Result<Meta, UpErr> {
             .filter(|s| !s.is_empty())
     });
     Ok(Meta {
+        issuer: issuer.clone(),
+        iss_supported: m
+            .get("authorization_response_iss_parameter_supported")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         authorization_endpoint: url("authorization_endpoint")?,
         token_endpoint: url("token_endpoint")?,
         registration_endpoint: url("registration_endpoint").ok(),
@@ -451,8 +505,27 @@ pub async fn sign_in(
         ));
     }
     let meta = discover(&app, &r).await.map_err(|e| bad(e, &r.name))?;
+    // The server now names another authorization server than it was signed in with: its client
+    // and tokens are not for that one. The owner looks and sets the server again (which forgets
+    // them) before anything goes there.
+    let before: Option<Meta> = r
+        .oauth_meta
+        .clone()
+        .and_then(|m| serde_json::from_value(m).ok());
+    if let Some(b) = &before {
+        if !same_issuer(&b.issuer, &meta.issuer) {
+            return Err(ApiError::Conflict(
+                "issuer_changed",
+                format!(
+                    "{} now names another authorization server ({}); edit the server to sign in \
+                     there",
+                    r.name, meta.issuer
+                ),
+            ));
+        }
+    }
     let redirect = redirect_uri(&app, &headers);
-    let mut s = secrets_of(&app, &r).unwrap_or_default();
+    let mut registered_secret = None;
     let client_id = match &r.oauth_client_id {
         Some(c) => c.clone(),
         None => {
@@ -477,7 +550,7 @@ pub async fn sign_in(
                 .send()
                 .await
                 .map_err(|e| bad(UpErr::Unavailable(super::short(&e)), &r.name))?;
-            let v: Value = resp.json().await.map_err(|_| {
+            let v: Value = capped_json(resp).await.ok_or_else(|| {
                 bad(
                     UpErr::Unavailable("the registration answered no JSON".into()),
                     &r.name,
@@ -493,22 +566,14 @@ pub async fn sign_in(
                     )
                 })?
                 .to_string();
-            if let Some(sec) = v.get("client_secret").and_then(Value::as_str) {
-                s.client_secret = Some(sec.to_string());
-            }
+            registered_secret = v
+                .get("client_secret")
+                .and_then(Value::as_str)
+                .map(String::from);
             c
         }
     };
-    let sealed = seal_secrets(&app, id, &s).map_err(|e| bad(e, &r.name))?;
-    sqlx::query(
-        "UPDATE mcp_servers SET oauth_client_id = $2, oauth_meta = $3, oauth_sealed = $4 WHERE id = $1",
-    )
-    .bind(id)
-    .bind(&client_id)
-    .bind(serde_json::to_value(&meta).expect("meta serializes"))
-    .bind(sealed)
-    .execute(&app.db)
-    .await?;
+    key(&app).map_err(|e| bad(e, &r.name))?;
     let state = random();
     let verifier = random();
     let challenge = b64(&Sha256::digest(verifier.as_bytes()));
@@ -538,6 +603,9 @@ pub async fn sign_in(
                 verifier,
                 redirect_uri: redirect,
                 at: Instant::now(),
+                meta: meta.clone(),
+                client_id: client_id.clone(),
+                registered_secret,
             },
         );
     }
@@ -555,6 +623,9 @@ pub struct CallbackQuery {
     state: Option<String>,
     #[serde(default)]
     error: Option<String>,
+    /// RFC 9207: the issuer that answered.
+    #[serde(default)]
+    iss: Option<String>,
 }
 
 fn page(title: &str, text: &str) -> Response {
@@ -593,8 +664,24 @@ pub async fn callback(
     if let Some(e) = q.error {
         return page(
             "Not signed in",
-            &format!("The authorization server said: {e}."),
+            &format!("The authorization server said: {}.", word(&e)),
         );
+    }
+    // RFC 9207: a code from another issuer than the one this sign-in went to is refused.
+    match &q.iss {
+        Some(iss) if !same_issuer(iss, &p.meta.issuer) => {
+            return page(
+                "Not signed in",
+                "The code came from another authorization server.",
+            )
+        }
+        None if p.meta.iss_supported => {
+            return page(
+                "Not signed in",
+                "The authorization server did not say who it is.",
+            )
+        }
+        _ => {}
     }
     let Some(code) = q.code else {
         return page("Not signed in", "The authorization server gave no code.");
@@ -603,14 +690,12 @@ pub async fn callback(
         Ok(r) => r,
         Err(_) => return page("Not signed in", "The server is gone."),
     };
-    let meta: Option<Meta> = r
-        .oauth_meta
-        .clone()
-        .and_then(|m| serde_json::from_value(m).ok());
-    let (Some(meta), Some(client_id)) = (meta, r.oauth_client_id.clone()) else {
-        return page("Not signed in", "Start the sign-in again.");
-    };
+    let (meta, client_id) = (p.meta, p.client_id);
+    // A client the hub registered now has its own secret; one given by the owner keeps theirs.
     let mut s = secrets_of(&app, &r).unwrap_or_default();
+    if p.registered_secret.is_some() || r.oauth_client_id.is_none() {
+        s.client_secret = p.registered_secret;
+    }
     let form = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code),
@@ -625,15 +710,30 @@ pub async fn callback(
     s.access_token = Some(t.access_token);
     s.refresh_token = t.refresh_token;
     s.expires_at = t.expires_in.map(|e| Utc::now().timestamp() + e);
-    if store(&app, r.id, &s).await.is_err() {
+    let Ok(sealed) = seal_secrets(&app, r.id, &s) else {
         return page("Not signed in", "The hub could not keep the sign-in.");
-    }
-    let _ = sqlx::query(
-        "UPDATE mcp_servers SET status = 'unknown', last_error = NULL, cached_at = NULL WHERE id = $1",
+    };
+    // The endpoints, the client and the tokens together, under the refresh lock.
+    let lock = {
+        let mut g = app.mcp_upstream.refreshing.lock().unwrap();
+        g.entry(r.id).or_default().clone()
+    };
+    let _held = lock.lock().await;
+    let stored = sqlx::query(
+        "UPDATE mcp_servers SET oauth_meta = $2, oauth_client_id = $3, oauth_sealed = $4,
+                                status = 'unknown', last_error = NULL, cached_at = NULL,
+                                updated_at = now()
+         WHERE id = $1",
     )
     .bind(r.id)
+    .bind(serde_json::to_value(&meta).expect("meta serializes"))
+    .bind(&client_id)
+    .bind(sealed)
     .execute(&app.db)
     .await;
+    if stored.is_err() {
+        return page("Not signed in", "The hub could not keep the sign-in.");
+    }
     super::forget_sessions(&app, r.id);
     tracing::info!(server_id = %r.id, "mcp oauth signed in");
     page(

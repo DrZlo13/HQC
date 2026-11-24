@@ -882,6 +882,13 @@ pub async fn ask(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Ans
             format!("this session already waits for {open} replies; at most {max_open} at once"),
         ));
     }
+    // The message is delivered before the request opens, so the id is checked first.
+    if db::request_id_held_by_other_kind(&app.db, "ask", caller.id, &c.request_id)
+        .await
+        .map_err(internal)?
+    {
+        return Err(err(error_code::UNAVAILABLE, db::REQUEST_ID_TAKEN));
+    }
     admit(app, caller, &chain).await?;
     let m = Message {
         text: &a.text,
@@ -891,7 +898,7 @@ pub async fn ask(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Ans
     };
     let row = store_message(app, caller, &t, &c.request_id, m, &chain).await?;
     let expires_at = Utc::now() + chrono::TimeDelta::seconds(timeout as i64);
-    db::open_request(
+    let opened = db::open_request_as(
         &app.db,
         "ask",
         caller.id,
@@ -902,6 +909,10 @@ pub async fn ask(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Ans
     )
     .await
     .map_err(internal)?;
+    if opened == db::Opened::Taken {
+        // Only a race: the check above ran before the message was stored.
+        return Err(err(error_code::UNAVAILABLE, db::REQUEST_ID_TAKEN));
+    }
     tracing::info!(from = %caller.id, to = %t.id, request_id = %c.request_id, timeout, "peer ask");
     // A request the target has open now shows in the caller too (SPEC §10.1).
     app.requests_changed(caller.owner_id);

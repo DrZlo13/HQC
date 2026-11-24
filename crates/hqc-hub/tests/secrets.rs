@@ -638,3 +638,43 @@ async fn hqc_ssh_keygen_and_the_kept_keys() {
     );
     hub.finish().await;
 }
+
+/// SPEC §10.1: `hqc_secret` whose call's id an open request of another kind holds is refused at
+/// once, not left waiting for an answer that cannot reach it.
+#[tokio::test]
+async fn a_secret_whose_id_another_open_request_holds_is_refused_at_once() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, _) = session(&hub, true).await;
+    let rid = Uuid::now_v7().to_string();
+    assert!(hqc_hub::db::open_request(
+        &hub.app.db,
+        "approval",
+        sid.parse().unwrap(),
+        &rid,
+        &json!({}),
+        None,
+        None,
+    )
+    .await
+    .unwrap());
+    let id = w
+        .send(
+            "mcp.call",
+            json!({"request_id": rid, "session_token": token, "tool": "hqc_secret",
+                   "args": {"name": "pi-lab", "purpose": "the key", "kind": "ssh_key"}}),
+        )
+        .await;
+    let r = next_of(&mut w, "mcp.result").await;
+    assert_eq!(r["id"], id.as_str(), "{r}");
+    assert_eq!(r["payload"]["error"]["code"], "unavailable", "{r}");
+    assert_eq!(
+        r["payload"]["error"]["message"],
+        hqc_hub::db::REQUEST_ID_TAKEN
+    );
+    assert!(!hub
+        .events(&sid)
+        .await
+        .iter()
+        .any(|e| e["type"] == "approval.request" && e["payload"]["tool"] == "hqc_secret"));
+    hub.finish().await;
+}

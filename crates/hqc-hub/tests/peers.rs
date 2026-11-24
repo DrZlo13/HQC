@@ -1339,3 +1339,60 @@ async fn the_hops_limit_is_the_hub_s_setting() {
         "{r}"
     );
 }
+
+/// SPEC §10.1: `hqc_ask` whose call's id an open request of another kind holds is refused at
+/// once, and its question is not delivered: the message is stored before the request opens, so
+/// the id is checked first.
+#[tokio::test]
+async fn an_ask_whose_id_another_open_request_holds_is_refused_before_its_message_is_sent() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (a, ta) = started(&hub, &mut w, "Asker", None).await;
+    let (b, _) = started(&hub, &mut w, "Helper", None).await;
+    let rid = Uuid::now_v7().to_string();
+    assert!(hqc_hub::db::open_request(
+        &hub.app.db,
+        "approval",
+        a.parse().unwrap(),
+        &rid,
+        &json!({}),
+        None,
+        None,
+    )
+    .await
+    .unwrap());
+    let id = call_with(
+        &mut w,
+        &ta,
+        "hqc_ask",
+        json!({"text": "hi", "session": "personal/helper"}),
+        &rid,
+    )
+    .await;
+    let r = w.expect("mcp.result").await;
+    assert_eq!(r["id"], id.as_str(), "{r}");
+    assert_eq!(code(&r["payload"]), "unavailable", "{r}");
+    assert_eq!(
+        r["payload"]["error"]["message"],
+        hqc_hub::db::REQUEST_ID_TAKEN
+    );
+    w.expect_silence(Duration::from_millis(300)).await;
+    assert!(
+        !hub.events(&b)
+            .await
+            .iter()
+            .any(|e| e["type"] == "peer.message"),
+        "the helper got the question"
+    );
+    assert_eq!(
+        count(
+            &hub,
+            "SELECT count(*) FROM pending_requests WHERE session_id = $1 AND kind = 'ask'",
+            &a
+        )
+        .await,
+        0
+    );
+    hub.finish().await;
+}

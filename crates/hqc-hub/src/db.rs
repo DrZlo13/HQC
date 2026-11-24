@@ -3252,6 +3252,30 @@ pub enum Opened {
     Taken,
 }
 
+/// What an MCP call is told when an open request of another kind in its session holds the id of
+/// its call ([`Opened::Taken`]): the call ends at once, none waits for an answer it cannot get.
+pub const REQUEST_ID_TAKEN: &str =
+    "the request id of this call is held by another open request of this session";
+
+/// Whether an open request of a kind other than `kind` in the session holds `request_id`: the
+/// condition [`open_request_as`] refuses on, for a caller that must know before it acts.
+pub async fn request_id_held_by_other_kind(
+    db: &PgPool,
+    kind: &str,
+    session_id: Uuid,
+    request_id: &str,
+) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pending_requests
+             WHERE session_id = $1 AND request_id = $2 AND kind <> $3 AND closed_at IS NULL)",
+    )
+    .bind(session_id)
+    .bind(request_id)
+    .bind(kind)
+    .fetch_one(db)
+    .await
+}
+
 /// Stores an open request; `false` if one with the same `(session, kind, request_id)` exists,
 /// or an open request of another kind in the session has this `request_id` ([`Opened`]).
 pub async fn open_request(
@@ -3769,20 +3793,34 @@ pub struct TurnMark {
     pub delivered_at: Option<DateTime<Utc>>,
 }
 
+/// The SQL of `payload.joined_after` of the events whose payload is `payload` (a column or an
+/// alias-qualified one): the `seq` when it is a non-negative JSON integer of at most 18 digits
+/// (every `seq` is one), else NULL. A worker's event payload is stored as sent, so a string or a
+/// fraction can stand there, and the cast sits inside the `CASE` because Postgres does not promise
+/// the order of an `AND`.
+fn joined_after_sql(payload: &str) -> String {
+    format!(
+        "CASE WHEN jsonb_typeof({payload} -> 'joined_after') = 'number'
+               AND {payload} ->> 'joined_after' ~ '^[0-9]{{1,18}}$'
+              THEN ({payload} ->> 'joined_after')::bigint END"
+    )
+}
+
 /// The events of session `id` in `seq` order, as [`TurnMark`]s.
 pub async fn turn_marks(db: &PgPool, id: Uuid) -> sqlx::Result<Vec<TurnMark>> {
-    sqlx::query_as(
+    sqlx::query_as(&format!(
         r#"SELECT seq, event_id, ts, type AS kind, author ->> 'kind' AS author_kind,
-                  COALESCE(payload @> '{"final": true}', false) AS is_final,
+                  COALESCE(payload @> '{{"final": true}}', false) AS is_final,
                   payload ->> 'state' AS state, payload ->> 'code' AS code,
                   payload ->> 'in_reply_to' AS in_reply_to,
-                  COALESCE(payload @> '{"joined": true}', false) AS joined,
-                  COALESCE(payload @> '{"quiet": true}', false) AS quiet,
-                  (payload ->> 'joined_after')::bigint AS joined_after,
+                  COALESCE(payload @> '{{"joined": true}}', false) AS joined,
+                  COALESCE(payload @> '{{"quiet": true}}', false) AS quiet,
+                  {} AS joined_after,
                   delivery, delivered_at
            FROM events WHERE session_id = $1 AND delivery IS DISTINCT FROM 'withdrawn'
            ORDER BY seq"#,
-    )
+        joined_after_sql("payload")
+    ))
     .bind(id)
     .fetch_all(db)
     .await
@@ -3814,7 +3852,7 @@ pub async fn copy_events(
 ) -> sqlx::Result<i64> {
     let ForkCut { seq, until, skip } = *cut;
     let mut tx = db.begin().await?;
-    let n = sqlx::query(
+    let n = sqlx::query(&format!(
         "WITH keep AS (
            SELECT e.event_id, e.seq, e.type, row_number() OVER (ORDER BY seq) AS nseq
            FROM events e WHERE session_id = $1 AND type = ANY($4)
@@ -3830,13 +3868,14 @@ pub async fn copy_events(
                      THEN (s.payload - 'joined_after')
                           || COALESCE((SELECT jsonb_build_object('joined_after', max(a.nseq))
                                        FROM keep a
-                                       WHERE a.seq <= (s.payload ->> 'joined_after')::bigint
+                                       WHERE a.seq <= {}
                                          AND a.type NOT IN ('user.message', 'peer.message')
-                                       HAVING max(a.nseq) > k.nseq), '{}'::jsonb)
+                                       HAVING max(a.nseq) > k.nseq), '{{}}'::jsonb)
                      ELSE s.payload END,
                 COALESCE(s.origin_id, s.event_id), COALESCE(s.origin_runtime, $5)
          FROM keep k JOIN events s ON s.event_id = k.event_id",
-    )
+        joined_after_sql("s.payload")
+    ))
     .bind(from)
     .bind(to)
     .bind(seq)

@@ -390,10 +390,12 @@ fn default_long_run_note() -> u64 {
 pub const DEFAULT_CLONE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// How often the agent is told of a background command or subagent of its own that still runs,
-/// unless `long_run_note` says otherwise (SPEC §14, §8.1). It is below the hour the prompt cache
-/// lives after the agent's last request, which is never before the task started: the turn the
-/// first note starts reads the cache, and each note's turn is a request that renews it for the
-/// next. A value of an hour or more makes the note's turn miss the cache.
+/// unless `long_run_note` says otherwise (SPEC §14, §8.1). With the 1-hour prompt cache
+/// (`cache_ttl_s` 3600 in `usage`) it is below the hour the cache lives after the agent's last
+/// request, which is never before a watched task started (for one a subagent left: before that
+/// subagent's report started a turn of the agent): the turn of the first note reads the cache,
+/// and each note's turn is a request that renews it for the next. A value of an hour or more
+/// misses it; with the 5-minute cache or on a provider the note's turn misses it at any value.
 pub const DEFAULT_LONG_RUN_NOTE: Duration = Duration::from_secs(55 * 60);
 
 /// Agent processes running at once, unless `max_sessions` says otherwise.

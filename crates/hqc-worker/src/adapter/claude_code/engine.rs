@@ -1008,11 +1008,14 @@ impl Core {
 
     /// Each background command ([`LiveKind::Command`], no Monitor) and subagent of
     /// [`Core::live`] and [`Core::live_commands`] that has run through another
-    /// [`Core::long_run_note`] since the last call → one [`AdapterEvent::LongRuns`] with all of them. A task held on the
-    /// foreground of the main agent's turn is not watched (a note would wait for its end), nor is
-    /// one that is gone. A task seen for the first time is counted as told for the marks it
-    /// has already passed: a command a subagent left running becomes a row only when the
-    /// subagent reports, long after its start.
+    /// [`Core::long_run_note`] since the last call → one [`AdapterEvent::LongRuns`] with all of
+    /// them. Not watched: a task the CLI runs in the foreground of the main agent's turn
+    /// ([`Core::foreground`]: a note would wait for its end), a subagent started by a subagent
+    /// that still runs (its parent waits for it, as for the commands of [`Core::parent`]; the
+    /// main agent may have had no request since its parent started), and one that is gone. A
+    /// task seen for the first time is counted as told for the marks it has already passed: a
+    /// command or a subagent a subagent left running is watched only once that one reports, long
+    /// after its own start.
     pub fn long_runs(&mut self, now: Instant) -> Vec<Action> {
         let Some(every) = self.long_run_note else {
             return vec![];
@@ -1022,7 +1025,13 @@ impl Core {
             .iter()
             .chain(&self.live_commands)
             .filter(|r| matches!(r.kind, LiveKind::Agent | LiveKind::Command))
-            .filter(|r| self.quiet_tasks.get(&r.task_id) != Some(&false))
+            .filter(|r| !self.foreground.contains_key(&r.task_id))
+            .filter(|r| {
+                !self
+                    .background
+                    .iter()
+                    .any(|t| t["task_id"] == r.task_id.as_str() && self.parent(t).is_some())
+            })
             .collect();
         self.long_told
             .retain(|id, _| watched.iter().any(|r| r.task_id == *id));

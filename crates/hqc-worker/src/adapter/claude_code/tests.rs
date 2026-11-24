@@ -11814,6 +11814,38 @@ fn the_period_is_the_workers_setting() {
     }
 }
 
+/// A background subagent a running subagent started is not told of while its parent runs (the
+/// parent waits for it); once the parent reports, it is the main agent's to stop, and it is told
+/// at its next mark, not of the one it passed.
+#[test]
+fn a_subagent_of_a_running_subagent_is_not_told() {
+    let parent = "a6996d99c74dd1835";
+    let nested = r#"{"type":"system","subtype":"task_started","task_id":"anest001","tool_use_id":"toolu_01Nest","description":"Nested check","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":2,"parent_task_id":"a6996d99c74dd1835","task_type":"local_agent"}"#;
+    let both = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a6996d99c74dd1835","task_type":"local_agent","description":"Heightmap: 25 frames, summed match"},{"task_id":"anest001","task_type":"local_agent","description":"Nested check","parent_task_id":"a6996d99c74dd1835"}]}"#;
+    let (mut core, at) = fed(&[LEFT_RUNNING[0], nested, both]);
+    let every = Duration::from_secs(55 * 60);
+    assert!(long_runs_of(core.long_runs(at)).is_empty());
+    let told = long_runs_of(core.long_runs(at + every));
+    let ids: Vec<_> = told.iter().flatten().map(|t| t.task_id.as_str()).collect();
+    assert_eq!(ids, [parent]);
+    // The parent reports; the nested one runs on, alone in the list; the turn the CLI then
+    // starts by itself is the next line of another kind, which drops the parent's row.
+    for l in [
+        LEFT_RUNNING[4],
+        LEFT_RUNNING[5],
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"anest001","task_type":"local_agent","description":"Nested check","parent_task_id":"a6996d99c74dd1835"}]}"#,
+        LEFT_RUNNING[7],
+        LEFT_RUNNING[8],
+    ] {
+        core.on_line(l);
+    }
+    let after = at + every + Duration::from_secs(60);
+    assert!(long_runs_of(core.long_runs(after)).is_empty());
+    let told = long_runs_of(core.long_runs(at + 2 * every));
+    let ids: Vec<_> = told.iter().flatten().map(|t| t.task_id.as_str()).collect();
+    assert_eq!(ids, ["anest001"]);
+}
+
 /// A task that ended is not told of, however long it ran.
 #[test]
 fn an_ended_task_is_not_told() {

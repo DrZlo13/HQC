@@ -1630,13 +1630,13 @@ MCP calls (worker → hub → worker):
   room's or paused, or is not on this worker; it acks the frame either way.
 - `session.long_runs` {session_id, tasks[{task_id, kind, description, running_s}]} → `ack {}`
   (since 0.242) — background commands or subagents of the session's agent that have each run for
-  another `long_run_note` of the worker (§14; 55 minutes unless set) (Claude Code: §8.1): `kind` is `command` or `agent` (a subagent), `task_id`
-  the task's id in the runtime, `description` its description there, `running_s` the seconds it
-  has run. Sent directly, one frame for all the tasks that reached their mark on one tick, while
-  the agent runs. The hub gives the agent a note as the owner's pending input (§8.1), unless the
-  session is a room's or paused, or is not on this worker; it acks the frame either way. A hub
-  older than 0.242 answers it with `error invalid_frame`, so the hub is updated before the
-  workers.
+  another `long_run_note` of the worker (§14; 55 minutes unless set; Claude Code: §8.1): `kind`
+  is `command` or `agent` (a subagent), `task_id` the task's id in the runtime, `description` its
+  description there, `running_s` the seconds it has run. Sent directly, one frame for all the
+  tasks that reached their mark on one tick, while the agent runs. The hub gives the agent a note
+  as the owner's pending input (§8.1), unless the session is a room's or paused, or is not on this
+  worker; it acks the frame either way. A hub older than 0.242 answers it with `error
+  invalid_frame`, so the hub is updated before the workers.
 - `workspace.created` {request_id, canonical | error} → `ack {}` (since 0.58, T45) — the outcome
   of `workspace.create`: the folder is ready at `canonical`, or it was not made (`error`, a
   message for the user; nothing is left on disk). Sent directly when the clone (or since 0.60 the
@@ -4984,21 +4984,25 @@ input (§7.1.1) and the worker's input (§7.1); since 0.242 a background command
 the agent itself (the rows of `subagents.live` of kind `command` and `agent`, no Monitor) that has
 run for the worker's `long_run_note` (§14; 3300 s = 55 minutes unless set, 0 turns the notes off),
 counted from its `task_started`, and for each as long again → the worker sends
-`session.long_runs` (§5.4), on the same tick as the leftovers. The default is below the hour the
-prompt cache lives from the agent's last request, which is never before the task started: the
-turn the first note starts reads the cache, and as that turn is a request too, it renews the cache
-for the next note; a value of an hour or more makes the note's turn miss the cache (not checked).
-A task seen for the first time is counted as told for the
-marks it has already passed (a command a subagent left running becomes a row only when the
-subagent reports); a task held on the foreground of the main agent's turn (`task_started` with
-`is_backgrounded: false`, until a `task_updated` moves it to the background) is not watched, a
-note would wait for its end; the tasks that reach their mark on one tick go in one frame. The hub
-gives the session's agent the note `[hqc] Background work of this session is still running:
-command "<description>" (task <task_id>, <time>); subagent "<description>" (task <task_id>,
-<time>). Check that each still makes progress; stop what hangs or is no longer needed with
-TaskStop, or leave it.` (the times as in the note of a pause; each description is the model's
-word, a JSON string escaped as in the note above) as the session owner's pending `user.message`,
-delivered as any input; none to a room nor to a paused session; `system`
+`session.long_runs` (§5.4), on the same tick as the leftovers; the tasks that reach their mark on
+one tick go in one frame. Not watched: a task the CLI runs in the foreground of the main agent's
+turn (`task_started` with `is_backgrounded: false`, until it moves to the background), as a note
+would wait for its end, and a subagent whose `parent_task_id` is a subagent that still runs, as
+its parent waits for it (the same rule keeps that subagent's commands off the rows). A task seen
+for the first time is counted as told for the marks it has already passed: a command or a
+subagent a subagent left running is watched only once that one reports. With the 1-hour prompt
+cache (`usage.cache_ttl_s` 3600) the default is below the hour the cache lives from the agent's
+last request, which is never before a watched task started (for one a subagent left: before that
+subagent's report started a turn of the agent): the turn of the note reads the cache, and as it
+is a request too, it renews the cache for the next note. A value of an hour or more misses it,
+and the worker does not refuse one; with the 5-minute cache or on a provider (§14) the note's turn
+misses the cache at any value. The hub gives the session's agent the note `[hqc] Background work
+of this session is still running: command "<description>" (task <task_id>, <time>); subagent
+"<description>" (task <task_id>, <time>). Check that each still makes progress; stop what hangs or
+is no longer needed with TaskStop, or leave it.` (the times as in the note of a pause; each
+description is the model's word, a JSON string escaped as in the note above) as the session
+owner's pending `user.message`, delivered as any input; none to a room nor to a paused session;
+`system`
 `compact_boundary` (`compact_metadata.trigger: manual`
 after `/compact`, 2.1.308 and 2.1.312; an automatic compaction was not checked; its `uuid` is
 that of the transcript's `system compact_boundary` record) →
@@ -5026,10 +5030,10 @@ running turn, then `completed` or `cancelled`; a turn the CLI begins by itself h
 typed, nothing of another session or of the hub's put in front of it or in its place) carries
 `origin: {kind: "human"}`, without which the CLI takes it as unattributed and its strict
 `isHuman()` gates refuse it; a message of another session, a room's input, a run of a schedule and
-a note of the hub's own (a resume, `hqc_move`, subagent leftovers, long runs) carry none. Two notes of hqc's own
-do stand in front of a human input, and it stays human: a fork's first input carries the note that
-the session is a copy (§6), and the worker puts the note of the background tasks a move stopped in
-front of the first input after the move. Each input is a line
+a note of the hub's own (a resume, `hqc_move`, subagent leftovers, long runs) carry none. Two
+notes of hqc's own do stand in front of a human input, and it stays human: a fork's first input
+carries the note that the session is a copy (§6), and the worker puts the note of the background
+tasks a move stopped in front of the first input after the move. Each input is a line
 of its own: the worker joins none, so a line never mixes a human's text with another's. The
 input of a turn, for `in_reply_to`, is the one whose `started` or echo begins a turn or comes
 during a turn the CLI began by itself (the first input of a process, and every input with a CLI
@@ -7278,9 +7282,10 @@ environment's `env`; without `task_tools` the variable is removed from the child
 The note of background work that runs long (since 0.242). `long_run_note` at the top of
 `worker.toml`, in seconds like `idle_timeout`, is how often the agent is told that a background
 command or subagent of its own still runs (§8.1): 3300 (55 minutes) unless written, `0` for no
-notes at all. It is below the hour the prompt cache lives after the agent's last request, so that
-the turn of the note reads the cache; a value of an hour or more makes that turn miss it, and is
-not refused. `hqc-worker env` shows `long_run_note`.
+notes at all. With the 1-hour prompt cache it is below the hour the cache lives after the
+agent's last request, so that the turn of the note reads the cache; a value of an hour or more
+makes that turn miss it, and is not refused; with the 5-minute cache or on a provider that turn
+misses it at any value. `hqc-worker env` shows `long_run_note`.
 
 A provider's key from Vaultwarden (since 0.241). The `api_key` of a `[providers.<name>]` is
 either a string or a table `{ vault = "<entry name or id>", field = "<optional field>" }`, the
@@ -8133,14 +8138,17 @@ the new `session.long_runs` when a background command or subagent of the agent h
 worker's new `long_run_note` and for each as long again, counted from its start, all the tasks due
 on one tick in one frame, and the hub gives the agent a note naming each with its task id and run
 time, as the owner's pending input, so that it checks the task and stops what hangs.
-`long_run_note` (§14) is in seconds, 3300 (55 minutes) unless written, `0` for none; the default
-is below the hour the prompt cache lives from the agent's last request, so the turn of the note
-reads the cache and renews it for the next note, and a value of an hour or more makes it miss. A Monitor and a task held on the foreground of the turn are not
-watched; a task first seen past a mark is not told of the marks it has passed. The task
-descriptions are the model's words and go into the note as JSON strings, with the marks of a
-room's and another session's lines escaped. §4: the hub is a source of `user.message` on that
-frame. A hub older than 0.242 answers the frame with `invalid_frame`: update the hub before the
-workers. No migration.
+`long_run_note` (§14) is in seconds, 3300 (55 minutes) unless written, `0` for none; with the
+1-hour prompt cache the default is below the hour the cache lives from the agent's last request,
+so the turn of the note reads the cache and renews it for the next note; a value of an hour or
+more makes it miss, and so does the 5-minute cache or a provider at any value. A Monitor, a task
+held on the foreground of the turn and a subagent of a subagent that still runs are not watched;
+a task first seen past a mark is not told of the marks it has passed. The task descriptions are
+the model's words and go into the note as JSON strings, with the marks of a room's and another
+session's lines escaped. §4: the hub is a source of `user.message` on that frame. A hub older
+than 0.242 answers the frame with `invalid_frame`: update the hub before the workers. No
+migration.
+
 ### 0.240 → 0.241 (a Vaultwarden secret as T3 Code's 1Password one, and a provider key from Vaultwarden)
 §14, §5.3: a locked `rbw` is no longer refused: `rbw list` unlocks it, `rbw-agent` asking for the
 master password through the `pinentry` of that machine, so a Touch ID pinentry with a short

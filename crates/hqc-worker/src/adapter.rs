@@ -113,8 +113,8 @@ pub enum AdapterEvent {
         commands: Vec<hqc_proto::frame::LeftoverCommand>,
     },
     /// Background commands or subagents of the agent have each run through another
-    /// `long_run_note` (Claude Code: its rows of `subagents.live`, SPEC §8.1). Sent as `session.long_runs`; the
-    /// hub tells the agent.
+    /// `long_run_note` (Claude Code: its rows of `subagents.live`, SPEC §8.1). Sent as
+    /// `session.long_runs`; the hub tells the agent.
     LongRuns {
         tasks: Vec<hqc_proto::frame::LongRun>,
     },

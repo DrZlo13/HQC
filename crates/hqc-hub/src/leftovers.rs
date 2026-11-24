@@ -2,9 +2,9 @@
 //! the hub once, a while after a subagent reported, while the runtime still lists commands the
 //! subagent started (`session.subagent_leftovers`), and every `long_run_note` of the worker (55
 //! minutes unless set) of a background command or subagent of the agent itself that still runs
-//! (`session.long_runs`); the hub gives the
-//! session's agent a note about them as a pending input of the session's owner, as the note of a
-//! pause (§17.3), so that the agent stops the ones it no longer needs.
+//! (`session.long_runs`); the hub gives the session's agent a note about them as a pending input
+//! of the session's owner, as the note of a pause (§17.3), so that the agent stops the ones it no
+//! longer needs.
 
 use hqc_proto::{
     event::LiveKind,

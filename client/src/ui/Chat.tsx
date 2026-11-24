@@ -46,7 +46,7 @@ import { selectedText, useQuoteSelection, type QuoteSelection } from './selectio
 import { PermissionBlock, SECRET_GIVEN } from './permission';
 import { MoveSession } from './ProjectSettings';
 import { WaitedRequests } from './requests';
-import { SchedulesPanel } from './Schedules';
+import { SchedulesList } from './Schedules';
 import { archivedLabel, atWorkAfterTurn, canPause, pausingAfterTurn, restartableSession } from './sessions';
 
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
@@ -1085,7 +1085,6 @@ export function Chat({
           </span>
         </div>
       )}
-      {schedules && <SchedulesPanel api={app.api} sessionId={sessionId} onClose={() => setSchedules(false)} />}
       {moving && info && (
         <div class="move-panel" role="region" aria-label="Move to project">
           <MoveSession app={app} session={info} onDone={() => setMoving(false)} />
@@ -1152,7 +1151,8 @@ export function Chat({
         (info?.subagents ?? 0) > 0 ||
         (info?.background_tasks ?? 0) > 0 ||
         t.liveAgents.some((a) => a.kind === 'wakeup' || a.kind === 'cron') ||
-        t.liveSchedules.length > 0) && (
+        t.liveSchedules.length > 0 ||
+        schedules) && (
         <LiveSubagents
           goal={goal ? { ...goal, running: STOPPABLE.has(state), onClear: inputShown ? clearGoal : undefined } : undefined}
           tasks={t.tasks}
@@ -1161,7 +1161,10 @@ export function Chat({
           receivedAt={t.liveAgentsAt}
           schedules={t.liveSchedules}
           schedulesAt={t.liveSchedulesAt}
-          onSchedules={() => setSchedules(true)}
+          onSchedules={() => setSchedules((o) => !o)}
+          schedulesList={
+            schedules ? <SchedulesList api={app.api} sessionId={sessionId} refresh={t.liveSchedulesAt} /> : undefined
+          }
           onStop={stopTask}
           asking={new Set(open.flatMap((r) => (r.type === 'approval.request' && r.payload.subagent ? [r.payload.subagent.task_id] : [])))}
           history={{

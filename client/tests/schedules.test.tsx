@@ -10,7 +10,7 @@ import { act } from 'preact/test-utils';
 import type { Api } from '../src/api';
 import { parseEvent, parseMe, parseSchedule, parseScheduleList, type Schedule } from '../src/proto';
 import { ChatItems, type ChatActions } from '../src/ui/cards';
-import { SchedulesPanel, scheduleWhen } from '../src/ui/Schedules';
+import { SchedulesList, scheduleWhen } from '../src/ui/Schedules';
 import { Timeline } from '../src/timeline';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
@@ -28,8 +28,7 @@ function mountRoot() {
   document.body.appendChild(root);
 }
 
-const button = (text: string) =>
-  [...root.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === text);
+const button = (label: string) => root.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
 
 describe('wire', () => {
   it('parses schedules', () => {
@@ -76,30 +75,42 @@ it('lists the session schedules, pauses, resumes and deletes them', async () => 
     list = [];
   });
   const api = { schedules, patchSchedule, deleteSchedule } as unknown as Api;
-  const onClose = vi.fn();
   mountRoot();
-  await act(async () => render(<SchedulesPanel api={api} sessionId="s1" onClose={onClose} />, root));
+  await act(async () => render(<SchedulesList api={api} sessionId="s1" refresh={1} />, root));
   await act(async () => {});
   expect(schedules).toHaveBeenCalledWith('s1');
-  expect(root.querySelector('.schedule-text')?.textContent).toBe(base.message);
-  expect(root.querySelector('.schedule-when')?.textContent).toContain('next ');
+  expect(root.querySelector('ul.live-schedules')?.getAttribute('aria-label')).toBe('Scheduled messages');
+  expect(root.querySelector('.live-schedule-text')?.textContent).toBe(base.message);
+  expect(root.querySelector('.live-schedule-when')?.textContent).toContain('next ');
+  // No header and no Close: the list belongs to the block above the input.
+  expect(root.querySelector('.schedules-head')).toBeNull();
 
-  await act(async () => button('Pause')!.click());
+  await act(async () => button('Pause this scheduled message')!.click());
   await act(async () => {});
   expect(patchSchedule).toHaveBeenCalledWith(base.id, { enabled: false });
-  expect(root.querySelector('.schedule-paused .schedule-when')?.textContent).toContain('paused');
+  expect(root.querySelector('.live-schedule-paused .live-schedule-when')?.textContent).toContain('paused');
 
-  await act(async () => button('Resume')!.click());
+  await act(async () => button('Resume this scheduled message')!.click());
   await act(async () => {});
   expect(patchSchedule).toHaveBeenLastCalledWith(base.id, { enabled: true });
+  expect(root.querySelector('.live-schedule-paused')).toBeNull();
 
-  await act(async () => button('Delete')!.click());
+  await act(async () => button('Delete this scheduled message')!.click());
   await act(async () => {});
   expect(deleteSchedule).toHaveBeenCalledWith(base.id);
-  expect(root.textContent).toContain('None.');
+  expect(root.querySelector('.live-agents-note')?.textContent).toContain('None.');
+});
 
-  button('Close')!.click();
-  expect(onClose).toHaveBeenCalled();
+it('reads the list again when the hub sends a new one (refresh changes)', async () => {
+  const schedules = vi.fn(async () => [] as Schedule[]);
+  const api = { schedules } as unknown as Api;
+  mountRoot();
+  await act(async () => render(<SchedulesList api={api} sessionId="s1" refresh={1} />, root));
+  expect(schedules).toHaveBeenCalledTimes(1);
+  await act(async () => render(<SchedulesList api={api} sessionId="s1" refresh={1} />, root));
+  expect(schedules).toHaveBeenCalledTimes(1);
+  await act(async () => render(<SchedulesList api={api} sessionId="s1" refresh={2} />, root));
+  expect(schedules).toHaveBeenCalledTimes(2);
 });
 
 describe('schedules.live (SPEC 0.169)', () => {

@@ -6,9 +6,10 @@
 // permission), then its tokens, tool calls and run time, which ticks here between the lists the
 // hub sends (a phone leaves out the word "tokens" and the tool calls); a command or a watcher has
 // only its description and run time. A timer, a wakeup or a cron job of the agent and a message
-// scheduled by the hub, has "in 12m 34s" instead, counting down to "due"; a scheduled message
-// opens the schedules of the chat. The session's goal (`/goal`, SPEC 0.218) is the block's first
-// row: the condition, the checks so far, and what it expands to. The task list is the next row,
+// scheduled by the hub, has "in 12m 34s" instead, counting down to "due"; the line of a scheduled
+// message opens the list of the session's schedules (`schedulesList`) under the last of them.
+// The session's goal (`/goal`, SPEC 0.218) is the block's first row: the condition, the checks
+// so far, and what it expands to. The task list is the next row,
 // "Tasks: 3 of 7 completed" with what the agent does on its task in progress, while a task is not
 // done; it opens the list with a mark for each task. The main agent's row ("Main agent:", `lead`)
 // stands after them, while a turn is on or input waits. A `stoppable` line ends with a stop
@@ -58,7 +59,8 @@ interface Row {
   after: string;
   right: ComponentChildren;
   timer: boolean;
-  open?: () => void;
+  /** A scheduled message's line: it opens and closes the list of the schedules. */
+  schedule?: boolean;
   /** The line opens what its subagent has done under it (since 0.181). */
   history?: boolean;
   /** The `task_id` its stop button stops: a `stoppable` row's. */
@@ -122,16 +124,18 @@ function TasksRow({ tasks, open, onToggle }: { tasks: readonly AgentTask[]; open
 
 /** `goal`: the row that stands before all the others and alone makes the block show.
  *  `agents`: the latest list, which came at `receivedAt` (`Date.now()`); `schedules`: the
- *  latest `schedules.live`, which came at `schedulesAt`; `onSchedules` opens the schedules;
+ *  latest `schedules.live`, which came at `schedulesAt`; `onSchedules` opens and closes the
+ *  schedules' list, `schedulesList` is that list while it is open (it holds the block, and shows
+ *  "Scheduled: none waiting" while no message is scheduled);
  *  `asking`: the `task_id`s an open permission request names (since 0.181), whose row says it
  *  waits for it instead of what it does; `history`: the lines that open what their subagent has
  *  done (one at a time; it goes with its line); `now`: the clock (tests). Nothing when both
- *  lists are empty and `lead` has no row. A `stoppable` row (a subagent's, a command's or a
- *  Monitor's) gets a stop button, which calls `onStop` with its `task_id` and stays disabled
- *  until that settles; the row goes when the task ends. `lead`: the rows that stand before them
- *  (the main agent's, cards.tsx `ActivityLine`), each one drawn; the block shows with only
- *  those. `tasks`: the agent's task list (`Timeline.tasks`), a row after the goal's while a task
- *  is not done. */
+ *  lists are empty, `lead` has no row and the schedules' list is not open. A `stoppable` row
+ *  (a subagent's, a command's or a Monitor's) gets a stop button, which calls `onStop` with its
+ *  `task_id` and stays disabled until that settles; the row goes when the task ends. `lead`: the
+ *  rows that stand before them (the main agent's, cards.tsx `ActivityLine`), each one drawn; the
+ *  block shows with only those. `tasks`: the agent's task list (`Timeline.tasks`), a row after
+ *  the goal's while a task is not done. */
 export function LiveSubagents({
   goal,
   tasks = [],
@@ -141,6 +145,7 @@ export function LiveSubagents({
   schedules,
   schedulesAt,
   onSchedules,
+  schedulesList,
   asking,
   history,
   now,
@@ -154,6 +159,7 @@ export function LiveSubagents({
   schedules: LiveSchedule[];
   schedulesAt: number;
   onSchedules: () => void;
+  schedulesList?: ComponentChildren;
   asking?: ReadonlySet<string>;
   history?: SubagentHistoryOpener;
   now?: () => number;
@@ -167,8 +173,21 @@ export function LiveSubagents({
       ...agentRow(a, t - receivedAt, asking),
       history: !!history && (a.kind === undefined || a.kind === 'agent'),
     })),
-    ...schedules.map((s) => scheduleRow(s, t - schedulesAt, onSchedules)),
+    ...schedules.map((s) => scheduleRow(s, t - schedulesAt)),
   ];
+  const schedulesOpen = schedulesList !== undefined;
+  // Its list is open with nothing scheduled any more: a line of its own holds it, to close it by.
+  if (schedulesOpen && !schedules.length) {
+    rows.push({
+      key: 'schedules-none',
+      prefix: 'Scheduled: ',
+      task: 'none waiting',
+      after: '',
+      right: null,
+      timer: true,
+      schedule: true,
+    });
+  }
   const [stopping, setStopping] = useState<ReadonlySet<string>>(new Set());
   const [open, setOpen] = useState<string | null>(null);
   const [tasksOpen, setTasksOpen] = useState(false);
@@ -182,7 +201,7 @@ export function LiveSubagents({
   useEffect(() => {
     if (!tasksShown && tasksOpen) setTasksOpen(false);
   }, [tasksShown, tasksOpen]);
-  const listOpen = shown !== null || (tasksShown && tasksOpen);
+  const listOpen = shown !== null || (tasksShown && tasksOpen) || schedulesOpen;
   if (!rows.length && !lead?.length && !goal && !tasksShown) return null;
   const stop = (id: string) => {
     setStopping((s) => new Set(s).add(id));
@@ -204,15 +223,9 @@ export function LiveSubagents({
           const line = (
             <>
               <span class={`pulse-dot live-agents-dot ${r.timer ? 'live-agents-dot-still' : ''}`} aria-hidden="true" />
-              {r.open ? (
-                <button type="button" class="live-agents-what live-agents-open" title="Open the schedules" onClick={r.open}>
-                  <RowText row={r} />
-                </button>
-              ) : (
-                <span class="live-agents-what">
-                  <RowText row={r} />
-                </span>
-              )}
+              <span class="live-agents-what">
+                <RowText row={r} />
+              </span>
               {r.right}
             </>
           );
@@ -242,6 +255,16 @@ export function LiveSubagents({
                   >
                     {line}
                   </button>
+                ) : r.schedule ? (
+                  <button
+                    type="button"
+                    class="live-agents-opens"
+                    aria-expanded={schedulesOpen}
+                    title={schedulesOpen ? 'Hide the scheduled messages' : 'Show the scheduled messages'}
+                    onClick={onSchedules}
+                  >
+                    {line}
+                  </button>
                 ) : (
                   line
                 )}
@@ -251,6 +274,9 @@ export function LiveSubagents({
             </li>
           );
         })}
+        {/* After the rows, so under the last "Scheduled:" line, as those come last; an item of its
+            own, so that the list, its scroll and its focus stay while those lines come and go. */}
+        {schedulesOpen && <li key="schedules-list">{schedulesList}</li>}
       </ul>
     </section>
   );
@@ -347,7 +373,7 @@ function agentRow(a: LiveSubagent, age: number, asking?: ReadonlySet<string>): R
   };
 }
 
-function scheduleRow(s: LiveSchedule, age: number, open: () => void): Row {
+function scheduleRow(s: LiveSchedule, age: number): Row {
   return {
     key: s.schedule_id,
     prefix: 'Scheduled: ',
@@ -355,7 +381,7 @@ function scheduleRow(s: LiveSchedule, age: number, open: () => void): Row {
     after: '',
     right: <span class="live-agents-stats">{countdown(s.due_in_ms, age)}</span>,
     timer: true,
-    open,
+    schedule: true,
   };
 }
 

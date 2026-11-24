@@ -1009,12 +1009,28 @@ impl FakeClient {
         Self::connect_origin(hub, jwt, Some(&hub.base)).await
     }
 
+    /// The iOS app's socket (`/api/ws?client=ios`, SPEC §16), with the hub's `Origin`.
+    pub async fn connect_ios(hub: &TestHub) -> Self {
+        Self::connect_path(hub, "/api/ws?client=ios", None, Some(&hub.base))
+            .await
+            .unwrap()
+    }
+
     pub async fn connect_origin(
         hub: &TestHub,
         jwt: Option<&str>,
         origin: Option<&str>,
     ) -> Result<Self, String> {
-        let mut req = format!("{}/api/ws", hub.ws_base)
+        Self::connect_path(hub, "/api/ws", jwt, origin).await
+    }
+
+    async fn connect_path(
+        hub: &TestHub,
+        path: &str,
+        jwt: Option<&str>,
+        origin: Option<&str>,
+    ) -> Result<Self, String> {
+        let mut req = format!("{}{path}", hub.ws_base)
             .into_client_request()
             .unwrap();
         if let Some(t) = jwt {

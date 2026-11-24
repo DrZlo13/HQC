@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        State, WebSocketUpgrade,
+        Query, State, WebSocketUpgrade,
     },
     response::Response,
 };
@@ -43,12 +43,15 @@ const BACKFILL_PAGE: i64 = 500;
 pub async fn handler(
     State(app): State<AppState>,
     user: CurrentUser,
+    Query(q): Query<HashMap<String, String>>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    // The iOS app names its socket (SPEC §16): its subscriptions hold back APNs.
+    let ios = q.get("client").is_some_and(|c| c == "ios");
     // Origin was checked by `security::guard` (SPEC §20).
     ws.max_message_size(MAX_WS_MESSAGE)
         .max_frame_size(MAX_WS_MESSAGE)
-        .on_upgrade(move |socket| run(app, user, socket))
+        .on_upgrade(move |socket| run(app, user, socket, ios))
 }
 
 struct Client {
@@ -61,9 +64,11 @@ struct Client {
     /// ([`AppState::live_text`]).
     live_from: HashMap<Uuid, u64>,
     summary: bool,
+    /// The iOS app's socket (`?client=ios`).
+    ios: bool,
 }
 
-async fn run(app: AppState, user: CurrentUser, socket: WebSocket) {
+async fn run(app: AppState, user: CurrentUser, socket: WebSocket, ios: bool) {
     let mut rx = app.bus.subscribe();
     let mut ping = tokio::time::interval(app.config.timing.heartbeat);
     ping.tick().await;
@@ -74,6 +79,7 @@ async fn run(app: AppState, user: CurrentUser, socket: WebSocket) {
         subs: HashMap::new(),
         live_from: HashMap::new(),
         summary: false,
+        ios,
     };
     loop {
         let ok = tokio::select! {
@@ -94,7 +100,7 @@ async fn run(app: AppState, user: CurrentUser, socket: WebSocket) {
         }
     }
     for sid in c.subs.keys() {
-        app.watch(c.user.id, *sid, false);
+        app.watch(c.user.id, *sid, false, c.ios);
     }
 }
 
@@ -152,7 +158,7 @@ impl Client {
                     )
                     .is_none()
                 {
-                    self.app.watch(self.user.id, session_id, true);
+                    self.app.watch(self.user.id, session_id, true, self.ios);
                 }
                 if !self.backfill(session_id).await {
                     return false;
@@ -183,7 +189,7 @@ impl Client {
             ClientFrame::Unsubscribe { session_id } => {
                 self.live_from.remove(&session_id);
                 if self.subs.remove(&session_id).is_some() {
-                    self.app.watch(self.user.id, session_id, false);
+                    self.app.watch(self.user.id, session_id, false, self.ios);
                 }
                 true
             }

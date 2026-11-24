@@ -218,21 +218,29 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
             }
         }
         for u in users {
-            if app.is_watching(u, session_id) {
-                continue;
-            }
-            if u == session_owner && !waiting.is_empty() {
+            // Web Push waits while any client shows the session; APNs only while the iOS app
+            // itself does (SPEC §16): a web tab left open must not keep the phone quiet.
+            let chained = u == session_owner && !waiting.is_empty();
+            let seen = |on_ios: bool| {
+                let watching = |sid| {
+                    if on_ios {
+                        app.is_watching_on_ios(u, sid)
+                    } else {
+                        app.is_watching(u, sid)
+                    }
+                };
                 // Watching a waiting session shows the request there (SPEC §10.1).
-                if waiting.iter().any(|w| app.is_watching(u, w.session_id)) {
-                    continue;
-                }
-                let top = waiting.last().map(|w| w.session_id);
-                let mut p = payload.clone();
-                p["open_session_id"] = serde_json::json!(top);
-                send_to_user(&app, u, &p).await;
+                watching(session_id) || (chained && waiting.iter().any(|w| watching(w.session_id)))
+            };
+            let (web, apns) = (!seen(false), !seen(true));
+            if !web && !apns {
                 continue;
             }
-            send_to_user(&app, u, &payload).await;
+            let mut p = payload.clone();
+            if chained {
+                p["open_session_id"] = serde_json::json!(waiting.last().map(|w| w.session_id));
+            }
+            send_to_user(&app, u, &p, web, apns).await;
         }
     });
 }
@@ -281,12 +289,12 @@ pub fn message(s: &SessionRow, row: &EventRow, request_id: Option<&str>, body: S
     serde_json::to_value(m).unwrap_or_default()
 }
 
-async fn send_to_user(app: &AppState, user: Uuid, payload: &Value) {
-    if app.push.public_key().is_some() {
+async fn send_to_user(app: &AppState, user: Uuid, payload: &Value, web: bool, apns: bool) {
+    if web && app.push.public_key().is_some() {
         send_web(app, user, payload).await;
     }
-    if let Some(apns) = &app.apns {
-        send_apns(app, apns.as_ref(), user, payload).await;
+    if let (true, Some(sender)) = (apns, &app.apns) {
+        send_apns(app, sender.as_ref(), user, payload).await;
     }
 }
 

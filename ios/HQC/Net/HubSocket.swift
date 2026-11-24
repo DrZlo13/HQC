@@ -53,6 +53,28 @@ final class HubSocket {
         state = .closed
     }
 
+    /// The app went to the background: close the socket, keeping the subscriptions, so the hub
+    /// no longer counts this app as showing them and sends their notices to the phone (SPEC §16).
+    func suspend() {
+        guard !stopped else { return }
+        stopped = true
+        reconnect?.cancel()
+        pinger?.cancel()
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
+        // A text streaming when the app left is sent again whole on the next subscribe.
+        for sub in subs.values { sub.onReset() }
+        state = .closed
+    }
+
+    /// Back in the foreground after `suspend`: open again; every chat resubscribes from its `seq`.
+    func resume() {
+        guard stopped else { return }
+        stopped = false
+        attempt = 0
+        open()
+    }
+
     /// Reconnect now if the socket is down (the app came to the foreground).
     func nudge() {
         guard !stopped, state == .closed else { return }

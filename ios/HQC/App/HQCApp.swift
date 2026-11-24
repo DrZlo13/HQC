@@ -16,6 +16,7 @@ struct HQCApp: App {
                 }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active, app.phase == .ready { app.foreground() }
+                    if phase == .background, app.phase == .ready { app.background() }
                 }
                 .onChange(of: app.phase) { _, phase in
                     // Asked once, in onboarding; after that only registered again.

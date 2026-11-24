@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.218, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.219, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2834,7 +2834,8 @@ client fetches the session object when it opens an idle chat without `command_in
 from a list among them) and shows, after each command's name in the list, its argument hint
 and then its description, muted, in the same line.
 
-WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 1 MiB): the client sends `subscribe {session_id, after_seq}` and receives
+WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 1 MiB; since 0.219
+the iOS app connects to `/api/ws?client=ios`, which only decides whom Apple push waits for, §16): the client sends `subscribe {session_id, after_seq}` and receives
 events with `seq > after_seq`, then the live stream; `agent.delta` has no `seq`. Since 0.72
 the answer being written comes right after those events, before `subscribed`, as one
 `agent.delta` with its text so far, and the stream carries only the deltas after it. Since 0.161
@@ -6718,7 +6719,12 @@ pushes nothing; the agent's post in the room, a `peer.message` there, pushes wit
 Since 0.214 the same notices also go over APNs to the user's iOS devices (`/api/push/apns`,
 §6), when the hub has a token-based APNs key (`HQC_APNS_KEY` or `HQC_APNS_KEY_FILE`,
 `HQC_APNS_KEY_ID`, `HQC_APNS_TEAM_ID`, `HQC_APNS_TOPIC` = the app's bundle id; all or none;
-RUNBOOK §1.10): to the same users, skipped by the same rule of a live subscription. The APNs
+RUNBOOK §1.10): to the same users. Since 0.219 APNs has its own rule: it is skipped only while one
+of the user's iOS app sockets (`/api/ws?client=ios`) subscribes to the session (or, for a request
+others wait on, to a session of the chain), whatever web clients show it, so a web tab left open
+on a session no longer keeps the phone quiet; Web Push keeps the rule of any live subscription.
+The app closes its socket when it goes to the background and opens it again, resubscribing from
+the last `seq`, when it returns, so a phone in a pocket is told. The APNs
 payload carries `aps.alert` `{title, body}` from the push body (the body cut until the payload
 fits 4 KB), `aps.thread-id` the session, `aps.category` `APPROVAL`, `QUESTION` or `MESSAGE`,
 and `session_id`, `open_session_id?`, `type`, `request_id?` and, for an approval, its
@@ -7299,6 +7305,11 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.218 → 0.219 (Apple push whoever else shows the session)
+§16, §6: APNs is skipped only while the user's iOS app (its socket `/api/ws?client=ios`) shows
+the session, not while any client does: a web tab left open on a session kept every notice of it
+from the phone. The app closes its socket in the background. Web Push is unchanged.
 
 ### 0.217 → 0.218 (Apple push notices sealed end to end)
 §16, §6, §3: the iOS app makes a 32-byte key for its notices and registers it with

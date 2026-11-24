@@ -41,6 +41,9 @@ pub struct Inner {
     /// `(user_id, session_id)` -> number of client WebSockets subscribed (SPEC §16: no push
     /// while the user is watching the session).
     pub watchers: Mutex<HashMap<(Uuid, Uuid), usize>>,
+    /// The same, counting only the iOS app's sockets (`/api/ws?client=ios`, SPEC §16): APNs
+    /// is held back only while the app itself shows the session.
+    pub ios_watchers: Mutex<HashMap<(Uuid, Uuid), usize>>,
     /// Per-address limits of `/worker/*` (SPEC §20).
     pub limiter: RateLimiter,
     /// Token lookups of `/worker/ws` in flight (SPEC §20).
@@ -188,6 +191,7 @@ impl AppState {
             apns,
             native_codes: Mutex::new(HashMap::new()),
             watchers: Mutex::new(HashMap::new()),
+            ios_watchers: Mutex::new(HashMap::new()),
             limiter: RateLimiter::default(),
             ws_auth: Arc::new(Semaphore::new(config.limits.ws_auth_concurrency)),
             turn_activity: Mutex::new(HashMap::new()),
@@ -466,16 +470,32 @@ impl AppState {
             .is_some_and(|n| *n > 0)
     }
 
-    pub fn watch(&self, user: Uuid, session: Uuid, on: bool) {
-        let mut w = self.watchers.lock().unwrap();
-        let n = w.entry((user, session)).or_insert(0);
-        if on {
-            *n += 1;
-        } else {
-            *n = n.saturating_sub(1);
-            if *n == 0 {
-                w.remove(&(user, session));
+    /// An iOS app of the user has the session open now (SPEC §16).
+    pub fn is_watching_on_ios(&self, user: Uuid, session: Uuid) -> bool {
+        self.ios_watchers
+            .lock()
+            .unwrap()
+            .get(&(user, session))
+            .is_some_and(|n| *n > 0)
+    }
+
+    /// A socket subscribes to (`on`) or leaves a session; `ios`: the iOS app's socket.
+    pub fn watch(&self, user: Uuid, session: Uuid, on: bool, ios: bool) {
+        let count = |m: &Mutex<HashMap<(Uuid, Uuid), usize>>| {
+            let mut w = m.lock().unwrap();
+            let n = w.entry((user, session)).or_insert(0);
+            if on {
+                *n += 1;
+            } else {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    w.remove(&(user, session));
+                }
             }
+        };
+        count(&self.watchers);
+        if ios {
+            count(&self.ios_watchers);
         }
     }
 }

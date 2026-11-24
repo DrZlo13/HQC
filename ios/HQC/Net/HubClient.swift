@@ -34,6 +34,9 @@ nonisolated struct HubEndpoint: Sendable, Equatable {
         var c = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
         c.scheme = baseURL.scheme == "http" ? "ws" : "wss"
         c.path = "/api/ws"
+        // Names the socket as the iOS app's: the hub then holds back Apple push for a session
+        // only while this app shows it, not while a web tab does (SPEC §16).
+        c.queryItems = [URLQueryItem(name: "client", value: "ios")]
         return c.url!
     }
 

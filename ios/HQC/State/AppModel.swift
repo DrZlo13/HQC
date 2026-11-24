@@ -294,8 +294,15 @@ final class AppModel {
     }
 
     func foreground() {
+        socket?.resume()
         socket?.nudge()
         Task { await refresh() }
+    }
+
+    /// In the background the app shows no session: closing the socket lets the hub send their
+    /// notices over Apple push (SPEC §16). `foreground()` opens it again.
+    func background() {
+        socket?.suspend()
     }
 
     func summary(_ sessionID: String) -> SessionSummary? { summaries[sessionID] }

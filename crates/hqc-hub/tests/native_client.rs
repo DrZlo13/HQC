@@ -195,6 +195,77 @@ async fn apns_device_gets_the_approval() {
     hub.finish().await;
 }
 
+/// SPEC 0.219: APNs goes out whoever else shows the session (a web tab left open must not
+/// keep the phone quiet), and is held back only while the iOS app itself shows it.
+#[tokio::test]
+async fn apns_skips_only_while_the_ios_app_watches() {
+    let hub = TestHub::start().await;
+    let (s, _) = hub
+        .post(
+            "/api/push/apns",
+            json!({"token": "ef".repeat(32), "sandbox": false}),
+        )
+        .await;
+    assert_eq!(s, 201);
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("watched").await;
+    ack_start(&mut w, &sid).await;
+    let ask = |n: u32| {
+        agent_event(
+            &sid,
+            "approval.request",
+            json!({
+                "request_id": format!("req-{n}"),
+                "tool": "Bash",
+                "description": "cargo test",
+                "options": [{"id": "allow", "label": "Allow once", "canonical": "once"}],
+                "expires_at": "2099-01-01T00:00:00Z",
+            }),
+        )
+    };
+    let sent = |hub: &TestHub| hub.apns.sent.lock().unwrap().len();
+
+    // A web client shows the session: the phone is still told.
+    let mut web = FakeClient::connect(&hub).await;
+    web.subscribe(&sid, 0).await;
+    w.event(ask(1)).await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while sent(&hub) < 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no APNs push while only the web watches"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // The iOS app shows it too: nothing more over APNs.
+    let mut ios = FakeClient::connect_ios(&hub).await;
+    ios.subscribe(&sid, 0).await;
+    w.event(ask(2)).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        sent(&hub),
+        1,
+        "APNs went out while the iOS app showed the session"
+    );
+
+    // The app leaves it (backgrounded): the phone is told again.
+    ios.send(json!({"type": "unsubscribe", "session_id": sid}))
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    w.event(ask(3)).await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while sent(&hub) < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no APNs push after the app left"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    hub.finish().await;
+}
+
 /// SPEC 0.218: a device that registered a key gets its notices sealed: Apple and a relay see
 /// only a generic alert; the key opens the content, request and options included.
 #[tokio::test]

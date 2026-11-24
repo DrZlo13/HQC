@@ -1384,6 +1384,20 @@ pub async fn quiet_stopped(app: &AppState, s: &SessionRow, input: Uuid) -> anyho
     .await
 }
 
+/// The input `row` of session `s` failed for good, the worker refusing it (SPEC §5.2): an ask
+/// it carried gets no answer, and fails now with the reason instead of at its timeout.
+pub async fn input_failed(
+    app: &AppState,
+    s: &SessionRow,
+    row: &EventRow,
+    reason: &str,
+) -> anyhow::Result<()> {
+    fail_turn(app, s, Some(row.event_id), "input failed", |to| {
+        format!("{to} did not take the question: {reason}")
+    })
+    .await
+}
+
 /// Fails the open asks that input `input` of session `s` carried (`None`: its last delivered
 /// input, by delivery time as [`last_delivered`]), with `unavailable` and `message(to)`.
 async fn fail_turn(

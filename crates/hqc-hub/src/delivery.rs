@@ -394,6 +394,8 @@ pub async fn on_input_failed(
                 &format!("Input was not delivered: {}", err.message),
             )
             .await?;
+            // An ask it carried is answered at once, not at its timeout.
+            crate::peers::input_failed(app, &s, &row, &err.message).await?;
             // An input from a room: the room says so (SPEC §7.1.1).
             crate::rooms::input_failed(app, &s, &row, &err.message).await?;
         }
@@ -417,7 +419,9 @@ async fn fail_pending(app: &AppState, session_id: Uuid, reason: &str) -> anyhow:
         )
         .await?;
         // Each input from a room: the room says so (SPEC §7.1.1).
+        // An ask an input carried is answered at once, not at its timeout.
         for row in &rows {
+            crate::peers::input_failed(app, &s, row, reason).await?;
             crate::rooms::input_failed(app, &s, row, reason).await?;
         }
     }

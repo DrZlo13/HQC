@@ -59,6 +59,22 @@ pub fn header(p: &PeerHeader) -> String {
     }
 }
 
+/// The note an agent gets for an input dropped at the owner's Stop because its cap is below
+/// the session's mode: what was dropped (the message of its `peer`, a schedule's run, or just a
+/// message), never its text. Buffered `send` messages in front of it stay in the hub's buffer
+/// and come with the next input, so they are not named.
+pub fn dropped_note(input: &SessionInput) -> String {
+    let what = match (&input.peer, input.schedule_id) {
+        (Some(p), _) => format!("A message from the session {}", field(&p.from)),
+        (None, Some(_)) => "A scheduled message".to_string(),
+        (None, None) => "A message".to_string(),
+    };
+    format!(
+        "[hqc] {what} was dropped at the owner's Stop because of a permission conflict: it may \
+         run only in a lower permission mode than this session's. Its text is not shown."
+    )
+}
+
 /// The "Messages from other sessions" block, empty without messages.
 fn prefix_block(messages: &[PeerPrefix]) -> String {
     if messages.is_empty() {

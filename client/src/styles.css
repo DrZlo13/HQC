@@ -5012,7 +5012,8 @@ a.relay-peer {
   color: var(--muted);
 }
 /* The main agent's row (ActivityLine): what it does in the accent colour; input waiting for a
-   turn is muted, an approval it waits for is the waiting colour. */
+   turn, with nothing the agent reports doing, is muted, an approval it waits for is the waiting
+   colour. */
 .live-agents-lead {
   color: var(--accent-text);
 }

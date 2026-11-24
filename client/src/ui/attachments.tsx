@@ -2,8 +2,9 @@
 // image inline, a diff as a diff, HTML in a sandboxed iframe when artifacts have their own
 // domain (a link otherwise), a published `site` with its public link (SPEC 0.209), anything
 // else a card with name, size and "download". Links are signed and short-lived: asked for
-// when shown or clicked, renewed on 403/410. An image and a Markdown text
-// open in a viewer over the chat.
+// when shown or clicked, renewed on 403/410. An image is shown from its bytes kept on this
+// device (`ArtifactStore`), not from a link. An image and a Markdown text open in a viewer
+// over the chat.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { formatSize, MAX_INLINE_TEXT, MAX_OPEN_TEXT, type ArtifactStore } from '../artifacts';
@@ -202,60 +203,90 @@ function isMarkdown(kind: ArtifactKind, name: string, meta: Artifact | null): bo
   );
 }
 
-/** A signed link for `id`, renewed by `renew()` (an expired link on `<img>` or `<iframe>`). */
+/** A signed link for `id`, for an `<iframe>`. */
 function useArtifactUrl(store: ArtifactStore, id: string) {
   const [url, setUrl] = useState<string | null>(() => store.cachedUrl(id) ?? null);
-  const [failed, setFailed] = useState(false);
-  const [renewed, setRenewed] = useState(false);
   useEffect(() => {
     let live = true;
     const cached = store.cachedUrl(id);
     if (cached) return setUrl(cached);
     store.url(id).then(
       (u) => live && setUrl(u),
-      () => live && setFailed(true),
+      () => {},
     );
     return () => {
       live = false;
     };
   }, [store, id]);
-  const renew = () => {
-    // The status of an <img> load is not visible: renew once, then give up.
-    if (renewed) return setFailed(true);
-    setRenewed(true);
-    store.url(id, true).then(setUrl, () => setFailed(true));
-  };
-  return { url, failed, renew };
+  return url;
 }
 
-/** The source of an image: its signed link, renewed once when it fails (it may have expired).
- *  A HEIC that fails with the renewed link too is one the browser does not show (Chrome,
- *  Firefox, Brave on a computer): it is decoded into a JPEG `data:` URL. */
-function useImageSrc(store: ArtifactStore, id: string, name: string) {
-  const { url, failed, renew } = useArtifactUrl(store, id);
-  const [decoded, setDecoded] = useState<string | null>(() => store.decodedHeic(id) ?? null);
-  const errors = useRef(0);
+/** The nearest ancestor that scrolls: the feed. Null: the page itself. */
+function scrollParent(el: Element): Element | null {
+  for (let p = el.parentElement; p; p = p.parentElement) {
+    const y = getComputedStyle(p).overflowY;
+    if (y === 'auto' || y === 'scroll') return p;
+  }
+  return null;
+}
+
+/** True once `ref` is within about one screen of its scroller's edge, and from then on. True
+ *  at once where there is no IntersectionObserver or `lazy` is off. */
+function useNearViewport(ref: { current: Element | null }, lazy: boolean, already: boolean): boolean {
+  const [near, setNear] = useState(!lazy || already || typeof IntersectionObserver === 'undefined');
+  useEffect(() => {
+    const el = ref.current;
+    if (near || !el) return;
+    const io = new IntersectionObserver(
+      (entries) => entries.some((e) => e.isIntersecting) && setNear(true),
+      { root: scrollParent(el), rootMargin: '100% 0px' },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [near]);
+  return near;
+}
+
+/** The source of an image: a `data:` URL of its bytes, downloaded once per device. A feed image
+ *  (`ref`) waits until it is near the viewport; the viewer loads at once. A HEIC the browser
+ *  does not show (Chrome, Firefox, Brave on a computer) fails to draw: it is decoded into a JPEG
+ *  `data:` URL then. Safari shows HEIC itself, and decoding it there would cost an iPhone
+ *  seconds and hundreds of megabytes per photo. */
+function useImageSrc(store: ArtifactStore, id: string, name: string, ref?: { current: Element | null }) {
+  const [src, setSrc] = useState<string | null>(() => store.decodedHeic(id) ?? store.cachedImage(id) ?? null);
+  const [failed, setFailed] = useState(false);
+  const near = useNearViewport(ref ?? { current: null }, !!ref, src !== null);
+  useEffect(() => {
+    if (!near || src) return;
+    let live = true;
+    store.imageUrl(id).then(
+      (u) => live && setSrc(u),
+      () => live && setFailed(true),
+    );
+    return () => {
+      live = false;
+    };
+  }, [store, id, near]);
   const onError = () => {
-    errors.current += 1;
-    // The first failure may be an expired link, and Safari shows a HEIC itself: decoding it
-    // there would cost an iPhone seconds and hundreds of megabytes per photo.
-    if (errors.current !== 2 || !HEIC_NAME.test(name)) return renew();
-    void store.heicImage(id).then((u) => (u ? setDecoded(u) : renew()));
+    if (!HEIC_NAME.test(name)) return setFailed(true);
+    void store.heicImage(id).then((u) => (u ? setSrc(u) : setFailed(true)));
   };
-  return { src: decoded ?? url, failed, onError };
+  return { src, failed, onError };
 }
 
 function ImageView({ id, name, store, actions }: { id: string; name: string; store: ArtifactStore; actions: AttachmentActions }) {
-  const { src, failed, onError } = useImageSrc(store, id, name);
+  const button = useRef<HTMLButtonElement>(null);
+  const { src, failed, onError } = useImageSrc(store, id, name, button);
   if (failed) return <FileCard id={id} name={name} kind="image" meta={null} actions={actions} />;
   return (
     <button
+      ref={button}
       type="button"
       class="attachment-image"
       title={name}
       onClick={() => (actions.viewArtifact ? actions.viewArtifact({ id, name, kind: 'image' }) : actions.openArtifact(id))}
     >
-      {src ? <img src={src} alt={name} loading="lazy" onError={onError} /> : <span class="muted">{name}</span>}
+      {src ? <img src={src} alt={name} onError={onError} /> : <span class="muted">{name}</span>}
     </button>
   );
 }
@@ -397,7 +428,7 @@ function HtmlView({
   store: ArtifactStore;
   actions: AttachmentActions;
 }) {
-  const { url } = useArtifactUrl(store, id);
+  const url = useArtifactUrl(store, id);
   // Rendered only from a separate artifact domain: on the hub's own domain HTML is served
   // as a download and would have the hub's origin (SPEC §12).
   if (!url || !store.isSeparateOrigin(url)) {

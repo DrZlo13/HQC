@@ -8,10 +8,15 @@
 //!   own or as the answer to the agent's `hqc_secret` (`request_id`). The answer is what the
 //!   worker told the agent's side (the path, the fingerprint), which the client puts into the
 //!   message being written; the feed gets `system secret_given` with the name only.
-//! - `hqc_secret(name, purpose, kind?)` ([`tool`]): a PendingRequest of kind [`KIND`] with an
-//!   `approval.request` card (`tool: hqc_secret`, `secret {name, kind}`, the option `deny`);
+//! - `hqc_secret(name, purpose, kind?, vault?)` ([`tool`]): a PendingRequest of kind [`KIND`]
+//!   with an `approval.request` card (`tool: hqc_secret`, `secret {name, kind, vault?}`, the
+//!   option `deny`);
 //!   the owner's [`give`] closes it with the call's result and `approval.response {option_id:
 //!   give}`, "Decline" with an error. Deferred as `hqc_move` is.
+//! - The vault: where the worker reads Vaultwarden (`capabilities.vault` of its `hello`), the
+//!   agent may name the entry that holds the secret (`vault`, shown on the card) and the owner
+//!   gives that entry in place of a value; the worker reads it with `rbw` and the value does
+//!   not pass through the hub. Elsewhere the agent's `vault` is dropped.
 //! - `hqc_ssh_keygen(name, comment?)` ([`keygen`]): the worker makes an ed25519 key for the
 //!   session's workspace and loads it; the agent gets the public half. No card: the agent gets
 //!   nothing it could not make with `ssh-keygen`, and the private half stays out of the
@@ -29,8 +34,9 @@ use axum::{
 use hqc_proto::{
     api::{SecretGiven, SecretRequest, WorkspaceKeyList},
     frame::{
-        HubFrame, McpCall, McpError, McpResult, ResultBody, SecretKind, SecretOutcome, SecretPut,
-        SecretValue, WorkspaceKeyDelete, WorkspaceKeysRequest, MAX_SECRET,
+        check_vault_entry, shown_line, HubFrame, McpCall, McpError, McpResult, ResultBody,
+        SecretKind, SecretOutcome, SecretPut, SecretValue, WorkspaceKeyDelete,
+        WorkspaceKeysRequest, MAX_SECRET,
     },
     mcp::error_code,
 };
@@ -72,20 +78,6 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
-/// A line the owner is shown: no control character, no line separator, no bidirectional
-/// control that reorders what is shown (as `hqc_move`'s path).
-fn shown_line(s: &str) -> bool {
-    !s.chars().any(|c| {
-        c.is_control()
-            || matches!(
-                c,
-                '\u{2028}' | '\u{2029}' | '\u{061C}' | '\u{200E}' | '\u{200F}'
-            )
-            || ('\u{202A}'..='\u{202E}').contains(&c)
-            || ('\u{2066}'..='\u{2069}').contains(&c)
-    })
-}
-
 /// The session's worker, if it is the session owner's and takes secrets; why not otherwise.
 async fn secrets_worker(app: &AppState, s: &SessionRow) -> Result<WorkerRow, String> {
     let w = match s.worker_id {
@@ -103,6 +95,12 @@ async fn secrets_worker(app: &AppState, s: &SessionRow) -> Result<WorkerRow, Str
         Some(w) => Ok(w),
         None => Err("the session has no worker".into()),
     }
+}
+
+/// The worker reads Vaultwarden through its `rbw` (`vault` and `session_secrets` on in its
+/// `worker.toml`, which its `hello` told).
+fn reads_vault(w: &WorkerRow) -> bool {
+    w.capabilities["vault"] == true
 }
 
 /// `secret.put` on the worker; the worker's refusal is `Err(Some(message))`, offline
@@ -166,21 +164,25 @@ impl From<PutError> for McpError {
 }
 
 /// What the feed says, without the value.
-fn given_text(kind: SecretKind, name: &str, o: &SecretOutcome) -> String {
+fn given_text(kind: SecretKind, name: &str, vault: Option<&str>, o: &SecretOutcome) -> String {
     let fp = o.fingerprint.as_deref().unwrap_or("");
+    let from = vault
+        .map(|e| format!(" from Vaultwarden entry {e}"))
+        .unwrap_or_default();
     match kind {
-        SecretKind::Secret => format!("Secret {name} given"),
+        SecretKind::Secret => format!("Secret {name} given{from}"),
         SecretKind::SshKey if o.remembered => {
-            format!("ssh key {name} ({fp}) given, remembered for this workspace")
+            format!("ssh key {name} ({fp}) given{from}, remembered for this workspace")
         }
-        SecretKind::SshKey => format!("ssh key {name} ({fp}) given"),
+        SecretKind::SshKey => format!("ssh key {name} ({fp}) given{from}"),
         SecretKind::SshKeygen => format!("ssh key {name} ({fp}) made for this workspace"),
     }
 }
 
 /// `POST /api/sessions/{id}/secrets` (SPEC §6): the session owner's, on a worker of theirs that
-/// takes secrets; `request_id` answers that session's open `hqc_secret` with the same name and
-/// kind. `200` with what the worker told the agent's side; `409 worker_offline`, `422
+/// takes secrets; exactly one of `value` and `vault` (a Vaultwarden entry the worker reads
+/// itself, only on a worker that reads Vaultwarden, else `409 unavailable`); `request_id`
+/// answers that session's open `hqc_secret` with the same name and kind. `200` with what the worker told the agent's side; `409 worker_offline`, `422
 /// secret_refused` with the worker's reason (no running agent, a bad key, a wrong
 /// passphrase), `504 worker_timeout`. A refused or failed give leaves the request open.
 pub async fn give(
@@ -208,11 +210,20 @@ pub async fn give(
                 .into(),
         ));
     }
-    if b.value.0.is_empty() || b.value.0.len() > MAX_SECRET {
-        return Err(ApiError::BadRequest(format!(
-            "value is 1 byte to {} KiB",
-            MAX_SECRET / 1024
-        )));
+    match (&b.value, &b.vault) {
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(ApiError::BadRequest(
+                "give exactly one of value and vault".into(),
+            ))
+        }
+        (Some(v), None) if v.0.is_empty() || v.0.len() > MAX_SECRET => {
+            return Err(ApiError::BadRequest(format!(
+                "value is 1 byte to {} KiB",
+                MAX_SECRET / 1024
+            )))
+        }
+        (None, Some(e)) => check_vault_entry(e).map_err(ApiError::BadRequest)?,
+        _ => {}
     }
     if b.kind == SecretKind::Secret && (b.remember || b.passphrase.is_some()) {
         return Err(ApiError::BadRequest(
@@ -222,6 +233,15 @@ pub async fn give(
     let worker = secrets_worker(&app, &s)
         .await
         .map_err(|m| ApiError::Conflict("unavailable", m))?;
+    if b.vault.is_some() && !reads_vault(&worker) {
+        return Err(ApiError::Conflict(
+            "unavailable",
+            format!(
+                "worker {} reads no Vaultwarden: vault is off in its worker.toml",
+                worker.name
+            ),
+        ));
+    }
     let request = match &b.request_id {
         None => None,
         Some(rid) => {
@@ -247,6 +267,7 @@ pub async fn give(
         kind,
         name,
         value,
+        vault,
         passphrase,
         remember,
         ..
@@ -256,14 +277,21 @@ pub async fn give(
         session_id: s.id,
         kind,
         name: name.clone(),
-        value: Some(value),
+        value,
+        vault: vault.clone(),
         passphrase,
         remember,
         comment: None,
     })
     .await?;
-    tracing::info!(session_id = %s.id, ?kind, %name, remembered = outcome.remembered, "secret given");
-    events::system(&app, &s, GIVEN, &given_text(kind, &name, &outcome)).await?;
+    tracing::info!(session_id = %s.id, ?kind, %name, ?vault, remembered = outcome.remembered, "secret given");
+    events::system(
+        &app,
+        &s,
+        GIVEN,
+        &given_text(kind, &name, vault.as_deref(), &outcome),
+    )
+    .await?;
     if let Some(p) = request {
         answered(&app, &user, &s, p, &outcome).await?;
     }
@@ -318,11 +346,15 @@ struct SecretArgs {
     purpose: String,
     #[serde(default)]
     kind: Option<SecretKind>,
+    #[serde(default)]
+    vault: Option<String>,
 }
 
-/// `hqc_secret(name, purpose, kind?)` (SPEC §7): the owner is asked with a card in the
+/// `hqc_secret(name, purpose, kind?, vault?)` (SPEC §7): the owner is asked with a card in the
 /// session's feed; the call is answered when they give it ([`give`]) or decline. Once per
-/// `request_id`: a repeat finds its request, waiting or answered.
+/// `request_id`: a repeat finds its request, waiting or answered. `vault`, the entry the agent
+/// proposes, goes on the card only where the worker reads Vaultwarden, and is dropped
+/// elsewhere.
 pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Answer, McpError> {
     let a: SecretArgs = args(c.args.clone())?;
     let kind = a.kind.unwrap_or(SecretKind::Secret);
@@ -337,6 +369,9 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
             error_code::INVALID_ARGS,
             "name is 1 to 64 letters, digits, '_', '-' and '.', not starting with '.' or '-'",
         ));
+    }
+    if let Some(e) = &a.vault {
+        check_vault_entry(e).map_err(|m| McpError::new(error_code::INVALID_ARGS, m))?;
     }
     let purpose = a.purpose.trim();
     if purpose.is_empty() || purpose.chars().count() > MAX_PURPOSE || !shown_line(purpose) {
@@ -361,14 +396,18 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
             }
         };
     }
-    secrets_worker(app, caller)
+    let worker = secrets_worker(app, caller)
         .await
         .map_err(|m| McpError::new(error_code::UNAVAILABLE, m))?;
+    let mut secret = json!({"name": a.name, "kind": kind});
+    if let Some(e) = a.vault.filter(|_| reads_vault(&worker)) {
+        secret["vault"] = json!(e);
+    }
     let payload = json!({
         "request_id": c.request_id,
         "tool": hqc_proto::mcp::SECRET,
         "description": purpose,
-        "secret": {"name": a.name, "kind": kind},
+        "secret": secret,
         "options": [
             {"id": hqc_proto::frame::worker_approval::DENY, "label": "Decline", "canonical": "deny"},
         ],
@@ -468,6 +507,7 @@ pub async fn keygen(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<
             kind: SecretKind::SshKeygen,
             name: a.name,
             value: None::<SecretValue>,
+            vault: None,
             passphrase: None,
             remember: true,
             comment: a.comment,
@@ -478,7 +518,7 @@ pub async fn keygen(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<
             &app,
             &caller,
             GIVEN,
-            &given_text(SecretKind::SshKeygen, &name, &o),
+            &given_text(SecretKind::SshKeygen, &name, None, &o),
         )
         .await
         .map_err(internal)?;

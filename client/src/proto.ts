@@ -53,7 +53,9 @@ export type PeerMode = (typeof PEER_MODES)[number] | Unknown;
 export const ARTIFACT_KINDS = ['file', 'image', 'diff', 'html', 'text', 'site'] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number] | Unknown;
 
-export const DELIVERIES = ['pending', 'delivered', 'failed'] as const;
+/** `withdrawn` (SPEC 0.219): the owner took the message back before the agent took it; no client
+ *  shows it. */
+export const DELIVERIES = ['pending', 'delivered', 'failed', 'withdrawn'] as const;
 export type Delivery = (typeof DELIVERIES)[number];
 
 export const PROCESS_STATES = ['stopped', 'starting', 'running', 'stopping'] as const;
@@ -129,6 +131,16 @@ export interface UserMessage {
   /** The runtime took it into the turn already running (SPEC §17.2); the hub sets it on
    *  delivery. */
   joined?: boolean;
+  /** The runtime wrote it into the agent's history without a turn when the owner pressed Stop
+   *  (SPEC 0.231); the hub sets it on delivery. */
+  quiet?: boolean;
+  /** The user typed it in the input route (SPEC 0.219): the only kind of message that can be
+   *  taken back or sent now; the hub's own notes and a schedule's runs do not have it. */
+  human?: boolean;
+  /** Since SPEC 0.221, with `joined` or `quiet`: the `seq` of the last event that is no input, stored before
+   *  the hub took the runtime's ack: where the agent took the message (SPEC §6). Absent on a message
+   *  joined before. */
+  joined_after?: number;
 }
 export interface AgentDelta {
   text: string;
@@ -287,6 +299,9 @@ export interface ApprovalRequest {
 export interface SecretAsked {
   name: string;
   kind: 'secret' | 'ssh_key';
+  /** The Vaultwarden entry the agent proposes; only where the worker reads Vaultwarden. The
+   *  owner confirms or changes it on the card. */
+  vault?: string;
 }
 /** The subagent that asks: its `task_id`, as `subagents.live` names it, and its task. */
 export interface RequestSubagent {
@@ -367,6 +382,25 @@ export interface PeerMessage {
   during_text?: boolean;
   /** As `UserMessage.joined`: set on a `send` and on a room's input (SPEC §17.2). */
   joined?: boolean;
+  /** As `UserMessage.joined_after`. */
+  joined_after?: number;
+  /** As `UserMessage.quiet` (SPEC 0.231). */
+  quiet?: boolean;
+}
+export const TASK_STATUSES = ['pending', 'in_progress', 'completed'] as const;
+/** How far a task of the agent's task list is (SPEC §4, since 0.223). */
+export type TaskStatus = (typeof TASK_STATUSES)[number] | Unknown;
+/** One task of the agent's task list. */
+export interface AgentTask {
+  subject: string;
+  status: TaskStatus;
+  /** What the agent is doing while the task is in progress, as the runtime names it. */
+  active_form?: string;
+}
+/** The agent's task list after a change, the whole list; empty: none (SPEC §4, since 0.223).
+ *  Stored, but never a feed item: the latest one is the list (`Timeline.tasks`). */
+export interface Tasks {
+  items: AgentTask[];
 }
 export interface Usage {
   input_tokens: number;
@@ -377,7 +411,16 @@ export interface Usage {
   cost_usd?: number;
   /** The runtime's running total of the whole session after this turn (T27). */
   session_cost_usd?: number;
+  /** The runtime's running token total of the whole session after this turn: input, output,
+   *  cache reads and cache writes (SPEC 0.229). */
+  session_tokens?: number;
   model?: string;
+  /** Tokens the main agent's context holds after this turn (SPEC §4, 0.222). */
+  context_tokens?: number;
+  /** Tokens it may hold before the runtime compacts it by itself. */
+  context_limit?: number;
+  /** Seconds the runtime's prompt cache of the session lives after the turn. */
+  cache_ttl_s?: number;
 }
 export interface Status {
   state: SessionState;
@@ -405,6 +448,22 @@ export interface SystemNote {
   model?: string;
   /** For `code: task_notification` (since 0.181): what the task spent, when the runtime says. */
   usage?: TaskUsage;
+  /** For `code: goal` (SPEC 0.218): the goal of the session and where its check stands. */
+  goal?: GoalNote;
+}
+/** Where a `/goal` stands (SPEC 0.218): set; checked and not met yet (the agent goes on); met;
+ *  given up (`failed`); cleared. */
+export const GOAL_STATES = ['set', 'unmet', 'met', 'failed', 'cleared'] as const;
+export type GoalState = (typeof GOAL_STATES)[number];
+export interface GoalNote {
+  condition: string;
+  state: GoalState | Unknown;
+  /** Why the check said "not met" or the goal failed, in the runtime's words. */
+  reason?: string;
+  /** How many checks it took, and what they spent, when the runtime says (met). */
+  checks?: number;
+  duration_ms?: number;
+  tokens?: number;
 }
 export interface TaskUsage {
   total_tokens: number;
@@ -414,6 +473,20 @@ export interface TaskUsage {
 /** Events of the session the runtime took back (SPEC 0.179): not shown. */
 export interface Retraction {
   event_ids: string[];
+}
+
+/** A side question the owner asked the session's agent (SPEC 0.232): the agent never sees it. */
+export interface SideQuestion {
+  text: string;
+  /** As `UserMessage.during_text`. */
+  during_text?: boolean;
+}
+/** The runtime's answer to side question `question` (SPEC 0.232): its text, or `error` why there
+ *  is none; exactly one of them. */
+export interface SideAnswer {
+  question: Uuid;
+  text?: string;
+  error?: string;
 }
 
 export interface PayloadByType {
@@ -435,9 +508,12 @@ export interface PayloadByType {
   attachment: Attachment;
   'peer.message': PeerMessage;
   usage: Usage;
+  tasks: Tasks;
   status: Status;
   system: SystemNote;
   retraction: Retraction;
+  'side.question': SideQuestion;
+  'side.answer': SideAnswer;
 }
 export type EventType = keyof PayloadByType;
 
@@ -554,6 +630,9 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     schedule_id: optStr(p, 'schedule_id'),
     during_text: optBool(p, 'during_text'),
     joined: optBool(p, 'joined'),
+    quiet: optBool(p, 'quiet'),
+    human: optBool(p, 'human'),
+    joined_after: optNum(p, 'joined_after'),
   }),
   'agent.delta': (p) => ({ text: str(p, 'text'), reset: optBool(p, 'reset'), thinking: optBool(p, 'thinking') }),
   'subagents.live': (p) => ({
@@ -683,6 +762,8 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     artifact_ids: present(p, 'artifact_ids') ? strArr(p, 'artifact_ids') : [],
     during_text: optBool(p, 'during_text'),
     joined: optBool(p, 'joined'),
+    joined_after: optNum(p, 'joined_after'),
+    quiet: optBool(p, 'quiet'),
   }),
   usage: (p) => ({
     input_tokens: num(p, 'input_tokens'),
@@ -691,7 +772,21 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     cache_write: optNum(p, 'cache_write'),
     cost_usd: optNum(p, 'cost_usd'),
     session_cost_usd: optNum(p, 'session_cost_usd'),
+    session_tokens: optNum(p, 'session_tokens'),
     model: optStr(p, 'model'),
+    context_tokens: optNum(p, 'context_tokens'),
+    context_limit: optNum(p, 'context_limit'),
+    cache_ttl_s: optNum(p, 'cache_ttl_s'),
+  }),
+  tasks: (p) => ({
+    items: arr(p, 'items').map((v, i) => {
+      const t = obj(v, `items[${i}]`);
+      return {
+        subject: str(t, 'subject'),
+        status: tolerantEnum(t, 'status', TASK_STATUSES),
+        active_form: optStr(t, 'active_form'),
+      };
+    }),
   }),
   status: (p) => ({
     state: tolerantEnum(p, 'state', SESSION_STATES),
@@ -710,8 +805,11 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     post_tokens: optNum(p, 'post_tokens'),
     model: optStr(p, 'model'),
     usage: present(p, 'usage') ? parseTaskUsage(obj(p.usage, 'usage')) : undefined,
+    goal: present(p, 'goal') ? parseGoal(obj(p.goal, 'goal')) : undefined,
   }),
   retraction: (p) => ({ event_ids: strArr(p, 'event_ids') }),
+  'side.question': (p) => ({ text: str(p, 'text'), during_text: optBool(p, 'during_text') }),
+  'side.answer': (p) => ({ question: str(p, 'question'), text: optStr(p, 'text'), error: optStr(p, 'error') }),
 };
 
 function parseApiRetry(o: Obj): ApiRetry {
@@ -743,6 +841,17 @@ function parseSubagent(p: Obj): RequestSubagent | undefined {
   if (!present(p, 'subagent')) return undefined;
   const s = obj(p.subagent, 'subagent');
   return { task_id: str(s, 'task_id'), description: str(s, 'description') };
+}
+
+function parseGoal(g: Obj): GoalNote {
+  return {
+    condition: str(g, 'condition'),
+    state: tolerantEnum(g, 'state', GOAL_STATES),
+    reason: optStr(g, 'reason'),
+    checks: optNum(g, 'checks'),
+    duration_ms: optNum(g, 'duration_ms'),
+    tokens: optNum(g, 'tokens'),
+  };
 }
 
 function parseTaskUsage(u: Obj): TaskUsage {
@@ -967,7 +1076,10 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     const kind = strictEnum(p, 'kind', SECRET_PUT_KINDS);
     str(p, 'name');
     if (kind === 'ssh_keygen') {
-      if (present(p, 'value')) throw new ProtoError('secret.put: ssh_keygen takes no value');
+      if (present(p, 'value') || present(p, 'vault')) throw new ProtoError('secret.put: ssh_keygen takes no value');
+    } else if (present(p, 'vault')) {
+      if (present(p, 'value')) throw new ProtoError('secret.put: a value or a vault entry, not both');
+      str(p, 'vault');
     } else str(p, 'value');
     optStr(p, 'passphrase');
     optBool(p, 'remember');
@@ -992,6 +1104,14 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
   'mcp.cancel': (p) => {
     str(p, 'request_id');
     str(p, 'reason');
+  },
+  // SPEC 0.235: a request of the relay of the owner's remote MCP server.
+  'mcp.upstream': (p) => {
+    str(p, 'request_id');
+    str(p, 'session_token');
+    str(p, 'server');
+    str(p, 'method');
+    if (p.params !== undefined) obj(p.params, 'params');
   },
   'mcp.result': (p) => {
     str(p, 'request_id');
@@ -1048,6 +1168,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
       optStr(x, 'request_id');
     }
     optPermissionMode(p, 'permission_cap');
+    optBool(p, 'human');
   },
   'session.stop': (p) => void str(p, 'session_id'),
   'session.background': (p) => {
@@ -1057,6 +1178,22 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
   'session.stop_task': (p) => {
     str(p, 'session_id');
     str(p, 'task_id');
+  },
+  // SPEC 0.219: a message of the owner's taken back, or sent into the running turn at once.
+  'session.withdraw': (p) => {
+    str(p, 'request_id');
+    str(p, 'session_id');
+    str(p, 'event_id');
+  },
+  'session.input_now': (p) => {
+    str(p, 'request_id');
+    str(p, 'session_id');
+    str(p, 'event_id');
+  },
+  'session.side_question': (p) => {
+    str(p, 'session_id');
+    str(p, 'event_id');
+    str(p, 'question');
   },
   'session.subagent_history': (p) => {
     str(p, 'request_id');
@@ -1258,6 +1395,11 @@ export interface DeliveryChange {
   delivered_at?: string;
   /** The input went into the turn already running (SPEC §17.2): `payload.joined` with it. */
   joined?: boolean;
+  /** With `joined` or `quiet`: `payload.joined_after` (SPEC §6). */
+  joined_after?: number;
+  /** The input was written into the agent's history without a turn, at a Stop (SPEC 0.231):
+   *  `payload.quiet` with it. */
+  quiet?: boolean;
 }
 
 export type ServerFrame =
@@ -1313,6 +1455,8 @@ export function parseDelivery(v: unknown): DeliveryChange {
     delivery: strictEnum(d, 'delivery', DELIVERIES),
     delivered_at: optStr(d, 'delivered_at'),
     joined: optBool(d, 'joined'),
+    joined_after: optNum(d, 'joined_after'),
+    quiet: optBool(d, 'quiet'),
   };
 }
 
@@ -1479,6 +1623,55 @@ export function parseModelProvider(v: unknown): ModelProvider {
     model: str(o, 'model'),
     context_tokens: optNum(o, 'context_tokens'),
     workers: optStrArr(o, 'workers') ?? [],
+  };
+}
+
+/** A remote MCP server of the owner (SPEC 0.235, iteration 7): `GET /api/mcp/servers`. The
+ *  hub relays its tools to the agents of `all_projects` or of `project_ids` as
+ *  `mcp__<name>__<tool>`; header values are write-only, only their names come back. */
+export interface McpServer {
+  id: Uuid;
+  name: string;
+  url: string;
+  header_names: string[];
+  timeout_s: number;
+  all_projects: boolean;
+  project_ids: Uuid[];
+  /** `unknown`: not reached yet (also a status this client does not know); `sign_in`: an OAuth
+   *  server to sign in to (again). */
+  status: 'ok' | 'failing' | 'sign_in' | 'unknown';
+  last_error?: string;
+  /** Its tools' names, as it last listed them. */
+  tools: string[];
+  instructions?: string;
+  /** How the hub signs in to it (T65): headers it keeps, or OAuth. */
+  auth: 'headers' | 'oauth';
+  /** With OAuth: the hub holds a token for it. */
+  signed_in: boolean;
+  oauth_client_id?: string;
+  oauth_scope?: string;
+}
+
+export const MCP_STATUSES = ['ok', 'failing', 'sign_in'] as const;
+
+export function parseMcpServer(v: unknown): McpServer {
+  const o = obj(v, 'mcp server');
+  return {
+    id: str(o, 'id'),
+    name: str(o, 'name'),
+    url: str(o, 'url'),
+    header_names: optStrArr(o, 'header_names') ?? [],
+    timeout_s: num(o, 'timeout_s'),
+    all_projects: optBool(o, 'all_projects') ?? false,
+    project_ids: optStrArr(o, 'project_ids') ?? [],
+    status: tolerantEnum(o, 'status', MCP_STATUSES),
+    last_error: optStr(o, 'last_error'),
+    tools: optStrArr(o, 'tools') ?? [],
+    instructions: optStr(o, 'instructions'),
+    auth: optStr(o, 'auth') === 'oauth' ? 'oauth' : 'headers',
+    signed_in: optBool(o, 'signed_in') ?? false,
+    oauth_client_id: optStr(o, 'oauth_client_id'),
+    oauth_scope: optStr(o, 'oauth_scope'),
   };
 }
 
@@ -1809,7 +2002,7 @@ export function parseWorkspaceRuleList(v: unknown): WorkspaceRule[] {
 }
 
 function parseSecretAsked(o: Obj): SecretAsked {
-  return { name: str(o, 'name'), kind: strictEnum(o, 'kind', ['secret', 'ssh_key'] as const) };
+  return { name: str(o, 'name'), kind: strictEnum(o, 'kind', ['secret', 'ssh_key'] as const), vault: optStr(o, 'vault') };
 }
 
 function parseSuggestions(o: Obj, key: string): RuleSuggestion[] {

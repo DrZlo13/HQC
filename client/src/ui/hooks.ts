@@ -23,6 +23,59 @@ export function useNow(ms: number, on = true, now: () => number = Date.now): num
   return on ? t : now();
 }
 
+/** How long a count runs up to a new value: the time the previous value took to come,
+ *  within these bounds (the VS Code tab's own for its thinking estimate). */
+const RUN_MIN_MS = 300;
+const RUN_MAX_MS = 3000;
+
+/** A count that runs up to each new value instead of jumping to it (`useRunUp`): `update`
+ *  takes the value at time `t`, `at` gives the number to show at time `t`. */
+export interface RunUp {
+  update(value: number | undefined, t: number): void;
+  at(t: number): number | undefined;
+}
+
+/** As the VS Code tab runs its thinking estimate: a larger value runs up from the number shown
+ *  now, linearly, over the time since the previous value came (`RUN_MIN_MS`–`RUN_MAX_MS`), so
+ *  values that come every couple of seconds read as one steady count. The first value, a
+ *  smaller one (a new thinking block counts from 0) and none are shown at once. */
+export function runUp(): RunUp {
+  let to: number | undefined;
+  let from = 0;
+  let start = 0;
+  let span = 0;
+  let last = 0;
+  const at = (t: number): number | undefined => {
+    if (to === undefined || span <= 0) return to;
+    // `t` before `start`: `useNow`'s clock of the render before its interval started.
+    return Math.floor(from + (to - from) * Math.min(1, Math.max(0, (t - start) / span)));
+  };
+  return {
+    at,
+    update(value, t) {
+      if (value === to) return;
+      if (value !== undefined && to !== undefined && value > to) {
+        from = at(t)!;
+        start = t;
+        span = Math.min(RUN_MAX_MS, Math.max(RUN_MIN_MS, t - last));
+      } else {
+        span = 0;
+      }
+      to = value;
+      last = t;
+    },
+  };
+}
+
+/** `value` shown as a count running up to it (`runUp`), redrawn every 100 ms while it runs. */
+export function useRunUp(value: number | undefined, now: () => number = Date.now): number | undefined {
+  const [run] = useState(runUp);
+  // Idempotent for the same value: a render repeated with it changes nothing.
+  run.update(value, now());
+  const t = useNow(100, value !== undefined && run.at(now()) !== value, now);
+  return run.at(t);
+}
+
 const PHONE = '(max-width: 899px)';
 
 /** Phone layout: one screen at a time, the permission request as a bottom sheet. Without

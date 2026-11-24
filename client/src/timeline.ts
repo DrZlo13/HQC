@@ -4,6 +4,7 @@
 // Pure logic, no DOM and no network.
 
 import type {
+  AgentTask,
   ApprovalResponse,
   ClarifyResponse,
   DeliveryChange,
@@ -71,6 +72,8 @@ export class Timeline {
   /** The first `system task_notification` by its `call_id`, and by its `task_id`. */
   private readonly endsByCall = new Map<string, EventOf<"system">>();
   private readonly endsByTask = new Map<string, EventOf<"system">>();
+  /** The `side.answer` with the lowest `seq` of each side question, by the question's `event_id` (SPEC 0.232). */
+  private readonly sideAnswers = new Map<string, EventOf<"side.answer">>();
   /** Event ids a `retraction` took back (SPEC 0.179): not shown, also when they load later. */
   private readonly retracted = new Set<string>();
   private readonly requests = new Map<
@@ -101,17 +104,31 @@ export class Timeline {
    *  `due_in_ms` were counted then. */
   liveSchedules: LiveSchedule[] = [];
   liveSchedulesAt = 0;
+  /** The agent's task list: the items of the stored `tasks` event with the highest `seq`, which
+   *  is never a feed item (SPEC §6). The hub sends the latest one on subscribe also when the
+   *  loaded history is newer than it, so an old `seq` is no gap. */
+  tasks: AgentTask[] = [];
+  private tasksSeq = 0;
   /** The thinking being written: the first `agent.delta` with `thinking` since the last
    *  `agent.thinking`, `agent.message` or `reset`, with the text of all of them (SPEC §6). */
   thinking: EventOf<"agent.delta"> | null = null;
   version = 0;
+  /** Grows with every change of what `items()` and the feed built from them (`buildFeed`) read:
+   *  a stored event (new, or one whose fields changed), the thinking being written, the invalid
+   *  events, the messages not stored yet. It does not grow with the answer's text
+   *  (`streaming`, drawn on its own), `subagents.live` or `schedules.live` (read by the cards
+   *  when they render, not by `buildFeed`), or the answers to requests (`markAnswered`, read by
+   *  the header and the request cards), which only `version` follows. */
+  revision = 0;
+  private itemsAt = -1;
+  private itemsCache: Item[] = [];
 
   onChange(fn: () => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }
 
-  private changed(): void {
+  changed(): void {
     this.version++;
     for (const fn of this.listeners) fn();
   }
@@ -133,15 +150,19 @@ export class Timeline {
     this.changed();
   }
 
-  private applyQuiet(ev: HqcEvent, advance = true): void {
+  /** Applies `ev` without telling the listeners: the caller calls `changed()` after a batch.
+   *  `advance` false leaves `lastSeq` where it is (`applyReply`). */
+  applyQuiet(ev: HqcEvent, advance = true): void {
     if (ev.type === "agent.delta") {
       // `reset`: the runtime abandoned the attempt that wrote the text so far, and the thinking
       // with it (SPEC §4).
       if (ev.payload.reset) {
+        if (this.thinking) this.revision++;
         this.streaming = "";
         this.thinking = null;
       } else if (!ev.payload.thinking) this.streaming += ev.payload.text;
       else {
+        this.revision++;
         if (!this.thinking) this.thinkingKey = `t${++this.thinkings}`;
         const text = (this.thinking?.payload.text ?? "") + ev.payload.text;
         this.thinking = { ...(this.thinking ?? ev), payload: { ...ev.payload, text } };
@@ -160,6 +181,14 @@ export class Timeline {
     }
     // Clients see only stored events (SPEC §5.2); anything else without seq is dropped.
     if (ev.seq === undefined) return;
+    if (ev.type === "tasks") {
+      if (advance) this.lastSeq = Math.max(this.lastSeq, ev.seq);
+      if (ev.seq > this.tasksSeq) {
+        this.tasksSeq = ev.seq;
+        this.tasks = ev.payload.items;
+      }
+      return;
+    }
     // Events are append-only: a seq seen before (REST page and subscribe backlog overlap,
     // the POST /input reply and its echo) is the same event. Only an input's `delivery`
     // changes (and with it a message's `payload.joined`), normally by a `delivery` frame
@@ -178,22 +207,28 @@ export class Timeline {
           (seen.delivery !== ev.delivery ||
             seen.delivered_at !== ev.delivered_at ||
             seen.reply_delivered_at !== replyAt ||
-            joined(seen) !== joined(ev))
+            joined(seen) !== joined(ev) ||
+            joinedAfter(seen) !== joinedAfter(ev) ||
+            quiet(seen) !== quiet(ev))
         ) {
           this.bySeq.set(
             ev.seq,
-            withJoined(
+            withFlags(
               { ...seen, delivery: ev.delivery, delivered_at: ev.delivered_at, reply_delivered_at: replyAt },
               joined(ev),
+              quiet(ev),
+              joinedAfter(ev),
             ),
           );
           this.sorted = null;
+          this.revision++;
         }
       }
       return;
     }
     this.bySeq.set(ev.seq, ev);
     this.sorted = null;
+    this.revision++;
     // An older page loaded behind the live tail ends no stream.
     const fresh = ev.seq > this.lastSeq;
     if (advance) this.lastSeq = Math.max(this.lastSeq, ev.seq);
@@ -233,6 +268,9 @@ export class Timeline {
           earliest(this.endsByCall, ev.payload.call_id, ev);
           earliest(this.endsByTask, ev.payload.task_id, ev);
         }
+        break;
+      case "side.answer":
+        earliest(this.sideAnswers, ev.payload.question, ev);
         break;
       case "approval.request":
       case "clarify.request":
@@ -275,18 +313,27 @@ export class Timeline {
   }
 
   /** A `delivery` frame (SPEC §6): new `delivery` / `delivered_at` of a stored input, and
-   *  `joined` when it went into the turn already running. A change for an event not loaded
+   *  `joined` (and `joined_after`) when it went into the turn already running. A change for an event not loaded
    *  yet is dropped: the event arrives with current fields. */
   applyDelivery(d: DeliveryChange): void {
     const ev = this.bySeq.get(d.seq);
     if (!ev || ev.event_id !== d.event_id) return;
-    this.bySeq.set(d.seq, withJoined({ ...ev, delivery: d.delivery, delivered_at: d.delivered_at }, d.joined === true));
+    this.bySeq.set(
+      d.seq,
+      withFlags(
+        { ...ev, delivery: d.delivery, delivered_at: d.delivered_at },
+        d.joined === true,
+        d.quiet === true,
+        d.joined_after,
+      ),
+    );
     this.sorted = null;
+    this.revision++;
     this.changed();
   }
 
   /** The hub's copies of events already loaded (the newest page fetched again when a kept
-   *  chat opens): `delivery`, `delivered_at`, `reply_delivered_at` and `payload.joined` may
+   *  chat opens): `delivery`, `delivered_at`, `reply_delivered_at` and `payload.joined`, `joined_after` may
    *  have changed while nothing was subscribed, and the hub tells only subscriptions. Events
    *  not loaded, `lastSeq` and `olderFrom` stay: the subscription brings what came after
    *  `lastSeq`. */
@@ -300,17 +347,25 @@ export class Timeline {
         seen.delivery === ev.delivery &&
         seen.delivered_at === ev.delivered_at &&
         seen.reply_delivered_at === replyAt &&
-        joined(seen) === joined(ev)
+        joined(seen) === joined(ev) &&
+        joinedAfter(seen) === joinedAfter(ev) &&
+        quiet(seen) === quiet(ev)
       )
         continue;
       this.bySeq.set(
         ev.seq!,
-        withJoined({ ...seen, delivery: ev.delivery, delivered_at: ev.delivered_at, reply_delivered_at: replyAt }, joined(ev)),
+        withFlags(
+          { ...seen, delivery: ev.delivery, delivered_at: ev.delivered_at, reply_delivered_at: replyAt },
+          joined(ev),
+          quiet(ev),
+          joinedAfter(ev),
+        ),
       );
       changed = true;
     }
     if (!changed) return;
     this.sorted = null;
+    this.revision++;
     this.changed();
   }
 
@@ -325,6 +380,7 @@ export class Timeline {
       error,
       raw,
     });
+    this.revision++;
     this.changed();
   }
 
@@ -375,6 +431,11 @@ export class Timeline {
     requestId: string,
   ): EventOf<"approval.request" | "clarify.request"> | undefined {
     return this.requests.get(requestId);
+  }
+
+  /** The runtime's answer to side question `eventId`, once it came (SPEC 0.232). */
+  sideAnswerFor(eventId: string): EventOf<"side.answer"> | undefined {
+    return this.sideAnswers.get(eventId);
   }
 
   resultFor(callId: string): EventOf<"tool.result"> | undefined {
@@ -439,16 +500,22 @@ export class Timeline {
   /** Model of the last `usage` that names one, and the session's cost: the runtime's own
    *  running total of the last `usage` that has one (`session_cost_usd`, T27) plus the last
    *  total before each `/clear`, after which the runtime counts from 0 again (`system
-   *  conversation_cleared`, SPEC §8.1), else the sum of `cost_usd` over the loaded history. */
-  usageTotals(): { model?: string; cost?: number } {
+   *  conversation_cleared`, SPEC §8.1), else the sum of `cost_usd` over the loaded history.
+   *  `tokens` is counted the same way from `session_tokens` (SPEC 0.229), with no fallback: none
+   *  when no `usage` has one. */
+  usageTotals(): { model?: string; cost?: number; tokens?: number } {
     let model: string | undefined;
     let sum: number | undefined;
     let total: number | undefined;
     let before: number | undefined;
+    let tokensTotal: number | undefined;
+    let tokensBefore: number | undefined;
     for (const e of this.events()) {
       if (e.type === "system" && e.payload.code === "conversation_cleared") {
         if (total !== undefined) before = (before ?? 0) + total;
         total = undefined;
+        if (tokensTotal !== undefined) tokensBefore = (tokensBefore ?? 0) + tokensTotal;
+        tokensTotal = undefined;
         continue;
       }
       if (e.type !== "usage") continue;
@@ -457,12 +524,66 @@ export class Timeline {
         sum = (sum ?? 0) + e.payload.cost_usd;
       if (e.payload.session_cost_usd !== undefined)
         total = e.payload.session_cost_usd;
+      if (e.payload.session_tokens !== undefined)
+        tokensTotal = e.payload.session_tokens;
     }
     const runtime =
       before === undefined && total === undefined
         ? undefined
         : (before ?? 0) + (total ?? 0);
-    return { model, cost: runtime ?? sum };
+    const tokens =
+      tokensBefore === undefined && tokensTotal === undefined
+        ? undefined
+        : (tokensBefore ?? 0) + (tokensTotal ?? 0);
+    return { model, cost: runtime ?? sum, tokens };
+  }
+
+  /** The goal of the session while one is set (SPEC 0.218), from the stored `system goal`
+   *  events: set starts it, each "not met" is a check and keeps the runtime's reason; met,
+   *  failed and cleared end it, and so does `/clear`, whose new conversation has none. A
+   *  compaction makes the CLI write the active goal's `set` again: a `set` of the condition
+   *  already active keeps its checks. */
+  goal(): { condition: string; checks: number; reason?: string } | null {
+    let goal = null as { condition: string; checks: number; reason?: string } | null;
+    for (const e of this.events()) {
+      if (e.type !== "system") continue;
+      if (e.payload.code === "conversation_cleared") {
+        goal = null;
+        continue;
+      }
+      const g = e.payload.code === "goal" ? e.payload.goal : undefined;
+      if (!g) continue;
+      if (g.state === "set") {
+        if (goal?.condition !== g.condition) goal = { condition: g.condition, checks: 0 };
+      } else if (g.state === "unmet") {
+        // A check whose `set` is on a page not loaded still shows the goal, from its own condition.
+        goal = { condition: g.condition, checks: (goal?.checks ?? 0) + 1, reason: g.reason };
+      } else if (g.state === "met" || g.state === "failed" || g.state === "cleared") goal = null;
+    }
+    return goal;
+  }
+
+  /** The main agent's context as of the last `usage` that gives its size (SPEC §4, 0.222): its
+   *  tokens, the limit the runtime compacts at, and when the prompt cache of the session ends
+   *  (the `usage`'s time plus the seconds its cache had left then, `cache_ttl_s`; ms). A
+   *  `/clear` after it empties it: the conversation is a new one. */
+  contextUse(): { tokens: number; limit?: number; cacheEnd?: number } | undefined {
+    let found: { tokens: number; limit?: number; cacheEnd?: number } | undefined;
+    for (const e of this.events()) {
+      if (e.type === "system" && e.payload.code === "conversation_cleared") {
+        found = undefined;
+        continue;
+      }
+      if (e.type !== "usage" || e.payload.context_tokens === undefined) continue;
+      const ttl = e.payload.cache_ttl_s;
+      const at = Date.parse(e.ts);
+      found = {
+        tokens: e.payload.context_tokens,
+        limit: e.payload.context_limit,
+        cacheEnd: ttl !== undefined && !Number.isNaN(at) ? at + ttl * 1000 : undefined,
+      };
+    }
+    return found;
   }
 
   /** The call of a result: results whose call is in the timeline are shown with it. */
@@ -483,6 +604,7 @@ export class Timeline {
     };
     if (attachments?.length) p.attachments = attachments;
     this.pending.set(clientOpId, p);
+    this.revision++;
     this.changed();
   }
 
@@ -490,14 +612,41 @@ export class Timeline {
     const p = this.pending.get(clientOpId);
     if (!p) return;
     this.pending.set(clientOpId, { ...p, status: "failed", error });
+    this.revision++;
     this.changed();
   }
 
   dropPending(clientOpId: string): PendingMessage | undefined {
     const p = this.pending.get(clientOpId);
     this.pending.delete(clientOpId);
+    this.revision++;
     this.changed();
     return p;
+  }
+
+  /** Drops the stored events and all that was drawn from them, when what was loaded does not
+   *  continue the hub's history (`ChatSession.load`). Messages not stored yet, the answers this
+   *  client sent and the transport state (deltas, live lists) stay, and so do the listeners. */
+  clear(): void {
+    this.bySeq.clear();
+    this.invalid.length = 0;
+    this.echoed.clear();
+    this.fates.clear();
+    this.results.clear();
+    this.calls.clear();
+    this.endsByCall.clear();
+    this.endsByTask.clear();
+    this.sideAnswers.clear();
+    this.retracted.clear();
+    this.requests.clear();
+    this.keys.clear();
+    this.tasks = [];
+    this.tasksSeq = 0;
+    this.sorted = null;
+    this.lastSeq = 0;
+    this.olderFrom = 0;
+    this.revision++;
+    this.changed();
   }
 
   /** The socket dropped: deltas after the gap would not continue the buffered text, and the
@@ -505,6 +654,7 @@ export class Timeline {
    *  lists). */
   reset(): void {
     if (!this.streaming && !this.thinking && !this.liveAgents.length && !this.liveSchedules.length) return;
+    if (this.thinking) this.revision++;
     this.streaming = "";
     this.thinking = null;
     this.liveAgents = [];
@@ -512,17 +662,28 @@ export class Timeline {
     this.changed();
   }
 
-  /** The stored events in `seq` order, without the retracted ones and the retractions. */
+  /** The stored events in `seq` order, without the retracted ones and the retractions, and the
+   *  inputs the owner took back (`delivery` `withdrawn`, SPEC 0.219). */
   events(): HqcEvent[] {
     if (!this.sorted)
       this.sorted = [...this.bySeq.values()]
-        .filter((e) => e.type !== "retraction" && !this.retracted.has(e.event_id))
+        .filter((e) => e.type !== "retraction" && !this.retracted.has(e.event_id) && e.delivery !== "withdrawn")
         .sort((a, b) => a.seq! - b.seq!);
     return this.sorted;
   }
 
+  /** The feed's items; the same array while `revision` stays, so callers do not change it. */
   items(): Item[] {
-    const bySeq: Item[] = this.events().map((e) => ({
+    if (this.itemsAt !== this.revision) {
+      this.itemsCache = this.buildItems();
+      this.itemsAt = this.revision;
+    }
+    return this.itemsCache;
+  }
+
+  private buildItems(): Item[] {
+    // A side answer is drawn in its question's block (SPEC 0.232), not as an item of its own.
+    const bySeq: Item[] = this.events().filter((e) => e.type !== "side.answer").map((e) => ({
       kind: "event",
       key: this.keys.get(e.seq!) ?? `e${e.seq}`,
       event: e,
@@ -559,12 +720,43 @@ export class Timeline {
       let at = i;
       while (at > floor) {
         const prev = out[at - 1];
-        if (prev.kind !== "event" || !duringText(prev) || prev.queued || prev.event.event_id === answers) break;
+        if (prev.kind !== "event" || prev.queued || prev.event.event_id === answers) break;
+        // An input the agent took after some of its work right before the text is stepped over:
+        // its place is behind this text or later (the next pass moves it there), and the inputs
+        // above it may have come while this text was written.
+        if (!duringText(prev) && joinedAfter(prev.event) === undefined) break;
         at--;
       }
       if (at < i) out.splice(at, 0, ...out.splice(i, n));
       floor = i + n;
       i += n - 1;
+    }
+    // An input the agent took after some of its work (`joined_after`) stands where it took it:
+    // behind the last event of the agent stored before the hub took the runtime's ack (SPEC §6),
+    // below the text and the calls that came before. It only moves down: one `placeQueued`
+    // already put behind a waiting input stays. Several behind the same event keep their `seq`
+    // order.
+    const moved = new Set<Item>();
+    for (let i = 0; i < out.length; i++) {
+      const input = out[i];
+      const after = input.kind === "event" ? joinedAfter(input.event) : undefined;
+      if (input.kind !== "event" || after === undefined || moved.has(input)) continue;
+      // The events that are no input stand in `seq` order here (the passes above move inputs, or
+      // a text up past inputs), so the anchor is the last of them after the input up to `after`.
+      let anchor = -1;
+      for (let j = i + 1; j < out.length; j++) {
+        const e = out[j];
+        if (e.kind !== "event" || e.event.type === "user.message" || e.event.type === "peer.message") continue;
+        if (e.event.seq! > after) break;
+        anchor = j;
+      }
+      if (anchor < 0) continue;
+      out.splice(i, 1);
+      let at = anchor;
+      for (let o = out[at]; o && o.kind === "event" && moved.has(o) && o.event.seq! < input.event.seq!; o = out[at]) at++;
+      out.splice(at, 0, input);
+      moved.add(input);
+      i--;
     }
     // The thinking being written stands after the stored events, above the inputs that came
     // while it was written and those still waiting for a turn of their own, before the
@@ -588,19 +780,22 @@ export class Timeline {
   }
 }
 
-/** A stored input the hub marked as come while the agent's text or thinking was being written
- *  (SPEC §6). */
+/** A stored input, or side question (SPEC 0.232), the hub marked as come while the agent's text
+ *  or thinking was being written (SPEC §6), unless the agent took it after some of its work (`joined_after`): it stands where
+ *  the agent took it, under the text it came during already. */
 export function duringText(it: Item): boolean {
   return (
     it.kind === "event" &&
-    (it.event.type === "user.message" || it.event.type === "peer.message") &&
-    it.event.payload.during_text === true
+    (it.event.type === "user.message" || it.event.type === "peer.message" || it.event.type === "side.question") &&
+    it.event.payload.during_text === true &&
+    joinedAfter(it.event) === undefined
   );
 }
 
 /** An input that stands under the thinking being written: one that came while it was written,
  *  unless `placeQueued` moved it after the turn it waited through, or one still waiting for a
- *  turn of its own, as under the text being written. */
+ *  turn of its own, as under the text being written. One the agent took after some of its work
+ *  (`joined_after`) is not under it: the agent took it before it began the thinking. */
 function underThinking(it: Item): boolean {
   if (it.kind !== "event") return false;
   return it.queued ? it.event.delivery === "pending" : duringText(it);
@@ -648,11 +843,11 @@ function mayWait(e: EventOf<"user.message" | "peer.message">): boolean {
 }
 
 /** An event of the agent's work in a turn: `status running`, `system context_compacted` (a
- *  `/compact` starts its turn with it), or what its runtime wrote but an input and the turn's
- *  `usage`. */
+ *  `/compact` starts its turn with it), `system command_output` (a slash command's turn starts
+ *  with its output, SPEC 0.218), or what its runtime wrote but an input and the turn's `usage`. */
 function agentWork(e: HqcEvent): boolean {
   if (e.type === "status") return e.payload.state === "running";
-  if (e.type === "system" && e.payload.code === "context_compacted") return true;
+  if (e.type === "system" && (e.payload.code === "context_compacted" || e.payload.code === "command_output")) return true;
   return e.author.kind === "agent" && e.type !== "peer.message" && e.type !== "usage";
 }
 
@@ -666,7 +861,10 @@ function agentWork(e: HqcEvent): boolean {
  *  not its own. A `joined` input behind waiting ones went into one of the later turns after the
  *  last of them that was delivered before it: it stays right behind that one; if each was still
  *  pending when it was delivered it went past them all, into the turn running then, and stands
- *  at its own `seq`. */
+ *  at its own `seq`. A `quiet` input (the hub keeps it as `payload.quiet`: written into the
+ *  history as a Stop ended the turn that ran then, no turn of its own) never waits and opens no
+ *  turn: it stays at its own `seq` until the `joined_after` pass of `items` moves it behind the
+ *  last event of the agent stored before it was written. */
 function placeQueued(items: Item[]): Item[] {
   const nextEnd: (HqcEvent | undefined)[] = [];
   let end: HqcEvent | undefined;
@@ -688,6 +886,10 @@ function placeQueued(items: Item[]): Item[] {
     if (it.kind !== "event") return void out.push(it);
     const e = it.event;
     if (isInput(e)) {
+      if (quiet(e) && e.delivery !== "failed") {
+        out.push(it);
+        return;
+      }
       if (joined(e) && waiting.length > 0) {
         // Behind the last waiting input delivered before it (and the inputs that joined behind
         // that one); it went past those delivered after it or still pending.
@@ -755,15 +957,36 @@ function joined(e: HqcEvent): boolean {
   return (e.type === "user.message" || e.type === "peer.message") && e.payload.joined === true;
 }
 
-/** `e` with `payload.joined` set when `on`; it is never taken back. */
-function withJoined(e: HqcEvent, on: boolean): HqcEvent {
-  if (!on || (e.type !== "user.message" && e.type !== "peer.message") || e.payload.joined) return e;
-  return { ...e, payload: { ...e.payload, joined: true } } as HqcEvent;
+/** `payload.quiet` of an input: the hub sets it when the runtime wrote the message into the
+ *  agent's history without a turn, at a Stop (SPEC 0.231). */
+function quiet(e: HqcEvent): boolean {
+  return (e.type === "user.message" || e.type === "peer.message") && e.payload.quiet === true;
+}
+
+/** `payload.joined_after` of a joined or a quiet input (SPEC §6): the `seq` of the last event of
+ *  the agent stored before the hub took the runtime's ack, when it is past the input's own; none
+ *  for an input joined before 0.221. */
+function joinedAfter(e: HqcEvent): number | undefined {
+  if (!joined(e) && !quiet(e)) return undefined;
+  const a = (e.payload as { joined_after?: number }).joined_after;
+  return typeof a === "number" && a > e.seq! ? a : undefined;
+}
+
+/** `e` with `payload.joined`, `payload.quiet` and `joined_after` set when `joined`, `quiet` and
+ *  `after` say so; none of them is taken back. */
+function withFlags(e: HqcEvent, joined: boolean, quiet: boolean, after?: number): HqcEvent {
+  if ((e.type !== "user.message" && e.type !== "peer.message") || (!joined && !quiet)) return e;
+  const add: { joined?: true; quiet?: true; joined_after?: number } = {};
+  if (joined && !e.payload.joined) add.joined = true;
+  if (quiet && !e.payload.quiet) add.quiet = true;
+  if (after !== undefined && e.payload.joined_after !== after) add.joined_after = after;
+  if (Object.keys(add).length === 0) return e;
+  return { ...e, payload: { ...e.payload, ...add } } as HqcEvent;
 }
 
 /** `ev` under `key` in `m` unless an earlier one (by `seq`) is there: an older page may load
  *  after it. No key, no entry. */
-function earliest(m: Map<string, EventOf<"system">>, key: string | undefined, ev: EventOf<"system">): void {
+function earliest<T extends HqcEvent>(m: Map<string, T>, key: string | undefined, ev: T): void {
   if (key === undefined) return;
   const had = m.get(key);
   if (!had || had.seq! > ev.seq!) m.set(key, ev);

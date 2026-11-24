@@ -147,7 +147,7 @@ pub const REGISTRY: &[HubTool] = &[
 
 /// The shape `new_secret("hqcs_")` gives session tokens; anything else never reaches the
 /// database.
-fn is_session_token(t: &str) -> bool {
+pub(crate) fn is_session_token(t: &str) -> bool {
     t.strip_prefix("hqcs_").is_some_and(|b| {
         b.len() == 43
             && b.bytes()
@@ -658,20 +658,33 @@ fn subagent_page(
 /// `hqc_read(session, before_seq?, after_seq?)` (SPEC §7): the events of one session of the
 /// calling session's owner, as `GET /api/sessions/{id}/events` returns them, in pages of at
 /// most [`READ_EVENTS`] events and [`hqc_proto::mcp::MAX_ARGS`] bytes: `{address, title,
-/// events (oldest first), last_seq, earlier?, later?}`. No side effects.
+/// events (oldest first, side questions and their answers left out), last_seq, earlier?,
+/// later?}`. No side effects.
 async fn read_session(app: &AppState, caller: &SessionRow, a: ReadArgs) -> ToolResult {
     let session = a.session.as_deref().expect("checked");
     let (s, address) = crate::peers::readable(app, caller, session).await?;
     let forward = a.after_seq.is_some();
     let limit = READ_EVENTS as i64;
     let rows = match a.after_seq {
-        Some(n) => db::events_after(&app.db, s.id, n, limit).await,
-        None => db::events_before(&app.db, s.id, a.before_seq.unwrap_or(i64::MAX), limit).await,
+        Some(n) => db::events_after(&app.db, s.id, n, limit, db::Withdrawn::Excluded).await,
+        None => {
+            db::events_before(
+                &app.db,
+                s.id,
+                a.before_seq.unwrap_or(i64::MAX),
+                limit,
+                db::Withdrawn::Excluded,
+            )
+            .await
+        }
     }
     .map_err(internal)?;
     let mut events = db::events_for_clients(&app.db, &rows)
         .await
         .map_err(internal)?;
+    // The agent never sees a side question or its answer, not in its own session either
+    // (SPEC 0.232).
+    events.retain(|e| !matches!(e["type"].as_str(), Some("side.question" | "side.answer")));
     // Over the byte budget the far end of the page goes, but one event always stays.
     let sizes = events.iter().map(|e| e.to_string().len());
     let keep = if forward {
@@ -695,7 +708,7 @@ async fn read_session(app: &AppState, caller: &SessionRow, a: ReadArgs) -> ToolR
         "last_seq": s.last_seq.max(0),
     });
     if let Some(first) = first {
-        if !db::events_before(&app.db, s.id, first, 1)
+        if !db::events_before(&app.db, s.id, first, 1, db::Withdrawn::Excluded)
             .await
             .map_err(internal)?
             .is_empty()
@@ -704,7 +717,7 @@ async fn read_session(app: &AppState, caller: &SessionRow, a: ReadArgs) -> ToolR
         }
     }
     if let Some(last) = last {
-        if !db::events_after(&app.db, s.id, last, 1)
+        if !db::events_after(&app.db, s.id, last, 1, db::Withdrawn::Excluded)
             .await
             .map_err(internal)?
             .is_empty()

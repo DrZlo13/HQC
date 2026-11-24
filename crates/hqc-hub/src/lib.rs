@@ -30,6 +30,7 @@ pub mod fork;
 pub mod icons;
 pub mod leftovers;
 pub mod mcp;
+pub mod mcp_servers;
 pub mod mirror;
 pub mod moves;
 pub mod native;
@@ -45,6 +46,7 @@ pub mod schedules;
 pub mod search;
 pub mod secrets;
 pub mod security;
+pub mod side;
 pub mod spawn;
 pub mod state;
 pub mod titles;
@@ -121,9 +123,35 @@ pub fn router(app: AppState) -> Router {
         .route("/api/sessions/{id}/input", post(api::input))
         .route("/api/sessions/{id}/stop", post(api::stop))
         .route("/api/sessions/{id}/background", post(api::background))
+        .route(
+            "/api/sessions/{id}/inputs/{event_id}/withdraw",
+            post(api::withdraw),
+        )
+        .route(
+            "/api/sessions/{id}/inputs/{event_id}/now",
+            post(api::input_now),
+        )
+        .route(
+            "/api/sessions/{id}/side_question",
+            post(side::side_question),
+        )
         .route("/api/sessions/{id}/restart", post(api::restart))
         .route("/api/sessions/{id}/pause", post(pause::pause))
         .route("/api/sessions/{id}/resume", post(pause::resume))
+        .route(
+            "/api/mcp/servers",
+            get(mcp_servers::list).post(mcp_servers::create),
+        )
+        .route(
+            "/api/mcp/servers/{id}",
+            axum::routing::patch(mcp_servers::update).delete(mcp_servers::delete),
+        )
+        .route("/api/mcp/servers/{id}/test", post(mcp_servers::test))
+        .route(
+            "/api/mcp/servers/{id}/sign_in",
+            post(mcp_servers::sign_in).delete(mcp_servers::sign_out),
+        )
+        .route("/api/mcp/oauth/callback", get(mcp_servers::oauth_callback))
         .route(
             "/api/providers",
             get(providers::list).post(providers::create),
@@ -262,6 +290,7 @@ async fn run(app: AppState) -> AppState {
         tokio::spawn(watchdog::turn_watchdog_loop(app.clone(), limit));
     }
     tokio::spawn(schedules::cron_loop(app.clone()));
+    tokio::spawn(mcp_servers::idle_loop(app.clone()));
     if let Some(keep) = app.config.artifacts.retention {
         tokio::spawn(artifacts::cleanup_loop(app.clone(), keep));
     }

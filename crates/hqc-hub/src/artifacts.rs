@@ -829,6 +829,59 @@ async fn save(
     Ok((row, created))
 }
 
+/// Stores `bytes` as an artifact of `owner` linked to `session_id`, so that the session's worker
+/// may download it: a large result of a remote MCP server for its relay (SPEC 0.235).
+pub async fn store_for_session(
+    app: &AppState,
+    owner: Uuid,
+    session_id: Uuid,
+    name: &str,
+    mime: &str,
+    bytes: Vec<u8>,
+) -> ApiResult<ArtifactRow> {
+    let mut w = Writer::new(&app.config.artifacts).await?;
+    w.max = w.max.max(bytes.len() as u64);
+    w.write(&bytes).await?;
+    let stored = w.finish().await?;
+    let (row, _) = save(
+        app,
+        owner,
+        stored,
+        clean_name(name),
+        mime.to_string(),
+        Some(ArtifactKind::File),
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO artifact_sessions (artifact_id, session_id) VALUES ($1, $2)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(row.id)
+    .bind(session_id)
+    .execute(&app.db)
+    .await?;
+    Ok(row)
+}
+
+/// Removes an artifact nothing refers to any more (a relay's large result after its hour).
+pub async fn forget(app: &AppState, id: Uuid) {
+    let sha: Option<String> = sqlx::query_scalar(
+        "DELETE FROM artifacts a WHERE a.id = $1
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.payload->>'artifact_id' = a.id::text)
+         RETURNING a.storage_key",
+    )
+    .bind(id)
+    .fetch_optional(&app.db)
+    .await
+    .ok()
+    .flatten();
+    if let Some(sha) = sha {
+        if let Err(e) = remove_blob(&app.config.artifacts, &app.db, &sha).await {
+            tracing::warn!(%sha, "artifact removal: {e:#}");
+        }
+    }
+}
+
 /// `kind` as the client or the worker named it; `unknown` is refused.
 fn parse_kind(v: &str) -> ApiResult<ArtifactKind> {
     let k: ArtifactKind = serde_json::from_value(v.trim().into())

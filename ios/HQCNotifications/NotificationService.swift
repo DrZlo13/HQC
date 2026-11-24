@@ -6,7 +6,7 @@ import os
 
 private let log = Logger(subsystem: "xyz.drewnja.hqc.notifications", category: "seal")
 
-/// Opens a sealed notice (SPEC 0.218) on the device: the hub sealed its content with this
+/// Opens a sealed notice (SPEC 0.238) on the device: the hub sealed its content with this
 /// device's key, so Apple and a relay carried only a generic alert and ciphertext. The real
 /// title, text, category, thread and fields (session, request, options) are restored here, before
 /// iOS shows it; what cannot be opened shows as the generic alert it came as.

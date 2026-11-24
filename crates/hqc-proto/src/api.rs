@@ -258,6 +258,92 @@ pub struct ProviderRequest {
     pub context_tokens: Option<u32>,
 }
 
+/// A remote MCP server the owner keeps on the hub (SPEC 0.235, iteration 7): `GET
+/// /api/mcp/servers`. Header values are never sent back, only their names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServer {
+    pub id: Uuid,
+    /// The key the agents' CLI names its tools by: `mcp__<name>__<tool>`.
+    pub name: String,
+    pub url: String,
+    pub header_names: Vec<String>,
+    pub timeout_s: u32,
+    /// Every project of the owner gets it; else `project_ids`.
+    pub all_projects: bool,
+    pub project_ids: Vec<Uuid>,
+    /// `ok`, `failing` (see `last_error`) or `unknown` (not reached yet).
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// The names of its tools, as it last listed them.
+    pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// `headers` or `oauth` (SPEC 0.235, T65).
+    #[serde(default = "headers_auth")]
+    pub auth: String,
+    /// With `oauth`: the hub holds a token for it.
+    #[serde(default)]
+    pub signed_in: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_scope: Option<String>,
+}
+
+fn headers_auth() -> String {
+    "headers".into()
+}
+
+/// `POST /api/mcp/servers/{id}/sign_in`: the page to sign in on, opened in the browser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpSignIn {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServerList {
+    pub servers: Vec<McpServer>,
+}
+
+/// One header of a server, as the owner gives it; the value is write-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpHeader {
+    pub name: String,
+    pub value: String,
+}
+
+/// `POST /api/mcp/servers` and `PATCH /api/mcp/servers/{id}`. In a `PATCH` an absent field
+/// stays as it is, and `headers` replaces all of them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Vec<McpHeader>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all_projects: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_ids: Option<Vec<Uuid>>,
+    /// `headers` (the default) or `oauth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    /// With `oauth`, a client registered by hand at the authorization server; absent: the hub
+    /// registers itself where the server offers it. The secret is write-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_scope: Option<String>,
+}
+
 /// `GET /api/projects/{id}/sessions`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionList {
@@ -720,13 +806,18 @@ pub struct AddWorkspaceRules {
 /// `POST /api/sessions/{id}/secrets` (since SPEC 0.147, §6): a secret or an ssh key for the
 /// session's running agent, passed to its worker in `secret.put` and kept by the hub nowhere.
 /// `request_id` answers the agent's `hqc_secret` (its `kind` and `name` must be the
-/// request's). Unknown fields are refused, so a misspelt `remember` is not a silent no.
+/// request's). Exactly one of `value` and `vault` (the Vaultwarden entry the worker reads the
+/// value from). Unknown fields are refused, so a misspelt `remember` is not a
+/// silent no.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretRequest {
     pub kind: crate::frame::SecretKind,
     pub name: String,
-    pub value: crate::frame::SecretValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<crate::frame::SecretValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passphrase: Option<crate::frame::SecretValue>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -741,6 +832,7 @@ impl std::fmt::Debug for SecretRequest {
             .field("kind", &self.kind)
             .field("name", &self.name)
             .field("value", &self.value)
+            .field("vault", &self.vault)
             .field("remember", &self.remember)
             .field("request_id", &self.request_id)
             .finish_non_exhaustive()
@@ -914,6 +1006,13 @@ pub struct InputRequest {
     pub artifact_ids: Vec<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_op_id: Option<String>,
+}
+
+/// `POST /api/sessions/{id}/side_question` (SPEC 0.232); the reply is an [`InputResponse`] with
+/// the stored `side.question`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SideQuestionRequest {
+    pub text: String,
 }
 
 /// Reply to `POST /api/sessions/{id}/input`: the stored `user.message` (201), or for a
@@ -1362,6 +1461,15 @@ mod tests {
         let c = sp.counts.unwrap();
         assert_eq!((c.all.hits, c.all.sessions, c.command.hits), (24, 2, 4));
         roundtrip::<InputRequest>(include_str!("../examples/wire/api.input.request.json"));
+        roundtrip::<SideQuestionRequest>(include_str!(
+            "../examples/wire/api.side_question.request.json"
+        ));
+        let r: InputResponse = roundtrip(include_str!("../examples/wire/api.side_question.json"));
+        let ev: crate::event::Event = serde_json::from_value(r.event).unwrap();
+        assert!(matches!(
+            ev.kind,
+            crate::event::EventKind::SideQuestion { .. }
+        ));
         let r: InputResponse = roundtrip(include_str!("../examples/wire/api.input.json"));
         let ev: crate::event::Event = serde_json::from_value(r.event).unwrap();
         assert!(ev.client_op_id.is_some() && ev.seq.is_some());
@@ -1510,6 +1618,11 @@ mod tests {
             serde_json::json!({"kind": "secret", "name": "a", "value": "b", "remeber": true})
         )
         .is_err());
+        let sv: SecretRequest = serde_json::from_value(
+            serde_json::json!({"kind": "secret", "name": "a", "vault": "home-wifi"}),
+        )
+        .unwrap();
+        assert!(sv.value.is_none() && sv.vault.as_deref() == Some("home-wifi"));
         let g: SecretGiven = roundtrip(include_str!("../examples/wire/api.secret.json"));
         assert!(g.note.contains("$HQC_SECRETS/WIFI_PASS") && !g.remembered);
         roundtrip::<WorkspaceKeyList>(include_str!("../examples/wire/api.workspace.keys.json"));

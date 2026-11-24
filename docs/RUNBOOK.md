@@ -103,6 +103,8 @@ The hub is configured by environment variables only; it takes a single command-l
 | `HQC_PEER_HOPS_PER_CHAIN` | no, `20` | messages between sessions one after another in one chain, started by a person's message (SPEC §7.1, §20), and the posts a room's conversation makes after the owner's message before it stops (§7.1.1); a whole number from 1 to 254. Over it `hqc_send`, `hqc_ask`, `hqc_spawn`, `hqc_room`, `hqc_schedule` and `hqc_move` are refused until a person writes. Raise it for a room that should talk longer on its own |
 | `HQC_PEER_MESSAGES_PER_CHAIN` | no, `50` | messages between sessions in one chain in all, a room's posts included (SPEC §7.1, §20), a whole number from 1; over it the next message of the chain is refused. Raise it together with `HQC_PEER_HOPS_PER_CHAIN` when agents of a long room conversation also write to other sessions |
 | `HQC_LIMIT_NOTICE_PERCENT` | no, `70` | from which share of a usage window (5-hour or weekly) of a worker's Claude Code account the chat shows the bar "You've used 82% of your weekly limit" above the input (SPEC §6), a whole number from 0 to 100; `0` shows no bar at all, "You've hit your … limit" included. The "More" menu of the chat shows the limits whatever it is |
+| `HQC_MCP_KEY` | no | 32 random bytes, base64 or 64 hex digits (`openssl rand -base64 32`): the key the headers (tokens) of the owners' remote MCP servers are sealed with in the database (SPEC 0.235). Without it the hub keeps no MCP server that needs a header (`422 mcp_key_missing`); with another key the stored headers cannot be read and must be set again. Keep it out of the database backups |
+| `HQC_MCP_ALLOW_PRIVATE` | no | `1`: a remote MCP server's URL may lead to a private or loopback address (a wiki or Portainer in the home network). Off by default, so that an entry cannot make the hub reach its own network |
 | `RUST_LOG` | no, `info` | log level (`tracing`), e.g. `hqc_hub=debug` |
 
 There is no master key for `api_keys` (§3, §20) in iteration 1: user keys are not stored.
@@ -682,7 +684,7 @@ The app (`ios/`, its README) signs in on its own: it opens `/api/native/login` i
 browser, where Cloudflare Access (§1.6) or an OIDC reverse proxy such as Traefik + oauth2-proxy
 + Keycloak (§1.9) signs the person in with any identity provider, and exchanges the one-time code
 at `/worker/native/token`, which both the `hqc-worker` Bypass application of §1.6 and the
-`hqc-worker` router of §1.9 already let through without sign-in (SPEC §6, 0.220). In OIDC mode
+`hqc-worker` router of §1.9 already let through without sign-in (SPEC §6, 0.240). In OIDC mode
 the app stores the proxy's cookies and updates them from `Set-Cookie` headers whenever the proxy
 refreshes them (`addAuthCookiesToResponse` in §1.9).
 
@@ -694,7 +696,7 @@ HQC_APNS_RELAY_URL=https://hqc.drewnja.xyz
 ```
 
 The hub then sends each notice for the app to that relay, which passes it to Apple. The app
-(since its notification extension, SPEC 0.218) registers a key of its own, and the hub seals each
+(since its notification extension, SPEC 0.238) registers a key of its own, and the hub seals each
 notice with it: the relay and Apple see a generic alert, the device token and ciphertext, never the
 session's title, the text or the request. Nothing else leaves the hub. Without the line
 the app works the same, without notifications. Settings in the app says whether they are on.
@@ -830,6 +832,12 @@ claude_bin = "/Users/me/.local/bin/claude"
 # but an agent can hand work to any local Claude session that accepts them, past hqc (SPEC §8.1).
 # allow_subagent_messages = false
 
+# Give agents Claude Code's task list tools (TaskCreate, TaskUpdate, TaskList, TaskGet), which
+# CLI 2.1.312 gives the 5.x models only with CLAUDE_CODE_ENABLE_TODO_TOOLS=1: the worker sets it
+# for every agent it starts. The client then shows the list as "Tasks: 3 of 7 completed" above the
+# input, after the goal's row and before the main agent's (SPEC §6, §14). Default false.
+# task_tools = false
+
 # The [workspace] block is gone (since T14): workspaces are hub objects added in the client
 # (project → Workspaces → "Add a workspace"). The worker ignores the old iteration 1 block and
 # logs a warning about it on start; remove it from the file.
@@ -943,6 +951,7 @@ environment and bind the folder to it:
 env = { GITHUB_TOKEN = "..." }        # variables for the agent, on top of the allowlist below
 ssh_keys = ["infra_ed25519"]          # keys of the store $HQC_HOME/keys/ (below)
 allow_local_mcp = false               # true: the machine's MCP servers too (hqc's stays)
+hub_mcp = false                       # true: the owner's remote MCP servers from the hub (SPEC 0.235)
 project_settings = false              # true: the repository's CLAUDE.md, .claude/settings.json too
 [environments.infra.permissions]
 unblock = ["Bash(ssh:*)"]             # deny rules of [permissions] lifted here only
@@ -1047,6 +1056,14 @@ device's `authorized_keys`). Only sessions of the worker's owner that are not re
 - The hub passes a secret through and stores it nowhere. What the agent does with a secret it
   has is up to it: give one only to a session you see asking for a reason you know.
 - Off (the default): the button is not shown, and the worker refuses `secret.put`.
+- A secret from Vaultwarden (since 0.216): with `vault = true` beside `session_secrets` and
+  [`rbw`](https://github.com/doy/rbw) 1.15 or newer (`rbw --version`) on the worker's `PATH`,
+  signed in and unlocked, an agent that knows the entry names it in `hqc_secret` (its exact name
+  or its id); the card shows it, you confirm or change it, and the worker reads the value with
+  `rbw` itself — it never passes the hub. The worker reads what that `rbw` account can, and
+  while `rbw` is unlocked the agents' own commands on that machine can read it as well, without
+  a card. When it is locked the card says so and stays open: unlock `rbw` on that machine, or
+  type the value.
 
 **The browser in a session** (SPEC §14, since 0.148). To let an agent look through pages in
 your accounts (listings on eBay, Amazon, AliExpress) in this machine's Chrome:
@@ -1061,6 +1078,14 @@ The agent opens its own tab group in your profile, signed in as you; drag a tab 
 give it that tab. It can read, navigate, click and type there under the session's mode, never
 upload files. Watch the tab group: a page can carry instructions, and a click there is yours.
 Every other session runs with `--no-chrome`.
+
+**The task list** (SPEC §14, since 0.223). With `task_tools = true` at the top of `worker.toml`
+(then restart the worker) the agents of that worker get Claude Code's task tools, and the chat
+shows the list they keep as a "Tasks: 3 of 7 completed" row above the input, which opens to the
+whole list; in the block above the input the goal's row (`/goal`) stands first, then the task
+list, then the main agent's row. Off (the default): the 5.x models of Claude Code have none of
+these tools, so their sessions show no row; the older models in the CLI's list (Opus 4.7 and
+4.6, Sonnet 4.6, Haiku 4.5) have the tools without the flag and their list shows.
 
 `show_in_vscode` (default `true`): the worker starts Claude Code with
 `CLAUDE_CODE_ENTRYPOINT=claude-vscode`; otherwise the CLI writes the transcript with

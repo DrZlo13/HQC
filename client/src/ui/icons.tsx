@@ -235,6 +235,14 @@ export const IconTrash = ({ size = 15 }: { size?: number }) => (
   </Svg>
 );
 
+/** A goal (`/goal`, SPEC 0.218): a target. */
+export const IconTarget = ({ size = 15 }: { size?: number }) => (
+  <Svg size={size}>
+    <circle cx="10" cy="10" r="6.5" />
+    <circle cx="10" cy="10" r="2.5" />
+  </Svg>
+);
+
 /** Rename: a pencil. */
 export const IconRename = ({ size = 15 }: { size?: number }) => (
   <Svg size={size}>

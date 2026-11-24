@@ -38,6 +38,11 @@ const files = readdirSync(WIRE).filter((f) => f.endsWith('.json'));
 const load = (f: string): unknown => JSON.parse(readFileSync(join(WIRE, f), 'utf8'));
 
 describe('examples/wire', () => {
+  it('parses the context and cache fields of a usage', () => {
+    const ev = parseEvent(load('event.usage.json'));
+    expect(ev.type === 'usage' && [ev.payload.context_tokens, ev.payload.context_limit, ev.payload.cache_ttl_s]).toEqual([329000, 967000, 3600]);
+  });
+
   it('has the files the client depends on', () => {
     expect(files).toContain('event.approval.request.json');
     expect(files).toContain('event.unknown.json');
@@ -98,6 +103,22 @@ describe('examples/wire', () => {
     expect(plain.type === 'tool.result' && plain.payload.artifact_ids).toEqual([]);
   });
 
+  it('reads side questions and their answers, the stored question and the request (SPEC 0.232)', () => {
+    const q = parseEvent(load('event.side.question.json'));
+    expect(q.type === 'side.question' && q.payload.text).toBe('Which file are you editing right now?');
+    const a = parseEvent(load('event.side.answer.json'));
+    expect(a.type === 'side.answer' && [a.payload.question, a.payload.text, a.payload.error]).toEqual([
+      q.event_id,
+      'It is editing `src/main.rs`.',
+      undefined,
+    ]);
+    const e = parseEvent(load('event.side.answer.error.json'));
+    expect(e.type === 'side.answer' && [e.payload.text, e.payload.error]).toEqual([undefined, 'Side question cancelled']);
+    expect(parseInputResponse(load('api.side_question.json')).event_id).toBe(q.event_id);
+    expect((load('api.side_question.request.json') as { text: string }).text).toBe(q.type === 'side.question' ? q.payload.text : '');
+    expect(parseFrame(load('hub.session.side_question.history.json')).type).toBe('session.side_question');
+  });
+
   it('reads the text answer of approval.response (T26)', () => {
     const ev = parseEvent(load('event.approval.response.message.json'));
     expect(ev.type === 'approval.response' && ev.payload.message).toBe('Leave the root alone, look only at ~/work/hqc');
@@ -146,7 +167,10 @@ describe('examples/wire', () => {
     expect(d.type === 'delivery' && d.joined).toBeFalsy();
     // Into the turn already running (SPEC §17.2): the frame says so, and so does the message.
     const j = parseServerFrame(load('client.delivery.joined.json'));
-    expect(j).toMatchObject({ type: 'delivery', seq: 44, delivery: 'delivered', joined: true });
+    expect(j).toMatchObject({ type: 'delivery', seq: 44, delivery: 'delivered', joined: true, joined_after: 46 });
+    // The owner took the message back (SPEC 0.219).
+    const w = parseServerFrame(load('client.delivery.withdrawn.json'));
+    expect(w).toMatchObject({ type: 'delivery', seq: 50, delivery: 'withdrawn' });
     const m = parseEvent(load('event.user.message.joined.json'));
     expect(m.type === 'user.message' && m.payload.joined).toBe(true);
     const plain = parseEvent(load('event.user.message.json'));
@@ -223,6 +247,22 @@ describe('examples/wire', () => {
     expect(retry.type === 'subagents.live' && retry.payload.agents[0].retry).toEqual({ attempt: 2, max_retries: 10, retry_delay_ms: 4000 });
     const kept = parseEvent(load('event.system.model_not_switched.json'));
     expect(kept.type === 'system' && kept.payload.model).toBe('claude-opus-5-5');
+    // SPEC 0.218: the goal of a `/goal`, with what its end says it took.
+    const goal = parseEvent(load('event.system.goal.json'));
+    expect(goal.type === 'system' && goal.payload.goal).toEqual({
+      condition: 'all tests in packages/api pass',
+      state: 'met',
+      reason: 'The last run of npm test in packages/api passed all 214 tests.',
+      checks: 3,
+      duration_ms: 54786,
+      tokens: 918,
+    });
+    const odd = load('event.system.goal.json') as any;
+    odd.payload.goal = { condition: 'c', state: 'paused' };
+    expect(parseEvent(odd).type === 'system' && (parseEvent(odd) as any).payload.goal).toEqual({
+      condition: 'c',
+      state: 'unknown',
+    });
     const retraction = parseEvent(load('event.retraction.json'));
     expect(retraction.type === 'retraction' && retraction.payload.event_ids).toEqual([
       '0199f3a2-7c10-7000-8000-000000000113',

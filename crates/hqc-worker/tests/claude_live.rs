@@ -44,6 +44,8 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::ToolResult { .. } => "tool.result".into(),
         AdapterEvent::InputAccepted { .. } => "accepted".into(),
         AdapterEvent::TurnEnded { .. } => "turn_ended".into(),
+        AdapterEvent::QuietTaken { event_ids } => format!("quiet_taken:{}", event_ids.len()),
+        AdapterEvent::QuietCancelled { .. } => "quiet_cancelled".into(),
         AdapterEvent::Exited { error } => format!("exited:{error:?}"),
         AdapterEvent::RuntimeSessionId(s) => format!("runtime_session_id:{s}"),
         AdapterEvent::Title(t) => format!("title:{t}"),
@@ -63,6 +65,7 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::Activity(a) => format!("activity:{a:?}"),
         AdapterEvent::Heartbeat => "heartbeat".into(),
         AdapterEvent::ModelKept(m) => format!("model_kept:{m}"),
+        AdapterEvent::SideAnswer { event_id, .. } => format!("side_answer:{event_id}"),
     }
 }
 
@@ -146,6 +149,7 @@ async fn live_repo_settings_ignored() {
         secrets: None,
         browser: false,
         browser_refused: None,
+        mcp_servers: vec![],
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -161,6 +165,7 @@ async fn live_repo_settings_ignored() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -284,6 +289,7 @@ async fn live_environment_ssh() {
                 secrets: None,
                 browser: false,
                 browser_refused: None,
+                mcp_servers: vec![],
                 fork: None,
             };
             println!("--- {dir}: environment {}", spec.environment.name);
@@ -303,6 +309,7 @@ async fn live_environment_ssh() {
                     peer: None,
                     permission_cap: None,
                     schedule_id: None,
+                    human: false,
                 })
                 .await
                 .unwrap();
@@ -513,6 +520,7 @@ async fn live_environment_ssh_keys() {
                 secrets: None,
                 browser: false,
                 browser_refused: None,
+                mcp_servers: vec![],
                 fork: None,
             };
             println!("--- {dir}: environment {}", spec.environment.name);
@@ -532,6 +540,7 @@ async fn live_environment_ssh_keys() {
                     peer: None,
                     permission_cap: None,
                     schedule_id: None,
+                    human: false,
                 })
                 .await
                 .unwrap();
@@ -662,6 +671,7 @@ async fn live_folder_rules() {
         secrets: None,
         browser: false,
         browser_refused: None,
+        mcp_servers: vec![],
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -677,6 +687,7 @@ async fn live_folder_rules() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -768,6 +779,7 @@ async fn live_permission_mode_switch() {
         secrets: None,
         browser: false,
         browser_refused: None,
+        mcp_servers: vec![],
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -791,6 +803,7 @@ async fn live_permission_mode_switch() {
                 peer: None,
                 permission_cap: None,
                 schedule_id: None,
+                human: false,
             })
             .await
             .unwrap();
@@ -923,6 +936,7 @@ async fn live_bash_turn_with_approval() {
         secrets: None,
         browser: false,
         browser_refused: None,
+        mcp_servers: vec![],
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -940,6 +954,7 @@ async fn live_bash_turn_with_approval() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -1164,6 +1179,7 @@ async fn live_permission_policy() {
         secrets: None,
         browser: false,
         browser_refused: None,
+        mcp_servers: vec![],
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1182,6 +1198,7 @@ async fn live_permission_policy() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -1299,6 +1316,7 @@ async fn live_ai_title() {
         secrets: None,
         browser: false,
         browser_refused: None,
+        mcp_servers: vec![],
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1316,6 +1334,7 @@ async fn live_ai_title() {
             peer: None,
             permission_cap: None,
             schedule_id: None,
+            human: false,
         })
         .await
         .unwrap();
@@ -1484,6 +1503,7 @@ async fn live_input_joins_turn() {
         secrets: None,
         browser: false,
         browser_refused: None,
+        mcp_servers: vec![],
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1498,6 +1518,7 @@ async fn live_input_joins_turn() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     };
     let first = Uuid::now_v7();
     adapter
@@ -1637,6 +1658,7 @@ async fn live_move_resumes_in_the_new_folder() {
         secrets: None,
         browser: false,
         browser_refused: None,
+        mcp_servers: vec![],
         fork: None,
     };
     let input = |text: &str| SessionInput {
@@ -1648,6 +1670,7 @@ async fn live_move_resumes_in_the_new_folder() {
         peer: None,
         permission_cap: None,
         schedule_id: None,
+        human: false,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);

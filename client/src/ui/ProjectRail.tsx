@@ -41,15 +41,25 @@ export function runningTitle(name: string, agents: number, rate: number): string
   return `${name} · ${agents} agent${agents === 1 ? '' : 's'} · ${rate} tokens/s`;
 }
 
+/** The stripe's lap at the slowest, the `animation-duration` of `.rail-run::before`. */
+const RUN_LAP_MS = 18_000;
+
 /** The stripe around a working project's tile, at [`runSpeed`] of the project's rate. The
- *  speed changes through the playback rate of its CSS animation, so the stripe goes on from
- *  where it is: a new `animation-duration` would make it jump. `quiet` where the row already
- *  says how many sessions run (a phone's project list): no label of its own. */
+ *  speed changes the lap's duration and puts the turn back where it was, so the stripe goes on
+ *  from there instead of jumping. Not the playback rate: WebKit takes an animation whose rate is
+ *  not 1 off the compositor, and the page repaints on every frame again. The animation is the
+ *  turn of the span's `::before`, hence `subtree`. `quiet` where the row already says how many
+ *  sessions run (a phone's project list): no label of its own. */
 export function RailRun({ rate, quiet }: { rate: number; quiet?: boolean }) {
   const el = useRef<HTMLSpanElement>(null);
   const k = runSpeed(rate);
   useEffect(() => {
-    for (const a of el.current?.getAnimations() ?? []) a.updatePlaybackRate(k);
+    for (const a of el.current?.getAnimations({ subtree: true }) ?? []) {
+      const lap = RUN_LAP_MS / k;
+      const at = a.effect?.getComputedTiming().progress ?? 0;
+      a.effect?.updateTiming({ duration: lap });
+      a.currentTime = at * lap;
+    }
   }, [k]);
   return <span ref={el} class="rail-run" aria-label={quiet ? undefined : 'working'} aria-hidden={quiet ? true : undefined} />;
 }

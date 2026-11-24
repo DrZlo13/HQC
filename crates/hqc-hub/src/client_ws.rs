@@ -4,15 +4,21 @@
 //! - `subscribe {session_id, after_seq?}` — stored events with `seq > after_seq` (default 0),
 //!   the thinking and the answer being written, each as one `agent.delta`
 //!   ([`AppState::live_text`]), the latest `subagents.live` ([`AppState::live_agents`]), the
-//!   session's `schedules.live`, unless it is empty ([`crate::schedules::live_event`]), then
-//!   `subscribed {session_id, last_seq}`, then the live stream: stored events, `agent.delta`,
-//!   `subagents.live` and `schedules.live` (no `seq`), `delivery` changes of inputs;
+//!   session's `schedules.live`, unless it is empty ([`crate::schedules::live_event`]), its
+//!   latest `tasks` when `after_seq` is not below it (the client's loaded history is newer, and
+//!   the list is the latest one stored, SPEC §6), then `subscribed {session_id, last_seq}`, then
+//!   the live stream: stored events, `agent.delta`, `subagents.live` and `schedules.live` (no
+//!   `seq`), `delivery` changes of inputs;
 //! - `unsubscribe {session_id}`;
 //! - `subscribe_summary` — `summary {sessions}` for every session of the user, then
 //!   `session.summary {session}` whenever one of them changes; with it `requests {requests}`,
 //!   the user's open requests, sent whole again whenever one opens or closes or an ask
 //!   waiting on one does (T37);
 //! - `ping` -> `pong`.
+//!
+//! `/api/ws?deflate=raw` asks for compression: the hub then sends each frame as a binary
+//! message, one raw DEFLATE stream for the whole connection, a sync flush after each frame,
+//! the frame's JSON followed by `\n`. Without it every frame is a text message.
 //!
 //! An `event` frame carries the event exactly as stored (SPEC §3 Event); `client_op_id`
 //! echoes the input that created it. Errors: `error {code, message, session_id?}`.
@@ -26,7 +32,9 @@ use axum::{
     },
     response::Response,
 };
+use flate2::{Compress, Compression, FlushCompress};
 use hqc_proto::client_frame::{ClientFrame, ServerFrame};
+use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
 
@@ -40,18 +48,27 @@ use crate::{
 
 const BACKFILL_PAGE: i64 = 500;
 
+#[derive(Deserialize)]
+pub struct WsQuery {
+    /// `raw` asks for the compressed stream; any other value or none, text frames.
+    deflate: Option<String>,
+    /// `ios` marks the iOS app's socket: its subscriptions hold back APNs (SPEC §16).
+    client: Option<String>,
+}
+
 pub async fn handler(
     State(app): State<AppState>,
     user: CurrentUser,
-    Query(q): Query<HashMap<String, String>>,
+    Query(query): Query<WsQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // The iOS app names its socket (SPEC §16): its subscriptions hold back APNs.
-    let ios = q.get("client").is_some_and(|c| c == "ios");
+    let deflate = (query.deflate.as_deref() == Some("raw"))
+        .then(|| Compress::new(Compression::new(2), false));
+    let ios = query.client.as_deref() == Some("ios");
     // Origin was checked by `security::guard` (SPEC §20).
     ws.max_message_size(MAX_WS_MESSAGE)
         .max_frame_size(MAX_WS_MESSAGE)
-        .on_upgrade(move |socket| run(app, user, socket, ios))
+        .on_upgrade(move |socket| run(app, user, socket, deflate, ios))
 }
 
 struct Client {
@@ -64,11 +81,43 @@ struct Client {
     /// ([`AppState::live_text`]).
     live_from: HashMap<Uuid, u64>,
     summary: bool,
+    /// The connection's one compression stream (raw DEFLATE, no zlib header), when the client
+    /// asked for `?deflate=raw`.
+    deflate: Option<Compress>,
     /// The iOS app's socket (`?client=ios`).
     ios: bool,
 }
 
-async fn run(app: AppState, user: CurrentUser, socket: WebSocket, ios: bool) {
+/// Compresses one frame into the connection's stream and ends it with a sync flush, so the
+/// client can inflate it at once. `\n` ends the JSON: serde_json's compact output has no raw
+/// newline (one inside a string is escaped), so the client splits the inflated text on it.
+fn deflate_frame(z: &mut Compress, json: &str) -> Result<Vec<u8>, flate2::CompressError> {
+    let mut input = Vec::with_capacity(json.len() + 1);
+    input.extend_from_slice(json.as_bytes());
+    input.push(b'\n');
+    let start = z.total_in();
+    let mut out = Vec::with_capacity(input.len() / 2 + 64);
+    loop {
+        // `compress_vec` writes into the spare capacity only.
+        if out.len() == out.capacity() {
+            out.reserve(4096);
+        }
+        let used = (z.total_in() - start) as usize;
+        z.compress_vec(&input[used..], &mut out, FlushCompress::Sync)?;
+        // The flush is complete once all input is taken and the output did not fill up.
+        if (z.total_in() - start) as usize == input.len() && out.len() < out.capacity() {
+            return Ok(out);
+        }
+    }
+}
+
+async fn run(
+    app: AppState,
+    user: CurrentUser,
+    socket: WebSocket,
+    deflate: Option<Compress>,
+    ios: bool,
+) {
     let mut rx = app.bus.subscribe();
     let mut ping = tokio::time::interval(app.config.timing.heartbeat);
     ping.tick().await;
@@ -79,6 +128,7 @@ async fn run(app: AppState, user: CurrentUser, socket: WebSocket, ios: bool) {
         subs: HashMap::new(),
         live_from: HashMap::new(),
         summary: false,
+        deflate,
         ios,
     };
     loop {
@@ -113,7 +163,18 @@ impl Client {
                 return true;
             }
         };
-        self.socket.send(Message::Text(text.into())).await.is_ok()
+        let message = match self.deflate.as_mut() {
+            Some(z) => match deflate_frame(z, &text) {
+                Ok(bytes) => Message::Binary(bytes.into()),
+                // The stream is in an unknown state: the client reconnects with a new one.
+                Err(e) => {
+                    tracing::error!(error = %e, "compress client frame");
+                    return false;
+                }
+            },
+            None => Message::Text(text.into()),
+        };
+        self.socket.send(message).await.is_ok()
     }
 
     async fn error(&mut self, code: &str, message: &str, session_id: Option<Uuid>) -> bool {
@@ -150,14 +211,8 @@ impl Client {
                             .await;
                     }
                 }
-                if self
-                    .subs
-                    .insert(
-                        session_id,
-                        i64::try_from(after_seq.unwrap_or(0)).unwrap_or(i64::MAX),
-                    )
-                    .is_none()
-                {
+                let after = i64::try_from(after_seq.unwrap_or(0)).unwrap_or(i64::MAX);
+                if self.subs.insert(session_id, after).is_none() {
                     self.app.watch(self.user.id, session_id, true, self.ios);
                 }
                 if !self.backfill(session_id).await {
@@ -177,6 +232,9 @@ impl Client {
                     }
                 }
                 if !self.send_schedules(session_id, false).await {
+                    return false;
+                }
+                if !self.send_tasks(session_id, after).await {
                     return false;
                 }
                 let last_seq = self.subs[&session_id].max(0) as u64;
@@ -206,7 +264,14 @@ impl Client {
             let Some(&after) = self.subs.get(&session_id) else {
                 return true;
             };
-            let page = match db::events_after(&self.app.db, session_id, after, BACKFILL_PAGE).await
+            let page = match db::events_after(
+                &self.app.db,
+                session_id,
+                after,
+                BACKFILL_PAGE,
+                db::Withdrawn::Included,
+            )
+            .await
             {
                 Ok(rows) => db::events_for_clients(&self.app.db, &rows)
                     .await
@@ -216,10 +281,11 @@ impl Client {
             let (rows, events) = match page {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::error!(error = %e, "backfill");
-                    return self
-                        .error("internal", "internal error", Some(session_id))
-                        .await;
+                    // No session in the frame: an error that names one is the client's answer to
+                    // a refused `subscribe` (SPEC §6), and a backfill runs on a gap and after a
+                    // lagged bus too.
+                    tracing::error!(error = %e, %session_id, "backfill");
+                    return self.error("internal", "internal error", None).await;
                 }
             };
             let n = rows.len() as i64;
@@ -373,6 +439,25 @@ impl Client {
             Ok(event) => self.send(ServerFrame::Event { event }).await,
             Err(e) => {
                 tracing::error!(error = %e, "schedules.live");
+                self.error("internal", "internal error", None).await
+            }
+        }
+    }
+
+    /// The session's latest stored `tasks` event, when the backfill after `after` did not send
+    /// it: it is not newer than `after`, so a client that loaded only the newest page of history
+    /// may not have it.
+    async fn send_tasks(&mut self, session_id: Uuid, after: i64) -> bool {
+        match db::latest_tasks_event(&self.app.db, session_id).await {
+            Ok(Some(row)) if row.seq <= after => {
+                self.send(ServerFrame::Event {
+                    event: row.to_json(),
+                })
+                .await
+            }
+            Ok(_) => true,
+            Err(e) => {
+                tracing::error!(error = %e, "tasks");
                 self.error("internal", "internal error", None).await
             }
         }

@@ -58,6 +58,9 @@ pub enum Delivery {
     Pending,
     Delivered,
     Failed,
+    /// The owner took the message back before the agent took it (SPEC 0.219): it is delivered
+    /// to nobody and shown by no client.
+    Withdrawn,
 }
 
 /// Session state as computed by the hub (SPEC §17.1), also used in `status` events.
@@ -251,6 +254,10 @@ pub enum AnswerInput {
 pub struct SecretAsk {
     pub name: String,
     pub kind: crate::frame::SecretKind,
+    /// The Vaultwarden entry the agent proposes (only where its worker reads Vaultwarden,
+    /// in its `worker.toml`); the owner confirms or changes it on the card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<String>,
 }
 
 /// One subagent of `subagents.live` (SPEC §4, since 0.101), or (since 0.127) one background
@@ -362,6 +369,28 @@ pub struct TaskUsage {
     pub duration_ms: u64,
 }
 
+/// How far a task of the agent's task list is (SPEC §4, since 0.223).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One task of the agent's task list in `tasks` (SPEC §4, since 0.223).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTask {
+    pub subject: String,
+    pub status: TaskStatus,
+    /// What the agent is doing while the task is in progress, as the runtime names it
+    /// (Claude Code: `activeForm`); absent when it names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_form: Option<String>,
+}
+
 /// An answer in `clarify.response.answers`: one string, or several for `multi` questions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -392,6 +421,11 @@ pub enum EventKind {
         /// when the worker acks the input `joined`. Absent when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         joined: bool,
+        /// The runtime wrote it into the agent's history without a turn when the owner pressed
+        /// Stop (SPEC 0.231): the hub sets it when the worker acks the input `quiet`. Absent
+        /// when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        quiet: bool,
     },
     /// Transport only, never stored (SPEC §4, §5.2).
     #[serde(rename = "agent.delta")]
@@ -495,7 +529,8 @@ pub enum EventKind {
         /// the owner for a secret.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secret: Option<SecretAsk>,
-        /// Why the runtime asks (Claude Code: `decision_reason`, since SPEC 0.180).
+        /// Why the runtime asks (Claude Code: `decision_reason`, since SPEC 0.180; since 0.217,
+        /// for a call an ask rule caught, the adapter's own text naming the rule and its source).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         /// The runtime's name of the tool (Claude Code: `display_name`, since SPEC 0.180).
@@ -602,9 +637,33 @@ pub enum EventKind {
         /// (Claude Code: `result.total_cost_usd`, carried over `--resume`), if it reports one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_cost_usd: Option<f64>,
+        /// The runtime's cumulative tokens of the whole runtime session after this turn:
+        /// input, output, cache reads and cache writes summed (Claude Code:
+        /// `result.modelUsage` summed over its models, carried over `--resume` and reset by
+        /// `/clear` like `total_cost_usd`); since SPEC 0.229.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_tokens: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// Tokens the main agent's context holds after this turn's last API response (Claude
+        /// Code: input, cache reads, cache writes and output of that response, or the size a
+        /// compaction reported); since SPEC 0.222. Only on a turn's `usage` with tokens.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_tokens: Option<u64>,
+        /// Tokens the context may hold before the runtime compacts it by itself (Claude Code:
+        /// `contextWindow` less the output reserve and a margin); since SPEC 0.222.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_limit: Option<u64>,
+        /// Seconds the runtime's prompt cache of the session has left when the turn ends,
+        /// counted from the request (Claude Code: 3600 or 300, as the cache writes were made,
+        /// less the seconds since the last response started); since SPEC 0.222.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_ttl_s: Option<u64>,
     },
+    /// The agent's task list as it stands after a change, the whole list; empty: none (SPEC §4,
+    /// since 0.223). Written by the worker, stored: the latest one is the list.
+    #[serde(rename = "tasks")]
+    Tasks { items: Vec<AgentTask> },
     #[serde(rename = "status")]
     Status {
         state: SessionState,
@@ -650,12 +709,38 @@ pub enum EventKind {
         /// the hub makes the session's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// Only with [`GOAL`] (since SPEC 0.218): the goal and how it stands.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal: Option<GoalStatus>,
     },
     /// Events of the session the runtime took back (since SPEC 0.179; Claude Code: the
     /// answer of a model that refused, replaced by another model's): clients do not show
     /// them. Nothing is deleted.
     #[serde(rename = "retraction")]
     Retraction { event_ids: Vec<Uuid> },
+    /// A side question the owner asked the session's agent (SPEC 0.232, §4): written by the
+    /// hub only. The agent never gets it in its input; the feed shows it with its answer.
+    #[serde(rename = "side.question")]
+    SideQuestion {
+        text: String,
+        /// Set by the hub: the agent's text or thinking was being written when the question
+        /// came, so clients show its block under that text, as an input's (SPEC 0.108);
+        /// absent when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        during_text: bool,
+    },
+    /// What the runtime answered to side question `question` (the `event_id` of its
+    /// `side.question`), written by the worker (SPEC 0.232, §4): the answer in `text`, or in
+    /// `error` why there is none (the runtime's error or notice, a process that ended, no
+    /// answer); exactly one of them is set.
+    #[serde(rename = "side.answer")]
+    SideAnswer {
+        question: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// An event type this build does not know; stored and passed on as is, not rendered.
     /// Never matches a known type: a known type with a bad payload is an error.
     #[serde(untagged)]
@@ -688,9 +773,12 @@ impl EventKind {
         "attachment",
         "peer.message",
         "usage",
+        "tasks",
         "status",
         "system",
         "retraction",
+        "side.question",
+        "side.answer",
     ];
 }
 
@@ -743,6 +831,30 @@ pub const SESSION_FORKED: &str = "session_forked";
 /// `system.code` of a model switch the runtime refused (SPEC §4, since 0.179). The payload
 /// carries `model`, the model the runtime kept, which the hub makes the session's.
 pub const MODEL_NOT_SWITCHED: &str = "model_not_switched";
+
+/// `system.code` of a change in the session's goal (`/goal`, SPEC §4, since 0.218). The payload
+/// carries [`GoalStatus`] as `goal`.
+pub const GOAL: &str = "goal";
+
+/// The goal of a session and how it stands (SPEC §4, since 0.218): the condition the runtime
+/// keeps the agent working until it holds, and the runtime's own check of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalStatus {
+    pub condition: String,
+    /// `set`, `unmet` (a check that did not pass), `met`, `failed` (the runtime judged the
+    /// condition impossible) or `cleared`.
+    pub state: String,
+    /// The runtime's reason of a check, when it gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// With `met` and `failed`: how many checks it took.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+}
 
 /// Extra payload of `system session_forked` (SPEC §4, §9.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -831,9 +943,12 @@ mod tests {
         "attachment",
         "peer.message",
         "usage",
+        "tasks",
         "status",
         "system",
         "retraction",
+        "side.question",
+        "side.answer",
     ];
 
     /// Wire examples shared with the TS client (`examples/wire/event.<type>.json`).
@@ -907,11 +1022,20 @@ mod tests {
             include_str!("../examples/wire/event.peer.message.json"),
         ),
         ("usage", include_str!("../examples/wire/event.usage.json")),
+        ("tasks", include_str!("../examples/wire/event.tasks.json")),
         ("status", include_str!("../examples/wire/event.status.json")),
         ("system", include_str!("../examples/wire/event.system.json")),
         (
             "retraction",
             include_str!("../examples/wire/event.retraction.json"),
+        ),
+        (
+            "side.question",
+            include_str!("../examples/wire/event.side.question.json"),
+        ),
+        (
+            "side.answer",
+            include_str!("../examples/wire/event.side.answer.json"),
         ),
     ];
 
@@ -938,9 +1062,12 @@ mod tests {
             EventKind::Attachment { .. } => "attachment",
             EventKind::PeerMessage { .. } => "peer.message",
             EventKind::Usage { .. } => "usage",
+            EventKind::Tasks { .. } => "tasks",
             EventKind::Status { .. } => "status",
             EventKind::System { .. } => "system",
             EventKind::Retraction { .. } => "retraction",
+            EventKind::SideQuestion { .. } => "side.question",
+            EventKind::SideAnswer { .. } => "side.answer",
             EventKind::Unknown { .. } => return None,
         })
     }
@@ -1199,6 +1326,22 @@ mod tests {
             .is_none());
     }
 
+    /// SPEC 0.231: a message written into the history at a Stop carries `quiet: true`; any other
+    /// leaves it out.
+    #[test]
+    fn a_quiet_user_message_roundtrips() {
+        let src = include_str!("../examples/wire/event.user.message.quiet.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(e.kind, EventKind::UserMessage { quiet: true, .. }));
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.user.message.json")).unwrap();
+        assert!(serde_json::to_value(&plain).unwrap()["payload"]
+            .get("quiet")
+            .is_none());
+    }
+
     /// SPEC 0.161: a reply an interrupt cut off carries `interrupted: true`; any other leaves
     /// it out.
     #[test]
@@ -1378,6 +1521,10 @@ mod tests {
             serde_json::from_value::<AnswerInput>(v("date")).unwrap(),
             AnswerInput::Unknown
         );
+        assert_eq!(
+            serde_json::from_value::<TaskStatus>(v("blocked")).unwrap(),
+            TaskStatus::Unknown
+        );
     }
 
     #[test]
@@ -1477,7 +1624,8 @@ mod tests {
                 usage: None,
                 fork: None,
                 compaction: None,
-                model: None
+                model: None,
+                goal: None
             }
         );
     }
@@ -1498,6 +1646,48 @@ mod tests {
         let plain: Event =
             serde_json::from_str(include_str!("../examples/wire/event.system.json")).unwrap();
         assert!(matches!(plain.kind, EventKind::System { model: None, .. }));
+    }
+
+    /// SPEC §4 (0.218): `system goal` carries the goal as a nested object, whose empty fields
+    /// are left out; other lines carry none.
+    #[test]
+    fn a_goal_line_carries_the_goal() {
+        let src = include_str!("../examples/wire/event.system.goal.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::System { code, goal, .. } = &e.kind else {
+            panic!("not system: {:?}", e.kind);
+        };
+        assert_eq!(code, GOAL);
+        assert_eq!(
+            goal,
+            &Some(GoalStatus {
+                condition: "all tests in packages/api pass".into(),
+                state: "met".into(),
+                reason: Some(
+                    "The last run of npm test in packages/api passed all 214 tests.".into()
+                ),
+                checks: Some(3),
+                duration_ms: Some(54786),
+                tokens: Some(918),
+            })
+        );
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let set = GoalStatus {
+            condition: "c".into(),
+            state: "set".into(),
+            reason: None,
+            checks: None,
+            duration_ms: None,
+            tokens: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&set).unwrap(),
+            serde_json::json!({"condition": "c", "state": "set"})
+        );
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.system.json")).unwrap();
+        assert!(matches!(plain.kind, EventKind::System { goal: None, .. }));
     }
 
     #[test]

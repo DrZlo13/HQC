@@ -62,6 +62,11 @@ pub enum Reply {
     WorkspaceCreate {
         workspace_id: Uuid,
     },
+    /// `session.side_question` (SPEC §17.5): an `error` to it is the question's answer.
+    SideQuestion {
+        session_id: Uuid,
+        event_id: Uuid,
+    },
     Other,
 }
 
@@ -81,6 +86,10 @@ pub enum StartState {
 pub struct SessConn {
     pub start: StartState,
     pub inflight: HashSet<Uuid>,
+    /// Inputs the owner is taking back: a `session.withdraw` of each is outstanding. Handed
+    /// again by nobody meanwhile (`delivery::kick` skips them like `inflight`), and a second
+    /// take-back of one is refused (SPEC 0.219).
+    pub withdrawing: HashSet<Uuid>,
     /// The session's newest record time the mirror last read from the database
     /// (`mirror::follow`).
     pub newest: Option<chrono::DateTime<chrono::Utc>>,
@@ -108,6 +117,10 @@ pub struct WorkerConn {
     /// Requests waiting for their `result` / `error` ([`WorkerConn::request`]), by frame id.
     /// Dropped with the connection, so a waiting request learns that the worker is gone.
     requests: std::sync::Mutex<HashMap<String, oneshot::Sender<Result<ResultBody, WireError>>>>,
+    /// The side questions sent through this connection that have no answer yet, as (session,
+    /// question event); each gets an error when the connection closes (SPEC §17.5). `None` once
+    /// the connection's close has taken them: a question that comes later is not sent here.
+    open_side: std::sync::Mutex<Option<HashSet<(Uuid, Uuid)>>>,
     /// `fs.*` requests of the API in flight (SPEC §20: `worker_fs_concurrency`).
     pub fs_slots: tokio::sync::Semaphore,
 }
@@ -123,6 +136,27 @@ pub enum RequestError {
 }
 
 impl WorkerConn {
+    /// Notes that side question `question` of `session_id` goes through this connection;
+    /// `false` when the connection's close has taken its open questions already, and this one
+    /// must not be sent here: that close does not answer it (SPEC §17.5).
+    pub fn side_opened(&self, session_id: Uuid, question: Uuid) -> bool {
+        match self.open_side.lock().unwrap().as_mut() {
+            Some(open) => {
+                open.insert((session_id, question));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The worker answered side question `question` (its `side.answer` is stored, or its
+    /// `error` to the frame came): the connection's close leaves it alone.
+    pub fn side_closed(&self, session_id: Uuid, question: Uuid) {
+        if let Some(open) = self.open_side.lock().unwrap().as_mut() {
+            open.remove(&(session_id, question));
+        }
+    }
+
     /// Send a request frame whose `request_id` is its frame id (`fs.stat`, `fs.list_dirs`,
     /// SPEC §5.3) and wait for the worker's `result`.
     pub async fn request(
@@ -284,6 +318,7 @@ async fn run(app: AppState, worker_id: Uuid, owner_id: Uuid, socket: WebSocket) 
         next_id: AtomicU64::new(1),
         st: Default::default(),
         requests: Default::default(),
+        open_side: std::sync::Mutex::new(Some(HashSet::new())),
         fs_slots: tokio::sync::Semaphore::new(app.config.limits.worker_fs_concurrency),
     });
     tracing::info!(%worker_id, "worker connected");
@@ -335,6 +370,17 @@ async fn run(app: AppState, worker_id: Uuid, owner_id: Uuid, socket: WebSocket) 
                 app.drop_activity(id);
                 app.session_changed(id);
             }
+        }
+    }
+    // This connection answers none of its open side questions now, however it closes (also when
+    // a new `hello` of the worker replaced it): each gets the error, and an answer the worker
+    // sends later from its outbox is dropped (SPEC §17.5).
+    let open = conn.open_side.lock().unwrap().take().unwrap_or_default();
+    for (session_id, question) in open {
+        if let Err(e) =
+            crate::side::answer_error(&app, session_id, question, crate::side::WORKER_OFFLINE).await
+        {
+            tracing::error!(%session_id, %question, error = %e, "side question not answered");
         }
     }
     conn.close();
@@ -568,6 +614,22 @@ async fn handle_text(
             }
             Ok(())
         }
+        WorkerFrame::McpUpstream(u) => {
+            // SPEC 0.235: off the connection's loop; the answer may take the server's timeout.
+            let (app2, conn2) = (app.clone(), conn.clone());
+            let rid = u.request_id.clone();
+            let task = tokio::spawn(async move {
+                let r = crate::mcp_servers::relay(&app2, conn2.worker_id, u).await;
+                conn2.reply(&id, HubFrame::McpResult(r));
+            });
+            app.mcp_upstream.track(rid, task.abort_handle());
+            Ok(())
+        }
+        WorkerFrame::McpCancel(c) if app.mcp_upstream.cancel(&c.request_id) => {
+            tracing::info!(worker_id = %conn.worker_id, request_id = %c.request_id, reason = %c.reason, "mcp upstream call cancelled by the worker");
+            conn.reply(&id, HubFrame::Ack(Ack::default()));
+            Ok(())
+        }
         WorkerFrame::McpCancel(c) => {
             // Only a deferred call (`hqc_ask`, an `hqc_move` waiting for the owner) has
             // anything on the hub to close; a fast one was answered already.
@@ -706,7 +768,10 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
         }
         // So is the stop of a turn a pause cut: the turn's end then brings the kill.
         for session_id in db::paused_turns_to_stop(&app.db, conn.worker_id).await? {
-            conn.send(HubFrame::SessionStop { session_id });
+            conn.send(HubFrame::SessionStop {
+                session_id,
+                quiet: false,
+            });
         }
         for sid in db::sessions_to_restart(&app.db, conn.worker_id).await? {
             delivery::kick(app, sid, true).await;
@@ -837,6 +902,8 @@ async fn on_session_state(
     if process_state == ProcessState::Stopped {
         // A stopped agent runs nothing and its wakeups and cron jobs died with its process.
         app.drop_live_agents(session_id);
+        // Its MCP sessions with the owner's remote servers end with it (SPEC 0.235).
+        crate::mcp_servers::process_stopped(app, session_id);
     } else if subagents == 0 && background_tasks == 0 {
         // Neither a subagent nor a background task runs: the kept list, which holds the agent's
         // background commands too, goes; the wakeups and cron jobs the agent armed stay, they
@@ -973,11 +1040,14 @@ async fn on_ack(app: &AppState, conn: &Arc<WorkerConn>, id: &str, a: Ack) -> any
             if a.event_id.is_some_and(|e| e != event_id) {
                 tracing::warn!(%session_id, "input ack carries a different event_id");
             }
-            delivery::on_input_ack(app, conn, session_id, event_id, a.joined).await
+            delivery::on_input_ack(app, conn, session_id, event_id, a.joined, a.quiet).await
         }
         Some(Reply::Result { pending_id }) => crate::peers::result_acked(app, pending_id).await,
         // The outcome comes as `workspace.created`.
-        Some(Reply::WorkspaceCreate { .. }) | Some(Reply::Other) | None => Ok(()),
+        Some(Reply::WorkspaceCreate { .. })
+        | Some(Reply::SideQuestion { .. })
+        | Some(Reply::Other)
+        | None => Ok(()),
     }
 }
 
@@ -1011,6 +1081,14 @@ async fn on_error(
         Some(Reply::WorkspaceCreate { workspace_id }) => {
             tracing::warn!(%workspace_id, code = %e.code, message = %e.message, "worker refused workspace.create");
             crate::workspaces::refused(app, workspace_id, &e.message).await
+        }
+        // The worker could not ask: the block shows why instead of waiting for ever.
+        Some(Reply::SideQuestion {
+            session_id,
+            event_id,
+        }) => {
+            conn.side_closed(session_id, event_id);
+            crate::side::answer_error(app, session_id, event_id, &e.message).await
         }
         Some(Reply::Other) | None => {
             tracing::warn!(worker_id = %conn.worker_id, frame = id, code = %e.code, message = %e.message, "worker error");

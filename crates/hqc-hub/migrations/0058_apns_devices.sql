@@ -1,6 +1,6 @@
--- SPEC 0.214 (Apple push to the native iOS client, SPEC §16): the devices of a user that take
+-- SPEC 0.237 (Apple push to the native iOS client, SPEC §16): the devices of a user that take
 -- notices over APNs. `sandbox`: a development build, sent through APNs' sandbox host.
-CREATE TABLE apns_devices (
+CREATE TABLE IF NOT EXISTS apns_devices (
     id uuid PRIMARY KEY,
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     token text NOT NULL UNIQUE,
@@ -8,4 +8,4 @@ CREATE TABLE apns_devices (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX apns_devices_user ON apns_devices (user_id);
+CREATE INDEX IF NOT EXISTS apns_devices_user ON apns_devices (user_id);

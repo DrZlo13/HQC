@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.220, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.240, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -50,7 +50,7 @@ outbound only, over WebSocket. Inside: a native Claude Code adapter, a generic A
 for Hermes and any agent from the ACP registry, the hqc MCP server, the VS Code session mirror,
 workspace operations, a local config with restrictions and environments.
 
-**Client** — a web app; a native iOS app (`ios/`, since 0.213) over the same API; later Tauri.
+**Client** — a web app; a native iOS app (`ios/`, since 0.236) over the same API; later Tauri.
 Talks only to the hub.
 
 Deployment: the hub sits in the home DMZ behind Cloudflare Tunnel. People sign in through
@@ -216,7 +216,7 @@ version, load_session, resume, image, isolation}]` — the result of each agent'
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
 `environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?}}`,
 never the values of `env`; `default` is implied), `env_bindings[]` (`{path, environment}`; the
-Hermes profile in iteration 7),
+Hermes profile in iteration 8),
 `allow_foreign_sessions`, `idle_timeout`, `system_session_id` (§10.2), `machine_hash` (since 0.23:
 the machine fingerprint from enrollment and the last `hello`, §5.1; not part of the API worker object),
 `session_secrets` (since 0.147, hub migration `0044`: its `worker.toml` has `session_secrets = true`,
@@ -462,7 +462,17 @@ session), `ts`, `author` (`{kind: user|agent, id}` or `{kind: system}` without `
 agent `id` = its `session_id`), `type`, `payload`, `chain` (`{chain_id, depth, hops,
 permission_cap?, capped_by?}` for agent→agent chains, otherwise null; the cap since 0.43, §7.1), `client_op_id` (echoed back to the client), `delivery` and
 `delivered_at` — two flat event fields, only on `user.message` and `peer.message`:
-`delivery` ∈ `pending | delivered | failed`, `delivered_at` — the delivery time. Since 0.112
+`delivery` ∈ `pending | delivered | failed | withdrawn`, `delivered_at` — the delivery time;
+`withdrawn` (since 0.219) is a message its owner took back before the agent took it (§17.2): it is
+delivered to nobody. The hub's reads for a client (the pages of `GET .../events`, the backlog of a
+subscription) still return it with `delivery: withdrawn`, so that a device that missed the `delivery`
+frame learns of it, and a client's timeline shows no such message; every read for the agent or a
+search (`hqc_read`, a fork's copy, the search, the title, the turn marks) leaves it out. A
+`user.message` also has a column of the hub's own, not in the event JSON: `handed_at` (since 0.219, migration
+`0055`) — when the hub
+first sent the input to a worker (set before the `session.input` goes, and kept); an input that was
+ever handed over may be held by the worker across a reconnect, so the hub alone withdraws only one with
+no `handed_at` (§6). Since 0.112
 the hub also sets `payload.joined: true` on a person's `user.message`, since 0.172 on a
 room's input to its agent (§7.1.1) and since 0.174 on a `peer.message` of mode `send`, when it
 is delivered into the turn already running (§17.2), with `delivery`; no other field of a stored
@@ -508,6 +518,17 @@ Open requests that survive a hub restart: `kind`
 (for ask and mcp_call: whom to give the result to), `result` (filled in when the answer has
 been received but not yet delivered to the worker).
 
+A row is one per `(session_id, kind, request_id)`, and since 0.225 an open row's `request_id` is
+the session's alone: the hub opens no request whose `request_id` an open request of another
+kind of the session has. An answer (`POST /api/sessions/{id}/requests/{request_id}`, §6) names
+its request by the id alone, so a worker's card under the id of a publication or a move the
+owner is asked about would have the owner's Allow land on that one. A worker's `approval.request`
+or `clarify.request` opens its row before the event is stored; one refused this way is not
+stored (`ack` without `seq`, §5.2) and shows no card. A request of the hub's own refused this
+way (a publication, a move, a secret, a follow) shows no card either, and its call waits as for a
+repeat; an `ask` refused this way gets no reply. A repeat of a request of the same kind is as
+before.
+
 An `ask` (since 0.35, T32) is a row of the **asking** session: `session_id` — the asking
 session, `request_id` — the `mcp.call`'s, `worker_id` — the asking session's worker,
 `payload` — `{target_session_id, event_id, to}` (`event_id` — the `peer.message` it put
@@ -548,7 +569,9 @@ closed row means records ask nothing more about that move.
 A `secret` (since 0.147) is a row of the session whose agent's `hqc_secret` waits for the owner
 (§7, §10.1): `request_id` — the `mcp.call`'s, `worker_id` — the session's worker, `payload` —
 the hub's `approval.request` in the session's feed (`tool: hqc_secret`, `description` — the
-agent's purpose, `secret: {name, kind}`, the one option `deny`), no `expires_at` (the call ends
+agent's purpose, `secret: {name, kind, vault?}` — `vault` (since 0.216) the Vaultwarden entry the
+agent named, kept only when the session's worker reads Vaultwarden (§14) — the one option
+`deny`), no `expires_at` (the call ends
 at the runtime's tool timeout, as a move's), `result` — the `mcp.result` frame once the owner
 gave it (`POST /api/sessions/{id}/secrets` with `request_id`, §6: the worker's note, the path or
 the key's fingerprint) or declined it. The runtime's `mcp.cancel` and a worker restart close the
@@ -566,11 +589,11 @@ when it is connected, or after its `hello`. A publication done before the stop a
 `attachment` with the link the artifact has then.
 
 ### ApnsDevice
-Since 0.214 (§16): a user's iOS device that takes notices over APNs: `id`, `user_id`,
+Since 0.237 (§16): a user's iOS device that takes notices over APNs: `id`, `user_id`,
 `token` (the APNs device token in hex, unique), `sandbox` (a development build), `created_at`,
 `updated_at`. Written by `POST /api/push/apns`, deleted by `DELETE` or when APNs says the
-token is gone (hub migration `0055`). Since 0.218 also `notice_key`, the 32-byte AES key the
-device made for its notices (absent for an app that registered before; migration `0056`).
+token is gone (hub migration `0058`). Since 0.238 also `notice_key`, the 32-byte AES key the
+device made for its notices (absent for an app that registered before; migration `0059`).
 
 ### ScheduledMessage
 `owner_id`, `session_id` or (`project_id`, `workspace_id`, template), `cron` or `at`,
@@ -594,7 +617,7 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.203: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
+| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `quiet?` (since 0.231: `true` once the worker wrote the message into the agent's history without a turn at the owner's Stop, set by the hub on `ack {quiet: true}`, §5.2, §17.2; absent when false; the feed stands it behind its `joined_after`, where Claude Code recorded it, §6), `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `joined_after?` (since 0.221, with `joined` or (since 0.231) `quiet`, set by the hub in the same write: the `seq` of the last event of the session that is no `user.message` or `peer.message`, stored before the hub took the ack, when it is past the message's own; absent when there is none and on a message joined before 0.221; §6), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise), `human?` (since 0.219: `true` on a message the owner typed in `POST /api/sessions/{id}/input` (§6), written there and nowhere else, so it is absent on a hub's own note (a resume, `hqc_move`, subagent leftovers), a run of a schedule, a room's post to its agent and a message from the Claude Code transcript; it is what Take back and Send now require (§6, §17.2) and what the worker writes Claude Code's `origin: human` for (§5.3, §8.1)) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.203: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text`, `reset?` (since 0.161: `true` when the runtime abandoned the attempt that wrote the text so far, which the hub and the client drop, and (since 0.208) the thinking being written with it, §6, §8.1; `text` is then empty; absent when false), `thinking?` (since 0.208: `true` for a piece of the agent's thinking being written, not of its answer; absent when false; §6, §8.1) | adapter; transport only, not written to the database |
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?, due_in_ms?, retry?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands and (since 0.169) Monitor watchers, in the order they became rows, then (since 0.169) the wakeup the agent armed and its cron jobs, empty when none (§8.1); since 0.181 a task the CLI marks `ambient` is no row, and the commands and subagents it starts are rows as the agent's own (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.161; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row, a command's and (since 0.169) a Monitor's say, `retry` (since 0.179) `{attempt, max_retries, retry_delay_ms, error_status?}` while its request to the model API failed and waits to be retried (`error_status` absent: the attempt got no response; §8.1), `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row, `command` for a command's and, since 0.169, `monitor` for a Monitor's, `wakeup` for the agent's wakeup and `cron` for one of its cron jobs; a command's or a Monitor's row carries only `task_id`, `description` (its Bash call's description, or the command; the Monitor's description), `duration_ms`, `call_id?`, `kind` and `stoppable`; a wakeup's and a job's row also `due_in_ms` (since 0.169), the milliseconds until it fires when the list was sent, by the worker's clock, 0 once due, absent on a job whose next fire is not known |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops, and (since 0.179) again, unchanged, at each heartbeat of a long call of the main agent (§8.1, §17.3) |
@@ -603,18 +626,21 @@ the client renders only them. The "source" column is the component that produces
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (short error text; since 0.194 an opened call row in the client shows it only when it is not the start of `result_preview`, which the Claude Code adapter cuts from the same text), `duration_ms?`, `artifact_id?` (a diff or a large result, §12; since 0.180 the Claude Code adapter's whole text of a result longer than `result_preview`, its first 2 MiB, kind `text`, §8.1), `artifact_ids[]?` (since 0.180: the result's images, kind `image`, in order; absent when none, §8.1) | adapter |
-| `approval.request` | `request_id`, `tool`, `description`, `args_preview?`, `options[{id, label, canonical, grant?}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind}`, `subagent?{task_id, description}` (since 0.181: the subagent that asks, §10.1; absent for the agent itself and a subagent the adapter does not know) | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons (since 0.213 also the option ids `server_session` and `server_always`, canonical `session` and `always`, on an MCP tool's card, §10.1); `args_preview` (since 0.207) — the call's arguments as `tool.call.args_preview` carries them (the same limit and form), so a card that does not stand right after its call (a subagent's, another session's, one in the Requests list) shows the whole command and every argument; absent from an older worker; `grant` of an option (since 0.207) — what choosing it grants besides this call: `{place, rules?[], exact?}`, `place` ∈ `session` (the worker's session rules, until the process ends) / `local_settings` (Claude Code writes the rules to `.claude/settings.local.json` at the root of the git repository containing the session's cwd, §8.1), `rules` — as Claude Code writes a rule, `toolName` or `toolName(ruleContent)`, at most 10, each at most 256 bytes (a rule cut there ends with `…`; past 10 the tenth item is `… N more`, the count of the rules not listed, which the option grants as well), `exact` — the exact call is allowed too; no field — the option grants nothing more (`once`, `deny`) or the worker does not say; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; since 0.180 `reason?` — why the runtime asks (Claude Code: `decision_reason`, at most 1024 bytes), `display_name?` — the runtime's name of the tool (at most 256 bytes), both absent when blank, and `human_only?` — `true` when only a person may answer it (§8.1): its `options` are `once` and `deny`, it has no `rule_suggestions`, and the hub's `auto_approve` leaves it to the owner (§10.1); absent when false. The client shows `reason` under the card's title and names the tool by `display_name` when there is one, an MCP server's tool as `<tool> (<server>)` (the runtime's `display_name` of one drops the server); `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for; the hub drops it from a worker's event |
+| `approval.request` | `request_id`, `tool`, `description`, `args_preview?`, `options[{id, label, canonical, grant?}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind, vault?}`, `subagent?{task_id, description}` (since 0.181: the subagent that asks, §10.1; absent for the agent itself and a subagent the adapter does not know) | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons (since 0.213 also the option ids `server_session` and `server_always`, canonical `session` and `always`, on an MCP tool's card, §10.1); `args_preview` (since 0.207) — the call's arguments as `tool.call.args_preview` carries them (the same limit and form), so a card that does not stand right after its call (a subagent's, another session's, one in the Requests list) shows the whole command and every argument; absent from an older worker; `grant` of an option (since 0.207) — what choosing it grants besides this call: `{place, rules?[], exact?}`, `place` ∈ `session` (the worker's session rules, until the process ends) / `local_settings` (Claude Code writes the rules to `.claude/settings.local.json` at the root of the git repository containing the session's cwd, §8.1), `rules` — as Claude Code writes a rule, `toolName` or `toolName(ruleContent)`, at most 10, each at most 256 bytes (a rule cut there ends with `…`; past 10 the tenth item is `… N more`, the count of the rules not listed, which the option grants as well), `exact` — the exact call is allowed too; no field — the option grants nothing more (`once`, `deny`) or the worker does not say; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; since 0.180 `reason?` — why the runtime asks (Claude Code: `decision_reason`, at most 1024 bytes; since 0.217, for a call an ask rule caught, the rule's tool and settings file, §8.1), `display_name?` — the runtime's name of the tool (at most 256 bytes), both absent when blank, and `human_only?` — `true` when only a person may answer it (§8.1): its `options` are `once` and `deny`, it has no `rule_suggestions`, and the hub's `auto_approve` leaves it to the owner (§10.1); absent when false. The client shows `reason` under the card's title and names the tool by `display_name` when there is one, an MCP server's tool as `<tool> (<server>)` (the runtime's `display_name` of one drops the server); `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for and, since 0.216, the Vaultwarden entry the agent named (§7); the hub drops it from a worker's event |
 | `approval.response` | `request_id`, `option_id`, `by` (user id or `auto`), `message?` (the user's text instead of the call, only with a `deny`/`deny_always` option, §10.1) | client, or the hub with `auto_approve` |
 | `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived, since 0.180 withdrawn — the runtime withdrew its request, §8.1; the client says "withdrawn") | adapter, worker or hub. An answer from another device is not a cancellation: the first answer closes the request, the second gets `409 request_closed` (§10.1) |
 | `clarify.request` | `request_id`, `questions[{id, text, header?, options?: [string], option_descriptions?: [string], option_previews?: [string], multi?: bool, required?: bool, input?: "integer" \| "number"}]`, `subagent?{task_id, description}` (since 0.181, as on `approval.request`) | Claude Code adapter: the `AskUserQuestion` tool arrives as `can_use_tool`, the answer goes into `updatedInput.answers` (verified on 2.1.307 with `--permission-prompt-tool stdio`, §8.1). Since 0.69 `header` is the question's short label and `option_descriptions` what each option means, in the order and number of `options`, `""` for an option without one; each is absent when empty. Since 0.199 `option_previews` is each option's mockup (an ASCII sketch, code, a config) by the same rule, cut by the worker to 8 KiB with `\n… (truncated)` after it. The client shows `header` above the question, each description under its option, and an "Other" field: its text is the answer (with `multi`, an item of the array beside the checked labels); "Other" chosen with nothing typed is sent as `"Other"`, as the VS Code tab does. As in the tab, "Answer" stays disabled until every question has an answer: an option picked, a text typed (not only spaces) or "Other" chosen. A question with a preview shows it as plain text in `<pre>`, never rendered as markdown or HTML, not wrapped and scrolling sideways: on a desktop in a column beside the options, the preview of the option last under the pointer while the pointer is over the question (the "Other" row lets it go) or of the option with the keyboard focus (kept while the focus is in the preview), else of the first chosen one, else the first one that has a preview, the column as tall as the tallest preview of the question; on a phone under each chosen option that has one. ACP agents have no source for it. Since 0.180 also an MCP server's request for input (Claude Code: `elicitation`, §8.1), with `server?` — the server that asks, `message?` — its text, `url?` — the page it sends the person to, then with no `questions`; a question of its form carries `required: true` for a field the server requires and `input` (`integer`, `number`) for a free-text field whose answer must read as one, both absent otherwise and in the agent's questions; the client heads the card "<server> asks", shows the text above the questions, "required" beside a required question's header, the link (only an http, https or mailto one as a link, labelled with the address it opens, a host in its punycode form), no "Other", the submit button ("Done" for a link, the card then saying "Done"; unlike the agent's questions it waits only for what the form's schema says, which a server on the MCP SDK checks the answer against, refusing one that does not match (§8.1): every `required` question answered, an `integer` answer an optional minus and digits, at most 2^53 − 1 in size, a `number` one written in decimal (an optional minus, digits with an optional point, an optional exponent) that JavaScript's `Number()` reads as a finite number; a field neither required nor answered may stay empty) and "Decline" |
 | `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`), `action?` (since 0.180, only for a request with `server`: `accept` — the answers, also none, are the input; `decline` — the person declined, `answers` empty; the client shows "Declined") | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; since 0.181 also the worker after a background task's end, the task's output file (§8.1), with the same `author`, `kind: text`; since 0.209 also a publication the owner allowed (`hqc_publish`, §7), with `kind: site` (`event.attachment.site.json`); the user's files go into `user.message.artifact_ids` (rule below) |
-| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
-| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost |
+| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `joined_after?` (since 0.221, with `joined` or (since 0.231) `quiet`: as on a `user.message`), `quiet?` (since 0.231: as on a `user.message`), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
+| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `session_tokens?`, `model?`, `context_tokens?`, `context_limit?`, `cache_ttl_s?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost. Since 0.229 `session_tokens` is the runtime's cumulative tokens of the whole runtime session after the turn — input, output, cache reads and cache writes summed (Claude Code: `result.modelUsage` summed over its models), on every `usage` the adapter sends (the turn's, the compaction's and the total-only one) whose `result` has a `modelUsage`, absent otherwise; the client's header shows the latest one plus the last one before each `system conversation_cleared`, as it does the cost, but with no fallback to summing turns (§6). Since 0.222 a `usage` that carries tokens (not the one with the total only) also says how full the main agent's context is and how long its prompt cache lives: `context_tokens` is the context after the turn's last API response of the main agent (§8.1), `context_limit` the tokens it may hold before the runtime compacts it by itself, `cache_ttl_s` the seconds the session's cache has left when the turn ends, counted from the request of the response (3600 or 300, less the seconds since the response started, 0 at the least); each is absent when the runtime does not say it. `context_limit` is the threshold of the model's window; an override of the auto-compaction window or a disabled auto-compaction is not seen in the stream (§8.1). The client's header shows them (§6) |
+| `tasks` | `items[{subject, status, active_form?}]` | Claude Code adapter (since 0.223), stored: the agent's task list after a change, the whole list each time, empty when it has none. `status` is `pending`, `in_progress` or `completed` (another value reads as "unknown", shown as pending); `subject` and `active_form` are at most 512 bytes and the list at most 200 tasks; `active_form` is what the agent is doing while the task is in progress, as the runtime names it (Claude Code: `activeForm`), absent when it names none. The latest one is the list, the client shows it as a row above the input (§6), never as a feed item; the adapter sends one only when the list changed (§8.1) |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.161 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`), `call_id?`, `status?`, `task_id?` (since 0.135, only on `task_notification`), `usage?{total_tokens, tool_uses, duration_ms}` (since 0.181, only on `task_notification`), `from_session_id?` (since 0.172, only on `room_passed`: the agent that passed), `trigger?`, `pre_tokens?`, `post_tokens?` (since 0.179, only on `context_compacted`), `model?` (since 0.179, only on `model_not_switched`) | hub or worker; codes below |
 | `retraction` | `event_ids[]` | adapter (since 0.179): events of the session the runtime took back — Claude Code's answer of a model that refused, replaced by another model's answer (§8.1). The hub keeps of `event_ids` only the session's own `agent.message`, `agent.thinking`, `tool.call` and `tool.result` of the agent, at most 1024, and stores it with those; nothing is deleted: clients do not show the events it names, also ones loaded after it, nor the retraction itself; search (§15) still finds them |
+| `side.question` | `text`, `during_text?` (set by the hub as on a `user.message`: the agent's text or thinking was being written when it was asked; absent when false; §6) | hub only (since 0.232): a side question the owner asked the session's agent with `POST /api/sessions/{id}/side_question` (§6, §17.5), authored by the owner, stored and sent to clients like any event; it has no `delivery`, and the agent is given neither it nor its answer as input. The feed shows it with its answer as one block |
+| `side.answer` | `question` (the `event_id` of its `side.question`), `text?`, `error?` | adapter (since 0.232): the runtime's answer to that question, stored when it comes, authored by the session's agent; exactly one of `text` (the answer, as Markdown) and `error` (why there is none) is set. A question has one answer: the hub stores a worker's `side.answer` only when `question` is a `side.question` of the same session that has no answer yet (an answer sent again after a lost `ack` gets its `seq`), and acknowledges any other without a `seq`, as it does an event for a session that is not the worker's; a client shows the answer with the lowest `seq`. It stands outside the agent's turn: it opens none and closes none (§17.5) |
 
 `system` codes (the list is open; the client shows an unknown code as text):
 
@@ -629,7 +655,8 @@ the client renders only them. The "source" column is the component that produces
 | `compaction_failed` | worker (adapter) | since 0.179: a compaction the runtime started failed; `text` is "Compaction failed: " and the runtime's error, "Compaction failed" without one (§8.1) |
 | `transcript_not_saved` | worker (adapter) | since 0.201: the CLI reported `system/session_writes_lost` with the session's transcript among what it could not write (`error_code` `ENOSPC`: "the disk is full", `EDQUOT`: "the disk quota is used up", another or no code: "a write to the worker's disk failed", the code named in the brackets when there is one, the fix "Check the worker's disk"); `text` "Transcript not saved: the disk is full (ENOSPC); resuming this session may miss part of its conversation. Free up space on the worker's disk", the quota's fix being "Free up space or raise the quota on the worker's disk"; the worker is not named, the chat header shows it. The client shows it as any other text line. The CLI sends the frame only when it exits with status 0 (§8.1, `close`), so a process that is killed reports nothing; a frame that lost only the global config is written to the worker's log, with no line (§8.1) |
 | `conversation_cleared` | worker (adapter) | since 0.162: `/clear` started a new conversation in the same agent process, with a new transcript (Claude Code: `conversation_reset`, §8.1); `text` "Conversation cleared"; the session goes on in the new transcript, and the agent no longer has what was before the line in its context |
-| `command_output` | worker (mirror) | since 0.162: what a slash command printed (`/context`, `/cost` and the like), from the transcript (Claude Code: `<local-command-stdout>` and `<local-command-stderr>`, §9.1); `text` is the output, at most 4096 bytes |
+| `command_output` | worker (mirror; since 0.218 adapter) | since 0.162: what a slash command printed (`/context`, `/cost` and the like), from the transcript (Claude Code: `<local-command-stdout>` and `<local-command-stderr>`, §9.1); since 0.218 also from the adapter, the CLI's `<synthetic>` reply with `local_command_source` (§8.1); `text` is the output, at most 4096 bytes |
+| `goal` | worker (adapter, mirror) | since 0.218: a record of the runtime's goal (Claude Code's `/goal`, §8.1); `goal` is `{condition, state, reason?, checks?, duration_ms?, tokens?}`, `state` one of `set`, `unmet` (a check found it not met yet; `reason` says why), `met`, `failed` (the check found it impossible), `cleared`; `checks`, `duration_ms` and `tokens` with `met` and `failed`: how many checks ran, how long and how many tokens it took since it was set or, after a `--resume`, since the CLI set it again; condition and reason at most 4096 bytes each; `text` as Claude Code's own UI says it: "Goal set: <condition>", "Goal not yet met… continuing", "Goal achieved", "Goal could not be achieved", "Goal cleared: <condition>". The client draws `met`, `unmet` and `failed` as lines, `set` and `cleared` as none (the command's own output says it), and while the last of them since the last `conversation_cleared` is `set` or `unmet`, the goal row above the input (§6) |
 | `runtime_notice` | worker (adapter) | since 0.179: a message of the runtime or of one of its hooks ("Stop hook says: …", a setting applied in part); `text` is the message as is (§8.1) |
 | `model_fallback` | worker (adapter) | since 0.179: the runtime went on with another model (unavailable, overloaded, or with the user's consent); `text` "<model> → <other model>" and the runtime's words after a colon (§8.1) |
 | `model_refusal_fallback` | worker (adapter) | since 0.179: the model refused and another model answered; `text` as for `model_fallback`; the refused answer is taken back by a `retraction` (§8.1) |
@@ -668,8 +695,9 @@ Rules:
 - Events are tolerant: unknown fields in `payload` are ignored; an event of an unknown
   `type` is parsed as "unknown" and stored and forwarded as is; clients do not
   render it but do not crash; an unknown enum value inside an event
-  (`state`, `canonical`, `mode`, `kind`, `reason`, `policy_hint`, since 0.180 `action`, since 0.207 `place` of an option's `grant`) reads as "unknown". An event
-  of a known `type` with an invalid `payload` is an error.
+  (`state`, `canonical`, `mode`, `kind`, `reason`, `policy_hint`, since 0.180 `action`, since
+  0.207 `place` of an option's `grant`, since 0.223 `status` of a task in `tasks`) reads as
+  "unknown". An event of a known `type` with an invalid `payload` is an error.
 
 - The user's files always go into `user.message.artifact_ids[]`, including without text
   (`text` empty): this is input, and the agent receives them (§8.1, §12) **[decision]** (T16). An
@@ -715,9 +743,10 @@ Rules:
   worker disconnects or says `hello` again (the worker sends a rate above 0 again after
   `hello.ack`), and a session's when it or its project is deleted.
 - History is never rewritten: besides an input's `delivery` and `delivered_at` (§3 Event), the
-one change of a stored event is `joined` of a person's `user.message` (since 0.112, §17.2),
-since 0.172 of a room's input to its agent (§7.1.1) and since 0.174 of a `send`'s
-`peer.message`.
+one change of a stored event is `joined` (and, since 0.221, `joined_after`) of a person's
+`user.message` (since 0.112, §17.2), since 0.172 of a room's input to its agent (§7.1.1) and
+since 0.174 of a `send`'s `peer.message`, and since 0.231 `quiet` (with `joined_after`) of any
+input the worker acks `quiet` (§5.2, §17.2).
 A `retraction` (since 0.179) hides events in clients and deletes none.
   Protection against forged peer-message headers is applied on delivery to the runtime (§7.1).
 
@@ -936,11 +965,20 @@ Hub → worker:
   (§17.2): the hub marks it `delivered` and does not open a turn for it (its `ack` goes after the
   outbox entries of the session written before it, §5.2); since 0.112 it keeps that on the
   message as `payload.joined: true` and sends it to clients with the `delivery` frame (§6).
-  After `hello` the hub sends `session.start` with `mode: resume` to every session of this worker
-  that has a `pending` input, an open `approval`/`clarify` or an answer to a request not yet
-  acknowledged by the worker; after the `ack` to it — the unacknowledged answers, then the
-  `pending` inputs in `seq` order. To an input for a session that has had no `session.start` in
-  its process, the worker answers `error {code: unknown_session, retryable: true}`.
+  Since 0.231 `ack {event_id, quiet: true}` says the input waited when the owner pressed Stop
+  (`session.stop {quiet: true}`, §5.3) and the runtime wrote it into the agent's history without a
+  turn (§8.1, §17.2): the hub
+  marks it `delivered`, tells clients as for any delivery, clears the send buffer it carried
+  and opens no turn; an `hqc_ask` it carried fails with "<address> was stopped before it took the
+  question" (§7.1), and a room's input goes on as for a joined one (§7.1.1). It keeps that on the
+  message as `payload.quiet: true` and sends it with the `delivery` frame (§6). Only a worker that
+  was sent `session.stop {quiet: true}` writes inputs quiet, and only a hub of 0.231 sends that, so
+  an older hub never meets `ack {quiet}`.
+  After `hello` the hub sends `session.start` with `mode: resume` to every session
+  of this worker that has a `pending` input, an open `approval`/`clarify` or an answer to a request
+  not yet acknowledged by the worker; after the `ack` to it — the unacknowledged answers, then the
+  `pending` inputs in `seq` order. To an input for a session that has had no `session.start` in its
+  process, the worker answers `error {code: unknown_session, retryable: true}`.
 - If the agent process fails to start (no binary, profile not configured), the worker
   answers `error {retryable: true}`; after **3 failed starts** in a row the hub sets the
   input's `delivery: failed`, writes a `system` event with the reason, and the session goes to
@@ -1064,6 +1102,19 @@ MCP calls (worker → hub → worker):
   their browser: the worker runs Claude Code with `--chrome` only if its `worker.toml` has
   `browser = true` and the session is its owner's and not restricted, and otherwise starts the
   agent with `--no-chrome` and writes `system browser_refused` (§4, §8.1, §14); absent — off;
+  `no_wait` (since 0.232) — `true` on the start the hub sends for a side question (§17.5): with
+  no free slot (`max_sessions`) the worker acks it and does not put the session in line for one
+  nor write `system waiting_for_slot`, keeps the start's settings for the agent's next start, and
+  the side question that follows is answered with an error; absent — false;
+  `mcp_servers` (since 0.235) — the names of the owner's remote MCP servers the session's project
+  gets (§6 `/api/mcp/servers`), not for a restricted session nor another runtime than Claude Code;
+  the worker takes them only in an environment with `hub_mcp = true` (§14), for an unrestricted
+  session of its owner, valid names only (`[a-z0-9_-]{1,32}`, not `hqc`, no `_` at either end
+  nor `__`), and gives each to the CLI in `--mcp-config` under its own name as a stdio relay
+  `hqc-worker mcp --socket <socket> --upstream <name>` with the session token in its `env`, with
+  no address and no header, so the CLI names its tools `mcp__<name>__<tool>` as with a direct
+  connection and none is allowed outright; a change reaches the agent at its next start; absent —
+  none;
   `allow_rules` (since 0.52, T48) — hqc's allow rules of the
   session's workspace (§3 Workspace), absent when none; the worker keeps the latest list per
   canonical workspace, shared by its sessions there, and drops a rule that is not valid hqc
@@ -1148,7 +1199,19 @@ MCP calls (worker → hub → worker):
   schedule, a message from before 0.43).
   `schedule_id?` (since 0.70) — the `schedule_id` of a `user.message` the hub cron sent (§4,
   §16): such a run waits for the end of a running turn instead of joining it (§17.2).
-- `session.stop` {session_id} — interrupt the current turn.
+  `human?` (since 0.219) — `true` only for what the owner typed: the `user.message` has
+  `payload.human` (§4), no `peer`, no `schedule_id`, the room did not rewrite its text (§7.1.1) and
+  no buffered `send` message of another session stands in front of it (`peer_prefix` is empty);
+  absent otherwise (a message of another session, a room's input, a run of a schedule, a note of the
+  hub's own: a resume, `hqc_move`, subagent leftovers). The worker writes Claude Code's
+  `origin: {kind: "human"}` for such an input alone (§8.1); one with a `peer`, a `peer_prefix` or a
+  `schedule_id` is not human whatever the frame says. The two exceptions are hqc's own notes that
+  stand in front of a human input without taking its mark: a fork's first-input note and the
+  worker's note of the background tasks a move stopped.
+- `session.stop` {session_id, quiet?} — interrupt the current turn. With `quiet: true` (since
+  0.231, sent only by the owner's own Stop of a session or room, never by a pause) the worker also
+  writes what waited at the Stop into the agent's history without a turn (§8.1, §17.2); without
+  it, and with no turn running, nothing is marked. A worker older than 0.231 ignores the field.
 - `session.background` {session_id, call_id} → `ack` (since 0.125) — move the agent's
   running call `call_id` to the background: the agent goes on, the call keeps running (Claude
   Code: the `background_tasks` control request, §8.1). The client sends one of the session's
@@ -1161,6 +1224,34 @@ MCP calls (worker → hub → worker):
   request, §8.1). The client sends a `stoppable` row of the session's `subagents.live` (§4).
   Like `session.kill` it is acked also when no agent runs; what the runtime answers (stopped,
   refused) is only in the worker's log, and the task's end comes as any end of it.
+- `session.withdraw` {request_id, session_id, event_id} → `result {request_id, withdrawn}`
+  (since 0.219) — the owner takes back the input `event_id`, which the hub sent as
+  `session.input` and the worker has not acked. `withdrawn: true`: the input is gone, the agent
+  will never see it, and the worker sends no `ack` and no `error` for it (nor "cancelled by
+  Stop"); `false`: the agent has taken it already (§17.2). A session the worker does not run, and an
+  input it neither queues nor has written to the runtime (after a `session.kill` or a restart),
+  hold nothing: `true`. When the runtime does not answer the cancel in time (§8.1) the worker answers
+  `error`, and the input is a written one again: if the runtime then cancels it by itself, that is
+  a drop like any other and the input is sent again, not taken for a withdrawn one.
+- `session.input_now` {request_id, session_id, event_id} → `result {request_id, sent_now}`, or
+  `error {code: not_now}` (since 0.219) — the owner sends the input `event_id`, which the worker
+  holds and the agent has not taken, into the running turn at once (§17.2). `sent_now: true`:
+  written into the turn with priority now; `false`: the agent had taken it already, or the turn
+  ended meanwhile and the input waits as before. `not_now`: the runtime cannot take it into a
+  turn now (none runs, a request waits for an answer, a move waits, the turn answers an `hqc_ask`),
+  the input is no person's plain message (a slash command, a capped one, one of another session,
+  a run of a schedule), or it is the turn's own input.
+- `session.side_question` {session_id, event_id, question, history?[{question, response}]} →
+  `ack` (since 0.232; examples `hub.session.side_question*.json`) — ask the agent a side
+  question (§17.5; Claude Code: the `side_question` control request, §8.1). `event_id` is the
+  `event_id` of the hub's `side.question`, which the worker's `side.answer` names; `history`
+  the session's earlier side questions that got an answer, oldest first (absent when none). An
+  agent whose process does not run is started first, resuming its transcript, with no input
+  and no turn; with no free slot (the start of a side question carries `no_wait`, below), or the
+  session held by VS Code, the question is not asked and the worker answers it with a
+  `side.answer {error}` at once. The `ack` comes after the
+  question is written to the runtime, and the answer, or why there is none, comes as
+  `side.answer` (§5.4).
 - `session.subagent_history` {request_id, session_id, task_id, after?, before?} → `result
   {request_id, events[], truncated, continues?}` (since 0.181) — what subagent `task_id` of
   `subagents.live` (§4) has done, for the history the client opens under its line (§6) and, since
@@ -1313,7 +1404,7 @@ MCP calls (worker → hub → worker):
   with git's message; `force` (only when the user confirmed the files the inspection listed, §6)
   removes them. A worktree folder that is gone already is pruned and `removed: false`. `force`
   changes nothing for a clone.
-- `secret.put` {request_id, session_id, kind, name, value?, passphrase?, remember?, comment?} →
+- `secret.put` {request_id, session_id, kind, name, value?, vault?, passphrase?, remember?, comment?} →
   `result {request_id, secret {note, path?, fingerprint?, public_key?, remembered?}}` or `error
   {invalid_frame}` with the reason (since 0.147, §14) — a secret or an ssh key for the session's
   running agent. `kind`: `secret` (`value` is the secret: the file `$HQC_SECRETS/<name>` of the
@@ -1322,9 +1413,15 @@ MCP calls (worker → hub → worker):
   and with `remember` kept for the session's workspace) or `ssh_keygen` (the worker makes an
   ed25519 key with `comment`, `hqc <name>` when absent, keeps it for the workspace and loads
   it; `public_key` is its public half). `name` is a key name of §14 (letters, digits, `_`, `-`
-  and `.`, 1 to 64, not starting with `.` or `-`); `value` is at most 64 KiB. `note` is what the
-  agent is told, never the value. The worker takes it only with `session_secrets`, for a session
-  of its owner that is not restricted and whose agent runs now; a kept name the workspace has
+  and `.`, 1 to 64, not starting with `.` or `-`); `value` is at most 64 KiB. `vault` (since
+  0.216) stands for `value` of a `secret` or an `ssh_key`, one of the two exactly: the exact name
+  or the id of a Vaultwarden (Bitwarden) entry, one line of 1 to 200 characters, which the worker
+  reads itself with `rbw` on its machine (§14) — the value never passes through the hub; a worker
+  without `vault` refuses it, and a locked `rbw`, no entry of that name or id, several of that
+  name, an empty value and one over 64 KiB are refused with the reason, never with what `rbw`
+  printed on its standard output. `note` is what the agent is told, never the value. The worker
+  takes it only with `session_secrets`, for a session of its owner that is not restricted and
+  whose agent runs now; a kept name the workspace has
   already, a bad key, a wrong passphrase are refused, and the reason never carries the value, the
   key or the passphrase; a frame that does not parse is answered "secret.put is malformed",
   without the parser's words. The hub sends it only on the owner's request and waits 30 s; the
@@ -1414,7 +1511,9 @@ MCP calls (worker → hub → worker):
   Code live sessions registry and reports holders (§9.3); `moves: true` (since 0.75) — the worker
   moves a moved session's transcript (§8.1), reported only when Claude Code's config folder
   (`$CLAUDE_CONFIG_DIR`, else `~/.claude`) exists at the worker's start, where the transcripts
-  are; the hub moves only sessions of such a worker (§6).
+  are; the hub moves only sessions of such a worker (§6). `vault: true` (since 0.216) — its
+  `worker.toml` has both `session_secrets` and `vault` (§14): `secret.put` may name a Vaultwarden
+  entry instead of the value (§5.3); the hub keeps it with the rest of `capabilities`.
   `environments` (since 0.56, T43) — the environments of the local config (§14) as `{name,
   allow_local_mcp?, permissions {unblock?, allow?, deny?}}`, without `default` and never with the
   values (or the names) of `env`; a plain string, as workers before 0.56 send, reads as an
@@ -1514,7 +1613,26 @@ MCP calls (worker → hub → worker):
 - `mcp.call` {request_id, session_token, tool, args} → `mcp.result` (fast tools) or `ack {}`
   (deferred, §5.2); through the outbox without the token (since 0.33, T30)
 - `mcp.cancel` {request_id, reason} → `ack {}` — a call that died on the worker's side
-  (§5.2, §7.2)
+  (§5.2, §7.2); also a relay request below, which the hub then stops
+- `mcp.upstream` {request_id, session_token, server, method, params} → `mcp.result` (since
+  0.235) — a request of the relay of the owner's remote MCP server `server` (§5.3
+  `mcp_servers`), `method` one of `initialize`, `tools/list`, `tools/call`, `params` as the CLI
+  sent them (at most 64 KiB). Sent directly, never through the outbox, and only while connected:
+  a call to a remote service is not made late; a lost connection fails the open ones on the
+  worker ("may still have been carried out"). The relay asks only for a server its agent was
+  started with. The hub checks the token as for `mcp.call` (the session must be this worker's),
+  that the server is the session owner's and its project's, and answers `result` `{upstream:
+  <the server's JSON-RPC result>}` or, for one over 512 KiB, `{upstream_artifact: {id, size,
+  sha256}}`: an artifact of the owner linked to the session, which the worker downloads with
+  `GET /worker/artifacts/{id}` and checks, removed after an hour; over 64 MiB, and every failure,
+  is `error` `mcp_unavailable` (unreachable, an error of the server, a URL into a private
+  address), `mcp_sign_in` (`401`/`403`: set the credentials again), `mcp_timeout` (the server's
+  timeout; "the call may still have been carried out on the server: check before retrying") or
+  `mcp_too_large`, which the relay gives the CLI as a tool error. `initialize` answers the
+  server's `serverInfo` and `instructions` (cached per server for an hour), which the relay hands
+  the CLI, so the server's instructions reach the agent's context; `tools/list` the server's
+  tools (cached the same way, all pages); `tools/call` goes to the server in the MCP session of
+  this session and server (below). The relay answers `ping` itself.
 - `worker.limits` {five_hour?, seven_day?, status?, rate_limit_type?, resets_at?} → `ack {}`
   (since 0.81) — the usage limits of the account the worker's agents run on, each window
   `{utilization (0..1), resets_at (Unix seconds)}`: the 5-hour window ("Current session" of
@@ -1781,8 +1899,49 @@ the rest is marked "later"):
   name the owner has, `409 provider_in_use` on deleting one sessions run on): {name, label,
   base_url, model, context_tokens?} (`context_tokens` 1000 to 10 000 000); a provider object has
   `workers[]`, the owner's workers whose last `hello` allowed it.
-  `POST /api/sessions/{id}/secrets` (since 0.147, §14) {kind, name, value, passphrase?,
-  remember?, request_id?} (unknown fields: `422`): a secret (`kind: secret`) or an ssh private
+  Remote MCP servers (since 0.235, `docs/ITERATION-7.md`): `GET/POST /api/mcp/servers`
+  ({servers: [...]} and `201`), `PATCH/DELETE /api/mcp/servers/{id}`, `POST
+  /api/mcp/servers/{id}/test`, the owner's only. A server: {id, name, url, header_names[],
+  timeout_s, all_projects, project_ids[], status (`ok` | `failing` | `unknown`), last_error?,
+  tools[] (names, as last listed), instructions?}. `POST` takes {name, url, headers?[{name,
+  value}], timeout_s?, all_projects?, project_ids?}; `PATCH` the fields given, `headers` replacing
+  all of them. `name` as in `session.start.mcp_servers`, unique per owner (`409 name_taken`); `url`
+  https (http only to a loopback host), without a user or password; at most 8 headers, a name of
+  letters, digits, `-` and `_` and none the hub sets itself (`Host`, `Content-Type`, `Accept`,
+  `Mcp-Session-Id`, `Mcp-Protocol-Version` …), a value of one line up to 4 KiB; `timeout_s` 30 to
+  1800, 300 by default; `project_ids` the owner's; at most 50 servers (`409
+  too_many_servers`). Header values are write-only: sealed with `HQC_MCP_KEY` (XChaCha20-Poly1305,
+  the server's id as associated data), never sent back, logged or put into an event; without the
+  key a server with headers is `422 mcp_key_missing`. `test` runs `initialize` and `tools/list` in
+  an MCP session of its own, closed after, and returns the server with its status. A changed URL
+  or headers drop the cache and the open MCP sessions. The hub speaks Streamable HTTP (`POST` with
+  a JSON or an event-stream answer, `Mcp-Session-Id`, `Mcp-Protocol-Version`), one MCP session per
+  hqc session and server, opened on the first request, opened again once when the server answers
+  `404` for it, and closed (`DELETE`) when the agent's process stops or after an hour unused;
+  redirects are not followed, and the address connected to is the one checked against private
+  ranges (§20).
+  OAuth (T65): a server with `auth: oauth` ({auth, oauth_client_id?, oauth_client_secret?,
+  oauth_scope?} in `POST`/`PATCH`; the secret write-only; status `sign_in` until signed in, and
+  `signed_in` in the server object) signs in through its authorization server, as MCP's
+  authorization spec has it. `POST /api/mcp/servers/{id}/sign_in` → {url}: the hub discovers the
+  server's protected-resource metadata (RFC 9728, named by its `401` or at the well-known path)
+  and the authorization server's metadata (RFC 8414 or OpenID), registers itself (RFC 7591) when
+  no client id is given and the server offers it (`422 client_id_needed` otherwise), and answers
+  the authorization URL with PKCE (S256), a state bound to the owner for ten minutes, the
+  `resource` (RFC 8707) and the scope given or the server's. The browser comes back to `GET
+  /api/mcp/oauth/callback`, behind the hub's sign-in like `/api/*`, which exchanges the code and
+  answers a plain page; the redirect URI is the first of `HQC_PUBLIC_ORIGINS`, else the request's
+  host. Tokens and the client secret are sealed under `HQC_MCP_KEY`; the access token is refreshed
+  a minute before it expires and once when the server refuses it (one refresh per server at a
+  time, a rotated refresh token kept); a failed refresh sets `sign_in`, and the call's error says
+  to sign in again. `DELETE /api/mcp/servers/{id}/sign_in` forgets the tokens. The client shows
+  the section "MCP servers" in Settings (the list with status and tools, add and edit with
+  headers or OAuth, Test, Sign in, Sign out, Delete) and the servers a project gets in its
+  settings (T66).
+  `POST /api/sessions/{id}/secrets` (since 0.147, §14) {kind, name, value?, vault?, passphrase?,
+  remember?, request_id?} (unknown fields: `422`; one of `value` and `vault` exactly, else `400`;
+  `vault` since 0.216 — a Vaultwarden entry the worker reads itself, §5.3, only on a worker whose
+  `capabilities` have `vault`, else `409 unavailable`): a secret (`kind: secret`) or an ssh private
   key (`kind: ssh_key`, with `passphrase` and `remember` for it only) for the session's running
   agent, from its owner, on a worker of theirs with `session_secrets` (else `409 unavailable`),
   not the service session, not archived. The hub passes it in `secret.put` (§5.3) and keeps it
@@ -1792,7 +1951,9 @@ the rest is marked "later"):
   secret_refused` with the worker's reason (no running agent, a bad key, a wrong passphrase, a
   kept name the workspace has), `504 worker_timeout`. The feed gets `system secret_given` with the
   name and, for a key, its fingerprint ("Secret WIFI_PASS given", "ssh key pi-lab (SHA256:…)
-  given, remembered for this workspace"). `request_id` answers the session's open `hqc_secret`
+  given, remembered for this workspace"), and the entry when the worker read it from
+  Vaultwarden ("Secret WIFI_PASS given from Vaultwarden entry home-wifi"; a locked `rbw` is `422
+  secret_refused` too). `request_id` answers the session's open `hqc_secret`
   (§7): its `name` and `kind` must be the request's (`400`), a closed one is `409
   request_closed`; the request closes with the call's result and the feed gets `approval.response
   {option_id: give}`; a refused give leaves it open. "Decline" is the request's answer with
@@ -1886,7 +2047,8 @@ the rest is marked "later"):
   agents (§7.1.1): `system room_stopped` "Stopped" in the room first, then each agent that is
   not archived stopped as its own `/stop` does (its own requests cancelled with `stopped`, the
   runtime's left to a connected worker, §10.1, and `session.stop` to its worker);
-  the agents' inputs stay as they are (`session.stop` interrupts the current turn only, §5.3),
+  the agents' inputs are not failed (since 0.231 the worker of an agent whose turn runs at the
+  Stop writes what waited into its history without a turn, §8.1, §17.2),
   and a turn on a message from before "Stopped" posts nothing unless a later one joined it
   (§7.1.1); `{sent}` is `true` when one went out. Since 0.130 `/restart` ends the agent's
   process and starts it again at once (`session.kill`, then `session.start` with `mode: resume`,
@@ -1908,6 +2070,61 @@ the rest is marked "later"):
   `foreground_calls`: Claude Code moves a foreground call of the session by its id, a
   subagent's too, and the session is the user's own. A `call_id` that is empty, longer than
   128 bytes or has U+0000: `400 bad_request`; service session: `409 system_session`
+- `POST /api/sessions/{id}/inputs/{event_id}/withdraw` → `{withdrawn: true}` (since 0.219;
+  `write` level, as `/input`): the owner takes back a message of theirs that waits for the agent
+  (§17.2). The message becomes `delivery: withdrawn`, which the hub tells the open clients with a
+  `delivery` frame and removes from `inflight`; the pages of the feed and the subscription backlog
+  go on returning it as withdrawn (§3), `hqc_read`, a fork's copy and the search never do. What
+  the hub does depends on whether a worker may hold the message. One the hub never handed to a
+  worker (no `handed_at`, §3: the worker was away since it was typed, the session is paused or not
+  started) is withdrawn on the hub alone. One that was handed is asked about at the worker with
+  `session.withdraw` (§5.3) on the worker's connection, whatever the session's start state there
+  (a `session.kill` clears the hub's `inflight` and the worker's queue, so the connection of a
+  paused session holds nothing, and the worker says so): `withdrawn: true` withdraws it, `false`
+  is `409 already_taken` and the message stays as it is. With no worker connection a handed
+  message is not withdrawn (the worker may keep the input and give it to the agent): `409
+  worker_offline`, "the worker holds this message; try again when it is connected", the message
+  stays pending. While the request is outstanding the connection's state keeps the message in
+  `withdrawing`, so the hub hands it to nobody and a second take-back of it is `409 withdrawing`,
+  "this message is being taken back already"; the set is cleared when the request ends in any
+  way (the answer, an error, the connection closed). The worker's answer is waited for 10 s, and
+  settled also when the owner's request is gone meanwhile. One that is withdrawn already is `409
+  withdrawn`, "this message was taken back already", and the client that asked puts its text and
+  files back into the input, as on `withdrawn: true`. One the agent took already (`delivery: delivered`, or no longer pending) is `409
+  already_taken`. The hub sends no input that is withdrawn (it marks
+  `handed_at` and checks `delivery = pending` in one statement before each `session.input`). An
+  event that is not a `user.message` of this session with `payload.human` (§4: an unknown id,
+  another session's, a resume note, a hub's note, a run of a schedule): `404`; archived: `409
+  archived`, driven from VS Code: `409 locked_vscode`, service session: `409 system_session`, a
+  room: `409 room`; no answer from the worker `504 worker_timeout`, a worker that answers `error`
+  (e.g. a runtime that does not answer the cancel): `502` with the worker's own `error` code and
+  message, not `400 invalid_path`. Two limitations. A worker that answers after the 10 s: the
+  owner has `504` and the hub drops the answer; when the worker had dropped the message, it stays
+  queued and handed to nobody until the owner takes it back again (the worker holds nothing then
+  and says so: the message is withdrawn and its text comes back), or until the worker connects
+  again or the agent's process restarts, which hands it again and it runs. The owner's request is
+  gone (the connection broke) or its `200` is lost: the hub withdraws the message all the same and
+  the chat hides it, but its text does not come back into the input, unless the owner takes it
+  back again before the client learns of it (`409 withdrawn`)
+- `POST /api/sessions/{id}/inputs/{event_id}/now` → `{sent_now}` (since 0.219; `write` level):
+  the owner sends such a message into the running turn at once (§17.2): `session.input_now` to
+  the worker connection that holds the message in `inflight` (§5.3), whose `sent_now` comes back as
+  it is. `409 not_now` when the worker answers `not_now` (no turn runs, the turn waits for an
+  answer to a card of the agent's, a move waits, the turn answers an `hqc_ask`), or when no started
+  connection holds the message (the worker is offline, the session paused or not started, the
+  message handed in an earlier connection); a worker's other `error` is `502` as for `/withdraw`,
+  and the other refusals are those of `/withdraw`
+- `POST /api/sessions/{id}/side_question` {text} → `201 {event}` (since 0.232; `write` level;
+  `api.side_question.request.json`, `api.side_question.json`): stores `side.question` (§4) and
+  sends the worker `session.side_question` (§5.3) with the session's `history` of side
+  questions, after sending `session.start` (with `no_wait`) when the session's agent is not
+  started on this connection, so that a side question works for an unloaded agent (§17.5). `400` for a text
+  that is empty or only blank; `409 room` (a room has no agent of its own), `409 archived`,
+  `409 locked_vscode` (as `/input`), `409 paused` (a paused agent is not started), `409
+  not_askable` (a runtime other than Claude Code), `409 worker_offline`, `409 system_session`;
+  the hub also stores `side.answer {error}` at once when the worker goes away between its check
+  and the send. A text with U+0000 is stored and sent with it replaced, as any text. The client sends it for a composer text `/btw
+  <question>` or `/side <question>` (§6 client layout).
 - `POST /api/sessions/{id}/tasks/{task_id}/stop` → `{sent}` (since 0.161; `write` level, as
   `/stop`): `session.stop_task` to the worker (§5.3), `sent: false` when the worker is not
   connected; nothing comes back of what the runtime did, the task's row leaves
@@ -1953,7 +2170,16 @@ the rest is marked "later"):
   without the source's events. Since 0.108 a fork before a message with `during_text` keeps the
   `agent.message` the client shows above it (below, the WebSocket paragraph) as the newest cut
   and the last copied event; an `agent.thinking` the client shows above it (since 0.208) is not
-  kept. Since 0.161 a fork before a message the client shows after the
+  kept. Since 0.221 a fork before a message with `joined_after` cuts at the last `agent.message` after
+  the message and not past `joined_after`, or at the place of the turns it waited through (below)
+  when that is later, and keeps the events up to it but the inputs; with neither it cuts before
+  the message as for any other, and such a message has no `during_text` place. The calls and the
+  thinking after that `agent.message`, which the feed shows above the message, are not kept, as a
+  thinking above is not. A fork's copy of a message keeps `joined_after` in the copy's own `seq`:
+  the last copied event that is no input and stood at or before it, none when that is not past
+  the message (a fork leaves out `usage`, `status` and requests, so its `seq` are not the
+  source's).
+  Since 0.161 a fork before a message the client shows after the
   turns it waited through (the same paragraph; one with `during_text` too) cuts after them: the
   newest cut is the last `agent.message` before the place the client shows the message at, and
   the feed also gets the events after the message and before that place but its inputs. The
@@ -2126,15 +2352,15 @@ the rest is marked "later"):
   body itself: §16. `endpoint`: only `https://` on push service hosts (§20), otherwise `400`;
   at most 10 subscriptions per user (`409 push_limit`); someone else's `endpoint`: `409
   conflict`, not a takeover; a repeated request for one's own subscription updates it.
-- `/api/push/apns` (since 0.214, §16): Apple push to the native iOS client. `GET` →
+- `/api/push/apns` (since 0.237, §16): Apple push to the native iOS client. `GET` →
   `{enabled}` (the hub has `HQC_APNS_*`); `POST {token, sandbox?, key?}` stores the device token the
   app got from iOS (hex, 64 to 200 characters, kept in lower case; `sandbox: true` for a
-  development build, sent through APNs' sandbox host; since 0.218 `key`: the device's notice
+  development build, sent through APNs' sandbox host; since 0.238 `key`: the device's notice
   key, 32 bytes in base64, `400` otherwise; a later `POST` replaces it) → `201 {id}`; `400` for
   another token;
   the limit and the rules of a push subscription apply (`409 push_limit`, someone else's token
   `409 conflict`); `DELETE {token}` → `204`, the device takes no more notices.
-- Native client sign-in (since 0.214, `crates/hqc-hub/src/native.rs`; OIDC mode since 0.220):
+- Native client sign-in (since 0.237, `crates/hqc-hub/src/native.rs`; OIDC mode since 0.240):
   the iOS app cannot read the session cookies of the system browser, and identity providers such
   as Google refuse a login page embedded in an app. The app opens
   `GET /api/native/login?challenge=<base64url SHA-256 of a verifier>&state=<s>` in the system
@@ -2326,10 +2552,14 @@ the same column with one head row after "‹" back to the projects and no button
 The chat header (since 0.206): the title, then the meta row — the state, the permission mode and
 the model as round pills beside it (below and §6 `permission_mode`; none for a room or the
 service session, and an archived session's are the names alone, without a menu), then, on a
-computer, "started by <address>", "on <worker>", the folder with its copy button, "Browser" and
-the cost. On a phone the header is lines at even gaps, with even padding above and below: "‹",
-the title and the header's buttons, centred on the title's line, the title cut only at the first
-button; the state at its full text and "N agents" (a room's: the state and its mode); the two
+computer, "started by <address>", "on <worker>", the folder with its copy button, "Browser", the
+cost and, since 0.222, the context. Since 0.229 the cost item names the session's tokens after
+the cost ("$2.25 · 3.4M tokens this session"; a room's "this room" sums its agents'; the tokens
+show also for a session on a provider, which has no cost shown; the hover gives the exact
+number). On a phone the header is lines at even gaps, with even
+padding above and below: "‹", the title and the header's buttons, centred on the title's line,
+the title cut only at the first button; the state at its full text and "N agents" (a room's: the
+state and its mode); the two
 pills, each at its full text with its chevron, 22 px tall as on a computer (20 px in a phone's
 Compact look), then "started by <address>", whose address gives way to an ellipsis first and a pill's text (a
 provider's long label) only past it. The lines under the first are as wide as the header past
@@ -2337,14 +2567,32 @@ provider's long label) only past it. The lines under the first are as wide as th
 a room has no pills, and its agents' line stays right under its state's, above "started by" of
 a room an agent made. "More" says where the session runs, "<worker> · <folder>" with the
 folder's copy button (no worker while VS Code holds the session: the state pill names it), and
-the cost. The model pill names the provider (§3 Provider), else
+the cost with the tokens. The model pill names the provider (§3 Provider), else
 the model (the one chosen, or the last usage's when none is or it is the chosen one's full
 name), else "Default"; its menu is the model menu above, the session's model checked (a family
 for its alias and for each of its versions, the version after the family's name, "Opus 4.8"):
 the checked entry itself (the alias, or the version in the submenu) only closes the menu, a
 family checked for one of its versions switches to its alias. "Another model…" asks for the name
 in the menu (Enter sends it, an empty one nothing); the worker's usage limits stand under the
-items (§6 `GET /api/workers`). The title is renamed in place:
+items (§6 `GET /api/workers`).
+
+Since 0.222 the context item stands after the cost, behind a "/": "<n>% context" — the
+`context_tokens` of the last `usage` that has them, as a share of its `context_limit` (rounded,
+over 100 when the context is past the limit; the hover says "329k of 967k tokens before
+auto-compaction") — and " · cache m:ss", the time left of the session's prompt cache, which ends
+`cache_ttl_s` after that `usage`'s time (the worker has taken the time since the request off
+it), counted down every second while there is time left, by a clock of the item alone, not of
+the chat; after its end "cache expired"; the hover adds "Claude's cache of this session ends at
+<time>; a message after that reads the whole context again". The cache part is shown only while
+the session is not Running (a response in the work renews the cache) and not for a session on a
+provider, whose endpoint has no such cache; a room has no item, and neither has a session VS
+Code holds (its turns are not reported, the numbers would stand still); after VS Code lets the
+session go, the item shows the last hqc turn's numbers until hqc's next turn. A later `usage`
+with the total only leaves the item as it was (once the earlier `usage` is loaded, §6 below),
+and a cache end the date cannot hold leaves the cache part out. A `system
+conversation_cleared` after that `usage` empties it. On a phone the item is short, "34% · cache
+41:12", and stands in the state's line after "N agents". It does not give way in the one-line
+row, as the cost does not. The title is renamed in place:
 on a computer a pencil after it, shown on hover, and on a phone a tap on the title turns it into
 a field; Enter or leaving the field sends `PATCH /api/sessions/{id} {title}` with the name
 trimmed (an empty or unchanged one sends nothing), Esc keeps the old one, a refusal is the
@@ -2479,15 +2727,18 @@ key button beside the attach one: a form above the composer with the kind (Passw
 name and the value — a password field (`autocomplete="current-password"`, so a phone's password
 manager fills it), a key a text area without spelling help, with an optional passphrase and
 "Remember for this workspace". "Give" sends `POST /api/sessions/{id}/secrets`; on success the
-answer's `note` goes on a line of its own into the message being written and the form closes;
-on an error the form keeps what was typed and shows the reason. The value lives only in the
-form while it is open: never in the draft, the feed, `localStorage` or `sessionStorage`. The
-hub's `hqc_secret` card (`approval.request` with `tool: hqc_secret` and `secret`) shows "The
-agent asks for a secret / an ssh key: <name>", the agent's purpose and the same fields, with
-"Give" and "Decline"; it is answered once the hub's `approval.response` with `give` or `deny`
-comes, and on the requests screen it has the same form. The rules screen of a workspace whose
-worker has `session_secrets` lists the ssh keys kept for it (name, fingerprint) with Delete
-after a confirmation; an offline worker gives a line saying so.
+answer's `note` goes on a line of its own into the message being written and the form closes; on
+an error the form keeps what was typed and shows the reason. The value lives only in the form
+while it is open: never in the draft, the feed, `localStorage` or `sessionStorage`. The hub's
+`hqc_secret` card (`approval.request` with `tool: hqc_secret` and `secret`) shows "The agent
+asks for a secret / an ssh key: <name>", the agent's purpose and the same fields, with "Give"
+and "Decline"; it is answered once the hub's `approval.response` with `give` or `deny` comes,
+and on the requests screen it has the same form. When the card names a Vaultwarden entry
+(`secret.vault`, since 0.216) it opens on "Vaultwarden | Type it" set to Vaultwarden: the entry
+in a field the owner may change, and "Give" sends `vault` instead of a value — the worker reads
+it, and the value reaches neither the client nor the hub; "Type it" gives the fields above. The
+rules screen of a workspace whose worker has `session_secrets` lists the ssh keys kept for it
+(name, fingerprint) with Delete after a confirmation; an offline worker gives a line saying so.
 
 The browser (since 0.148, §14). The menu of the chat header's mode pill of a session whose worker
 has `browser` has, under the switch, "Browser: off · Give the browser" or "Browser: on · Turn
@@ -2534,11 +2785,16 @@ stands at the right end of its first line, inside the bubble or plate for the us
 note on that line (since 0.178 an icon, its words the tooltip: "Joined the turn", §17.2; "Instead
 of the request", §10.1) and before "· scheduled", "· awaiting delivery", "· queued" (since 0.161,
 an input that came while a turn ran, see the WebSocket below), "· not delivered" or "· forking…";
-its buttons are always shown, in the line's flow so that they cover no text: Search, Copy, Quote
+its buttons are always shown, in the line's flow so that they cover no text: Copy
 and, for the user's message, "Add to quick messages" (see quick messages above) and "Fork from
-here", left of the time in its line (inside the bubble or plate for the user's and the text
-answer's), on a phone too, except that a phone's agent message with a usage line has them at that
-line's right end (since 0.204, see Quote below). Since
+here", at the message's bottom right, on a computer and a phone alike (since 0.228; from 0.204
+left of the time in its first line, see Copy and Quote below): at the right end of an agent
+message's usage line and of the bottom line of "Reply to"; else floated right at the end of the
+text's last line (inside the bubble or plate for the user's and the text answer's), so that a last
+line with room keeps them and a full one puts them on a line of their own under it; after a text
+that ends in a code block, a table, a rule, a quote or a formula, on a line of their own; a message
+with no text (files only) has them left of its time. A user's text and a reasoning are shown without
+their trailing line breaks, which would put the buttons lines below the text. Since
 0.156, until the hub answers a fork (it copies the source's history first, seconds for a long
 session) the message says "· forking…" and its "Fork from here" is disabled; the client asks for
 no second fork before the same message meanwhile.
@@ -2614,37 +2870,50 @@ or the result's (an error's `error_text`; a done one's without the CLI's trailer
 Markdown marks; a click on the head opens the whole text as Markdown. In the Compact look the
 start's mark is a pulsing dot while it runs, a check when done, a cross when it failed or stopped
 and a grey dot in the background; the end's a check when done, else a cross.
-Search, Copy and Quote (since 0.204; the client's menu of a right click and a phone's "Quote" button
-are gone, a right click gives the browser's own menu): the buttons of an agent message, the user's
-message, a text answer, a message from another session and the reply to it, what the session sent to
-another ("Sent to") and the reply it got ("Reply from"), a room post and the agent's reasoning (at
-the right end of its summary line, folded or open; a click on them neither folds nor unfolds it),
-also in the history of a subagent; tool output has none. They are always shown (see the message's
-time above), Search being a slot at the strip's left end that keeps its place, hidden and not
-clickable, while the message holds no selection, so that the line does not re-wrap when one is made.
-A message holds the selection that starts in it, else the one that ends in it, and its selection is
-the browser's own text when the range lies inside it; one that leaves it is clipped to the message,
-by lines (paragraphs, list items and table rows on separate lines, cells apart by a tab), without
-the message's time and head, its meta line, the summary line of a reasoning (a folded one: only that
-line, without its "Thinking · "), the caption bar of a code block and the buttons (a triple click
-that ends at the start of the next block, or a range across two messages, gives the first message
-its own part). Copy puts the selection into the clipboard, else the message's text; "Quote" puts the
-selection into the input as `> ` lines (and clears the selection), else the message's first two
-sentences (`Intl.Segmenter`, a blank line between paragraphs is not one), with "…" after them when
-text follows (after a space when they end in `.`, `!`, `?` or `…`); it is shown where there is an
-input; "Search in <the search picked in Settings>" (since 0.142), live while the message holds a
-selection, with or without an input, opens its results for the text in a new tab. A press on the
-buttons reads the selection and keeps it as it was when it began: a mouse press does not clear it,
-and a phone's tap, which clears it before the click, still acts on the text it held; the click, a
-press elsewhere or a press the browser takes over lets go of it. The input is
-one row: the paperclip, the field growing with its lines up to 200 px, send; on a computer its
-placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input takes the
-caret when the chat opens, once its newest page is in, unless a request waits for an answer (an open
-approval in the feed, or the session `waiting`), another field has the focus, or a menu or the
-slid-out column is open; on a phone only when the chat replaces a new session's window. An open chat
-stays at its bottom while its images load: only a scroll up lets go of the bottom, and a move up
-while the feed's scroll range changed is the browser's, not a scroll up (since 0.164), unless it
-comes in the user's own scroll up (since 0.198).
+Copy (since 0.204, with Search and Quote until 0.233; a phone's "Quote" button is gone): the button
+of an agent message, the user's message, a text answer, a message from another session and the reply
+to it, what the session sent to another ("Sent to") and the reply it got ("Reply from"), a room post
+and the agent's reasoning (at the right end of its summary line while folded, since 0.228 at the end
+of its text while open; a click on it neither folds nor unfolds it), also in the history of a
+subagent; tool output has none. It is always shown (see the message's time above) and puts the whole
+text of its message into the clipboard, whatever is selected in it. A press on the strip's buttons
+does not take the focus from the input. "Quote" (since 0.234; before it a button of every message,
+which took the selection or, with none, the message's first two sentences) is one button over the
+input, not on the messages: the word "Quote" in the input's row, over the right end of the field,
+left of send, taking no room, so that the field, its wraps and the feed stay as they are while it
+comes and goes (the end of the draft's last line fades under it). It is shown while the chat holds a
+selection that starts in the feed or in a subagent's history, and where there is an input; a
+selection that starts elsewhere (the header, the input) gives none. Following the selection is cheap
+(whether it is there, not its text); the text is read when the button is pressed. A press puts the
+selection into the input after the draft as `> ` lines, with the caret at its end, and clears the
+selection. The selection is the browser's own text when the range lies inside one message; one
+across messages is taken whole, by lines (paragraphs, list items and table rows on separate lines,
+cells apart by a tab), without the messages' times and heads, their meta lines, the summary line of
+a reasoning, the caption bar of a code block, the hidden text of folded blocks and the buttons; a
+range that starts in the line a folded reasoning shows begins with its selected part of that line
+(without "Thinking · "), one that only passes through it leaves the line out; a range that ends
+outside the feed it starts in (a triple click on the last paragraph of the last message) is cut at
+that feed's end, and one that ends at the start of the next block gives its message's own part. A
+press on the button takes the text at once and keeps the button, though the press clears the
+selection (a phone's tap does, before the click); the click, a press elsewhere or a press the
+browser takes over lets go of it. The right-click menu below holds "Search in <the search picked in
+Settings>" (since 0.142; the messages' buttons had it until 0.233) and Copy of the selection. On a
+computer a right click on text selected in the feed or in a subagent's history opens the client's
+menu of the same for that text (again since 0.228; from 0.204 the browser's): "Quote" where there is
+an input, "Copy" and "Search in …"; it takes the text as Quote does, cut at the feed's end too
+(since 0.234). A right click with nothing selected before it or outside the selection (a Mac's
+browser answers it by selecting the word under the pointer), elsewhere in the chat and on a phone
+gives the browser's own menu; one inside a selection that the browser cleared on the press (WebKit
+off a Mac) selects it again. Firefox, which does not tell the text under the pointer, gives the
+client's menu while the selection stays as it was and the browser's when the press cleared it.
+The input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
+computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input
+takes the caret when the chat opens, once its newest page is in, unless a request waits for an
+answer (an open approval in the feed, or the session `waiting`), another field has the focus, or a
+menu or the slid-out column is open; on a phone only when the chat replaces a new session's window.
+An open chat stays at its bottom while its images load: only a scroll up lets go of the bottom, and
+a move up while the feed's scroll range changed is the browser's, not a scroll up (since 0.164),
+unless it comes in the user's own scroll up (since 0.198).
 
 than the text, and an open thinking block is prose in the feed's font. A call without a
 `tool.result` is running (a pulsing dot) until its turn ends; since 0.161 one with an end of a
@@ -2652,29 +2921,42 @@ turn after it in `seq` order (the final `agent.message`, `status` `idle` or `err
 turn_lost`) is not finished, marked with the cross of a failed call, as the VS Code tab marks a
 call without a result once the session is not busy; a run is running while one of its calls
 is, else it takes the mark of its last call.
-Search, Copy and Quote (since 0.204; the client's menu of a right click and a phone's "Quote" button
-are gone, a right click gives the browser's own menu): the buttons of an agent message, the user's
-message, a text answer, a message from another session and the reply to it, what the session sent to
-another ("Sent to") and the reply it got ("Reply from"), a room post and the agent's reasoning (at
-the right end of its summary line, folded or open; a click on them neither folds nor unfolds it),
-also in the history of a subagent; tool output has none. They are always shown (see the message's
-time above), Search being a slot at the strip's left end that keeps its place, hidden and not
-clickable, while the message holds no selection, so that the line does not re-wrap when one is made.
-A message holds the selection that starts in it, else the one that ends in it, and its selection is
-the browser's own text when the range lies inside it; one that leaves it is clipped to the message,
-by lines (paragraphs, list items and table rows on separate lines, cells apart by a tab), without
-the message's time and head, its meta line, the summary line of a reasoning (a folded one: only that
-line, without its "Thinking · "), the caption bar of a code block and the buttons (a triple click
-that ends at the start of the next block, or a range across two messages, gives the first message
-its own part). Copy puts the selection into the clipboard, else the message's text; "Quote" puts the
-selection into the input as `> ` lines (and clears the selection), else the message's first two
-sentences (`Intl.Segmenter`, a blank line between paragraphs is not one), with "…" after them when
-text follows (after a space when they end in `.`, `!`, `?` or `…`); it is shown where there is an
-input; "Search in <the search picked in Settings>" (since 0.142), live while the message holds a
-selection, with or without an input, opens its results for the text in a new tab. A press on the
-buttons reads the selection and keeps it as it was when it began: a mouse press does not clear it,
-and a phone's tap, which clears it before the click, still acts on the text it held; the click, a
-press elsewhere or a press the browser takes over lets go of it. The
+Copy (since 0.204, with Search and Quote until 0.233; a phone's "Quote" button is gone): the button
+of an agent message, the user's message, a text answer, a message from another session and the reply
+to it, what the session sent to another ("Sent to") and the reply it got ("Reply from"), a room post
+and the agent's reasoning (at the right end of its summary line while folded, since 0.228 at the end
+of its text while open; a click on it neither folds nor unfolds it), also in the history of a
+subagent; tool output has none. It is always shown (see the message's time above) and puts the whole
+text of its message into the clipboard, whatever is selected in it. A press on the strip's buttons
+does not take the focus from the input. "Quote" (since 0.234; before it a button of every message,
+which took the selection or, with none, the message's first two sentences) is one button over the
+input, not on the messages: the word "Quote" in the input's row, over the right end of the field,
+left of send, taking no room, so that the field, its wraps and the feed stay as they are while it
+comes and goes (the end of the draft's last line fades under it). It is shown while the chat holds a
+selection that starts in the feed or in a subagent's history, and where there is an input; a
+selection that starts elsewhere (the header, the input) gives none. Following the selection is cheap
+(whether it is there, not its text); the text is read when the button is pressed. A press puts the
+selection into the input after the draft as `> ` lines, with the caret at its end, and clears the
+selection. The selection is the browser's own text when the range lies inside one message; one
+across messages is taken whole, by lines (paragraphs, list items and table rows on separate lines,
+cells apart by a tab), without the messages' times and heads, their meta lines, the summary line of
+a reasoning, the caption bar of a code block, the hidden text of folded blocks and the buttons; a
+range that starts in the line a folded reasoning shows begins with its selected part of that line
+(without "Thinking · "), one that only passes through it leaves the line out; a range that ends
+outside the feed it starts in (a triple click on the last paragraph of the last message) is cut at
+that feed's end, and one that ends at the start of the next block gives its message's own part. A
+press on the button takes the text at once and keeps the button, though the press clears the
+selection (a phone's tap does, before the click); the click, a press elsewhere or a press the
+browser takes over lets go of it. The right-click menu below holds "Search in <the search picked in
+Settings>" (since 0.142; the messages' buttons had it until 0.233) and Copy of the selection. On a
+computer a right click on text selected in the feed or in a subagent's history opens the client's
+menu of the same for that text (again since 0.228; from 0.204 the browser's): "Quote" where there is
+an input, "Copy" and "Search in …"; it takes the text as Quote does, cut at the feed's end too
+(since 0.234). A right click with nothing selected before it or outside the selection (a Mac's
+browser answers it by selecting the word under the pointer), elsewhere in the chat and on a phone
+gives the browser's own menu; one inside a selection that the browser cleared on the press (WebKit
+off a Mac) selects it again. Firefox, which does not tell the text under the pointer, gives the
+client's menu while the selection stays as it was and the browser's when the press cleared it. The
 input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
 computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the
 input takes the caret when the chat opens, once its newest page is in, unless a request waits
@@ -2763,10 +3045,33 @@ message opens the schedules of the chat ("Schedules" in the menu), and goes when
 is sent or it is paused or deleted (a recurring one then shows its next run). The same one-line
 ellipsis as the other lines, on a computer and on a
 phone; a dropped socket clears these lines too until the next subscribe.
-Since 0.189 the main agent's row stands first in the block ("Main agent: Working", §17.1), and the
-block shows also while that row does (a turn is on, input waits, or an approval is awaited that is
-not an open request of the feed), with no subagent, command or timer; in a room each agent at work
-has a row of its own, led by its name in place of "Main agent: ".
+Since 0.223 the agent's task list (`tasks`, §4, §8.1) is a row of the block, after the goal's
+(below) and ahead of the main agent's, while it has a task that is not completed: "Tasks: 3 of 7
+completed", the completed tasks of all of them, and, when a task is in progress, ` · ` and its
+`active_form` (else its subject), with a ▸ at the right end that turns to ▾ when it is open; a
+press opens the list under the row, a mark and the words of each task in the list's order, ✓
+completed (dimmed), ◐ in progress (its `active_form`, else its subject, in the accent colour), ○
+pending (a status this client does not know is shown as pending), and a second press closes it.
+The block shows for the row alone; with no task left to do (the list is empty or every task
+completed) there is no row, and a list that comes later is closed. The row is the latest stored
+`tasks` event of the session, the one of the highest `seq`: it is not a feed item, and the hub
+sends the session's latest one on subscribe also when the client's `after_seq` is past it (§6
+`subscribe`), which the client takes as the list and as nothing else: it does not move the
+client's `lastSeq` back and leaves no gap in the history. The same on a phone.
+Since 0.189 the main agent's row stands in the block, after the goal's and the task list's ("Main
+agent: Working", §17.1), and the block shows also while that row does (a turn is on, input waits, or
+an approval is awaited that is not an open request of the feed), with no subagent, command or timer;
+in a room each agent at work has a row of its own, led by its name in place of "Main agent: ".
+Since 0.218 the session's goal (`system goal`, §4: the last of them since the last
+`conversation_cleared`, which ends the conversation the goal belonged to, is `set` or `unmet`) has a
+row before all others, shown also while the agent is idle: "Goal: " and the condition on one line,
+"N checks" after it while unmet checks came since it was set, a chevron that opens the whole
+condition and "Last check: " with the last unmet check's reason, and "Clear goal", only where the
+input is: it sends `/goal clear`, and while a turn runs (`running`, `waiting`, `queued`) it stops
+the turn first, since a slash command waits for the end of the turn and a turn chasing a goal goes
+on until the goal is met or hooks have blocked its end 9 times in a row (§8.1). There is no pause of
+the goal: the session's Pause stops it with the agent, and Resume goes on with it (the CLI sets it
+again on `--resume`).
 Since 0.181 a subagent's line (a row whose `kind` is `agent`, or none this client knows,
 whatever the feed holds: a chat loads only its latest events, and a subagent's subagent has no
 call there; a command's, a Monitor's, a wakeup's and a cron job's line is none) is, but for its
@@ -2795,7 +3100,8 @@ header and the session's row say "Pausing" (since 0.191; "Pausing after this tur
 of the state.
 `activity` (since 0.179): what the agent waits on now (`retrying`, `compacting`, `thinking`),
 from `session.state` (§5.4), kept in the hub's memory; absent — none. The chat's main agent
-row (§17.1) shows it in place of "Working"; a client ignores a `kind` it does not know.
+row (§17.1) shows it in place of "Working" and (since 0.233) of "Input queued"; a client ignores a
+`kind` it does not know.
 `permission_mode` and `effective_permission_mode` (since 0.42, T38): §3 Session; absent —
 null. The client shows the mode in the chat header as a round pill beside the state:
 `effective_permission_mode`, else `permission_mode`; "Auto" and (since 0.129) "Allow all" in
@@ -2840,8 +3146,7 @@ client fetches the session object when it opens an idle chat without `command_in
 from a list among them) and shows, after each command's name in the list, its argument hint
 and then its description, muted, in the same line.
 
-WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 1 MiB; since 0.219
-the iOS app connects to `/api/ws?client=ios`, which only decides whom Apple push waits for, §16): the client sends `subscribe {session_id, after_seq}` and receives
+WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 1 MiB; since 0.230 the query `?deflate=raw` asks for compression, below; since 0.239 the iOS app connects with `client=ios`, which only decides whom Apple push waits for, §16): the client sends `subscribe {session_id, after_seq}` and receives
 events with `seq > after_seq`, then the live stream; `agent.delta` has no `seq`. Since 0.72
 the answer being written comes right after those events, before `subscribed`, as one
 `agent.delta` with its text so far, and the stream carries only the deltas after it. Since 0.161
@@ -2853,6 +3158,10 @@ carries each new one; a client whose part of the hub's event stream fell behind 
 or an empty one when none is kept, with the history it catches up. Since 0.169 the session's
 `schedules.live` (§4, §16) follows it the same way, when its list is not empty, and the stream
 carries each change of the session's schedules; a client that fell behind gets it, empty or not.
+Since 0.223 the session's latest stored `tasks` event (§4) follows them when its `seq` is not above
+`after_seq`, as stored and with its own `seq`: a client that loaded only the newest page of the
+history, which does not reach back to it, still gets the list, and one whose `after_seq` is
+before it has it among the events sent.
 The text ends with the `agent.message` stored for it, a `status` other than `running` and (since
 0.179) a `retraction`, after which the runtime sends no message for the text it took back. Since
 0.208 the thinking being written comes the same way, as one `agent.delta` with `thinking` before
@@ -2871,8 +3180,9 @@ is stored: the `agent.message` goes above the inputs with `during_text` right be
 order, never above the input it answers (`in_reply_to`) and, since 0.161, never above one that
 waited for a turn of its own and stands after the turns it waited through (below); a final one
 takes along its `usage` and, since 0.161, the `system turn_interrupted` or `turn_ended_early`
-line after it. The client takes this from the hub's `payload.during_text`, never guesses it
-from times. Since 0.208 the same holds for the thinking: the hub marks an input stored while the
+line after it. Since 0.232 a `side.question` (§17.5) with `during_text` is one of these inputs
+for this order, though it is no input: the answer goes above it too. The client takes this from
+the hub's `payload.during_text`, never guesses it from times. Since 0.208 the same holds for the thinking: the hub marks an input stored while the
 session's thinking is being written with `during_text` too; the thinking being written stands
 above the inputs with `during_text` at the end of the feed, but one that waited for a turn of
 its own and was delivered (below), and above the inputs that still wait for one (`pending`); the
@@ -2891,15 +3201,27 @@ followed by "· queued" while it is `pending` ("· awaiting delivery" stays for 
 while no turn ran), as the VS Code tab holds what is typed during a turn. Meanwhile the worker
 may write it into the running turn (§17.2: a person's input or, since 0.174, a `send` of another
 session, at once or after an answer to a permission request): once the agent takes it after its
-current calls (`joined`) it stands at its `seq`, one with `during_text` under that text as above;
-a person's message carries "joined the turn" on its first line, a send's bubble no note.
+current calls (`joined`) it stands where the agent took it (since 0.221; before, at its `seq`,
+one with `during_text` under that text as above): right behind the last event of the session
+that is no input stored before the hub took the worker's `joined` ack (`payload.joined_after`),
+below the text and the calls the agent made before it saw the message, and never above its own
+`seq`; the worker sends that ack after the session's own records written before it (§5.2), so
+every event the agent made before it took the message is stored by then. Several taken behind
+the same event keep their `seq` order. One with `during_text` is placed by `joined_after`, not
+by the rule for such an input: it stands below the text it came during and the calls after it,
+and the thinking or the text being written stands below it, since the agent took it before they
+began. An ack lost while the worker was away (a restart of the hub, a dropped link) comes again
+only after what the worker sends on reconnecting, so such a message then stands behind all of
+that, also under the answer to it. A message joined before 0.221 has no `joined_after` and stands
+at its `seq` as before; a person's message carries "joined the turn" on its first line, a send's bubble no note.
 Otherwise it waits for a turn of its own and, delivered (`delivered_at`, by the `delivery`
 frame), stands where the agent took it: after the events of the turns it waited through, the
 text it came during among them, before the first event of its own turn. The client reads the
 turns from the events in `seq` order: a turn runs from an input that does not wait, or from
 the agent's first event of work (any event of the agent but its `usage` and a `status` other
 than `running`, and
-`system context_compacted`, with which a `/compact` starts), to its end (the final
+`system context_compacted`, with which a `/compact` starts, and since 0.218 `system
+command_output`, with which a slash command's turn starts), to its end (the final
 `agent.message`, `status` `idle` or `error`, `system turn_lost`); a delivered input waited only
 if the first end after it is not its own (`in_reply_to`). Inputs waiting one behind another
 take the turns in `seq` order: the first delivered one starts at the agent's first event of
@@ -2909,14 +3231,53 @@ input and is no `status` (a `status` there closes the same turn as the end befor
 `joined` input stored behind waiting ones joined a turn after the last of them that was delivered
 before it (since 0.174 an input may join past a waiting one, §17.2): it stays right behind that
 one and is taken with it; if each of them was still pending when it was delivered (or is now) it
-joined the turn running then and stands at its own `seq`. The hub follows this order where it
+joined the turn running then and stands at its own `seq` (with `joined_after`,
+behind that event when it is below, as above).
+A `quiet` input (since 0.231) is never shown as waiting and stands behind its `joined_after` as a
+joined one does (the hub writes it on the `ack {quiet}`): behind the stopped turn, or behind a turn
+the CLI ran by itself before it recorded the line.
+The hub follows this order where it
 cuts by `seq`: a fork before such an input (above) and the files of a reply to a question
-(§7.1). On open
-the chat loads the newest 100 events (`before_seq`), shows them and subscribes, then loads the
-older history behind them, newest first; it renders the last 60 blocks of the feed and 60 more
-each time the user scrolls to the top, and while the feed is shorter than its window (which
-cannot be scrolled); "Requests only" of a worker's service session, on or off, starts it again at
-the last 60 blocks of the new view. Since 0.114 the client keeps the 12 most recently used
+(§7.1).
+A fork's copy leaves out a quiet input whose `joined_after` is not below the `seq` of the record
+where the copy's conversation is cut, an `agent.message`: Claude Code recorded it after that record,
+so the copied agent never got it; a fork of a copy reads the copy's own `joined_after`, carried into
+its `seq` (above).
+On open
+the chat loads the newest 100 events (`before_seq`), shows them and subscribes. Since 0.220 it
+loads the older history only where it is needed, newest first: a page of 200 events when the user
+scrolls to the top of what is loaded, while the feed is shorter than its window, and by itself
+while the header's cost has no `usage` within the last 1000 events (not in a room or a worker's
+service session, which may have none); pages of 1000 down to a search hit (§15) and down to the
+event of an open request older than what is loaded (its card comes from that event). An automatic
+load that failed is not repeated until the user scrolls, a load succeeds or the chat opens again.
+Before 0.220 it loaded the whole older history behind the newest page. It renders the last 60
+blocks of the feed and 60 more each time the user scrolls to the top, and while the feed is shorter
+than its window (which cannot be scrolled); "Requests only" of a worker's service session, on or
+off, starts it again at the last 60 blocks of the new view. Since 0.220 the client keeps on the
+device what it received of a session's history (IndexedDB `hqc-history-<user id>`: the events as
+the hub sent them and, per session, the one range of `seq` it holds whole; a session's `seq` have
+no gaps): a chat opens on the newest 100 events of the copy, then takes the hub's newest page, and
+an older page the copy holds is read from it. A newest page that does not continue the copy (the
+hub is more than a page ahead, holds fewer events, or holds another event at a `seq` both have)
+drops the copy, and the chat shows the hub's page. The copy is the user's: a chat opened before
+`/api/me` answers waits for it. A session the hub answers `404` for is forgotten; one deleted from
+this client, a room's agents with their room and the sessions of a deleted project are forgotten
+with the attachments their copies refer to (`artifact_ids`, `artifact_id`, as the hub's cleanup
+counts them, §12). A failure of the browser's storage leaves the chat as it is without the copy. An
+older page the copy holds with an input still `pending` in it is taken from the hub: the input may
+have been delivered or taken back (§17.2) since, and the subscribe does not send it again. A
+take-back waits for the hub's newest page of a chat shown from its copy, and writes `withdrawn`
+into the copy itself as well. The header's cost adds the last `session_cost_usd` before a `system
+conversation_cleared` (§4) only once that line is loaded.
+The goal's row (above) comes from the loaded history too: the search for the header's `usage`
+loads back to the end of the last finished turn, so a goal set or checked since shows; one whose
+last `set` or `unmet` is older (its turn was stopped, or the search went 1000 events back without
+a `usage`) shows once that part is loaded. The header's context item (0.222) comes from the loaded
+history too: the search for the header's `usage` stops at any `usage`, so when the newest one
+loaded has the total only and the one with `context_tokens` before it is older than what is loaded
+(a long turn stopped while its reply was written, 0.161), the item shows once that part is loaded.
+Since 0.114 the client keeps the 12 most recently used
 chats in memory with what they have loaded (an open one is never dropped): one of them opens
 again at once, with no wait for its newest page, and subscribes after its last `seq`, so the hub
 sends what came while it was closed (a half-written answer and the live subagents are dropped
@@ -2935,9 +3296,29 @@ After a reconnect the client repeats `subscribe` with the last `seq` it has seen
 before its first input still `pending` if that is earlier (since 0.40): a `delivery` frame sent
 while the socket was down is lost, and an event sent again carries its current `delivery`,
 which the client takes over the stored copy (the reply to `POST /input` never overrides a
-newer copy).
+newer copy). Since 0.230 the client applies the events that come before `subscribed` (sent after
+the backfill, the live text, `subagents.live`, `schedules.live` and `tasks`) without drawing the
+chat for each one: it draws at most every 100 ms while they come and once at `subscribed`. The
+same holds for the backfill after a reconnect, which starts a catch-up again. The hub answers each
+`subscribe`: with `subscribed`, or, when it refuses one (`not_found`, a failed lookup of the
+session), with an `error` naming the session and nothing more. Only a refused `subscribe` gets an
+error that names a session: a failed backfill, on a `subscribe`, on a gap in the live stream or
+when the hub catches a subscription up after its bus overflowed, gets an `error` without
+`session_id`, and a `subscribe` gets its `subscribed` after it. An answer
+to a subscription the client left and made again meanwhile does not end the new catch-up: the
+client counts the `subscribe` frames it sent on the socket and the answers that came.
 
-`/api/ws` frames are flat JSON objects `{type, ...}` with no `id` and no `payload` wrapper:
+`/api/ws` frames are flat JSON objects `{type, ...}` with no `id` and no `payload` wrapper. Since
+0.230, with `?deflate=raw` on the upgrade (any other value or none: as before), the hub sends every
+frame as a binary message instead of a text one: the connection has one raw DEFLATE stream (RFC
+1951, no zlib header, no gzip header), each frame's compact JSON followed by `\n` is compressed
+into it and ended with a sync flush, so a message holds whole frames only and the client inflates
+them as they come; a message may hold several frames, the client splits the inflated text on `\n`
+(a newline inside a JSON string is escaped, so none is raw). The pings stay WebSocket pings and the
+client's frames stay text. The client asks when its browser has `DecompressionStream` with
+`'deflate-raw'`; a text message on such a connection is a frame as it is. The macOS app's page
+script, which reads the page's own `/api/ws` frames for its notifications, its Dock badge and its
+window bar (`macos/`), inflates a compressed socket's messages on a stream of its own the same way.
 - client → hub: `{type: subscribe, session_id, after_seq?}`, `{type: unsubscribe,
   session_id}`, `{type: subscribe_summary}`, `{type: ping}`;
 - hub → client: `{type: event, event}`: the event as stored (§3), `agent.delta` and (since
@@ -2946,11 +3327,20 @@ newer copy).
   once the asker's worker acknowledged the reply, to the subscriptions that already had it (the
   client takes the field over its copy);
   `{type: subscribed, session_id, last_seq}`: the history after `after_seq` has been
-  sent, the live stream follows; `{type: delivery, session_id, event_id, seq, delivery,
-  delivered_at?, joined?}`: the delivery of an input changed; the event itself is not resent, the
+  sent (and, since 0.223, the session's latest `tasks` event when it is older than that),
+  the live stream follows; `{type: delivery, session_id, event_id, seq, delivery,
+  delivered_at?, joined?, joined_after?, quiet?}`: the delivery of an input changed; the event
+  itself is not resent, the
   client updates `delivery`/`delivered_at` of its event with this `seq`; `joined: true` (since
   0.112, `client.delivery.joined.json`, absent when false) says the input went into the turn
-  already running, and the client sets the message's `payload.joined` with it;
+  already running, and the client sets the message's `payload.joined` with it; `joined_after`
+  (since 0.221, with `joined` or (since 0.231) `quiet`, `client.delivery.joined.json`, absent when
+  the message has none) is
+  the `seq` after which the agent took it, which the client sets as `payload.joined_after` and
+  places the message by (above);
+  `quiet: true` (since 0.231, `client.delivery.quiet.json`, absent when false) says the worker
+  wrote it into the agent's history without a turn at the owner's Stop, and the client sets
+  `payload.quiet`;
   `{type: summary, sessions[]}`: the reply to `subscribe_summary`, all of the user's sessions;
   `{type: session.summary, session}`: one session changed; an element is `{session_id,
   project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?,
@@ -2959,6 +3349,15 @@ newer copy).
   the session object; the modes since 0.42, so the header follows a switch the worker confirms,
   the cap since 0.43, `subagents` since 0.70, `background_tasks` since 0.104, `output_per_s`
   since 0.122, `foreground_calls` since 0.125, `activity` since 0.179, `paused_at` since 0.160);
+  a summary of a session the client does not have is a session created elsewhere: since 0.230,
+  when a `session.summary` names it and the client knows its project (on the bar or archived), it
+  fetches that session alone
+  (`GET /api/sessions/{id}`), one request per session at a time, and merges a summary of it that
+  came meanwhile after the answer when the answer is what brought the session (one that came
+  first with the lists or a reply keeps that); for a project it does not know, or a session moved
+  into one,
+  it fetches the project and session lists again as before, and so it does for a `summary` of every
+  session that names one (after a reconnect it may name many);
   `{type: requests, requests[]}` (since 0.41, T37,
   `client.requests.json`): the list of `GET /api/requests`, sent right after `summary` and then
   again, whole, whenever one of the user's requests opens or closes (an event of §4
@@ -3044,7 +3443,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
 - `hqc_attach(path?, content?, name?, kind?, caption?)` — upload a file as an artifact
   to the current session; `path` for runtimes with a file system, `content` for the bare model.
   Since 0.34 (T31) the worker's MCP server lists `hqc_attach(path, name?, kind?, caption?)`;
-  `content` comes with the bare model (iteration 7) and is refused until then
+  `content` comes with the bare model (iteration 8) and is refused until then
   (`invalid_args`). The worker daemon does the file part itself, trusting neither the hub nor
   the agent's path (§2.1): `path` is absolute or relative to the session's working directory;
   its canonical form (symlinks resolved) must lie inside the session's workspace and inside
@@ -3062,7 +3461,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   live_attach.rs`): the event lands between the call's `tool.call` and `tool.result`.
 - `hqc_send(text, session?)` — a message to another session without waiting for a reply;
   without `session`, to the owner's personal assistant session. Since 0.35 (T32): `session`
-  is required until the personal session exists (iteration 7); the result is `{to,
+  is required until the personal session exists (iteration 8); the result is `{to,
   delivery}`, `to` — the target's address, `delivery` — `queued` (the input queue, the
   target wakes on sends; by default since 0.55) or `buffered` (the send buffer, §7.1); since 0.47 (T42) also
   `with_reply`: the send goes back with the reply to the target's open ask (§7.1). Since 0.54
@@ -3116,7 +3515,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   cap of its chain (§7.1), and so does the spawned session's first turn. `project` — a slug or an id
   of the owner's project; `workspace` — an id, a label or a path of a workspace of that
   project (else `not_found`), absent — the project's `default_workspace_id` (none:
-  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 7 (else
+  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 8 (else
   `invalid_args`); `model` absent — the calling session's model (a cheap spawner does not
   start an expensive agent by default), present — checked as in §6. `prompt` (not blank)
   becomes a `peer.message` with `mode: send` from the calling session in the new session's
@@ -3211,7 +3610,8 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   `seq > N`; both together are `invalid_args`. A page is at most 100 events and 64 KiB of
   serialized `events`; over the budget the events at the far end of the page are left out (the
   oldest, for `after_seq` the newest), but one event is always returned, however large. The result
-  is `{address, title, events (oldest first), last_seq, earlier?, later?}`: `earlier` (the `seq` of
+  is `{address, title, events (oldest first), last_seq, earlier?, later?}` (since 0.232 without
+  `side.question` and `side.answer`, §17.5): `earlier` (the `seq` of
   the first event returned, to pass as `before_seq`) only when older events exist, `later` (the
   last one's, to pass as `after_seq`) only when newer ones do. No side effects: no read cursor
   moves, nothing is written. An agent of a room cannot read its room or another agent of it
@@ -3364,10 +3764,14 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   address does not change. The result is `{address, title}` — the session's address and the
   title as stored. A repeat of the call (§5.2) sets the same title again.
 
-- `hqc_secret(name, purpose, kind?)` (since 0.147) — asks the owner for a secret without it
+- `hqc_secret(name, purpose, kind?, vault?)` (since 0.147) — asks the owner for a secret without it
   entering the conversation: `kind` `secret` (the default) or `ssh_key`, `name` a key name of §14,
   `purpose` one line of 1 to 300 characters the owner is shown (a control character, a line or
   paragraph separator or a bidirectional control is `invalid_args`, as for `hqc_move`'s path).
+  `vault` (since 0.216) — the Vaultwarden (Bitwarden) entry that holds it, its exact name or its
+  id, one such line of 1 to 200 characters: the card shows it for the owner to
+  confirm or change and the worker reads the value (§5.3); on a worker that does not read
+  Vaultwarden the hub leaves it off the card and the owner types the value.
   Only on a worker of the owner with `session_secrets`, else `unavailable`. It opens a
   PendingRequest `secret` (§3) with the hub's card in the feed and waits as `hqc_ask` does
   (`ack` now, the `mcp.result` later, kept until the worker acknowledges it); a repeat finds the
@@ -3392,7 +3796,9 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   is walked with its names sorted, every entry's canonical path must stay inside the folder and
   `allowed_roots` (a link pointing out is `invalid_args` naming it; a link to a folder up the
   tree is skipped), an entry named `.git` or `.hqc` in any case (a folder or a file) is never
-  packed, at any depth inside the folder (the published path itself is not checked), and the hub
+  packed, at any depth inside the folder (the published path itself is not checked), nor (since
+  0.226) an entry whose canonical path has such a component below the folder (a link `repo ->
+  .git` or `cfg -> .git/config`), and the hub
   refuses an archive with such a component in a name, only regular files and
   folders, at most 10 000 files of at most 500 MiB together, each path at most 512 bytes (the
   hub's limits, §20); a folder without `index.html` is `invalid_args`. One file becomes the
@@ -3410,15 +3816,21 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   session's feed (§10.1), `author {kind: system}`, `tool: hqc_publish`, the description "The
   agent asks to publish <path> at a public link: anyone who has the link can open it, without
   signing in to hqc, until you unpublish it or delete this session." and on the next lines the
-  number of files and their size unpacked, then the files in three groups, each in the
-  archive's order: every file whose last component looks like a secret, wherever it is, also
-  inside a hidden folder (case-insensitively: starting with `.env`, `credentials`, `id_rsa`,
-  `id_dsa`, `id_ecdsa` or `id_ed25519`, or ending with `.pem`, `.key`, `.p12` or `.pfx`); every
-  other hidden file (a name starting with `.`) and every hidden folder as one line `<folder>/ (N
-  files)`, a secret in it counted there too; the first 50 of the other files; and "and N more"
-  for the files on no line (`event.approval.request.publish.json`). What matters most comes
-  first, also where the card is cut to a few lines (the macOS app's notification, which keeps
-  this order). Options `once` ("Publish") / `deny` ("Deny"). A session has at most one such
+  number of files and their size unpacked, then the files in three groups: every file whose
+  last component looks like a secret, wherever it is, also inside a hidden folder
+  (case-insensitively, since 0.226 the globs `.env*`, `credentials*`, `id_rsa*`, `id_dsa*`,
+  `id_ecdsa*`, `id_ed25519*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.ppk`, `*.jks`,
+  `*.keystore`, `*.kdbx`, `*.gpg`, `.netrc`, `.npmrc`, `.git-credentials`, `secrets.*`,
+  `service-account*.json`), at most 20, the first file of each glob in the archive's order, then
+  the second of each, and so on; every other hidden file (a name starting with `.`, or a file
+  inside a folder whose name starts with `.`) by its full path, at most 20, the same way round
+  the hidden folders (a hidden file outside them a group of its own); the first 50 of the other
+  files in the archive's order; and "and N more" for the files on no line
+  (`event.approval.request.publish.json`). Before 0.226 the secrets had no cap and kept the
+  archive's order, and a hidden folder was one line `<folder>/ (N files)`. What matters most
+  comes first, also where the card is cut to a few lines (the macOS app's notification, which
+  keeps this order): a hundred `*.key` cannot push an `id_rsa` off them, nor a big hidden folder
+  the files of another. Options `once` ("Publish") / `deny` ("Deny"). A session has at most one such
   request open: while that of another call waits, the call is `unavailable` ("a publication already waits for the user's
   answer"). The call is deferred as that of `hqc_move`: `ack` now, the `mcp.result` a frame of
   its own later, kept in the request until the worker acknowledges it; the runtime's tool
@@ -3452,7 +3864,7 @@ to it (`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}`
 server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
 Codes added in 0.35: `timeout` (no reply in time), `limit_exceeded` (a chain limit, §7.1),
 `worker_restart` (the asking worker restarted; never seen by the agent, whose call died).
-Until grants (iteration 8) every tool works only on the calling session's owner's own
+Until grants (iteration 9) every tool works only on the calling session's owner's own
 projects and sessions; anything else is `not_found`.
 
 ### 7.1 Semantics of send and ask **[decision]**
@@ -3504,7 +3916,10 @@ Delivery:
   (§9.3). Since 0.160 an `ask` to a paused session (§17.3) is refused at once as well, with
   `unavailable` and "<address> is paused; it takes no questions until it is resumed", so it does
   not wait out its timeout; a `send` to it is queued. An `ask` queued before the pause stays
-  queued and its caller waits out its timeout. Since 0.172 another agent of the caller's room is
+  queued and its caller waits out its timeout. Since 0.231 an `ask` whose question the owner's
+  Stop made the worker write into the agent's history without a turn (§17.2) fails at once as
+  well, with `unavailable` and "<address> was stopped before it took the question".
+  Since 0.172 another agent of the caller's room is
   refused at once too (`invalid_args`, §7.1.1). An empty (blank) `text` is `invalid_args`.
 
 Queues (two different ones):
@@ -3843,8 +4258,9 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
 - `POST /stop` of the room (§6), in both modes, writes `system room_stopped` "Stopped" and
   stops every agent as the agent's own Stop does (§8.1: its background subagents spared;
   §10.1: the runtime's open requests left to a connected worker); the agents' inputs are not failed
-  (`session.stop` interrupts the current turn only, and the worker keeps the inputs it has,
-  §5.3). A turn on a message from
+  (since 0.231 the worker of an agent whose turn runs at the Stop writes the inputs it holds into
+  the agent's history without a turn, each acked `quiet`, §8.1, §17.2; the others wait and run).
+  A turn on a message from
   before "Stopped" posts nothing unless a later one joined it (above), and with no speaker no
   turn's end wakes an agent.
 - The hub decides and stores all of this under one lock per room, in the hub's memory (the hub
@@ -3867,7 +4283,8 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   dot's colors, and the
   room's header names its agents with their state, each a link to its session, has Stop (`POST
   /stop` of the room) and the room's cost, the sum of its agents' (each as its own header counts
-  it, one with a provider left out), "$X this room". A room has no
+  it, one with a provider left out), "$X this room"; since 0.229 with its agents' tokens summed
+  the same way ("$X · N tokens this room"; an agent on a provider counts its tokens). A room has no
   Restart, no Pause and no Move, in its menu or by dragging its row. The room's feed
   shows its agents' open approval requests and questions, an agent's post under its agent's
   title in place of "Message from", a pass as a quiet line, and (since 0.189 in the live block above the input, before 0.189 at
@@ -4253,7 +4670,10 @@ a `control_request` with `subtype: can_use_tool` (`tool_name`, `input`,
 allow|deny`. Options for the client: `once`, `session`, `always`, `deny`
 (`always` only if `permission_suggestions` contains `addRules` in `localSettings`), and since 0.213
 for an MCP tool `server_session` and `server_always` (`server_always` only for a session with a
-workspace that is not restricted; neither on a request only a person may answer; §10.1).
+workspace that is not restricted; neither on a request only a person may answer, nor, since 0.224,
+for a tool name another server's tool could share; §10.1). Since 0.224 the adapter keeps the ids
+of the options it offered with the open request and refuses an answer with any other (the request
+stays open), as the hub does against the stored request (§10.1).
 Mapping: `once` → allow;
 `deny` → deny as the "No" of the VS Code tab (since 0.69; extension 2.1.309): `message` "The user
 doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit,
@@ -4281,7 +4701,7 @@ does, also for a subagent's request) and a `grant` on `session` (`place: session
 rule form: for `Bash` `Bash(<prefix> *)` or `Bash(<command>)`, for another tool `toolName`) and on
 `always` (`place: local_settings`, `rules` — the rules it sends in `updatedPermissions`), so the
 card says what each grants. Under `--restricted` (§8.4) local settings do not apply, so
-`always` maps to `session`. The hub stores no permissions of Claude Code's own; its only
+`always` is not offered (before 0.224 an answer `always` there was taken as `session`). The hub stores no permissions of Claude Code's own; its only
 standing ones are hqc's allow rules of a folder (since 0.52, below). The
 `AskUserQuestion` tool arrives through the same `can_use_tool`: the adapter turns it into
 a `clarify.request`, assigning its own `id`s to the questions, and returns the answers via
@@ -4307,9 +4727,22 @@ carries `human_only: true`, which the hub's `auto_approve` leaves to the owner (
 check of `[permissions]` still comes first. `AskUserQuestion`, which comes with
 `requires_user_interaction: true` every time (checked live on 2.1.312), stays a
 `clarify.request`. Every `approval.request` carries the request's `decision_reason` (why the CLI
-asks: a safety check, an ask rule, a hook) as `reason`, cut to 1024 bytes, and its
+asks: a safety check, a hook, a classifier) as `reason`, cut to 1024 bytes, and its
 `display_name` (the CLI's name of the tool, `Bash` for Bash on 2.1.307) as `display_name`, cut to
-256 bytes. `matched_ask_rule` and `suppress_always_allow_rule` were not seen live (**[verify]**).
+256 bytes. For a call a `permissions.ask` rule caught the CLI sends no `decision_reason`, only
+`decision_reason_type: "rule"` and the rule's `decision_reason_rule_source`, also in
+`bypassPermissions`, where such a rule still asks (checked live on 2.1.329 for `Read`, a compound
+`Bash` command and `Artifact`); since 0.217 the adapter then writes `reason` itself: "An ask rule
+for <tool> in <place> requires approval for this call", or, when `matched_ask_rule` comes (also
+beside a tool's own ask, `decision_reason_type` `subcommandResults` or `mode`), "The ask rule
+<toolName>(<ruleContent>) in <place> requires approval for this call", without
+`(<ruleContent>)` for a rule on the whole tool, `<place>` being the CLI's name of the source
+with its file — "user settings (~/.claude/settings.json)", "shared project settings
+(.claude/settings.json)", "project local settings (.claude/settings.local.json)", "enterprise
+managed settings", "MCP server policy", and so on. The rule itself is not sent: none of the four
+calls (`Read` under `Read(./x.txt)` and under `Read`, the `Bash` command, `Artifact`) carried
+`matched_ask_rule`, and `Artifact` came with `suppress_always_allow_rule: true` (2.1.329), so its
+card is `human_only`; `matched_ask_rule` was not seen live (**[verify]**).
 
 A withdrawn request (since 0.180): the CLI sends `{"type": "control_cancel_request", "request_id"}`
 when it stops waiting for a request of its own (the wait was aborted: the turn stopped, the call or
@@ -4445,7 +4878,37 @@ meanwhile. The client's header counts that total and the feed draws no line for 
 process that ends first leaves it out of every `cost_usd`: the next one starts from the `cost-state`
 that has it). Since 0.161 the same holds for any `result` with no tokens, whatever its `num_turns`:
 a turn interrupted while its reply streamed can end with no tokens though its total grew (2.1.312,
-seen live), and gave an empty `0 → 0 tokens` line under the interrupted reply. Since 0.69: an
+seen live), and gave an empty `0 → 0 tokens` line under the interrupted reply. Since 0.222 the
+`usage` that carries tokens has the context and the cache from the stream, not from a
+`get_context_usage` request (that builds the whole system prompt on every call): the adapter keeps
+the `message.usage` and `message.model` of the main agent's latest `assistant` line that is not
+`<synthetic>` (the lines of one response repeat its usage: the last stands; a subagent's lines
+are not the main agent's context). `context_tokens` is its `input_tokens`, `cache_read_input_tokens`,
+`cache_creation_input_tokens` and `output_tokens` summed, as the VS Code tab's `updateUsage` sums
+them. After a `compact_boundary` the size is the `post_tokens` of its `compact_metadata` until
+the next response; a boundary without it (the runtime did not count the size) leaves no size, so
+that a compaction's `usage` does not report the context from before it. The lines of a response
+carry the usage of its `message_start`, with a few output tokens: the main agent's
+`message_delta` of that response (`stream_event`) gives the output count the size takes. A
+`<synthetic>` line is no response of the model and leaves the size as it was; `/clear` forgets it.
+`context_limit` is the `contextWindow` of the main model's entry in `result.modelUsage`, less
+`min(maxOutputTokens, 20000)` and 13000 — the threshold of the model's window (checked on 2.1.329:
+a window of 1 000 000 gives 967 000 in `get_context_usage`; the tab's `yPt` is
+`window - min(maxOutput, 2e4) - 13e3`). An override of the auto-compaction window
+(`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `autoCompactWindow`, `/autocompact`) and a disabled
+auto-compaction are not seen in the stream, so under one the shown limit is not where the CLI
+compacts. The CLI keys the entry by the model as requested (`claude-sonnet-4-6[1m]`, a provider's
+id), not as the response names it: the adapter looks for the model the main loop runs (`system/init`,
+a switch), then for `message.model`, then for the entry whose `canonicalModel` is that; a turn with
+no tracked response (`/compact` first after a restart) still has the limit through the first.
+`cache_ttl_s` is 3600 when that response's `usage.cache_creation.ephemeral_1h_input_tokens` or the
+entry's `cacheCreationEphemeral1hInputTokens` is above 0, else 300 when `ephemeral_5m_input_tokens`
+or `cacheCreationEphemeral5mInputTokens` is (Claude Desktop reads the TTL the same way: an hour
+when `ephemeral_1h_input_tokens` is there, else five minutes), else absent; the cache is written
+when the request goes out, so the seconds since the response started — its `message_start`, else
+its first line — are taken off it (0 at the least). After a compaction boundary there is none until
+the next response: the compacted context is in no cache yet. `context_tokens` and `cache_ttl_s` are
+absent without a tracked response. Since 0.69: an
 `assistant` text whose `message.model` is `<synthetic>` — a reply the CLI wrote itself (an API
 error, "Credit balance is too low"; on 2.1.312 with `is_api_error_message` and the same `uuid` as
 the transcript record) — → `agent.message` with `runtime: true`, held and ended like any other text:
@@ -4542,7 +5005,16 @@ Since 0.70 every user message the adapter writes carries a fresh v4 `uuid` (not 
 `event_id`: 2.1.312 drops a line whose `uuid` it has seen, echo and all, without a turn); its
 echo and its `command_lifecycle {command_uuid, state}` lines carry it (2.1.312: `queued` when
 the line is read, `started` when the CLI takes it, right after the echo for one that went into a
-running turn, then `completed` or `cancelled`; a turn the CLI begins by itself has none). The
+running turn, then `completed` or `cancelled`; a turn the CLI begins by itself has none). Since
+0.219 the line of an input the hub marked `human` (`session.input.human`, §5.3: what the owner
+typed, nothing of another session or of the hub's put in front of it or in its place) carries
+`origin: {kind: "human"}`, without which the CLI takes it as unattributed and its strict
+`isHuman()` gates refuse it; a message of another session, a room's input, a run of a schedule and
+a note of the hub's own (a resume, `hqc_move`, subagent leftovers) carry none. Two notes of hqc's own
+do stand in front of a human input, and it stays human: a fork's first input carries the note that
+the session is a copy (§6), and the worker puts the note of the background tasks a move stopped in
+front of the first input after the move. Each input is a line
+of its own: the worker joins none, so a line never mixes a human's text with another's. The
 input of a turn, for `in_reply_to`, is the one whose `started` or echo begins a turn or comes
 during a turn the CLI began by itself (the first input of a process, and every input with a CLI
 that sends no such lines: the one written). At `result`
@@ -4767,7 +5239,8 @@ naming that response's frames, which the CLI dropped; "Remove them on receipt") 
 it brings none. `model_refusal_fallback` is then `system model_refusal_fallback`
 "<original> → <fallback>: <content>", and the turn's `usage` names the fallback model unless its
 `scope` is `local` (a subagent's, a side question's or a background fork's answer came from it;
-`session` or none: the session's model is swapped). These lines are not held for the turn's
+`session` or none: the session's model is swapped). Since 0.232 a `local` one retracts
+nothing either: the uuids it names are not records of the conversation. These lines are not held for the turn's
 text: one that comes while a text is held stands above it. `system/init`, which comes before
 every turn: its `mcp_servers` whose `status` is neither `connected` nor `disabled` (turned off
 by the user) → `system mcp_not_connected` "MCP servers not connected: <name> (<status>), …"
@@ -4800,7 +5273,10 @@ and a total below that baseline does not lower it. `usage.session_cost_usd` is
 transcript's `cost-state` has 0.00232689, so a `--resume` of it goes on from there), and since
 0.162 the baseline goes back to none at `conversation_reset`: the turn after it cost 0.00232689,
 not the 0.0000004 its total grew by over the last one before. The client's header adds the last
-`session_cost_usd` before each `system conversation_cleared` (§4).
+`session_cost_usd` before each `system conversation_cleared` (§4). Since 0.229
+`usage.session_tokens` is the sum of the four token counts of the result's `modelUsage` over its
+models, which the CLI carries over `--resume` and resets on `/clear` with the cost; the header
+counts it the same way (§4).
 
 `/clear` (since 0.162; live run `w1-clear`, 2.1.312): the CLI goes on in a new conversation, its
 own transcript in the same folder, and keeps the process. It sends `conversation_reset`
@@ -4844,6 +5320,49 @@ while it waited, leaves it), and tells the worker each change; idle unload waits
 (§17.3). A wakeup does not outlive its process: in `x6-wake-kill` the process was stopped
 before it fired, and the process that resumed the session (`x6-wake-resume`), alive past the
 wakeup's time, got no fire.
+
+The task list (since 0.223). Claude Code 2.1.312 gives the models of its list that predate the 5.x
+ones (Opus 4.7 and 4.6, Sonnet 4.6, Haiku 4.5) the tools `TaskCreate`, `TaskUpdate`, `TaskList` and
+`TaskGet` always, and the 5.x models only with `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` in its environment
+(checked with 2.1.329: `init.tools` has none of the four without it and all four with it, and then
+no `TodoWrite`), which the worker sets with `task_tools = true` (§14); the older `TodoWrite` is
+followed too. The CLI keeps the list in its own files, `~/.claude/tasks/<session id>`, not in the
+transcript. The adapter keeps the main agent's list from the results of its calls (a subagent's
+calls and a failed call, `is_error`, change nothing), and sends a `tasks` event (§4) with the whole
+list when it differs from the one sent last. `TodoWrite` `{todos[{content, status, activeForm}]}`
+replaces the list; when every task of it is `completed` the list is empty, as the CLI stores it. The
+CLI corrects the input of a call before it runs it (2.1.312), and nothing else reaches it, the input
+schema being strict: a `TaskCreate` input with neither `subject` nor `description` at the top takes
+the fields of an object in `task`, and `title` or `name` stand for `subject`, `content` for
+`description`, `active_form` for `activeForm`, `subject` is made from `description` and the other
+way; a `TaskUpdate` input takes `id` or `task_id` for `taskId` and `active_form` for `activeForm`
+only (one with `title`, `name` or a `task` wrapper is an error and changes nothing). So the adapter
+takes the id and the subject from the text of the result block the CLI writes after that:
+`TaskCreate` adds a task under the id and subject of `Task #<id> created successfully: <subject>`
+(2.1.312, 2.1.325), else under the result's `tool_use_result.task.id` and the call's `subject` (or
+`title`, `name`), `pending`, with the call's `activeForm` (or `active_form`; both also from the
+`task` wrapper). `TaskUpdate` changes the task of the id of `Updated task #<id> …`, setting the
+`status`, `subject` and `activeForm` (or `active_form`) the call has at the top; a task it did not
+find gives the error or `Task #<id> not found`, and an id the list does not hold changes nothing;
+`status: deleted` removes the task. The block's text is read, not the record's `tool_use_result`,
+which is of one of the calls when a record holds several results (parallel calls): only a record
+with one result gives its `tool_use_result` to a call. `TaskList` replaces the list with the
+result's `tool_use_result.tasks[{id, subject, status}]`, a task whose id it knew keeping its
+`active_form`; a result that is not the only one of its record, or has no `tasks` array, changes
+nothing. A task with a status other than `pending`, `in_progress` and `completed` is left out; a
+subject and an `active_form` are cut at 512 bytes and the list at 200 tasks, so the event stays far
+under the WebSocket frame limit. `/clear` (`conversation_reset`) empties the list. A process that
+resumes a transcript starts with the list the CLI has: the adapter replays the main agent's (not a
+sidechain's) task calls and their results from the transcript (`toolUseResult` for
+`tool_use_result`), in order, through the same rules as the live ones, and sends no event for it,
+the hub has the latest stored one. Only the lines with a task call, and the results of those calls,
+are parsed. A copy made by a fork has the source's records up to the cut in its own transcript, with
+their uuids (§6), but the CLI's list of the copy only the tasks made after the fork, numbered from
+#1 again: when the copy is resumed (its second start; the hub sends `fork` on every start), only the
+records after the cut are replayed, all of them when the cut is not found. A fork starts with an
+empty list: the CLI keeps the list per session id, and `--resume <id> --fork-session` of a session
+with tasks answers `TaskList` with "No tasks found" (checked with 2.1.329); the hub copies no
+`tasks` event into a fork (§6 `POST /api/sessions/{id}/fork`), consistent with it.
 
 Slash commands (since 0.28, T27): `system/init` comes before every turn of a process and lists
 `slash_commands` (built-in commands, skills and plugin commands, e.g. `compact`, `context`,
@@ -5030,8 +5549,15 @@ before the start it works). A file the source lacks is skipped; any other failur
 fork goes on. The CLI writes the switch into the transcript as a typed `/model <name>` record; the
 adapter counts it as its own input (§9.3), so the mirror imports no prompt from it (since 0.77).
 
-Interrupting a turn (`session.stop`): the adapter sends `control_request {subtype:
-"interrupt"}` to stdin; the CLI ends the turn with a `result` record with `subtype:
+Interrupting a turn (`session.stop`): for the owner's own Stop (`quiet: true`, since 0.231) the
+adapter first sends a `cancel_async_message` for every line of hqc's that the CLI has not taken (its
+`command_lifecycle` is not `started` yet; the CLI answers each it drops with `command_lifecycle`
+`cancelled` before the turn's `result`), then `control_request {subtype: "interrupt"}` to stdin. The
+interrupt is plain on purpose: `cancel_queued: true` (checked live on 2.1.312; it answers
+`{still_queued: [], cancelled: [uuid…]}`) also dequeues the CLI's own queued lines that carry no
+`uuid` (the task notifications of background subagents and tasks, cron and `/loop` triggers;
+`cli-2.1.312.pretty.js:110256`), which hqc cannot write back. The CLI ends the turn with a `result`
+record with `subtype:
 error_during_execution`, the partial reply text comes as a separate `assistant` record, and
 the process stays alive (checked on 2.1.308). Since 0.201 the adapter also waits for the CLI's
 `control_response` to the `interrupt` (2.1.312 answers it in its input handler, ahead of the
@@ -5044,6 +5570,30 @@ the next input brings the process up via `--resume`.
 Since 0.143, if the turn still runs 10 s after the SIGINT (a process stuck in a tool call that
 the signal does not end), the group gets SIGTERM, and SIGKILL 5 s later, as a kill does: Stop
 ends a stuck session together with the commands it started.
+Since 0.231 what the owner's Stop (`session.stop {quiet: true}`) cancelled is not lost: the worker
+writes each input it marked into the conversation as a quiet line, a `user` message with
+`shouldQuery: false` (otherwise as any input, `origin` human for the owner's), which the CLI records
+without calling the model. It answers with `command_lifecycle` `queued` and `started`, a
+`system/init`, the line's echo (`isReplay`), a `result` `success` with `num_turns: 0` and
+`user_message_uuids` listing the line, and `completed` (checked live on 2.1.312; the next turn's
+agent remembers the text). Lines written back to back are taken as the CLI pleases: the first alone,
+the next ones together, with one `init`, an echo for each (the first one's own `uuid` and text, then
+the last one's `uuid` with the texts joined by a line break) and one `result` listing all of them.
+The engine takes each quiet line by the `result` that lists its `uuid`, once, and answers it with
+one adapter event naming the inputs; the `init` of a quiet line opens no turn of the CLI's own (no
+`status running`), its echo accepts no input, and its `result` (`num_turns: 0`) gives no `usage`, no
+`status idle`, no end of turn. The line carries `priority: "later"`: the CLI folds a line of
+priority "next" or above into a turn that runs, without looking at `shouldQuery`, and a line with no
+`priority` is "next" (2.1.312). A "later" line never joins a running turn, neither one of ours nor
+one the CLI started by itself on a task notification it kept in its queue; the CLI takes it when it
+is idle, after that turn's `result`. The CLI dequeues "next" before "later", so a normal line
+written while a quiet one still waits in its queue would run first, before the agent has seen the
+stopped text: the worker hands no normal input while quiet lines are out, and writes it after their
+acks. The idle unload and a move wait for the quiet lines to be taken too, since the end of the
+process loses their acks. A quiet line the CLI drops (`command_lifecycle` `cancelled`: on 2.1.312
+the CLI answers that for a line it failed to process) is written again at once, and one whose
+process ends before the CLI took it (not through `session.kill`) goes back to the queue and is
+written quiet into the next process. A `session.kill` is not held for them (§17.2).
 Since 0.161, with `perTaskStopAffordance` in the process's `initialize` (above), the interrupt stops
 only the turn: background subagents and workflows go on, as in the VS Code tab (by the 2.1.312
 binary, "an interrupt on an open-input (interactive stream-json) session spares running background
@@ -5063,6 +5613,18 @@ turn did not end in an error (by the 2.1.325 binary; after a Stop it exits with 
 does not come), so the worker closes a quiet process's stdin instead of sending SIGTERM (§17.3).
 With `transcript` among `lost` the adapter writes `system transcript_not_saved` (§4); with
 `global_config` alone the worker's log gets a warning and the chat nothing.
+
+A side question (since 0.232, §17.5) is `control_request {subtype: "side_question", question,
+history?[{question, response}]}` with `request_id` `hqc-side-<event_id>` (2.1.312, checked
+live). The CLI answers `system/control_request_progress` `started` (no event), then
+`control_response` `success` `{response, synthetic}` in 2.4 to 3.5 s: while idle, during a
+running turn (the answer was about what the agent was doing; the turn went on untouched) and in
+a process started with `--resume` that has run no turn. No `system/init`, `stream_event` or
+`result` comes with it and the transcript has no record of it. By the CLI's code (not checked
+live): `response` may be `null`, `synthetic: true` marks a notice of the CLI's own, there may be
+a `refusal_fallback`, `interrupt` does not cancel it, and an `error` `control_response` says
+"Session is shutting down", "Side question cancelled" or "side_question timed out: the host did
+not answer in time" (660 s). The adapter turns the answer into `side.answer` (§4).
 
 Stopping one task (since 0.161, the VS Code tab's stop of a background task, which
 `perTaskStopAffordance` declares): the adapter marks every row of `subagents.live`
@@ -5100,6 +5662,23 @@ with `{backgrounded: bool}`, or an error when background tasks are disabled; the
 tool result ("Command was manually backgrounded by user with ID: …" for Bash, `async_launched`
 for a subagent) and the agent goes on. The adapter only logs the answer.
 
+Since 0.219 the adapter takes input back and sends it now. `session.withdraw` (§5.3) is
+`control_request {subtype: "cancel_async_message", message_uuid: <the line's uuid>}` for an
+input written and not taken (2.1.312): the CLI answers `success` with `{cancelled: bool}`, and
+with `true` writes `command_lifecycle` `cancelled` for the line before it, which then never
+reaches the model. The adapter waits for the answer (`interrupt_answer`, 2 s; an error after
+it: the CLI is hung, and the input is then a written one again, which a later `cancelled` of the
+CLI's own drops like any other) and treats the line as no one's drop: it is not acked, not carried and not
+`dropped` at a `result`; one that was carried, or opened the turn, ends the turn it kept
+running with no `result` to come, as a carried input the CLI cancelled does. An input echoed or
+`started` is not asked for (`false`). `session.input_now` is the line of `session.input` written
+into the running turn with `priority: "now"`: the CLI moves the running Bash, MCP call or
+subagent to the background and takes the line into the same turn at once (the echo is
+`isReplay`, both uuids in `result.user_message_uuids`); during model text with no open call the
+turn ends `terminal_reason: "aborted_streaming"` and the line runs as a turn of its own, as a
+carried input does. An input already written to the CLI and held there is cancelled first and
+written again as it was, with a new `uuid` and the same `event_id`.
+
 The working directory is `<workspace>/<cwd>`. The process environment comes from the binding
 of the workspace path in the worker's local config (§14). Authentication is the subscription
 already logged in on the machine (Keychain on a Mac); the hub neither stores nor sees it.
@@ -5136,6 +5715,36 @@ message under 10 characters (2.1.312) or when making one fails, and the reads wo
 the whole turn. Before 0.162 the
 transcript was read only at the end of a turn, so a new session got its title when its first
 turn ended.
+
+Goal (since 0.218). Claude Code's own `/goal <condition>` (2.1.312, also in `-p` stream-json) adds a
+Stop hook to the conversation: at each end of a turn a model of the CLI checks the condition and,
+while it is not met, the agent goes on in the same turn; once hooks have blocked the end 9 times in
+a row (seen live on 2.1.312; `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`) the CLI ends the turn anyway, and
+the goal is checked again at the end of the next one. `/goal clear` (also `stop`, `off`, `reset`,
+`none`, `cancel`) removes it, `/goal` alone says what it is. Stop leaves the goal set; on `--resume`
+(an idle unload, a pause, a restart, a fork before the goal ended) the CLI sets it again from the
+transcript's last goal record. Seen live: a `/goal clear` typed while a turn runs waits for the end
+of that turn, as any slash command (§17.2), so a turn chasing a goal is stopped before it can be
+cleared. The goal's progress is never streamed (the SDK's `active_goal` comes only under
+`CLAUDE_CODE_REMOTE`): the CLI writes it to the transcript as `attachment` records of type
+`goal_status` — set `{met: false, sentinel: true, condition}`, each unmet check `{met: false,
+condition, reason}`, met `{met: true, condition, reason, iterations, durationMs, tokens}`, cleared
+`{met: true, sentinel: true, condition}`, impossible `{met: false, failed: true, …}`. The adapter
+reads them every 2 s of the process's life (with the token rate, below) and before each `result`
+line, by which the check of the turn's last text is written (seen live: so is every record of the
+turn) from the end of the transcript as it was when the process started (from its start for a
+transcript that appears later, the one after `/clear` too), skipping records written before the
+process started (a fork's copied history), and at a resume also the transcript's last one: each
+gives a stored `system goal` (§4) whose `event_id` is that of the record, so one read twice is one
+event. A record written after the text the adapter still holds (a check of the turn's last text is
+written after it, and the next stream-json line comes later) waits for that text and follows it, so
+a check stands under the text it judged. The mirror maps the same records to the same events for a
+transcript the worker's own process does not write (a VS Code tab, another machine); for its own
+process's records the adapter's events stand. The CLI's reply to a local slash command (`/goal`'s
+"Goal set: …", `/cost`, `/context`, "/config opens an interactive panel…"), a `<synthetic>`
+`assistant` text with `local_command_source`, which the CLI sets on that reply only (2.1.312), is
+`system command_output` with that text (at most 4096 bytes), not a `runtime` `agent.message`: it is
+the command's output, not an error.
 
 The worker runs `title.request` (T24) as a one-shot process — not through the session's adapter
 and not in its process: `claude -p --model claude-haiku-5-5 --max-turns 1 --no-session-persistence
@@ -5918,7 +6527,15 @@ no rule lifts the worker's `deny`.
 more answers after the session and always answers: option `server_session` ("Allow all
 <server> tools for this session", `canonical: session`) and, when the session has a workspace and
 is not restricted, option `server_always` ("Always allow all <server> tools in this folder",
-`canonical: always`); a request only a person may answer (§8.1) offers neither. The worker
+`canonical: always`); a request only a person may answer (§8.1) offers neither. Since 0.224
+neither is offered for a tool name another server's tool could share: the tool part starts with
+`_` or has `__` (Claude Code splits the name at the first `__` too, so `mcp__hqc___x`, the tool
+`x` of a server `hqc_`, reads as the tool `_x` of `hqc`, and `mcp__a__b__x` as the tool `b__x`
+of `a`; a rule `mcp__hqc` or `mcp__a` made from such a card would allow another server), and, as
+a precaution, when the server part starts or ends with `_`. The hub stores no folder rule for
+`server_always` on such a tool either (`400`, the request stays open). A rule `mcp__hqc` made
+from a card of the real `hqc` still allows the tools of `hqc_`, as Claude Code's own rule does:
+how a rule matches a tool is unchanged. The worker
 answers `allow` to either and remembers the server for the rest of the process: every
 `mcp__<server>__*` call is then allowed without a card, another server's is not. `server_always`
 is also an answer of the owner that the hub turns into a standing rule: before it forwards the
@@ -6161,12 +6778,12 @@ s>&sig=<base64url HMAC-SHA256 of "{id}.{exp}">`, TTL 10 minutes. Base:
 outside Cloudflare Access); if unset, the link is relative, on the hub's domain (behind Access).
 Key: `HQC_ARTIFACT_KEY`, or a random one per start. `GET /artifacts/{id}` without a signature
 or with a wrong one gives `403`, an expired one `410`; on `403`/`410` the client requests the
-link again (for `<img>`, once, on `onerror`). Only the artifact's owner gets a link (`404` for
-everyone else); the link itself is the access right, no cookies needed. Since 0.114 the chats of
-a page share one cache of links by artifact id, each used until 30 s before it expires: a chat
-opened again has its images' addresses in its first render, and the browser shows them from its
-cache instead of loading them anew; the cache is emptied whenever the client's socket to the hub
-opens, as a hub restarted without `HQC_ARTIFACT_KEY` signs with a new key.
+link again, once. Only the artifact's owner gets a link (`404` for everyone else); the link
+itself is the access right, no cookies needed. Since 0.114 the chats of a page share one cache of
+links by artifact id, each used until 30 s before it expires; the cache is emptied whenever the
+client's socket to the hub opens, as a hub restarted without `HQC_ARTIFACT_KEY` signs with a new
+key. Since 0.220 the client fetches an image by its link as it does a diff, and keeps the bytes
+on the device (the client paragraph below).
 
 Response headers (both via the link and to the worker): `Content-Security-Policy: sandbox;
 default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'none'`,
@@ -6212,14 +6829,23 @@ what is already uploaded. The worker puts them into `.hqc/inbox/` and substitute
 of `user.message` and `attachment` events render the same way: image — inline, diff — a code
 block with added and removed lines highlighted (up to 512 KB, larger as a card), html — an
 iframe from the artifacts domain or an "Open" link, text and file — a card with the name,
-size and "Open" (except file) and "Download" buttons. In a chat a click on an image and
+size and "Open" (except file) and "Download" buttons. Since 0.220 an image is shown as a `data:`
+URL of its bytes (the client's CSP has no `blob:`, §20), loaded when it comes within about a
+screen of the feed's window (in the viewer at once), and the client keeps on the device (IndexedDB
+`hqc-artifacts-<user id>`) the records of artifacts (not a `site`'s: its link goes when it is
+unpublished) and the bytes it downloads to show: images, diffs, a Markdown text in the viewer. An
+artifact's bytes never change (the hub keeps one row per owner, sha256 and name), so they are not
+downloaded again, whatever link the next view gets; its record may take another kind (§3), and an
+event naming another kind makes the client ask the hub again, as before. A file's "Download" and a
+text opened in a new tab are not kept; a failure of the browser's storage leaves the client
+downloading as before. In a chat a click on an image and
 "Open" of a Markdown text (a text named `.md` or `.markdown`, or typed `text/markdown`) show it
 in a viewer over the chat: the image fitted to the window, the Markdown rendered as the agent's
 messages; the viewer has "Download" and closes on its cross, Escape or a click outside it, and
 while it is open no key reaches the chat (a request card's Enter and Escape). Since 0.124 an
 image named `.heic` or `.heif` that the browser does not show (one sent before 0.124 or as it
-is, one an agent attached) is decoded the same way when its `<img>` fails with the renewed link
-too (a first failure may be an expired link, and Safari shows HEIC itself), and shown in the feed
+is, one an agent attached) is decoded the same way when its `<img>` fails (Safari shows HEIC
+itself), and shown in the feed
 and in the viewer as a JPEG `data:` URL, decoded once while the chat is open. Other text opens
 in a new tab. Since 0.128 a Markdown file of kind file has "Open" in a chat too, up to 2 MB;
 elsewhere a file has only "Download" (a new tab would download it). An `attachment` event
@@ -6317,7 +6943,7 @@ from the `fs.list_dirs` tree or its path is typed in, the worker checks it with 
 the hub stores the canonical path. Since 0.64, when the folder is missing (`400
 path_not_found`) the form offers "Create the folder and add" in place of "Add" (until the path
 or the worker changes), which sends `create: true`. Only the worker's owner can add a workspace to a worker (until
-the sharing of iteration 8 a worker has no other users), so there is no confirmation through the
+the sharing of iteration 9 a worker has no other users), so there is no confirmation through the
 service session yet; if the worker is offline, the workspace is not created. Since 0.58 (T45)
 `clone`: the client gives the URL, the parent folder and a name, the hub checks the parent and
 stores the workspace `creating`, the worker checks the new path itself and clones into it in its
@@ -6376,7 +7002,7 @@ The worker's local config is the only source of truth for:
   old file is ignored with a warning in the log at start;
 - `environments{}` — named environments (`[environments.<name>]`, below; since 0.56, T43);
 - `env_bindings[]` — records `{path, environment, hermes_profile?, foreign_profile?}`
-  (`[[env_bindings]]`; the profiles are iteration 7). A binding is looked up **by the workspace
+  (`[[env_bindings]]`; the profiles are iteration 8). A binding is looked up **by the workspace
   path** (not by the session's `cwd`), canonical (symlinks resolved; the binding's own path is
   resolved again at every lookup, so a binding through a symlink names its target); the longest
   binding that equals or contains the path wins, compared by path components (`/a/b` does not
@@ -6464,6 +7090,7 @@ env = { GITHUB_TOKEN = "..." }        # variables on top of the child allowlist
 ssh_keys = ["infra_ed25519"]          # keys of the worker's store, $HQC_HOME/keys/
 allow_local_mcp = false
 project_settings = false
+hub_mcp = false                       # true: the owner's remote MCP servers from the hub (0.235)
 [environments.infra.permissions]
 unblock = ["Bash(ssh:*)"]             # lift worker-wide deny rules here only
 allow = ["Bash(ssh debian@192.168.1.20:*)"]
@@ -6578,6 +7205,35 @@ session asks and why, and a prompt-injected agent that has a secret can leak it.
 the card it writes (`approval.request` with `secret`, §4) its own: it drops `secret` from an
 `approval.request` a worker sends.
 
+A secret from Vaultwarden (since 0.216). `vault = true` at the top of `worker.toml` (off by
+default, and only with `session_secrets`) lets an `hqc_secret` card name a Vaultwarden
+(Bitwarden) entry instead of a typed value, as T3 Code's card takes a 1Password reference: the
+worker reads it with `rbw` 1.15 or newer (from `PATH`; an older one lacks `list --fields type`
+and `get --field private_key`, and is refused as such) on its own machine and the value goes
+into the agent's process as a typed one does, so it passes neither the client nor the hub. The
+entry is the one whose name or id equals what the card says, exactly: `rbw get` alone would also
+take an entry whose name merely contains it, or one with a matching site address, so the worker
+first finds the entry's id in `rbw list --fields id,name,type` (none, or several of that name,
+is refused) and reads by the id — the password (a note's text for a note), the private key of an
+entry of Bitwarden's type "SSH key" (`--field private_key`), and such an entry only for `kind:
+ssh_key` (into the agent's ssh-agent): as a plain `secret` it would be a file the agent reads, so it
+is refused, naming the entry, before anything is read. `rbw unlocked`, the list and the
+read take at most 15 s together. What the worker can read is what the account `rbw` is signed in
+with there can, and while `rbw` is unlocked there the commands of every agent on that machine,
+which run as the same user, can read it too without a card: the card decides what the worker
+gives, not what an agent there can reach. A locked `rbw` is refused (unlock it on that machine,
+or type the value), and the card stays open. `hello.capabilities.vault` tells the hub (§5.4);
+`hqc-worker env` shows `vault`.
+
+The task list tools (since 0.223). `task_tools = true` at the top of `worker.toml` (off by default;
+the hub cannot turn it on) starts every agent process of the worker with
+`CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, which gives the 5.x models of Claude Code 2.1.312 and later the
+task tools (`TaskCreate`, `TaskUpdate`, `TaskList`, `TaskGet`, §8.1, and then no `TodoWrite`) that
+fill the task list row above the input (§6); the older models of the CLI's list (Opus 4.7 and 4.6,
+Sonnet 4.6, Haiku 4.5) have them without it. The worker's own value wins over one of the
+environment's `env`; without `task_tools` the variable is removed from the child's environment.
+`hqc-worker env` shows `task_tools`.
+
 The browser (since 0.148). `browser = true` at the top of `worker.toml` (off by default; the hub
 cannot turn it on) lets the owner give a session's agent their Chrome on this machine (`PATCH
 /api/sessions/{id} {browser}`, §6): Claude Code runs with `--chrome` and reaches the browser
@@ -6628,7 +7284,7 @@ it finds commands, their output and word forms and puts the best match first:
 - **Configuration `hqc`.** A copy of `russian` whose Latin words go to an English and the rest
   to a Russian Snowball stemmer, both without stop words, so every word stays searchable and
   "переезд" finds "переезда", "deploy" finds "deployed".
-- **Whose.** Until grants (iteration 8): the user's (the calling session's owner's) sessions,
+- **Whose.** Until grants (iteration 9): the user's (the calling session's owner's) sessions,
   archived ones included and marked `archived: true`, the workers' service sessions left out and
   (since 0.172) of a room's agents' sessions their inputs from the room, which the room has
   (§7.1.1); since 0.175, for an agent of a room (`hqc_search_history`, §7) also the room and
@@ -6704,7 +7360,7 @@ it finds commands, their output and word forms and puts the best match first:
   (`#/search?q=…&kind=…&project=…&time=…&order=newest&fuzzy=1`, replaced, not pushed), so
   Back from an opened hit brings the same search back; the Compact look puts all the filters on
   one row. A hit opens `#/s/<session>?seq=<seq>`:
-  the chat loads its history as always (the newest page, then the older ones, §6) and, once the
+  the chat loads its newest page and then the older pages down to the hit (§6) and, once the
   event is there, renders the feed from the block that holds it if it did not and scrolls the block that holds it (the last block starting at or before `seq`) to the middle
   and marks it.
 
@@ -6722,10 +7378,10 @@ pushes nothing; the agent's post in the room, a `peer.message` there, pushes wit
 `session_id`, so the click opens the room, the room's title and the body "<agent's title>:
 <text>".
 
-Since 0.214 the same notices also go over APNs to the user's iOS devices (`/api/push/apns`,
+Since 0.237 the same notices also go over APNs to the user's iOS devices (`/api/push/apns`,
 §6), when the hub has a token-based APNs key (`HQC_APNS_KEY` or `HQC_APNS_KEY_FILE`,
 `HQC_APNS_KEY_ID`, `HQC_APNS_TEAM_ID`, `HQC_APNS_TOPIC` = the app's bundle id; all or none;
-RUNBOOK §1.10): to the same users. Since 0.219 APNs has its own rule: it is skipped only while one
+RUNBOOK §1.10): to the same users. Since 0.239 APNs has its own rule: it is skipped only while one
 of the user's iOS app sockets (`/api/ws?client=ios`) subscribes to the session (or, for a request
 others wait on, to a session of the chain), whatever web clients show it, so a web tab left open
 on a session no longer keeps the phone quiet; Web Push keeps the rule of any live subscription.
@@ -6741,7 +7397,7 @@ the push body's `tag` (its SHA-256 in hex when longer than 64 bytes). APNs answe
 `BadDeviceToken`, `Unregistered` or `DeviceTokenNotForTopic` deletes the device, as a gone Web
 Push subscription is deleted.
 
-Since 0.218 a device that registered a `key` gets its notices sealed end to end. The hub puts
+Since 0.238 a device that registered a `key` gets its notices sealed end to end. The hub puts
 what the payload above says (`title`, `body`, `category`, `session_id`, `open_session_id?`,
 `type`, `request_id?`, `options?`) into a JSON object, seals it with AES-256-GCM under the
 device's key and a random 12-byte nonce, and sends
@@ -6863,9 +7519,15 @@ failure shown as a notice; the button
 goes once the worker reports the call moved or ended; since 0.179, with no such call, the
 session's `activity`, §6, stands in place of "Working": "Retrying 3/10 (529), next in
 8 s" — "no response" in place of a status the attempt did not get, the delay rounded up to
-whole seconds and left out when it is 0 —, "Compacting the conversation…", "Thinking · ~12k
-tokens"; a waiting `hqc_ask` is "Waiting for a reply from <session>"), `queued` — "Main agent:
-Input queued", `paused` — "Paused" in the header and the session's row,
+whole seconds and left out when it is 0 —, "Compacting the conversation…", "Thinking · 12.34k
+tokens" — since 0.227 a count that runs up to each new estimate, as in the VS Code tab: from the
+number shown, linearly, over the time since the estimate before it (0.3–3 s), redrawn every
+100 ms, the first estimate and a smaller one (a new thinking block) shown at once —; a waiting
+`hqc_ask` is "Waiting for a reply from <session>"), `queued` — "Main agent:
+Input queued"; since 0.233, when the session has an `activity`, that activity in its place, the
+row drawn as a running one (Claude Code echoes an input, which opens its turn, only after the
+auto-compaction it runs before it, so the input waits while the agent compacts), `paused` —
+"Paused" in the header and the session's row,
 `waiting` — "Main agent: Waiting for approval" if the open request is not in the feed (otherwise
 its card is that row). In a room each agent at work has its row, led by its name in place of
 "Main agent: ". The row is not in the feed, so the feed's window gets shorter when the block appears at
@@ -6915,7 +7577,8 @@ may join: the cap of §7.1 caps it whenever one of them comes from a session in 
 worker gets without `peer` (§7.1.1), and (since 0.174) a `peer.message` of mode `send` without
 `schedule_id`; a `joined` on any other input is the worker's mistake, logged, not kept, and the
 input's turn opens (since 0.71). Since 0.112 the hub keeps an honoured one on the message,
-`payload.joined: true` (§4), and sends it with the `delivery` frame (§6); the client marks the first line of a person's message with an icon before the time, "Joined the turn" its tooltip (since 0.178; the words in the line before; a send's bubble has no such note).
+`payload.joined: true` (§4) and, since 0.221, `payload.joined_after`, where the agent took it
+(§4, §6), and sends them with the `delivery` frame (§6); the client marks the first line of a person's message with an icon before the time, "Joined the turn" its tooltip (since 0.178; the words in the line before; a send's bubble has no such note).
 What may not join waits for the end of the turn as before (scheduled runs and slash commands
 always do), and a person's inputs keep their `seq` order among themselves. Since 0.75 nothing
 is written into the turn either while a move of the session waits (§5.3): the input is for the
@@ -6939,12 +7602,74 @@ The same holds for an input sent during a turn the CLI began by itself after a b
 `session.stop` interrupts such
 a turn too (the adapter knows it from the CLI's `system/init` with no input of hqc's). An input
 the CLI cancels after a `session.stop` (a carried input on a second Stop) fails, not retryable,
-instead of going back to the queue: the person cancelled it. The "interrupt and send" button does
+instead of going back to the queue: the person cancelled it. Since 0.231 the owner's own Stop of a
+turn that runs (`session.stop {quiet: true}`: the stop button, a room's Stop; a pause's stop is none
+of these) is "stop the turn, send everything that waited, stop again": when it comes the worker
+marks the inputs it holds (its queue; a capped input waiting for its mode), and when the stopped
+turn ends it marks the inputs the runtime dropped from that turn (cancelled or not taken: they were
+written before the Stop). It writes the marked ones into the agent's history without a turn (§8.1),
+in `event_id` order, the hub's creation order. The agent knows them next time and does not act on
+them now. Each is acked `quiet` when the runtime has taken it, and acked `quiet` again when the hub
+resends it. A slash command among them fails, not retryable ("cancelled by Stop"): it runs or it
+does not, it is no text for the history (what decides is the text the runtime gets: a message of
+another session whose text starts with a path carries a header first and is no command). Until the
+stopped turn ends nothing new goes into it, and what comes after the Stop is never marked: it waits,
+and goes as an ordinary input once the quiet lines are taken (the CLI runs a "next" line before a
+"later" one, and the agent must see the stopped text first). So a message typed after the Stop runs,
+and so does a slash command typed after it (Clear goal is a Stop, then `/goal clear`). The idle
+unload and a move wait for the acks. A Stop with no turn running (idle, no process, the agent waits
+for a slot or a move) and a stop with no `quiet` (a pause's, which keeps the waiting messages for
+the resume) mark nothing and write nothing. The hub keeps `payload.quiet: true` on such a message
+and sends it with the `delivery` frame (§6); the feed stands it behind its `joined_after`, where
+Claude Code recorded it, and never shows it as waiting (§6). An input the hub has not handed to the
+worker yet is not touched. Before 0.231 an input the CLI cancelled after a Stop failed, not
+retryable, and the others waited and ran. Send now (§6) is no way past that hold: while the stopped
+turn ends, an input that came after the Stop is `error not_now`. The runtime's `cancelled` for the
+turn's own first line, which a Stop's cancel can reach before the CLI started it (a cold start),
+makes that input come back as dropped at once, so it is written quiet like the others (not in a turn
+the runtime started by itself, where that line is not what keeps the turn open). Take back of an
+input the Stop marked withdraws it as ever: one still in the worker's queue leaves it, and one the
+CLI already cancelled is withdrawn at once, without asking the CLI again, and is never written
+quiet. One already written as a quiet line is on its way into the history and is `409
+already_taken`. Limitation: a `session.kill` or a worker restart at any time between the Stop and
+the quiet acks (during the stopped turn, and while quiet lines wait behind a turn the CLI started by
+itself) drops the marked inputs at the worker; the hub, which holds them `pending`, sends them to
+the next process as plain inputs, which run as before 0.231. The "interrupt and send" button does
 `session.stop` and then the input. For runtimes with `steer` (Hermes) a "steer" button is
 available: `session.steer` without interrupting. Two users with `write` share the same queue.
 Each turn runs in its own input's mode (since 0.43, T39): a person's input queued behind a
 capped turn runs in the session's mode (§5.3), unless (since 0.44, T40) it carries a buffered
 send from a session in a lower mode (§7.1).
+
+Since 0.219 the owner may take a message of theirs back, or send it in at once, while it waits
+for the agent: it shows `queued` or `awaiting delivery` and, beside its Copy button,
+Take back and (only while the session's turn runs) Send now. A message waits in the hub (the
+worker is away, the session paused), in the worker's queue, or written into the CLI's queue and
+not yet taken. Take back (`POST .../inputs/{event_id}/withdraw`, §6) removes it from wherever it
+waits, or has the CLI drop the line (§8.1), and then no one ever sees it: it is `delivery:
+withdrawn`, never acked, never failed, never copied into a fork, and the client puts its text
+after what is typed in the input (a blank line between them) and its files back among the input's
+files, read from the device when it holds them (§6), else from the hub, and not kept on the
+device; a refusal, because the agent took the message first, is `409 already_taken` and says so,
+and the bubble stays. A message that was handed to a worker is asked
+about at its connection whatever the session's start state (a paused session's worker holds
+nothing: `true`); with no worker connected it is `409 worker_offline`; while the question is open
+the message is `withdrawing`, handed to nobody and refused a second take-back (`409 withdrawing`);
+a message taken back already is `409 withdrawn`, and the client that asked puts the text back as on
+success; a worker's answer after the hub's `504` is dropped, and a take-back whose answer the
+client lost hides the message without putting its text back (§6, limitations). Only a message the
+owner typed (`payload.human`, §4) has them, and Send now not a slash command.
+Send now (`.../now`) writes a message the worker only queues into the turn with priority now (§8.1),
+or has a line the CLI holds cancelled and written again that way; the CLI moves the call the agent
+is in to the background, which is the point; while the agent writes its answer, the answer stops and
+the message runs next. It goes past the inputs waiting in front of it, as the owner chose; the turn
+takes it under the rules of the input that joins (no `hqc_ask` turn, no move waiting, no open
+request, no slash command, no cap): a turn that waits for an answer to a card of the agent's takes
+nothing, so that is `409 not_now` (the client says "The agent cannot take this message into its turn
+now"); one the agent took meanwhile is `sent_now: false` (the client says "Not sent now: the agent
+took it already, or it goes next") and nothing else. A turn's own input is not sent now; it is not taken back once the CLI
+started it. A message the hub handed to a worker in an earlier connection is neither taken back nor
+sent now until that worker is connected (§6).
 
 ### 17.3 Processes
 - An idle agent is left alone by default. With the worker's `idle_timeout` > 0 the
@@ -6969,7 +7694,8 @@ send from a session in a lower mode (§7.1).
   last listed (`due_in_ms` of its `kind: cron` row, §4; a job whose next fire is not known holds
   nothing), so an unload no longer kills a job that has yet to fire. While such a job waits, the process
   holds its slot of `max_sessions`: a new session waits for a slot (`waiting_for_slot`), as it
-  does beside any running agent.
+  does beside any running agent. Since 0.232 an agent is not idle while
+  a side question is unanswered (§17.5).
 - Since 0.201 the worker ends a process with nothing running by closing the CLI's stdin: a CLI
   with nothing to do exits on it, with status 0, and then reports what it could not write
   (`system/session_writes_lost`, `system transcript_not_saved`, §4); SIGTERM was sent before and
@@ -7085,6 +7811,56 @@ send from a session in a lower mode (§7.1).
   records as in §13.2 (archived sessions lose `workspace_id` and `worker_id`, the history stays),
   then the worker's record. Files on the machine are left alone.
 
+### 17.5 Side questions
+
+A side question (since 0.232; the backlog's "a side question to a running session": T3 Code and
+Orca ask it in a copy beside the session) is answered by the session's own agent without a turn
+and without a trace in its context: the runtime reads the conversation, answers, and the agent
+is not asked, does not see the question or the answer, and does not work on it.
+
+- The owner types `/btw <question>` or `/side <question>` in the chat's composer; the client
+  sends it to `POST /api/sessions/{id}/side_question` (§6) instead of the input. A text with
+  files, `/btw` alone or any other command name goes as a message as before.
+- The hub stores `side.question` (§4) and sends the worker `session.side_question` (§5.3),
+  after `session.start` (with `no_wait`, §5.3) when the agent is not started on the connection:
+  with all `max_sessions` slots busy the session is not put in line, the feed has no
+  `waiting_for_slot` line, the question is answered with the error "All the agent slots of this
+  worker are in use" and no agent starts later with nobody to answer; the settings of that start
+  are kept for the agent's next start, as those of any start. Refused, with nothing stored: a
+  room, an archived or paused session, one VS Code holds, a session of a runtime other than
+  Claude Code, a worker that is offline. `history` of the frame is the earlier side questions of
+  the session whose answer (the first stored, by `seq`) is a `text`, not an error one, after the
+  owner's last `user.message`, the last 10, oldest first.
+- The worker starts the agent's process when none runs, as for an input (resuming; no input is
+  written), asks the runtime (§8.1) and stores the answer as `side.answer {question, text}`.
+  The runtime's notice of its own (`synthetic: true`) and its errors go as `error`, a `null`
+  answer as the error "No answer", a question that could not be asked as the reason. A process
+  that ends with a question unanswered (a kill, a crash, a pause) answers it with the error
+  "The agent's process ended before the answer". The idle timeout (§17.3) does not unload the
+  agent while a side question is unanswered. A
+  hub stores an `error` the worker answers `session.side_question` with as the question's
+  `side.answer {error}`. The hub keeps the questions sent through a connection that have no
+  answer yet, and when that connection closes, however it closes (the socket drops, or a new
+  `hello` of the worker replaces it), it stores "The worker went offline before the answer" for
+  each of them; an answer the worker sends later from its outbox is dropped (§4), and nothing
+  resends the question.
+- The runtime's API cost for the question is added to the process's running total, so the next
+  turn of the same process shows it in its cost (`usage.cost_usd`) and in `session_tokens`
+  (0.229); a process that ends before a turn does not show it. The question has no line of its
+  own. Claude Code asks it on the conversation's prompt cache, which the read renews; the
+  header's cache time (§6) counts from the last turn's `usage` and does not see that.
+- The feed shows the question and its answer as one muted block "Side question", the answer as
+  Markdown, "Answering…" until it comes, the error text when there is none; it is neither a
+  message of the owner nor of the agent. A fork (§6) does not copy side events, and the hub's
+  reckoning of a turn's order (§6, `agent_work`) does not count them as the agent's work.
+  The events list of the client returns them as stored; `hqc_read` (§7) leaves them out, also
+  in the calling session's own feed, as the agent sees neither the question nor its answer; the
+  search index (§15) takes none.
+- Order (§6): a question asked while the agent's text or thinking is being written has
+  `during_text` and stands under that text, in the order it came, as an input does: with a
+  message M, a question Q and the final answer A stored after them, the feed shows A, M, Q. A
+  fork before such a message looks for the answer above it past side events.
+
 ## 18. Stack
 
 - Hub: Rust, axum, tokio, sqlx, Postgres. Artifacts: disk or S3.
@@ -7095,7 +7871,7 @@ send from a session in a lower mode (§7.1).
   on macOS (ssh keys of environments are 0600 files, §14); on Linux and Windows in the first version the worker token is a 0600 file (§5.1),
   libsecret and DPAPI later.
 - Client: TypeScript, responsive web, PWA; Tauri on the same code later. iOS: Swift and SwiftUI
-  (`ios/`, since 0.213), the same REST API and `/api/ws`, no hub change.
+  (`ios/`, since 0.236), the same REST API and `/api/ws`, no hub change.
 - Shared crates: `hqc-proto` (event and frame schema, versioned),
   `hqc-claude-jsonl` (transcript parser), adapters as separate crates.
 
@@ -7115,7 +7891,7 @@ send from a session in a lower mode (§7.1).
    a session started in VS Code (live test `live_takeover`; checked by hand through the UI on a phone on 2026-10-25).
    Closed on 2026-10-25.
 3. hqc MCP: attach, send, ask, spawn, list, search, schedule; `mcp.call` frames;
-   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 8).
+   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 9).
    Tasks: `docs/ITERATION-3.md`. Criterion checked by hand on the production hub on 2026-10-31.
    Closed on 2026-10-31.
 4. Workspaces: ~~clone~~ (0.58, T45), ~~worktree~~ (0.60, T46), ~~ephemeral~~ (0.61, T47). Environments and bindings on the worker. Moved
@@ -7132,12 +7908,18 @@ send from a session in a lower mode (§7.1).
    the hub's storage; a key may be kept for the workspace; only a worker with `session_secrets`
    takes them (§14); and the owner's Chrome for one session (since 0.148, `browser`). Tasks:
    `docs/ITERATION-6.md`.
-7. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
+7. Remote MCP servers from the hub (since 0.235, #59): the owner adds a server reached by URL
+   once, for all projects or chosen ones; a session's agent gets it under its own name
+   (`mcp__<name>__<tool>`) through a stdio relay of the worker, and the hub makes the calls
+   with the token or OAuth sign-in it keeps, so no worker, agent or transcript sees it; only an
+   environment with `hub_mcp = true` takes them (§14). MCP servers that run on the machine and
+   skills from the hub (#62) come after it. Tasks: `docs/ITERATION-7.md`.
+8. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
    worker; the bare model; the personal assistant session (moved from 3: its default runtime is
    the bare model, §8.3), until then `hqc_send` needs `session`.
-8. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
+9. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
    (0.38, T35, with `hqc_schedule`).
-9. Tauri, native notifications, several agents in one session.
+10. Tauri, native notifications, several agents in one session.
 
 ## 20. Hosting and security
 
@@ -7145,7 +7927,7 @@ send from a session in a lower mode (§7.1).
   it); `/api/*` is behind Cloudflare Access with JWT verification (in OIDC mode, behind the
   proxy's sign-in, the hub verifying the provider's ID token, §6); `/worker/*` is outside
   Access, worker tokens only, rate limit on enroll;
-  `/worker/native/token` (since 0.214, §6) is there too: it gives the Access or OIDC proxy
+  `/worker/native/token` (since 0.237, §6) is there too: it gives the Access or OIDC proxy
   credential only for a one-time code with its verifier, and shares the rate limit of enroll; so is
   `/worker/push/relay` (§16), on a hub that relays, limited per address;
   `artifacts.<hub-domain>` is public, signed links with a TTL only; the publication domain
@@ -7154,6 +7936,21 @@ send from a session in a lower mode (§7.1).
   `HQC_HUB_LISTEN` address and without `HQC_ACCESS_*` or `HQC_OIDC_*`; otherwise the hub does
   not start (§6).
 - Worker tokens: random 256 bits, only the hash in the database; revocation from the UI.
+- Remote MCP servers (since 0.235), what is accepted: the relay authenticates to the worker with
+  the session token, which is on the CLI's command line as for the hqc server (§7.2), so an agent
+  allowed to run commands can start a relay of its session's servers itself and call their tools
+  without the CLI's permission card for each; the servers it reaches are only those of its
+  project, with the owner's credentials. Give a server to the projects whose agents may act on it.
+  The hub itself, not only the worker, refuses a restricted session, another runtime, and a
+  session on a worker that is not its owner's: a foreign worker holds the session's token.
+- Remote MCP servers (since 0.235): their header values are sealed under `HQC_MCP_KEY` and never
+  leave the hub but to the server itself; no worker, agent, transcript or log line sees them. A
+  server's URL is https, and the hub refuses to connect to a private, loopback, link-local or
+  CGNAT address (also behind a name) unless `HQC_MCP_ALLOW_PRIVATE=1`, so an owner's server entry
+  cannot reach the hub's own network by surprise; the name is resolved once per request and the
+  connection goes to that address, and redirects are not followed. A relay request needs the
+  session token of a session the sending worker runs; a server answers only sessions of the
+  projects its owner gave it to.
 - `Origin` **[decision]**: a WebSocket upgrade of `/api/ws` without `Origin`, or with an `Origin`
   that does not match the request's `Host`, gets `403`; non-GET `/api/*` requests with a foreign
   `Origin` get `403` (without `Origin` they pass: that is how non-browser clients come). A match
@@ -7192,7 +7989,7 @@ send from a session in a lower mode (§7.1).
   | … mirror sessions per workspace | 2000 in total | the event is dropped, `ack` without `seq`, warn in the hub's log |
   | … `runtime_session_id` | lowercase uuid with hyphens | same |
   | … `cwd` | up to 4096 bytes and inside the workspace path | same |
-  | a worker event of type `user.message`, `approval.response`, `clarify.response`, `peer.message`, (since 0.169) `schedules.live` (§4: only the hub writes them) | forbidden in any session | `error invalid_frame` |
+  | a worker event of type `user.message`, `approval.response`, `clarify.response`, `peer.message`, (since 0.169) `schedules.live`, (since 0.232) `side.question` (§4: only the hub writes them) | forbidden in any session | `error invalid_frame` |
   | a worker event in its service session (§10.2) | only `system` with `code: worker_log` | `error invalid_frame` |
   | `session.state.foreground_calls` (§5.4, since 0.125) | 64 unique ids of 1–128 bytes without whitespace or control characters | the rest of the list is dropped |
   | a worker event in an archived session (§17.4) | only one that ends a turn: the final `agent.message`, `status idle`/`error` | `ack` without `seq` |
@@ -7242,7 +8039,7 @@ send from a session in a lower mode (§7.1).
   | `files` of `hqc_send`/`hqc_ask` (§7, since 0.46) | at most 32; each path by the rules of `hqc_attach` (above), on the sender's worker | `error invalid_args` / `not_found` from the worker, no call is sent |
   | `artifact_ids` of `hqc_send`/`hqc_ask` on the hub | at most 32, each an artifact of the owner linked to the calling session | `error invalid_args` / `not_found`, nothing is stored |
   | files of an `hqc_ask` reply (§7.1) | at most 32, artifacts of the target's owner only; downloaded by the asking worker with the limits of an input (100 MB each, 500 MB per reply) | the rest left out (warn in the hub's log) / that file reported with an `error` |
-  | `hqc_publish` packing on the worker (§7, since 0.209) | at most 10 000 files, 500 MiB together, paths up to 512 bytes, only regular files and folders (entries named `.git` or `.hqc` are left out), every entry inside the folder and `allowed_roots` after resolving symlinks; the zip up to 100 MB | `error invalid_args`, nothing is uploaded |
+  | `hqc_publish` packing on the worker (§7, since 0.209) | at most 10 000 files, 500 MiB together, paths up to 512 bytes, only regular files and folders (entries named `.git` or `.hqc` are left out, and since 0.226 a link into one), every entry inside the folder and `allowed_roots` after resolving symlinks; the zip up to 100 MB | `error invalid_args`, nothing is uploaded |
   | `hqc_publish` archive on the hub (`hqc_proto::mcp::MAX_SITE_*`) | the file ends with its end record (no comment, not zip64) right after its central directory, whose records the hub walks itself before the zip reader opens it (and the reader must open that directory): at most 10 000, names up to 512 bytes, no extra field, no comment, stored or deflated; 500 MiB unpacked by the sizes the entries declare; names relative, without an empty, `.` or `..` component, a control character or a bidirectional control, each once (the records walked against the names the reader keeps); not encrypted, no links; `index.html` at the top or a single file; `path` 1–4096 bytes, showable | `error invalid_args`, no card |
   | open `hqc_publish` requests per session | 1 | `error unavailable` |
   | a published entry served (§12) | no more than the size its archive declares | the rest is not sent |
@@ -7312,7 +8109,7 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
-### 0.219 → 0.220 (native client sign-in behind an OIDC proxy)
+### 0.239 → 0.240 (native client sign-in behind an OIDC proxy)
 §6, §20: `GET /api/native/login` and `POST /worker/native/token` now work in OIDC mode
 (`HQC_OIDC_*`, e.g. Traefik + oauth2-proxy + Keycloak, RUNBOOK §1.9) instead of answering
 `400 not_access`. After `CurrentUser` verifies the OIDC ID token, the hub stores the forwarded
@@ -7322,31 +8119,31 @@ iOS builds keep working. The iOS app stores the cookies (or bearer token) in Key
 absorbs `Set-Cookie` headers from the hub's responses so proxy cookie refreshes keep it signed
 in.
 
-### 0.218 → 0.219 (Apple push whoever else shows the session)
+### 0.238 → 0.239 (Apple push whoever else shows the session)
 §16, §6: APNs is skipped only while the user's iOS app (its socket `/api/ws?client=ios`) shows
 the session, not while any client does: a web tab left open on a session kept every notice of it
 from the phone. The app closes its socket in the background. Web Push is unchanged.
 
-### 0.217 → 0.218 (Apple push notices sealed end to end)
+### 0.237 → 0.238 (Apple push notices sealed end to end)
 §16, §6, §3: the iOS app makes a 32-byte key for its notices and registers it with
 `POST /api/push/apns {key}`; the hub seals each notice to that device with AES-256-GCM and sends
 Apple, and a relay, a generic alert with `mutable-content`, the content in `enc`. The app's
-notification extension opens it on the device. Hub migration `0056` (`apns_devices.notice_key`);
+notification extension opens it on the device. Hub migration `0059` (`apns_devices.notice_key`);
 an app that registered no key gets its notices in the clear as before.
 
-### 0.216 → 0.217 (the iOS client signs in through the browser and gets Apple push)
+### 0.236 → 0.237 (the iOS client signs in through the browser and gets Apple push)
 §6: `GET /api/native/login` and `POST /worker/native/token`, the native client's sign-in
 through the system browser with a one-time code and a verifier, so identity providers that
 refuse an embedded login page (Google) work; `/api/push/apns` for the client's device token.
 §16: the notices of Web Push also go over APNs (`HQC_APNS_*`), with the approval's options so
 the app answers it from the notification; a hub without a key sends through another hub's relay
 (`HQC_APNS_RELAY_URL`, `POST /worker/push/relay`, served with `HQC_APNS_RELAY=1`). §20: `/worker/native/token` outside Access. §3: the
-table `apns_devices` (hub migration `0055`). The iOS client also gains attachments (upload and
+table `apns_devices` (hub migration `0058`). The iOS client also gains attachments (upload and
 preview), rooms, schedules, search, workers with enrollment and Claude Code's sign-in,
 workspaces with a folder browser, and the session controls of the web client (rename, model,
 pause, restart, favorite, archive, delete), all over the existing API.
 
-### 0.215 → 0.216 (a native iOS client)
+### 0.235 → 0.236 (a native iOS client)
 §2, §18: a native iOS client in `ios/` (Swift, SwiftUI, iOS 26) besides the web client. It uses
 only what §6 already gives the web client: `GET /api/me`, `/api/projects`, a project's
 sessions and workspaces, `GET /api/requests`, a session's events by `before_seq`, `POST /input`
@@ -7356,6 +8153,352 @@ request, `PUT /read_cursor`, and `/api/ws` with `subscribe_summary` and `subscri
 sends the `CF_Authorization` cookie with each request; on the WebSocket upgrade it sends
 `Origin` as the hub's origin, which §20 checks (a native client has no Origin of its own). No
 hub, worker or protocol change.
+
+### 0.234 → 0.235 (iteration 7: remote MCP servers relayed by the hub)
+§19: a new iteration 7, remote MCP servers the owner adds once on the hub (#59); the generic ACP
+adapter becomes iteration 8, sharing 9, Tauri 10, and the references to them follow. §5.3
+`session.start.mcp_servers`, §5.4 `mcp.upstream`, §6 `/api/mcp/servers`, §14 `hub_mcp`, §20.
+A server's address and token stay on the hub: the worker gives the CLI a stdio relay per server
+under the server's own name (`mcp__<name>__<tool>`), and the hub makes the calls, one MCP session
+per hqc session and server, a large result as an artifact, a timeout per server. Migration
+`0057`. OAuth sign-in (T65) and the client's screens (T66).
+
+### 0.233 → 0.234 (one Quote button over the input, Copy alone on a message)
+§6: a message's buttons were Search, Copy and Quote: Search worked on the selection inside that
+message (hidden without one), Quote on it, else on the message's first two sentences; the Quote
+pop-up was awkward, the menu of a right click a click more, and the buttons at the message's bottom
+right had to be reached in a long message. Search and Quote are gone from the messages: their strip
+is Copy (which now copies the whole message, never the selection) and, on the user's own message,
+Take back, Send now, Add to quick messages and Fork; a press on the strip no longer takes the focus
+from the input. "Quote" is one button, the word itself, over the right end of the input's field
+(left of send, taking no room: the field, its wraps and the feed do not move when it comes and
+goes), shown while the chat holds a selection that starts in the feed or in a subagent's history,
+where there is an input, and it needs a selection; a press appends the selection to the draft as
+`> ` lines. The chat follows the selection cheaply (a copy of its range; its text is read at the
+press, or from that copy when the press cleared the selection) and renders only when a quotable
+selection comes or goes. A range that ends outside the feed it starts in (a triple click on the
+last paragraph of the last message ends past it) is cut at the feed's end, for the right-click
+menu (Quote, Copy, Search in …), which is otherwise as it was, too. A range that starts in the
+line a folded reasoning shows begins with its selected part of that line, as the old Quote of that
+reasoning had it; one that only passes through the reasoning leaves the line out, as before.
+
+### 0.232 → 0.233 (a compaction before a waiting input is shown)
+§6, §17.1: with the context past its threshold Claude Code runs an auto-compaction before it takes
+the next input and echoes that input only after it, so for the whole compaction (93 s on a live
+session) the input stayed pending, no turn was open, the session was `queued`, and the main
+agent's row said "Input queued" whatever the worker reported. The worker and the hub already
+passed "compacting" on; the client dropped it in `queued`. Now an `activity` stands in place of
+"Input queued", the row drawn as a running one: "Main agent: Compacting the conversation…". Only
+the client changed.
+
+### 0.231 → 0.232 (a side question to a session's agent)
+§4: the events `side.question` (the hub's, the owner's) and `side.answer` (the adapter's); §5.3:
+`session.side_question`; §6: `POST /api/sessions/{id}/side_question`; §8.1: the `side_question`
+control request, which Claude Code answers outside the conversation, without a turn and without a
+trace in the agent's context; §17.5: behaviour. `/btw <question>` or `/side <question>` in the
+composer asks it, the question and the answer stand as one muted block in the feed, and it
+works for an unloaded agent, which the hub starts first, with `session.start.no_wait`: with all
+slots busy the session does not queue, the start's settings are kept for the next start, and
+the question gets an error. A question the worker answers with an `error` frame, or whose
+connection closes before the answer (it drops or a new `hello` replaces it), gets that error as
+its `side.answer`. The hub stores only one `side.answer` per question, of a question of the same
+session. A question during the agent's text stands under it like a message (`during_text`). A
+refused question comes back into the composer. `hqc_read` leaves side events out. Its API cost
+is added to the process's running total, so the next turn of the same process shows it, in its
+cost and in `session_tokens`. The question reads the conversation's prompt cache and so renews
+it, which the header's cache time does not see.
+A `model_refusal_fallback` of `scope` `local` no longer retracts events of the conversation.
+
+### 0.230 → 0.231 (the owner's Stop sends what waited without a turn)
+§4, §5.2, §5.3, §6, §7.1, §8.1, §17.2: a Stop used to leave the messages that waited to chance: the
+CLI cancelled the ones written into the turn and they failed, the worker's queue ran after the Stop
+as if nothing had happened. Now the owner's own Stop is "stop the turn, send everything that waited,
+stop again". `session.stop` gets `quiet` (omitted when false); the hub sets it in the owner's Stop
+route and in a room's Stop, never in a pause's stop, which keeps the waiting messages for the
+resume. A worker older than 0.231 ignores the field and stops as before, and only a hub of 0.231
+makes a worker send `ack {quiet}`, so the workers need not be updated after the hub. With a turn
+running (the runtime's own included) a `quiet` stop sends a `cancel_async_message` for each line of
+hqc's the CLI has not taken, then the plain `interrupt` (`cancel_queued` would also dequeue the
+CLI's own lines that carry no `uuid`: task notifications, cron, `/loop`), and marks the inputs the
+worker holds; when the stopped turn ends it marks the inputs the runtime dropped from it, and writes
+the marked ones into the agent's history as quiet lines (`shouldQuery: false`, which Claude Code
+records without calling the model), in the hub's creation order (`event_id`), so the agent knows
+what was written and does not act on it. Until that end nothing new goes into the turn, and what
+comes after the Stop is never marked, so Clear goal (a Stop, then `/goal clear`) still runs `/goal
+clear`. A slash command that waited, judged by the text the runtime gets, fails ("cancelled by
+Stop"). A Stop with no turn running and a stop without `quiet` mark nothing. The engine takes each
+quiet line by the `result` that lists it in `user_message_uuids` (the CLI takes lines written back
+to back together: one `result` for several), with one adapter event and no turn, status, `usage` or
+end of turn. The worker acks each input with the new `ack {quiet: true}`; the idle unload and a move
+wait for those acks, and a quiet line the CLI drops (on 2.1.312 it answers `cancelled` for a line it
+failed to process) or a process that ends first (not through `session.kill`) is written again. The
+quiet line carries `priority: "later"`: the CLI folds a line of priority "next" or above into a turn
+that runs, whatever its `shouldQuery`, a turn it started by itself included, so a "later" line never
+joins one and is taken once the CLI is idle, and the worker writes it at once. A normal input
+written while quiet lines wait would run before them (the CLI dequeues "next" before "later"), so
+the worker hands none until their acks. A Stop never cancels a quiet line. On the `ack {quiet}` the
+hub also writes `payload.joined_after` (0.221), so the feed stands a quiet message where Claude Code
+recorded it: behind the stopped turn, or behind a turn the CLI ran by itself before it took the
+line. The hub marks such an input delivered, keeps `payload.quiet` on it and tells clients with the
+`delivery` frame (never as waiting), opens no turn for it, fails an `hqc_ask` it carried ("<address>
+was stopped before it took the question"), and lets a room go on as for a joined input. Send now
+does not pass the hold of the stopped turn (`not_now`). A `cancelled` for the turn's own first line
+that a Stop's cancel reached before the CLI started it (no `result` follows) makes it come back
+dropped, and so quiet, except in a turn the runtime started by itself. Take back of a marked input
+in the worker's queue leaves it, and of one the CLI already cancelled is answered at once; neither
+is written quiet; one already written as a quiet line is `409 already_taken`. A `session.kill` is
+not held for the acks: a kill or a worker restart at any time between the Stop and the acks (during
+the stopped turn, and while quiet lines wait behind a turn the CLI started by itself) drops the
+marked inputs at the worker, and the hub, which holds them pending, sends them to the next process
+as plain inputs, which run as before 0.231 (§17.2). A Stop no longer leaves its flag set when no
+turn runs or its process ends, which made the end of a later turn treat its dropped inputs as
+cancelled. A fork's copy leaves out a message written quiet whose `joined_after` is not below the
+`seq` of the record where the copy's conversation is cut (Claude Code recorded it after that record,
+so the copied agent never got it); a fork of a copy reads the copy's own `joined_after`.
+
+### 0.229 → 0.230 (a chat catching up draws a few times, the client socket compressed, one session fetched instead of the list)
+§6: a chat opened after a long absence took long to show the events it had missed: the hub sent
+them at once, but the client drew the chat for each frame. On a chat of 28 000 events with 3000
+missed, reopening drew 3000 times and took 2.7 to 6.1 s before this change; with it, it draws 5 to
+18 times and takes 0.6 to 2.0 s, about as long as the hub takes to send them (six runs each,
+Brave, live hub). The client now applies the events of a subscription without drawing until the
+hub's `subscribed` (and again after a socket reset, which subscribes with a backfill), and draws
+at most every 100 ms meanwhile, so a long backfill shows as it arrives. A `subscribed` of a
+subscription that was left and made again meanwhile (the hub answers each `subscribe`, a refused
+one with an `error` naming the session) does not end the new catch-up: the socket counts the
+`subscribe` frames it sent and the answers it got. So that an error naming a session answers only
+a refused `subscribe`, a failed backfill (on a `subscribe`, on a gap in the live stream, or after
+the hub's bus overflowed) now sends its `error` without `session_id`; the hub logs the session. An open chat also builds its
+feed only when what it is built from changed: the timeline's `revision` grows with a stored event
+(new or changed), the thinking being written, an invalid event and a message not stored yet, and
+not with the answer's text, `subagents.live` or `schedules.live`, which the feed does not read;
+each hub `session.summary` (1.5 to 3 a second) and each delta of the text redrew the chat and
+built the feed again without a change in it. `Timeline.items()` is kept per `revision`.
+
+§6: on a narrow channel the page paid for every byte of `/api/ws`: tungstenite, under axum's
+WebSocket, has no permessage-deflate, so the hub answered the upgrade without
+`Sec-WebSocket-Extensions` and sent plain text. Measured on the live hub with raw DEFLATE: the full
+`summary` 479 KB → 102 KB; a catch-up of 3000 `event` frames 2690 KB → 1498 KB when each frame is
+compressed alone, 686 KB when they are one stream, which is why there is one stream per
+connection. `/api/ws?deflate=raw` now asks for that stream (the hub uses `flate2` with the
+`zlib-rs` backend `zip` already brings, at level 2: level 1 there uses fixed Huffman codes only and
+compressed a synthetic summary to 178 KB against 127 KB at level 2, for the same CPU): every frame
+goes out as a binary message, its JSON and `\n` compressed and sync-flushed, without it the frames
+are text as before. The client asks when `DecompressionStream('deflate-raw')` exists, inflates the
+messages in order through one stream, takes each line as a frame, and reconnects when the stream
+breaks. The frames reach the listeners a few microtasks after the message, and not at all when the
+socket was replaced meanwhile; the client resubscribes from the last `seq` it has seen, so nothing
+is lost. The macOS app's page script read only text frames of a socket whose address ends in
+`/api/ws`, so on a compressed socket the app would have shown no notification, no Dock badge and
+no window bar; it now finds the socket by its path and inflates its binary messages on a stream of
+its own. An HQC.app built before 0.230 reads no frame of a hub that serves this client (no
+notifications, Dock badge or window bar, and answered permission cards stay): rebuild the app when
+the hub is updated. Also §6: a summary of an unknown session in a known project fetched `GET /api/sessions`,
+2.2 MB of JSON (243 KB gzipped by the proxy in front), to add one session; the client now fetches
+that session when one session's frame names it; the `summary` of every session, sent on each
+(re)subscribe, still fetches the lists, as it may name many. What the lists did besides adding it
+is not done then: a session deleted elsewhere stays on the page until the next list.
+
+### 0.228 → 0.229 (the session's tokens next to its cost in the chat header)
+§4, §6, §8.1: the header showed only the session's cost. The worker now sends the runtime's
+running token total on `usage` as `session_tokens` (the sum of the cumulative `modelUsage` token
+counts of the `result`, input, output, cache reads and cache writes, carried over `--resume` and
+reset by `/clear` like the cost), and the header shows it after the cost, "$2.25 · 3.4M tokens
+this session" (a room sums its agents'; a session on a provider shows its tokens, not its made-up
+cost). A session whose last `usage` came from an older worker shows no tokens until its next turn.
+
+### 0.227 → 0.228 (a message's buttons at its bottom right, and the right-click menu again)
+§6: a message's buttons (Search, Copy, Quote; on the user's message also Add to quick messages,
+Fork, Take back, Send now) stood left of its time at the right end of its first line, except a
+phone's agent message with a usage line, which had them at that line's end: a long message had to
+be scrolled back up to reach them. They now stand at the message's bottom right, on a computer and
+a phone alike: at the right end of an agent message's usage line and of the bottom line of "Reply
+to"; else floated right at the end of the text's last line, on that line while it has room, on a
+line of their own under it when it has none and after a text that ends in a code block, a table, a
+rule, a quote or a formula. A message from another session and a room post no longer have them in
+their head; an open reasoning has them at the end of its text (a folded one, in its summary line as
+before); a message with no text keeps them left of its time. A user's text and a reasoning are shown
+without their trailing line breaks. On a computer a right click on text selected in the feed or in a
+subagent's history gives the client's menu again (Quote where there is an input, Copy, "Search in
+…"), for the selection as it was at the press: a click outside it (which a Mac's browser answers by
+selecting the word under the pointer) and a click with nothing selected give the browser's menu, a
+click inside a selection that WebKit off a Mac cleared on the press selects it again; a selection
+across messages is taken whole, without their times, heads and the hidden text of folded blocks.
+
+### 0.226 → 0.227 (the thinking estimate runs up between reports)
+§17.1: "Thinking · ~N tokens" in the main agent's row changed in steps: the worker reports a new
+estimate at most once per 2 s, and the client drew each as it came, in whole thousands from 10k
+up, so the count stood still for seconds. The VS Code tab runs its own count up to each new
+estimate over the time since the one before; the client now does the same (0.3–3 s, redrawn every
+100 ms; the first estimate and a smaller one shown at once) and writes it with two decimals from
+1k up and without the "~", "Thinking · 12.34k tokens". Only the client changed.
+
+### 0.225 → 0.226 (the publication card: secrets capped, hidden files named, no link into `.git`)
+§7, §20: the owner's card of an `hqc_publish` listed every name that looks like a secret in the
+archive's order with no cap, so a hundred `a0001.key` pushed an `id_rsa` far down the card and off
+the few lines of the macOS app's notification; it showed a hidden folder as one line with its
+count, so `.kube/config`, `.aws/config` or `.docker/config.json` went unnamed. The secrets now
+come at most 20, the first file of each glob, then the second of each, and so on; every hidden file
+is named by its full path, at most 20, the same way round the hidden folders; the rest is counted
+in "and N more". More names look like a secret: `*.ppk`, `*.jks`, `*.keystore`, `*.kdbx`,
+`*.gpg`, `.netrc`, `.npmrc`, `.git-credentials`, `secrets.*`, `service-account*.json`. The
+worker packed a link inside the folder that resolves into `.git` (`repo -> .git`) as `repo/…`;
+an entry whose canonical path has a `.git` or `.hqc` component below the folder is now left out.
+
+### 0.224 → 0.225 (a request's id is its session's alone while it is open)
+§3 PendingRequest: an answer names its request by the id alone, and the hub looked it up across
+kinds; a worker could open an `approval` with the `request_id` of a publication or a move waiting
+for the owner, and the owner's Allow on that card could land on the publication instead, as the
+owner's own `once` with the `allowed_by` mark. The hub now opens no request whose `request_id` an
+open request of another kind of the same session has (the check and the insert under one lock),
+and a worker's `approval.request` and `clarify.request` open their row before they are stored,
+so one refused is not stored and shows no card. A repeat of the same request after a reconnect is
+stored as before. The clients and the macOS app are unchanged.
+
+### 0.223 → 0.224 (no whole-server answer for an ambiguous name; only an offered option)
+§8.1, §10.1: the card of an MCP tool offered "all tools of this server" for any tool name, and
+the server is the part before the next `__`, as Claude Code reads it; for a server whose name
+starts or ends with `_` or has `__` that part is another server's name (`mcp__hqc___x` of a
+server `hqc_` reads as `hqc`), so "Allow all hqc tools" stored `mcp__hqc` and allowed the real
+`hqc` too. The worker now offers neither answer for a name another server's tool could share
+(the tool part starts with `_` or has `__`; as a precaution also a server part that starts or
+ends with `_`), and the hub stores no folder rule for `server_always` on one. A rule made from a
+card of the real `hqc` still covers `hqc_`, as Claude Code's own does. The worker also took any
+option it knows as the answer: `server_session` and `server_always` on a card that offered
+neither, `session` on a request only a person may answer, `always` in restricted mode (as
+`session`). It now keeps the ids of the options the card offered and refuses any other; the hub
+already refused an option that is not in the request it stores.
+
+### 0.222 → 0.223 (the agent's task list above the input)
+Backlog item "the agent's task list as a pinned block". §4: a stored event `tasks`
+`{items[{subject, status, active_form?}]}`, the whole list after each change, written by the
+Claude Code adapter. §8.1: the adapter follows the main agent's `TodoWrite`, `TaskCreate`,
+`TaskUpdate` and `TaskList` calls through their results, sends `tasks` only when the list
+changed, and `/clear` empties it, and a resumed process starts with the list its transcript makes
+(a fork starts empty, as the CLI's). A `tasks` event is cut at 200 tasks of 512 bytes; the hub
+indexes the type (migration `0056_events_tasks`); an unknown `status` is tolerated; the adapter
+takes the id and subject of a task from the CLI's result text, after the CLI corrected the call.
+§14: the worker's `task_tools = true` sets `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` for its agents;
+without it CLI 2.1.312 gives the 5.x models no task tools (the older models of its list have them
+regardless). §6: "Tasks: 3 of 7 completed" is a row of the block above the input while a task is
+not completed, after the goal's row (0.218) and before the main agent's; a press opens the list
+with a mark per task, the client keeps the event of the highest `seq` and it is no feed item; on
+subscribe the hub also sends the session's latest `tasks` event when it is older than
+`after_seq`, so a client that loaded only the newest page has the list.
+
+### 0.221 → 0.222 (the context and the prompt cache in the chat header)
+§4 `usage`, §6 chat header, §8.1: the header said what a session cost but not how close its
+context is to the auto-compaction, nor how long Claude's prompt cache of the session still lives
+(a message after it ends reads the whole context again at the full price). A `usage` that carries
+tokens now has `context_tokens`, `context_limit` and `cache_ttl_s`, built by the Claude Code
+adapter from the stream: the usage of the main agent's last API response, the model's window in
+`result.modelUsage` less the output reserve and the CLI's margin, and the TTL of the cache writes
+seen (an hour or five minutes) less the seconds since the response started; after a compaction the
+size is the boundary's `post_tokens` until the next response. The limit is the model window's
+threshold: an overridden auto-compaction window or a disabled one is not seen. The item is left
+out of a room and of a session VS Code holds. The meta row shows "<n>% context" and, while the
+session is not Running and not on a provider, " · cache m:ss" counted down, "cache expired" after
+the end, on a computer after the cost and on a phone in the state's line; `/clear` empties both.
+Like the goal's row, the item comes from the loaded history (0.220). Worker, protocol and client;
+the new fields are optional, so an older worker's `usage` shows nothing.
+
+### 0.220 → 0.221 (an input the agent took after its calls stands where it took it)
+§4, §6, §17.2: a message typed during a turn that the CLI took only after the running tool call's
+result (`joined`) stood at its own `seq`, above the whole turn: above the text and the calls the
+agent made before it ever saw the message. The hub now keeps where it was taken: when it honours
+the worker's `joined` ack it writes `payload.joined_after`, the `seq` of the last event of the
+session that is no input, in the same update, and sends it in the `delivery` frame. The worker
+sends that ack after the session's own records written before it, and the hub handles a worker
+connection's frames one after another, so every event the agent made before it took the message
+is stored by then; the agent events' `ts` is the worker's clock and `delivered_at` the hub's, so
+the client cannot compare them. The client moves such a message down to right behind that event
+(never up, several behind the same one in `seq` order); one with `during_text` is placed by
+`joined_after` too, below the text it came during, and the text or the thinking being written
+stands below it. A fork before it cuts at the last `agent.message` up to that event, and a fork's
+copy carries `joined_after` into the copy's own `seq`. An ack lost while the worker was away
+comes after what the worker sends on reconnecting: the message then stands behind all of that, a
+limitation. A message joined before has no `joined_after` and stands as before.
+
+### 0.219 → 0.220 (history and attachments kept on the device, the older history on demand)
+§6, §12, §15, §17.2: each open of a chat downloaded its newest page and then the whole older
+history again, and each view of an image after its link had expired (10 minutes) downloaded the
+image again; on a slow link a long chat took long to open. The client now keeps on the device
+(IndexedDB, a database per user) what it received of each session's history, the records of
+attachments and the bytes it downloads to show them; a chat opens on its copy, takes the hub's
+newest page to check and extend it, and drops the copy when that page does not continue it. The
+older history loads a page at a time when the user scrolls to its top, down to a search hit, and
+by itself only for the header's cost (a `usage` within the last 1000 events) and the cards of
+open requests. An image in the feed is a `data:` URL of its kept bytes, loaded when it comes near
+the window; its `<img>` no longer renews a link. A `/clear` older than the loaded history adds the
+cost before it to the header only once its line is loaded, and a goal whose last event is older
+than the loaded history shows its row only then too. A take-back (0.219) in a chat shown from its
+copy waits for that page, which would show the message waiting again, and writes `withdrawn` into
+the copy itself; the files it puts back into the input are not kept on the device.
+
+### 0.218 → 0.219 (take a waiting message back, or send it now)
+§3 Event, §5.3, §6, §8.1, §17.2: a message of the owner's that waits for the agent shows two buttons,
+Take back and (while a turn runs) Send now. Take back withdraws it (`delivery: withdrawn`, a new
+value): the hub drops it, a worker that holds it takes it out of its queue or has Claude Code drop
+the line with `cancel_async_message`, an agent that has taken it already makes it `409
+already_taken`; `hqc_read`, a fork's copy and the search leave it out, the feed pages and a
+subscription's backlog return it as `withdrawn` and the client hides it, and puts its text and
+files back into the input. Send now writes it
+into the running turn with `priority: "now"`, which makes Claude Code move the running Bash, MCP
+call or subagent to the background and take the message into the same turn. New frames
+`session.withdraw` and `session.input_now`, answered with `result {withdrawn}` / `{sent_now}`
+(`error not_now` for a turn that cannot take input), routes `POST .../inputs/{event_id}/withdraw`
+and `.../now`; an input the owner typed is written to the CLI with `origin: {kind: "human"}`, which a
+message of another session, a room's input, a run of a schedule and a note of the hub's own do not
+carry: the hub marks the owner's `user.message` `payload.human` in its input route alone and sets
+`session.input.human` from it, unless a peer header, a room's rewrite or buffered `send` messages
+make the input something else; Take back and Send now are for such messages only. A worker keeps an
+input across a reconnect, so the hub marks `events.handed_at` (migration `0055`) before each
+`session.input` and withdraws on its own word only an input never handed; one handed is asked about
+at its worker's connection whatever the session's start state (a worker that was killed or paused
+holds nothing and says so), with no connection it is `409 worker_offline`; while the question is
+open the connection's `withdrawing` keeps the message from being handed and refuses a second
+take-back (`409 withdrawing`); the answer is settled also when the owner's request is gone. A
+withdrawn input is never sent; a client whose take-back got `409 withdrawn` puts the text back. Two
+limitations (§6): a worker's answer after `504 worker_timeout` is dropped, and a message the worker
+dropped meanwhile stays queued until the owner takes it back again, the worker reconnects or the
+agent's process restarts; a take-back whose `200` the client lost hides the message without
+putting its text back. A worker's `error` for the two frames is `502` with its own code. When the
+CLI does not answer a cancel in time the input is a written one again, and a session that waited
+for a slot for a withdrawn input leaves the line. Hub, worker, protocol and client.
+
+### 0.217 → 0.218 (the agent's goal: a row above the input, its checks in the feed)
+§4, §6, §8.1: Claude Code's `/goal <condition>` already reached the CLI, which keeps the agent at
+work until a model of its own finds the condition met, but hqc showed nothing of it: the CLI streams
+none of the goal's progress and writes it only to the transcript. The adapter now reads those
+records and sends each as `system goal`, a check after the text it judged, and the mirror maps the
+same records for a session the worker's own process does not run; the client draws the checks as
+lines as Claude Code's own UI does ("Goal achieved (55s · 3 checks · 918 tokens)", "Goal not yet
+met… continuing", "Goal could not be achieved" with the reason) and, while the goal is set, a row
+first above the input with the condition, the number of unmet checks, the last one's reason, and
+"Clear goal", which stops a running turn before it sends `/goal clear`. The CLI's reply to a local
+slash command, which the adapter sent as a `runtime` message drawn in red as an error, is `system
+command_output`, as the mirror's already was.
+### 0.216 → 0.217 (the card names the ask rule behind it)
+§8.1, §4: a card that a `permissions.ask` rule raised said nothing of why, also in Allow all,
+where such a rule still asks: Claude Code sends no `decision_reason` for a rule, only
+`decision_reason_type: "rule"` and the rule's source (2.1.329). The adapter now writes `reason`
+itself, "An ask rule for Artifact in user settings (~/.claude/settings.json) requires approval
+for this call", naming the rule when `matched_ask_rule` comes; the client already shows
+`reason` under the card's title.
+
+### 0.215 → 0.216 (a secret from Vaultwarden)
+§14: `vault = true` in `worker.toml` (with `session_secrets`) lets an `hqc_secret` card take the
+secret from a Vaultwarden (Bitwarden) entry instead of a typed value, as T3 Code's card takes a
+1Password reference: the worker reads it with `rbw` on its own machine, as T3 Code reads
+1Password with `op` on the agent's machine, so the value passes neither the client nor the hub.
+The entry is the one named exactly (found by its id first, since `rbw get` alone also takes a
+partial name), an entry of Bitwarden's type "SSH key" gives its private key, and every `rbw`
+call of a read fits in 15 s.
+§7: `hqc_secret` takes `vault`, the entry the agent names; §3, §4: the card carries it as
+`secret.vault`, only for a worker that reads Vaultwarden. §6: the card opens on the entry, which
+the owner confirms or changes, or switches to typing the value; `POST
+/api/sessions/{id}/secrets` takes `vault` in place of `value`, and the feed line names the entry.
+§5.3: `secret.put.vault`; §5.4: `hello.capabilities.vault`, so no hub migration.
 
 ### 0.214 → 0.215 (.git and .hqc are never published; the card names secrets first)
 §7, §20: the card of a publication could understate what goes public: it named the first 50

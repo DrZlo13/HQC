@@ -25,7 +25,7 @@ import { ChatItems, type ChatActions } from '../src/ui/cards';
 import { Chat } from '../src/ui/Chat';
 import { tileBackground } from '../src/ui/Appearance';
 import { PhoneHome } from '../src/ui/PhoneHome';
-import { ProjectRail, onMac, runSpeed, runningTitle } from '../src/ui/ProjectRail';
+import { ProjectRail, RailRun, onMac, runSpeed, runningTitle } from '../src/ui/ProjectRail';
 import { ProjectSettings } from '../src/ui/ProjectSettings';
 import { LIST_WIDTH_MAX, LIST_WIDTH_MIN, LIST_WIDTH_STEP, SESSION_DRAG, SessionList, WidthGrip } from '../src/ui/SessionList';
 import { ALLOW_ALL_CONFIRM } from '../src/ui/labels';
@@ -1311,6 +1311,34 @@ describe('ProjectRail', () => {
     expect(runningTitle('hqc', 3, 120)).toBe('hqc · 3 agents · 120 tokens/s');
   });
 
+  it("passes the speed to the turn of the stripe's ::before, which only a subtree lookup finds, as the lap's duration from where the turn is", async () => {
+    // A quarter of the way round at the slowest lap. No `updatePlaybackRate` or `playbackRate`:
+    // a rate other than 1 takes the animation off WebKit's compositor.
+    // The fake counts the turn from its time and lap, as a browser does, so reading the turn after
+    // the new lap is set would land the stripe elsewhere.
+    let lap = 18000;
+    const updateTiming = vi.fn((t: { duration: number }) => {
+      lap = t.duration;
+    });
+    const anim = {
+      currentTime: 4500,
+      effect: { getComputedTiming: (): { progress: number } => ({ progress: (anim.currentTime % lap) / lap }), updateTiming },
+    };
+    const own = Element.prototype.getAnimations;
+    // As a browser answers: the span itself has no animation, its pseudo-element has the turn.
+    Element.prototype.getAnimations = function (o?: GetAnimationsOptions) {
+      return (o?.subtree ? [anim] : []) as unknown as Animation[];
+    };
+    try {
+      await mount(<RailRun rate={40} />);
+      // Twice as fast: a 9 s lap, and still a quarter of the way round.
+      expect(updateTiming).toHaveBeenCalledWith({ duration: 9000 });
+      expect(anim.currentTime).toBe(2250);
+    } finally {
+      Element.prototype.getAnimations = own;
+    }
+  });
+
   it('in the Compact look: the same marks on the icon, an unread project in bold', async () => {
     const app = makeApp([
       ...LIST,
@@ -2176,6 +2204,7 @@ describe('loading a chat ahead', () => {
     expect(api.eventsBefore).toHaveBeenCalledTimes(1);
     // A press loads at once.
     link('Cave scene port').dispatchEvent(pointer('pointerdown'));
+    await wait(0);
     expect(api.eventsBefore).toHaveBeenLastCalledWith('cave', undefined, 100);
 
     render(null, root);
@@ -4684,5 +4713,28 @@ describe('the browser of a session (SPEC 0.149)', () => {
     await mount(<PhoneHome app={app} />);
     const tile = (n: string) => phoneRow(n).querySelector('.phone-tile-wrap')!.classList.contains('has-browser');
     expect([tile('physics-mp'), tile('Personal')]).toEqual([true, false]);
+  });
+});
+
+describe("the projects' marks", () => {
+  it('are counted once per change of the sessions, not per project and mark on every render', async () => {
+    const app = makeApp([...LIST, sess('notes', 'Notes', 'idle', at(0.5), { project_id: 'p0', unread: 1 })]);
+    const shown = vi.spyOn(app, 'shown');
+    await mount(<ProjectRail app={app} />);
+    // One pass over the six sessions the marks count: LIST and Notes, not the service sessions.
+    expect(shown).toHaveBeenCalledTimes(6);
+    expect([app.projectWaiting('p1'), app.projectRunning('p1'), app.projectUnread('p0')]).toEqual([1, true, true]);
+    shown.mockClear();
+    // A render with the same sessions (a change of anything else: a project picked, a menu
+    // opened) counts nothing again. A hub's summary sets its session, so it is one pass.
+    await mount(<ProjectRail app={app} />);
+    expect(shown).not.toHaveBeenCalled();
+    // A change of a session: one more pass, and the marks see it.
+    app.sessions.set('prof', { ...app.sessions.get('prof')!, state: 'waiting' });
+    expect(app.projectWaiting('p1')).toBe(2);
+    expect(shown).toHaveBeenCalledTimes(6);
+    // A session gone: the same.
+    app.sessions.delete('net');
+    expect(app.projectWaiting('p1')).toBe(1);
   });
 });

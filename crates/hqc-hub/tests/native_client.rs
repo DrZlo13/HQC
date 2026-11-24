@@ -1,5 +1,5 @@
-//! The native iOS client's hub side (SPEC 0.217): its sign-in through the system browser and
-//! Apple push next to Web Push.
+//! The native iOS client's hub side (SPEC 0.237–0.240): its sign-in through the system browser
+//! and Apple push next to Web Push.
 
 mod common;
 
@@ -195,7 +195,7 @@ async fn apns_device_gets_the_approval() {
     hub.finish().await;
 }
 
-/// SPEC 0.219: APNs goes out whoever else shows the session (a web tab left open must not
+/// SPEC 0.239: APNs goes out whoever else shows the session (a web tab left open must not
 /// keep the phone quiet), and is held back only while the iOS app itself shows it.
 #[tokio::test]
 async fn apns_skips_only_while_the_ios_app_watches() {
@@ -266,7 +266,7 @@ async fn apns_skips_only_while_the_ios_app_watches() {
     hub.finish().await;
 }
 
-/// SPEC 0.218: a device that registered a key gets its notices sealed: Apple and a relay see
+/// SPEC 0.238: a device that registered a key gets its notices sealed: Apple and a relay see
 /// only a generic alert; the key opens the content, request and options included.
 #[tokio::test]
 async fn apns_notice_is_sealed_with_the_device_key() {
@@ -442,7 +442,7 @@ fn extract_code(loc: &str) -> String {
         .to_string()
 }
 
-/// SPEC 0.220: native sign-in works behind an OIDC reverse proxy (Keycloak + oauth2-proxy,
+/// SPEC 0.240: native sign-in works behind an OIDC reverse proxy (Keycloak + oauth2-proxy,
 /// RUNBOOK §1.9), returning the proxy's cookies (or bearer token when no cookies were sent).
 #[tokio::test]
 async fn native_sign_in_works_in_oidc_and_access_modes() {

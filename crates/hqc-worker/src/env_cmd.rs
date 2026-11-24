@@ -53,6 +53,7 @@ pub fn summary(cfg: &Config) -> String {
         vars(&mut out, e);
         let _ = writeln!(out, "    allow_local_mcp: {}", e.allow_local_mcp);
         let _ = writeln!(out, "    project_settings: {}", e.project_settings);
+        let _ = writeln!(out, "    hub_mcp: {}", e.hub_mcp);
         list(&mut out, "unblock", &e.rules.unblock);
         list(&mut out, "allow", &e.rules.allow);
         list(&mut out, "deny", &e.rules.deny);
@@ -83,6 +84,7 @@ pub fn summary(cfg: &Config) -> String {
         "session_secrets: {}",
         if cfg.session_secrets { "on" } else { "off" }
     );
+    let _ = writeln!(out, "vault: {}", if cfg.vault { "on" } else { "off" });
     let _ = writeln!(
         out,
         "browser: {}",
@@ -91,6 +93,11 @@ pub fn summary(cfg: &Config) -> String {
         } else {
             "off"
         }
+    );
+    let _ = writeln!(
+        out,
+        "task_tools: {}",
+        if cfg.task_tools { "on" } else { "off" }
     );
     out.push_str("workspace keys:\n");
     match cfg.secrets.all() {
@@ -156,6 +163,15 @@ pub fn which(cfg: &Config, path: &Path) -> anyhow::Result<String> {
             "read (--setting-sources user,project,local)"
         } else {
             "off (--setting-sources user,local)"
+        }
+    );
+    let _ = writeln!(
+        out,
+        "    the hub's MCP servers: {}",
+        if e.hub_mcp {
+            "taken (hub_mcp), each as a relay to the hub"
+        } else {
+            "off"
         }
     );
     let p = &cfg.permissions;

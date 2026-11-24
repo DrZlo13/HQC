@@ -509,7 +509,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {}, demo = fa
         tool: 'hqc_secret',
         description: 'The Wi-Fi password to write into the camera config',
         options: [{ id: 'deny', label: 'Decline', canonical: 'deny' }],
-        secret: { name: 'WIFI_PASS', kind: 'secret' },
+        secret: { name: 'WIFI_PASS', kind: 'secret', vault: 'home-wifi' },
         expires_at: undefined,
         policy_hint: undefined,
         rule_suggestions: undefined,
@@ -765,6 +765,147 @@ $$t(n) = c \\cdot n, \\quad \\text{for every token of length } n.$$
     if (!providers.delete(p.id)) throw fail(404, 'not_found', 'unknown provider');
     return withStatus(204, null);
   });
+  // SPEC 0.235: the owner's remote MCP servers. The mock reaches no server: `test` flips the
+  // status between ok and failing. Header values are dropped at once, only their names are
+  // kept, as the hub keeps them sealed and never sends them back. A server named `no-key`
+  // with headers gets `422 mcp_key_missing`, as a hub without HQC_MCP_KEY answers.
+  const mcpServers = new Map();
+  const MCP_NAME = (n) => /^[a-z0-9_-]{1,32}$/.test(n) && n !== 'hqc' && !n.startsWith('_') && !n.endsWith('_') && !n.includes('__');
+  {
+    const id = randomUUID();
+    mcpServers.set(id, {
+      id,
+      name: 'github',
+      url: 'https://api.githubcopilot.com/mcp/',
+      header_names: ['Authorization'],
+      timeout_s: 300,
+      all_projects: true,
+      project_ids: [],
+      status: 'ok',
+      tools: ['get_me', 'create_issue'],
+      auth: 'headers',
+      signed_in: false,
+    });
+    const lid = randomUUID();
+    mcpServers.set(lid, {
+      id: lid,
+      name: 'linear',
+      url: 'https://mcp.linear.app/mcp',
+      header_names: [],
+      timeout_s: 300,
+      all_projects: true,
+      project_ids: [],
+      status: 'sign_in',
+      tools: [],
+      auth: 'oauth',
+      signed_in: false,
+    });
+  }
+  /** Checks the fields of a POST or PATCH body and puts them into `into`. */
+  const mcpFields = (body, into) => {
+    const known = ['name', 'url', 'headers', 'timeout_s', 'all_projects', 'project_ids', 'auth', 'oauth_client_id', 'oauth_client_secret', 'oauth_scope'];
+    const extra = Object.keys(body ?? {}).filter((k) => !known.includes(k));
+    if (extra.length) throw fail(422, 'unprocessable', `unknown field \`${extra[0]}\``);
+    if (body.name !== undefined) {
+      if (typeof body.name !== 'string' || !MCP_NAME(body.name)) throw fail(400, 'bad_request', 'a bad server name');
+      if ([...mcpServers.values()].some((x) => x.name === body.name && x.id !== into.id)) throw fail(409, 'name_taken', `you have a server named "${body.name}"`);
+      into.name = body.name;
+    }
+    if (body.url !== undefined) {
+      let u;
+      try {
+        u = new URL(body.url);
+      } catch {
+        throw fail(400, 'bad_request', 'url: not a URL');
+      }
+      const loopback = /^(localhost|127(\.\d+){3}|\[::1\])$/.test(u.hostname);
+      if (!(u.protocol === 'https:' || (u.protocol === 'http:' && loopback)) || u.username || u.password) throw fail(400, 'bad_request', 'url: https only, without a user or password');
+      into.url = body.url;
+    }
+    if (body.timeout_s !== undefined) {
+      if (!Number.isInteger(body.timeout_s) || body.timeout_s < 30 || body.timeout_s > 1800) throw fail(400, 'bad_request', 'timeout_s: 30 to 1800');
+      into.timeout_s = body.timeout_s;
+    }
+    if (body.all_projects !== undefined) into.all_projects = !!body.all_projects;
+    // T65: OAuth; the secret goes nowhere, a change asks for a new sign-in.
+    if (body.auth !== undefined) {
+      if (!['headers', 'oauth'].includes(body.auth)) throw fail(400, 'bad_request', 'auth is headers or oauth');
+      into.auth = body.auth;
+      into.signed_in = false;
+      into.status = body.auth === 'oauth' ? 'sign_in' : 'unknown';
+    }
+    if (body.oauth_client_id !== undefined) into.oauth_client_id = body.oauth_client_id || undefined;
+    if (body.oauth_scope !== undefined) into.oauth_scope = body.oauth_scope || undefined;
+    if (body.project_ids !== undefined) {
+      if (!Array.isArray(body.project_ids) || body.project_ids.some((id) => !projects.has(id))) throw fail(400, 'bad_request', 'project_ids: not your projects');
+      into.project_ids = [...body.project_ids];
+    }
+    if (body.headers !== undefined) {
+      if (!Array.isArray(body.headers) || body.headers.length > 8) throw fail(400, 'bad_request', 'headers: at most 8');
+      for (const h of body.headers) {
+        if (!/^[A-Za-z0-9_-]+$/.test(h?.name ?? '') || typeof h.value !== 'string' || !h.value || /[\r\n]/.test(h.value)) throw fail(400, 'bad_request', 'a bad header');
+      }
+      if (body.headers.length && (into.name ?? body.name) === 'no-key') throw fail(422, 'mcp_key_missing', 'the hub has no HQC_MCP_KEY: it cannot keep header values');
+      // The names only: the values go nowhere.
+      into.header_names = body.headers.map((h) => h.name);
+      into.status = 'unknown';
+      into.tools = [];
+      delete into.last_error;
+    }
+    if (body.url !== undefined) {
+      into.status = 'unknown';
+      into.tools = [];
+      delete into.last_error;
+    }
+    return into;
+  };
+  const mcpOr404 = (id) => {
+    const s = mcpServers.get(id);
+    if (!s) throw fail(404, 'not_found', 'unknown server');
+    return s;
+  };
+  const mcpList = () => [...mcpServers.values()].sort((a, b) => a.name.localeCompare(b.name));
+  route('GET', '/api/mcp/servers', () => ({ servers: mcpList() }));
+  route('POST', '/api/mcp/servers', (_, body) => {
+    if (typeof body?.name !== 'string' || typeof body?.url !== 'string') throw fail(400, 'bad_request', 'name and url are needed');
+    if (mcpServers.size >= 50) throw fail(409, 'too_many_servers', 'at most 50 servers');
+    const id = randomUUID();
+    const s = mcpFields(body, { id, header_names: [], timeout_s: 300, all_projects: false, project_ids: [], status: 'unknown', tools: [], auth: 'headers', signed_in: false });
+    mcpServers.set(id, s);
+    return withStatus(201, s);
+  });
+  route('PATCH', '/api/mcp/servers/:id', (p, body) => {
+    const next = mcpFields(body, { ...mcpOr404(p.id) });
+    mcpServers.set(p.id, next);
+    return next;
+  });
+  route('DELETE', '/api/mcp/servers/:id', (p) => {
+    mcpOr404(p.id);
+    mcpServers.delete(p.id);
+    return withStatus(204, null);
+  });
+  // T65: the mock signs in at once; the page it gives is the hub's own callback page.
+  route('POST', '/api/mcp/servers/:id/sign_in', (p) => {
+    const s = mcpOr404(p.id);
+    if (s.auth !== 'oauth') throw fail(400, 'bad_request', 'this server signs in with headers');
+    mcpServers.set(s.id, { ...s, signed_in: true, status: 'unknown' });
+    return { url: 'https://example.com/oauth/authorize?mock=1' };
+  });
+  route('DELETE', '/api/mcp/servers/:id/sign_in', (p) => {
+    const s = mcpOr404(p.id);
+    mcpServers.set(s.id, { ...s, signed_in: false, status: 'sign_in' });
+    return withStatus(204, null);
+  });
+  route('POST', '/api/mcp/servers/:id/test', (p) => {
+    const s = mcpOr404(p.id);
+    const next =
+      s.status === 'ok'
+        ? { ...s, status: 'failing', last_error: 'the server answered 401 Unauthorized' }
+        : { ...s, status: 'ok', tools: s.tools.length ? s.tools : ['echo', 'get_time'] };
+    if (next.status === 'ok') delete next.last_error;
+    mcpServers.set(p.id, next);
+    return next;
+  });
   // SPEC 0.147: a secret or an ssh key for a session's agent, through the worker; the mock
   // keeps no value. The keys a workspace remembers, by workspace id (names and fingerprints).
   const workspaceKeys = new Map();
@@ -772,11 +913,15 @@ $$t(n) = c \\cdot n, \\quad \\text{for every token of length } n.$$
   const fingerprint = (seed) => `SHA256:${Buffer.from(seed).toString('base64').replace(/=+$/, '').slice(0, 43)}`;
   route('POST', '/api/sessions/:id/secrets', (p, body) => {
     const s = sessionOr404(p.id);
-    const extra = Object.keys(body ?? {}).filter((k) => !['kind', 'name', 'value', 'passphrase', 'remember', 'request_id'].includes(k));
+    const extra = Object.keys(body ?? {}).filter((k) => !['kind', 'name', 'value', 'vault', 'passphrase', 'remember', 'request_id'].includes(k));
     if (extra.length) throw fail(400, 'bad_request', `unknown field \`${extra[0]}\``);
-    const { kind, name, value } = body ?? {};
+    const { kind, name, vault } = body ?? {};
+    // The worker reads a vault entry itself: the mock has no value then, only a stand-in.
+    const value = vault !== undefined ? 'PRIVATE KEY (from the vault)' : body?.value;
     if (!['secret', 'ssh_key'].includes(kind)) throw fail(400, 'bad_request', 'kind is secret or ssh_key');
     if (typeof name !== 'string' || !SECRET_NAME.test(name)) throw fail(422, 'secret_refused', 'a bad name');
+    if ((body?.value !== undefined) === (vault !== undefined)) throw fail(400, 'bad_request', 'give exactly one of value and vault');
+    if (vault !== undefined && (typeof vault !== 'string' || !vault.trim())) throw fail(400, 'bad_request', 'vault is one line of 1 to 200 characters');
     if (typeof value !== 'string' || !value) throw fail(400, 'bad_request', 'value is required');
     if (s.system) throw fail(409, 'unavailable', 'a service session takes no secret');
     if (kind === 'ssh_key' && !value.includes('PRIVATE KEY')) throw fail(422, 'secret_refused', 'not an OpenSSH private key');
@@ -795,9 +940,10 @@ $$t(n) = c \\cdot n, \\quad \\text{for every token of length } n.$$
       if (keys.some((k) => k.name === name)) throw fail(422, 'secret_refused', `this workspace has a key named ${name}`);
       workspaceKeys.set(s.workspace_id, [...keys, { name, fingerprint: fp }]);
     }
+    const from = vault !== undefined ? ` from Vaultwarden entry ${vault}` : '';
     const text = kind === 'ssh_key'
-      ? `ssh key ${name} (${fp}) given${remembered ? ', remembered for this workspace' : ''}`
-      : `Secret ${name} given`;
+      ? `ssh key ${name} (${fp}) given${from}${remembered ? ', remembered for this workspace' : ''}`
+      : `Secret ${name} given${from}`;
     store(s, mk(s, 'event.system', { text, code: 'secret_given' }));
     if (o) {
       s.open = null;

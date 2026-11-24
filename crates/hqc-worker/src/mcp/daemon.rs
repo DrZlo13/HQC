@@ -274,6 +274,75 @@ async fn serve(
                     link.mcp_cancel(rid, cancel_reason::CANCELLED);
                 }
             }
+            Some(Ok(ToDaemon::Upstream {
+                id,
+                server,
+                method,
+                params,
+            })) => {
+                let fail = |e: McpError| {
+                    let _ = out_tx.send(FromDaemon::Result {
+                        id,
+                        result: None,
+                        error: Some(e),
+                    });
+                };
+                let Some(sid) = link.mcp().session_for(&token) else {
+                    fail(McpError::new(
+                        error_code::UNAUTHORIZED,
+                        "the session's agent no longer runs",
+                    ));
+                    continue;
+                };
+                if !link.mcp().has_upstream(sid, &server) {
+                    fail(McpError::new(
+                        error_code::NOT_FOUND,
+                        format!("the session's agent was not started with the hub's MCP server {server}"),
+                    ));
+                    continue;
+                }
+                if !matches!(method.as_str(), "initialize" | "tools/list" | "tools/call") {
+                    fail(McpError::new(
+                        error_code::INVALID_ARGS,
+                        format!("{method} is not relayed"),
+                    ));
+                    continue;
+                }
+                let size = serde_json::to_vec(&params).map(|v| v.len()).unwrap_or(0);
+                if size > MAX_ARGS {
+                    fail(McpError::new(
+                        error_code::INVALID_ARGS,
+                        format!("arguments are {size} bytes, more than {MAX_ARGS}"),
+                    ));
+                    continue;
+                }
+                let (rid, rx) = match link.mcp_upstream(sid, &server, &method, params) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        fail(e);
+                        continue;
+                    }
+                };
+                tracing::info!(session_id = %sid, request_id = %rid, %server, %method, "mcp upstream");
+                open.lock().unwrap().insert(id, rid);
+                let (out, open, attacher) = (out_tx.clone(), open.clone(), attacher.clone());
+                tokio::spawn(async move {
+                    // A cancelled call's sender is dropped: no answer goes back (MCP).
+                    let Ok(outcome) = rx.await else { return };
+                    let outcome = match outcome {
+                        Ok(answer) => upstream_result(&attacher, answer).await,
+                        Err(e) => Err(e),
+                    };
+                    if open.lock().unwrap().remove(&id).is_none() {
+                        return;
+                    }
+                    let (result, error) = match outcome {
+                        Ok(r) => (Some(r), None),
+                        Err(e) => (None, Some(e)),
+                    };
+                    let _ = out.send(FromDaemon::Result { id, result, error });
+                });
+            }
             Some(Ok(ToDaemon::Call { id, tool, args })) => {
                 let fail = |code: &str, message: String| {
                     let _ = out_tx.send(FromDaemon::Result {
@@ -418,6 +487,40 @@ fn send_call(
         };
         let _ = out.send(FromDaemon::Result { id, result, error });
     });
+}
+
+/// The server's JSON-RPC result from the hub's answer to `mcp.upstream` (SPEC 0.235): carried
+/// in the frame, or downloaded from the artifact the hub stored it as and checked against its
+/// sha256.
+async fn upstream_result(
+    attacher: &Attacher,
+    answer: serde_json::Value,
+) -> Result<serde_json::Value, McpError> {
+    use hqc_proto::frame::UpstreamAnswer;
+    let bad = |m: String| McpError::new(error_code::MCP_UNAVAILABLE, m);
+    match serde_json::from_value::<UpstreamAnswer>(answer)
+        .map_err(|e| bad(format!("the hub's answer is not an upstream result: {e}")))?
+    {
+        UpstreamAnswer::Upstream(v) => Ok(v),
+        UpstreamAnswer::UpstreamArtifact(a) => {
+            let max = hqc_proto::mcp::UPSTREAM_MAX as u64;
+            let bytes = attacher
+                .client
+                .fetch_bytes(a.id, max)
+                .await
+                .map_err(|e| bad(format!("the large result could not be fetched: {e}")))?;
+            use sha2::Digest;
+            let got: String = sha2::Sha256::digest(&bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            if bytes.len() as u64 != a.size || got != a.sha256 {
+                return Err(bad("the large result came damaged".into()));
+            }
+            serde_json::from_slice(&bytes)
+                .map_err(|e| bad(format!("the large result is not JSON: {e}")))
+        }
+    }
 }
 
 /// The next message; `None` at EOF, `Err` for a line too long or not a message.

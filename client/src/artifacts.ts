@@ -1,8 +1,11 @@
-// Artifacts in the chat (SPEC §12): metadata and signed links, cached per artifact. A link
-// lives 10 minutes; it is asked for when something is rendered or opened, renewed shortly
-// before it expires, and asked for again when the artifact host answers 403 or 410.
+// Artifacts in the chat (SPEC §12): metadata, signed links and content, cached per artifact.
+// A link lives 10 minutes; it is asked for when something is rendered or opened, renewed
+// shortly before it expires, and asked for again when the artifact host answers 403 or 410.
+// The record and the bytes are kept on this device (`ArtifactCache`): what was downloaded
+// once is not downloaded again, whatever link it came by.
 
 import type { Api } from './api';
+import { deviceArtifactCache, type ArtifactCache } from './artifactcache';
 import { dataUrl, heicToJpeg } from './heic';
 import type { Artifact } from './proto';
 
@@ -22,6 +25,8 @@ export class ArtifactStore {
   private readonly metas = new Map<string, Promise<Artifact>>();
   private readonly heicImages = new Map<string, Promise<string | null>>();
   private readonly heicDecoded = new Map<string, string>();
+  private readonly imageLoads = new Map<string, Promise<string>>();
+  private readonly imageUrls = new Map<string, string>();
 
   constructor(
     private readonly api: Source,
@@ -30,18 +35,27 @@ export class ArtifactStore {
     /** Where relative links point: the hub's own origin. */
     private readonly origin: string = typeof location !== 'undefined' ? location.origin : 'http://localhost',
     private readonly links: LinkCache = new Map(),
+    private readonly cache: ArtifactCache = deviceArtifactCache(),
   ) {}
 
-  /** The artifact's record; `fresh` asks the hub again (it may have taken another kind). */
+  /** The artifact's record: from memory, then from this device, then from the hub; `fresh`
+   *  asks the hub again (it may have taken another kind). */
   meta(id: string, fresh = false): Promise<Artifact> {
     let p = fresh ? undefined : this.metas.get(id);
     if (!p) {
-      p = this.api.artifact(id);
+      p = fresh ? this.hubMeta(id) : this.cache.getMeta(id).then((m) => m ?? this.hubMeta(id));
       this.metas.set(id, p);
       // A failure is not cached: the next render tries again.
       p.catch(() => this.metas.delete(id));
     }
     return p;
+  }
+
+  private async hubMeta(id: string): Promise<Artifact> {
+    const m = await this.api.artifact(id);
+    // A `site` is not kept: its public link changes when it is unpublished (SPEC 0.209).
+    if (m.kind !== 'site') void this.cache.putMeta(m);
+    return m;
   }
 
   /** The owner unpublishes a `site` (SPEC 0.209); its metadata is asked for again. */
@@ -50,7 +64,7 @@ export class ArtifactStore {
     this.metas.delete(id);
   }
 
-  /** The cached signed link if it still lives, without asking the hub: an image shown again
+  /** The cached signed link if it still lives, without asking the hub: a page shown again
    *  has its address in the first render. */
   cachedUrl(id: string): string | undefined {
     const cached = this.links.get(id);
@@ -73,21 +87,57 @@ export class ArtifactStore {
     return `${u}${u.includes('?') ? '&' : '?'}dl=1`;
   }
 
-  /** The content as text; an expired or refused link is renewed once (403/410). A body
-   *  announced larger than `maxBytes` is not read. */
+  /** The content as text, from this device or else from the host; an expired or refused link
+   *  is renewed once (403/410). A body announced larger than `maxBytes` is not read, nor kept. */
   async text(id: string, maxBytes = MAX_INLINE_TEXT): Promise<string> {
+    const kept = await this.cache.getBlob(id);
+    if (kept) {
+      if (kept.size > maxBytes) throw new Error('attachment too large');
+      return kept.text();
+    }
     const res = await this.content(id);
     const len = Number(res.headers.get('content-length') ?? NaN);
     if (len > maxBytes) {
       void res.body?.cancel();
       throw new Error('attachment too large');
     }
-    return res.text();
+    const blob = await res.blob();
+    void this.cache.putBlob(id, blob);
+    return blob.text();
   }
 
-  /** The content as a Blob; an expired or refused link is renewed once (403/410). */
-  async blob(id: string): Promise<Blob> {
-    return (await this.content(id)).blob();
+  /** The content as a Blob, from this device or else from the host; an expired or refused
+   *  link is renewed once (403/410). The device keeps what it downloads only when `keep`: the
+   *  bytes of what it shows, not a file taken back into the input. */
+  async blob(id: string, keep = true): Promise<Blob> {
+    const kept = await this.cache.getBlob(id);
+    if (kept) return kept;
+    const blob = await (await this.content(id)).blob();
+    if (keep) void this.cache.putBlob(id, blob);
+    return blob;
+  }
+
+  /** An image as a `data:` URL of its bytes, downloaded once per device. A failure is not
+   *  cached. */
+  imageUrl(id: string): Promise<string> {
+    let p = this.imageLoads.get(id);
+    if (!p) {
+      p = this.blob(id).then(async (b) => {
+        const u = await dataUrl(b);
+        if (!u) throw new Error('image not readable');
+        this.imageUrls.set(id, u);
+        return u;
+      });
+      this.imageLoads.set(id, p);
+      p.catch(() => this.imageLoads.delete(id));
+    }
+    return p;
+  }
+
+  /** The `data:` URL of an image loaded already, without waiting: an image shown again (the
+   *  viewer opened from the feed) has its source in the first render. */
+  cachedImage(id: string): string | undefined {
+    return this.imageUrls.get(id);
   }
 
   /** A HEIC or HEIF image the browser does not show, as a JPEG `data:` URL; null where it

@@ -33,7 +33,9 @@ Optional fields are omitted when absent; readers must accept `null` for them as 
 Replies reuse the request `id`: `hub.hello.ack.json` and `hub.error.json` answer
 `worker.hello.json` (`w-1`), `hub.ack.json` answers `worker.event.json` (`w-2`),
 `worker.ack.json` answers `hub.session.input.json` (`f-3`); `worker.ack.joined.json` is the same
-answer for an input the runtime took into the turn already running (`joined`, SPEC §17.2).
+answer for an input the runtime took into the turn already running (`joined`, SPEC §17.2);
+`worker.ack.quiet.json` is the answer for one written into the agent's history without a turn at the
+owner's Stop, which `hub.session.stop.quiet.json` asks for (`quiet`, SPEC 0.231).
 `hub.ack.unknown-session.json`
 is the ack for an event dropped because the hub does not know its session (no `seq`).
 `hub.clarify.response.cancel.json` — empty `answers`: the hub cancelled the clarify request.
@@ -140,3 +142,12 @@ SPEC 0.209: `api.artifact.site.json` — an artifact of kind `site` (the archive
 uploads) that is published: `public_url` (absent while it is not). `event.attachment.site.json`
 — the publication in the feed; `event.approval.request.publish.json` — the owner's card that
 comes before it (`tool: hqc_publish`).
+
+SPEC 0.219: `hub.session.withdraw.json` and `hub.session.input_now.json` take back an input the
+worker holds and send it into the running turn at once; `worker.result.withdrawn.json` and
+`worker.result.input_now.json` answer them (`withdrawn`, `sent_now`; `error` `not_now` when the
+runtime cannot take the input now). `client.delivery.withdrawn.json` — the `delivery` of a message
+the owner took back, which no client shows. `hub.session.input.human.json` — an input the owner
+typed (`human`: the worker writes Claude Code's `origin: human` for such an input only; it is
+absent for a message of another session, a room's input, a run of a schedule, a note of the hub's
+own and an input with messages of other sessions in front of it).

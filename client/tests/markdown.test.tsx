@@ -219,6 +219,58 @@ describe('elements', () => {
   });
 });
 
+describe('a tail (the buttons at the end of a message)', () => {
+  const T = <b class="tail">T</b>;
+  function withTail(text: string): HTMLElement {
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    act(() => render(<Markdown text={text} tail={T} />, root!));
+    return root.querySelector('.md')!;
+  }
+  /** Where the tail stands: the tag of its parent. */
+  const parent = (el: HTMLElement) => {
+    expect(el.querySelectorAll('.tail')).toHaveLength(1);
+    return el.querySelector('.tail')!.parentElement!;
+  };
+
+  it('ends the last paragraph or heading', () => {
+    const p = parent(withTail('first\n\nlast line'));
+    expect(p.tagName).toBe('P');
+    expect(p.textContent).toBe('last lineT');
+    expect(p.lastElementChild!.className).toBe('tail');
+    expect(parent(withTail('para\n\n## Head')).tagName).toBe('H2');
+  });
+
+  it("ends the last item of a list, a nested list's last item, a tight item's text and a loose item's paragraph", () => {
+    const tight = parent(withTail('- one\n- two'));
+    expect(tight.tagName).toBe('SPAN');
+    expect(tight.closest('li')!.textContent).toBe('twoT');
+    expect(parent(withTail('1. one\n2. two\n   - inner\n   - last')).closest('li')!.textContent).toBe('lastT');
+    const loose = parent(withTail('- one\n\n- two\n\n  more'));
+    expect(loose.tagName).toBe('P');
+    expect(loose.textContent).toBe('moreT');
+  });
+
+  it('stands on a line of its own after a block that holds no line of text', () => {
+    for (const src of ['text\n\n```sh\nls\n```', 'text\n\n| a | b |\n|---|---|\n| 1 | 2 |', 'text\n\n---', 'text\n\n> quote', 'text\n\n$$x^2$$']) {
+      const el = withTail(src);
+      const line = parent(el);
+      expect(line.className, src).toBe('msg-tail-line');
+      expect(line, src).toBe(el.lastElementChild);
+      expect(el.querySelector('p')!.textContent, src).toBe('text');
+    }
+    // A list that ends in a code block: in the item, after it.
+    const item = parent(withTail('- step\n\n  ```sh\n  ls\n  ```'));
+    expect(item.className).toBe('msg-tail-line');
+    expect(item.parentElement!.tagName).toBe('LI');
+  });
+
+  it('is after the last block that shows something, not after a link definition, and alone in an empty text', () => {
+    expect(parent(withTail('last\n\n[a]: https://example.com')).tagName).toBe('P');
+    expect(parent(withTail('')).className).toBe('msg-tail-line');
+  });
+});
+
 describe('HTML is text', () => {
   it('inline HTML creates no elements', () => {
     const el = md('before <img src=x onerror=alert(1)> and <script>alert(1)</script> after <b>bold</b>');
@@ -306,20 +358,20 @@ describe('messages', () => {
       ev('event.agent.message', (e) => (e.payload.text = SRC)),
       ev('event.peer.message', (e) => (e.payload.text = 'peer **md**')),
     ]);
-    // A message's in its buttons by the time; a peer message's in its head.
+    // Each message's own, at the bottom right of it.
     const copy = (sel: string) => root.querySelector<HTMLButtonElement>(`${sel} .btn-copy`)!;
     for (const [sel, text] of [
       ['.msg-user .msg-buttons', 'user *md*'],
       ['.msg-agent .msg-buttons', SRC],
-      ['.relay-head > .meta', 'peer **md**'],
+      ['.relay .msg-buttons', 'peer **md**'],
     ]) {
       await act(async () => copy(sel).click());
       expect(writeText).toHaveBeenLastCalledWith(text);
     }
-    // The result is the button's icon and label, in a head too.
+    // The result is the button's icon and label.
     await act(() => new Promise((r) => setTimeout(r, 0)));
     expect(copy('.msg-agent .msg-buttons').getAttribute('aria-label')).toBe('Copied');
-    expect(copy('.relay-head > .meta').getAttribute('aria-label')).toBe('Copied');
+    expect(copy('.relay .msg-buttons').getAttribute('aria-label')).toBe('Copied');
     // The code block's button copies only the block.
     await act(async () => root.querySelector<HTMLButtonElement>('.msg-agent .md-code .btn-copy')!.click());
     expect(writeText).toHaveBeenLastCalledWith('ls -la');

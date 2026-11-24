@@ -60,7 +60,8 @@ pub enum Ingested {
 const MAX_RETRACTED: usize = 1024;
 
 /// Event types only the hub writes (SPEC §4): input of users, answers to requests and
-/// messages between sessions, and `schedules.live`. A worker sending one is refused.
+/// messages between sessions, `schedules.live` and `side.question`. A worker sending one is
+/// refused.
 fn hub_only(kind: &EventKind) -> bool {
     matches!(
         kind,
@@ -69,6 +70,7 @@ fn hub_only(kind: &EventKind) -> bool {
             | EventKind::ClarifyResponse { .. }
             | EventKind::PeerMessage { .. }
             | EventKind::SchedulesLive { .. }
+            | EventKind::SideQuestion { .. }
     )
 }
 
@@ -192,6 +194,14 @@ pub async fn ingest_worker_event(
         }
         payload = json!({ "event_ids": kept });
     }
+    // An answer to a side question of this session that has none yet (SPEC 0.232): the worker
+    // names the question, and is not trusted with another session's or with a second answer.
+    if let EventKind::SideAnswer { question, .. } = &ev.kind {
+        if !db::side_answer_wanted(&app.db, s.id, *question, ev.event_id).await? {
+            tracing::info!(session_id = %s.id, %question, "side.answer for no open side question dropped");
+            return Ok(dropped);
+        }
+    }
     let new = NewEvent {
         event_id: ev.event_id,
         session_id: ev.session_id,
@@ -204,6 +214,41 @@ pub async fn ingest_worker_event(
         delivery: None,
         delivered_at: None,
     };
+    // A worker's request is opened before its card is stored. One whose `request_id` an open
+    // request of another kind in the session holds is not stored at all: an answer names its
+    // request by the id alone, so the owner's answer to that card would answer the other one
+    // (a publication, SPEC §10.1). A repeat of the same request is stored as before.
+    let opens = match &ev.kind {
+        EventKind::ApprovalRequest {
+            request_id,
+            expires_at,
+            ..
+        } => Some(("approval", request_id, *expires_at)),
+        EventKind::ClarifyRequest { request_id, .. } => Some((
+            "clarify",
+            request_id,
+            new.payload
+                .get("expires_at")
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        )),
+        _ => None,
+    };
+    if let Some((kind, request_id, expires_at)) = opens {
+        let opened = db::open_request_as(
+            &app.db,
+            kind,
+            s.id,
+            request_id,
+            &new.payload,
+            expires_at,
+            s.worker_id,
+        )
+        .await?;
+        if opened == db::Opened::Taken {
+            tracing::warn!(session_id = %s.id, worker_id = %conn.worker_id, %request_id, kind, "a worker's request with the id of an open request of another kind dropped");
+            return Ok(dropped);
+        }
+    }
     // A cancel from the worker is stored in the transaction that closes its request, so one
     // that fails to be stored leaves the request open for its resend. One the hub closed
     // already (`POST /stop` cancels before it stops the turn, an answer that crossed the
@@ -227,6 +272,9 @@ pub async fn ingest_worker_event(
     match inserted {
         Inserted::New(row) => {
             let seq = row.seq;
+            if let EventKind::SideAnswer { question, .. } = &ev.kind {
+                conn.side_closed(s.id, *question);
+            }
             after_store(app, &s, &row, &ev.kind, Source::Worker).await?;
             // Here rather than in after_store: auto_approve stores an event itself.
             if let EventKind::ApprovalRequest { request_id, .. } = &ev.kind {
@@ -326,8 +374,8 @@ async fn store_hub_event_as(
     hqc_proto::replace_nul_json(&mut payload);
     let client_op_id = client_op_id.map(|c| hqc_proto::replace_nul(&c).into_owned());
     // Clients put an input that came while the agent's text or thinking was being written
-    // under it (SPEC §6).
-    if kind == "user.message" && app.text_open(s.id) {
+    // under it (SPEC §6), and so a side question.
+    if matches!(kind, "user.message" | "side.question") && app.text_open(s.id) {
         payload["during_text"] = json!(true);
     }
     let typed: EventKind = serde_json::from_value(json!({"type": kind, "payload": payload}))?;
@@ -499,39 +547,9 @@ async fn after_store(
         seq: row.seq,
         event: row.to_json(),
     });
+    // A worker's `approval.request` and `clarify.request` opened their request before they were
+    // stored (`ingest_worker_event`).
     match kind {
-        EventKind::ApprovalRequest {
-            request_id,
-            expires_at,
-            ..
-        } if source == Source::Worker => {
-            db::open_request(
-                &app.db,
-                "approval",
-                s.id,
-                request_id,
-                &row.payload,
-                *expires_at,
-                s.worker_id,
-            )
-            .await?;
-        }
-        EventKind::ClarifyRequest { request_id, .. } if source == Source::Worker => {
-            let expires_at = row
-                .payload
-                .get("expires_at")
-                .and_then(|v| serde_json::from_value(v.clone()).ok());
-            db::open_request(
-                &app.db,
-                "clarify",
-                s.id,
-                request_id,
-                &row.payload,
-                expires_at,
-                s.worker_id,
-            )
-            .await?;
-        }
         EventKind::AgentMessage {
             r#final: true,
             text,

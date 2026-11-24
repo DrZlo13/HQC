@@ -128,7 +128,8 @@ const agentText = (seq: number, text: string, final: boolean) =>
 describe("every example event renders", () => {
   // Transport only: the stream text, the subagents and the schedules above the input
   // (chat.test.tsx), and the token rate, which reaches the client as the session's
-  // `output_per_s`; a retraction is stored but not drawn.
+  // `output_per_s`; a retraction and the agent's task list are stored but not drawn, and a side
+  // answer is drawn in its question's block.
   const names = readdirSync(WIRE)
     .filter(
       (f) =>
@@ -139,6 +140,8 @@ describe("every example event renders", () => {
         f !== "event.subagents.live.retry.json" &&
         f !== "event.retraction.json" &&
         f !== "event.tokens.rate.json" &&
+        f !== "event.tasks.json" &&
+        !f.startsWith("event.side.answer") &&
         f !== "event.schedules.live.json",
     )
     .map((f) => f.replace(/\.json$/, ""));
@@ -151,6 +154,22 @@ describe("every example event renders", () => {
       expect(root.children.length).toBe(name === "event.status" ? 0 : 1);
     });
   }
+
+  it("a side answer stands in its question's block, not as an item of its own (SPEC 0.232)", () => {
+    const t = new Timeline();
+    t.apply(ev("event.side.question", withSeq(1)));
+    expect(t.sideAnswerFor("0199f3a2-7c10-7000-8000-000000000131")).toBeUndefined();
+    show(t);
+    expect(root.querySelector(".side-wait")?.textContent).toBe("Answering…");
+    // The one with the lowest seq is shown, also when it came later (an older page).
+    t.apply(ev("event.side.answer.error", withSeq(3)));
+    t.apply(ev("event.side.answer", withSeq(2)));
+    expect(t.items().map((i) => (i.kind === "event" ? i.event.type : i.kind))).toEqual(["side.question"]);
+    expect(t.sideAnswerFor("0199f3a2-7c10-7000-8000-000000000131")?.seq).toBe(2);
+    show(t);
+    expect(root.children.length).toBe(1);
+    expect(root.querySelector(".side-answer code")?.textContent).toBe("src/main.rs");
+  });
 
   it("agent.delta streams into a buffer and is not stored", () => {
     const t = new Timeline();
@@ -297,11 +316,31 @@ describe("the thinking being written (SPEC §6)", () => {
       const t = new Timeline();
       t.apply(ev("event.user.message", withSeq(1)));
       t.apply(thinking("Checking"));
+      // Read before the end, so that the cached items are what the end has to change.
+      expect(t.items().some((i) => i.kind === "event" && i.event.type === "agent.delta")).toBe(true);
       end(t);
       expect(t.thinking).toBeNull();
       expect(t.items().some((i) => i.kind === "event" && i.event.type === "agent.delta")).toBe(false);
     });
   }
+});
+
+describe("the items kept for a revision of the timeline", () => {
+  it("show an invalid event that came after they were read", () => {
+    const t = new Timeline();
+    t.apply(ev("event.user.message", withSeq(1)));
+    expect(t.items().some((i) => i.kind === "invalid")).toBe(false);
+    t.addInvalid({ seq: 2 }, "bad payload");
+    expect(t.items().some((i) => i.kind === "invalid")).toBe(true);
+  });
+
+  it("are empty after `clear`, also when they were read before", () => {
+    const t = new Timeline();
+    t.apply(ev("event.user.message", withSeq(1)));
+    expect(t.items()).toHaveLength(1);
+    t.clear();
+    expect(t.items()).toHaveLength(0);
+  });
 });
 
 describe("delivery after a dropped socket", () => {
@@ -394,6 +433,23 @@ describe("an input that came while the agent's text was being written (SPEC §6)
     const t = new Timeline();
     t.applyAll([answer(1), input(2, true), answer(3), answer(4)]);
     expect(order(t)).toEqual(["e1", "e3", "e2", "e4"]);
+  });
+
+  it("a side question written during the text stands under the answer, in the order it came (SPEC 0.232)", () => {
+    const side = (seq: number, during: boolean) =>
+      ev("event.side.question", (e) => {
+        e.seq = seq;
+        e.event_id = `0199f3a2-7c10-7000-8000-00000000030${seq}`;
+        if (during) e.payload.during_text = true;
+      });
+    // M (a message during the text), Q (a side question during it), A (the answer).
+    const t = new Timeline();
+    t.applyAll([input(1, true), side(2, true), answer(3)]);
+    expect(order(t)).toEqual(["e3", "e1", "e2"]);
+    // One asked before the text stays where it is.
+    const before = new Timeline();
+    before.applyAll([side(1, false), input(2, true), answer(3)]);
+    expect(order(before)).toEqual(["e1", "e3", "e2"]);
   });
 
   it("stands under the thinking stored after it, and the answer after that stays under it", () => {
@@ -556,6 +612,86 @@ describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
     expect(queued.map((i) => i.key)).toEqual(["e3", "e4"]);
   });
 
+  it("a quiet input, written into the history as the turn was stopped, stands after that turn and never waits", () => {
+    // SPEC 0.231: E3 and E4 were typed during the turn of E1; Stop ended it and the worker wrote
+    // them into the agent's history without a turn: delivered after its end, `quiet`. The waiting
+    // one, E8, was typed after Stop and has the turn of its own. The hub gives each
+    // `joined_after`: the last event stored before the worker's ack, the `status idle` (E7).
+    const quietly = (e: any) => ((e.payload.quiet = true), (e.payload.joined_after = 7));
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 7.1, quietly),
+      input(4, 7.2, quietly),
+      result(5, "a"),
+      final(6, 1),
+      idle(7, 1),
+      input(8, 7.3),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e7", "e3", "e4", "e8"]);
+    expect(t.items().filter((i) => i.kind === "event" && i.queued)).toEqual([]);
+    show(t);
+    expect(time(3)).toBe(formatTime(at(3)));
+    // The same through a `delivery` frame: it waits until the hub says it was written quiet.
+    const live = new Timeline();
+    live.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3),
+      result(4, "a"),
+      final(5, 1),
+      idle(6, 1),
+    ]);
+    expect(order(live)).toEqual(["e1", "e2", "e4", "e5", "e6", "e3"]);
+    live.applyDelivery({
+      session_id: "s",
+      event_id: id(3),
+      seq: 3,
+      delivery: "delivered",
+      delivered_at: at(7.1),
+      quiet: true,
+      joined_after: 6,
+    });
+    expect(order(live)).toEqual(["e1", "e2", "e4", "e5", "e6", "e3"]);
+    expect(live.items().filter((i) => i.kind === "event" && i.queued)).toEqual([]);
+    // Delivered, not quiet, it stands as it did.
+    const plain = new Timeline();
+    plain.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 7.1),
+      result(4, "a"),
+      final(5, 1),
+      idle(6, 1),
+      call(7, "b", "Bash", { command: "ls" }),
+    ]);
+    expect(order(plain)).toEqual(["e1", "e2", "e4", "e5", "e6", "e3", "e7"]);
+    expect(plain.items().find((i) => i.key === "e3")).toMatchObject({ queued: true });
+  });
+
+  it("a quiet input stands after the turn that was stopped, not the one it was typed in", () => {
+    // SPEC 0.231: T1 answers an `hqc_ask`, nothing is injected into it. A (3) and Q (4) are typed
+    // meanwhile; A runs as T2 (delivered at 6.5), Q is injected into T2 and the Stop cancels it:
+    // delivered quiet at 9.1. The agent's history has A, then Q.
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 6.5),
+      input(4, 9.1, (e) => ((e.payload.quiet = true), (e.payload.joined_after = 11))),
+      result(5, "a"),
+      final(6, 1),
+      idle(7, 1),
+      call(8, "b", "Bash", { command: "ls" }),
+      result(9, "b"),
+      final(10, 3),
+      idle(11, 3),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e7", "e3", "e8", "e9", "e10", "e11", "e4"]);
+    expect(t.items().filter((i) => i.kind === "event" && i.key === "e4" && i.queued)).toEqual([]);
+  });
+
   it("a joined input behind a waiting one stays behind it: two inputs carried past a final answer", () => {
     // Both written during the thinking of a turn with no calls (DrZlo13/hqc#42): the CLI runs
     // the first as the next turn, the second joins that turn.
@@ -658,6 +794,106 @@ describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
     expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e7", "e8", "e3", "e4", "e9", "e10", "e11", "e12"]);
   });
 
+  it("an input the agent took after its calls stands where it took it (`joined_after`)", () => {
+    // The text and the calls came before the agent saw the second message: it stands after the
+    // last of them (the hub's `joined_after`), not at its own `seq` above the whole turn.
+    const think = (seq: number) => ev("event.agent.thinking", (e) => ((e.seq = seq), (e.ts = at(seq))));
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      input(2, 5, (e) => ((e.payload.joined = true), (e.payload.during_text = true), (e.payload.joined_after = 8))),
+      think(3),
+      agentText(4, "Looking.", false),
+      call(5, "a", "Bash", { command: "ls" }),
+      call(6, "b", "Read", { file_path: "a.rs" }),
+      result(7, "a"),
+      result(8, "b"),
+      think(9),
+      call(10, "c", "Bash", { command: "pwd" }),
+      result(11, "c"),
+      final(12, 1),
+      idle(13, 1),
+    ]);
+    expect(order(t)).toEqual(["e1", "e3", "e4", "e5", "e6", "e7", "e8", "e2", "e9", "e10", "e11", "e12", "e13"]);
+  });
+
+  it("inputs taken behind the same event keep their seq order", () => {
+    const t = new Timeline();
+    const joinedAfter = (n: number) => (e: any) => ((e.payload.joined = true), (e.payload.joined_after = n));
+    t.applyAll([
+      input(1, 1.2),
+      input(2, 5, joinedAfter(5)),
+      input(3, 5.5, joinedAfter(5)),
+      call(4, "a", "Bash", { command: "ls" }),
+      result(5, "a"),
+      call(6, "b", "Bash", { command: "pwd" }),
+      result(7, "b"),
+    ]);
+    expect(order(t)).toEqual(["e1", "e4", "e5", "e2", "e3", "e6", "e7"]);
+  });
+
+  it("a joined input behind a waiting one goes after its anchor inside the waiting one's turn", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      ev("event.agent.thinking", (e) => ((e.seq = 2), (e.ts = at(2)))),
+      input(3, 6.1),
+      input(4, 7.1, (e) => ((e.payload.joined = true), (e.payload.joined_after = 7))),
+      final(5, 1),
+      idle(6, 1),
+      ev("event.agent.thinking", (e) => ((e.seq = 7), (e.ts = at(7)))),
+      final(8, 3),
+      idle(9, 3),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e3", "e7", "e4", "e8", "e9"]);
+  });
+
+  it("a delivery frame with joined_after moves a live message, and it is kept when the hub copy comes again", () => {
+    const t = new Timeline();
+    t.applyAll([input(1, 1.2), input(2), call(3, "a", "Bash", { command: "ls" }), result(4, "a"), agentText(5, "Next", false)]);
+    expect(order(t)).toEqual(["e1", "e3", "e4", "e5", "e2"]);
+    t.applyDelivery({
+      session_id: "s",
+      event_id: id(2),
+      seq: 2,
+      delivery: "delivered",
+      delivered_at: at(6),
+      joined: true,
+      joined_after: 4,
+    });
+    expect(order(t)).toEqual(["e1", "e3", "e4", "e2", "e5"]);
+    // The copy a reload brings carries it the same way.
+    const fresh = new Timeline();
+    fresh.applyAll([input(1, 1.2), input(2), call(3, "a", "Bash", { command: "ls" }), result(4, "a"), agentText(5, "Next", false)]);
+    fresh.refresh([input(2, 6, (e) => ((e.payload.joined = true), (e.payload.joined_after = 4)))]);
+    expect(order(fresh)).toEqual(["e1", "e3", "e4", "e2", "e5"]);
+  });
+
+  it("a text goes above an input that came while it was written past one the agent took later", () => {
+    // e2 came while "Looking." was written; e3 the agent took after it. The text goes above both,
+    // and e3 stays behind its place.
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      input(2, 5, (e) => (e.payload.during_text = true)),
+      input(3, 5.5, (e) => ((e.payload.joined = true), (e.payload.during_text = true), (e.payload.joined_after = 4))),
+      agentText(4, "Looking.", false),
+    ]);
+    expect(order(t)).toEqual(["e1", "e4", "e2", "e3"]);
+  });
+
+  it("the thinking being written stands under an input the agent took before it began", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      input(2, 5, (e) => ((e.payload.joined = true), (e.payload.during_text = true), (e.payload.joined_after = 4))),
+      call(3, "a", "Bash", { command: "ls" }),
+      result(4, "a"),
+    ]);
+    t.apply(ev("event.agent.delta", (e) => (e.payload = { text: "Checking", thinking: true })));
+    expect(order(t)).toEqual(["e1", "e3", "e4", "e2", "t1"]);
+  });
+
   it("a /compact typed during a turn stands above the compaction it started", () => {
     const t = new Timeline();
     t.applyAll([
@@ -676,6 +912,26 @@ describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
       idle(10, 3),
     ]);
     expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e7", "e3", "e8", "e9", "e10"]);
+  });
+
+  // SPEC 0.218: the adapter sends a slash command's output as `system command_output`, no
+  // longer as the agent's message, and a command typed during a turn still stands above it.
+  it("a slash command typed during a turn stands above its output", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 7.1, (e) => (e.payload.text = "/goal clear")),
+      result(4, "a"),
+      final(5, 1),
+      idle(6, 1),
+      ev("event.system", (e) => {
+        e.seq = 7;
+        e.payload = { code: "command_output", text: "Goal cleared: tests pass" };
+      }),
+      idle(8, 3),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e3", "e7", "e8"]);
   });
 
   it("a turn lost right after it was taken ends the waiting input's own turn", () => {
@@ -2946,6 +3202,31 @@ describe("messages", () => {
     expect(reopened.usageTotals().cost).toBe(3.25);
   });
 
+  it("counts the session's tokens as its cost: the latest total plus the last one before each /clear", () => {
+    const at = (seq: number) =>
+      `0199f3a2-7c10-7000-8000-0000000004${String(seq).padStart(2, "0")}`;
+    const usage = (seq: number, tokens?: number) =>
+      ev("event.usage", (e) => {
+        e.seq = seq;
+        e.event_id = at(seq);
+        e.payload = { input_tokens: 10, output_tokens: 5, session_tokens: tokens };
+      });
+    const cleared = (seq: number) =>
+      ev("event.system", (e) => {
+        e.seq = seq;
+        e.event_id = at(seq);
+        e.payload = { text: "Conversation cleared", code: "conversation_cleared" };
+      });
+    const none = new Timeline();
+    none.apply(usage(1));
+    expect(none.usageTotals().tokens).toBeUndefined();
+    const t = new Timeline();
+    for (const e of [usage(1, 100), usage(2, 250)]) t.apply(e);
+    expect(t.usageTotals().tokens).toBe(250);
+    for (const e of [cleared(3), usage(4, 40)]) t.apply(e);
+    expect(t.usageTotals().tokens).toBe(290);
+  });
+
   it("draws the line of a usage with no tokens but a cost, as /compact's", () => {
     const t = new Timeline();
     t.apply(agentText(1, "All tests passed.", true));
@@ -3096,13 +3377,84 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
     // The next attempt goes at once: no delay to count.
     expect(line({ ...retry, retry_delay_ms: 0 })).toBe("Main agent: Retrying 3/10 (no response)");
     expect(line({ kind: "compacting" })).toBe("Main agent: Compacting the conversation…");
-    expect(line({ kind: "thinking", estimated_tokens: 12345 })).toBe("Main agent: Thinking · ~12k tokens");
-    expect(line({ kind: "thinking", estimated_tokens: 840 })).toBe("Main agent: Thinking · ~840 tokens");
-    // A running command keeps its own line; other states keep theirs.
+    expect(line({ kind: "thinking", estimated_tokens: 12340 })).toBe("Main agent: Thinking · 12.34k tokens");
+    expect(line({ kind: "thinking", estimated_tokens: 840 })).toBe("Main agent: Thinking · 840 tokens");
+    // A running command keeps its own line; an approval waited for keeps its own.
     const t = new Timeline();
     t.apply(call(1, "b", "Bash", { command: "sleep 30" }));
     expect(line({ kind: "compacting" }, "running", t)).toContain("sleep 30");
-    expect(line({ kind: "compacting" }, "queued")).toBe("Main agent: Input queued");
+    expect(line({ kind: "compacting" }, "waiting")).toBe("Main agent: Waiting for approval");
+  });
+
+  it("queued with an activity (SPEC 0.233): what the agent does, as a running row", () => {
+    // Claude Code takes the input only after the auto-compaction it runs first: the input waits,
+    // no turn is open, and the agent compacts.
+    root = document.createElement("div");
+    document.body.appendChild(root);
+    act(() => render(<ActivityLine state="queued" timeline={new Timeline()} now={() => NOW} activity={{ kind: "compacting" }} />, root));
+    const row = root.querySelector(".live-agents-row")!;
+    expect(row.textContent).toBe("Main agent: Compacting the conversation…");
+    expect(row.querySelector(".live-agents-dot-still")).toBeNull();
+    expect(row.querySelector(".live-agents-lead-queued")).toBeNull();
+    // Without one it is the waiting input's muted row.
+    act(() => render(<ActivityLine state="queued" timeline={new Timeline()} now={() => NOW} />, root));
+    const still = root.querySelector(".live-agents-row")!;
+    expect(still.textContent).toBe("Main agent: Input queued");
+    expect(still.querySelector(".live-agents-dot-still")).not.toBeNull();
+    expect(still.querySelector(".live-agents-lead-queued")).not.toBeNull();
+  });
+
+  it("the thinking estimate runs up between the worker's reports, as in the VS Code tab", () => {
+    let clock = NOW;
+    const now = () => clock;
+    const thinking = (n: number): Activity => ({ kind: "thinking", estimated_tokens: n });
+    const text = () => root.querySelector(".live-agents-lead")!.textContent;
+    const draw = (activity?: Activity) =>
+      act(() => render(<ActivityLine state="running" timeline={new Timeline()} now={now} activity={activity} />, root));
+    const wait = (ms: number) =>
+      act(() => {
+        clock += ms;
+        vi.advanceTimersByTime(ms);
+      });
+    try {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      root = document.createElement("div");
+      document.body.appendChild(root);
+      // The first estimate is shown as it comes.
+      draw(thinking(1000));
+      expect(text()).toBe("Thinking · 1.00k tokens");
+      // The next one, 2 s later, runs up from there over 2 s.
+      wait(2000);
+      draw(thinking(3000));
+      expect(text()).toBe("Thinking · 1.00k tokens");
+      wait(500);
+      expect(text()).toBe("Thinking · 1.50k tokens");
+      wait(500);
+      expect(text()).toBe("Thinking · 2.00k tokens");
+      // An estimate that comes mid-run starts from the number shown, over the time since the
+      // last one (1 s).
+      draw(thinking(4000));
+      wait(500);
+      expect(text()).toBe("Thinking · 3.00k tokens");
+      wait(500);
+      expect(text()).toBe("Thinking · 4.00k tokens");
+      wait(5000);
+      expect(text()).toBe("Thinking · 4.00k tokens");
+      // Once the count is there, the 100 ms redraw stops.
+      expect(vi.getTimerCount()).toBe(0);
+      // A smaller one (a new thinking block) is shown at once, and so is the first after none.
+      draw(thinking(200));
+      expect(text()).toBe("Thinking · 200 tokens");
+      expect(vi.getTimerCount()).toBe(0);
+      draw(undefined);
+      expect(text()).toBe("Working");
+      wait(1000);
+      draw(thinking(900));
+      expect(text()).toBe("Thinking · 900 tokens");
+    } finally {
+      render(null, root);
+      vi.useRealTimers();
+    }
   });
 
   it('running with the last shell call unanswered: "Command: <command>" and its run time', () => {
@@ -3339,7 +3691,7 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
       ),
     );
     expect([...root.querySelectorAll(".live-agents-what")].map((e) => e.textContent)).toEqual([
-      "Optimist · Thinking · ~647 tokens",
+      "Optimist · Thinking · 647 tokens",
       "Pessimist · Command: sleep 15",
       "Realist · Input queued",
     ]);
@@ -4336,5 +4688,94 @@ describe("an answered request closes before its event", () => {
       b.click();
     });
     expect(approve).toHaveBeenCalledTimes(1);
+  });
+});
+
+// `/goal` (SPEC 0.218): the timeline's fold, the feed and the lines of the runtime's checks.
+describe("goal", () => {
+  const goalEvent = (seq: number, state: string, extra: Record<string, unknown> = {}, text = "x") =>
+    ev("event.system.goal", (e) => {
+      e.seq = seq;
+      e.event_id = `0199f3a2-7c10-7000-8000-0000000004${String(seq).padStart(2, "0")}`;
+      e.payload = { text, code: "goal", goal: { condition: "tests pass", state, ...extra } };
+    });
+  const cleared = (seq: number) =>
+    ev("event.system", (e) => {
+      e.seq = seq;
+      e.event_id = `0199f3a2-7c10-7000-8000-0000000004${String(seq).padStart(2, "0")}`;
+      e.payload = { text: "Conversation cleared", code: "conversation_cleared" };
+    });
+  const fold = (...evs: HqcEvent[]) => {
+    const t = new Timeline();
+    for (const e of evs) t.apply(e);
+    return t.goal();
+  };
+
+  it("folds the goal over its events: set, each check, the end", () => {
+    expect(fold()).toBeNull();
+    expect(fold(goalEvent(1, "set"))).toEqual({ condition: "tests pass", checks: 0 });
+    expect(
+      fold(goalEvent(1, "set"), goalEvent(2, "unmet", { reason: "1 test fails" }), goalEvent(3, "unmet", { reason: "2 tests fail" })),
+    ).toEqual({ condition: "tests pass", checks: 2, reason: "2 tests fail" });
+    // A check whose `set` is on a page not loaded still starts the goal.
+    expect(fold(goalEvent(2, "unmet", { reason: "r" }))).toEqual({ condition: "tests pass", checks: 1, reason: "r" });
+    for (const end of ["met", "failed", "cleared"]) {
+      expect(fold(goalEvent(1, "set"), goalEvent(2, "unmet"), goalEvent(3, end))).toBeNull();
+    }
+    // A new goal after the end starts from no checks and no reason.
+    expect(fold(goalEvent(1, "set"), goalEvent(2, "unmet", { reason: "r" }), goalEvent(3, "cleared"), goalEvent(4, "set"))).toEqual({
+      condition: "tests pass",
+      checks: 0,
+    });
+    // `/clear` starts a conversation that has no goal.
+    expect(fold(goalEvent(1, "set"), goalEvent(2, "unmet"), cleared(3))).toBeNull();
+    // A compaction writes the active goal's `set` again: its checks stay; another condition starts anew.
+    expect(fold(goalEvent(1, "set"), goalEvent(2, "unmet", { reason: "r" }), goalEvent(3, "set"))).toEqual({
+      condition: "tests pass",
+      checks: 1,
+      reason: "r",
+    });
+    expect(fold(goalEvent(1, "set"), goalEvent(2, "unmet", { reason: "r" }), goalEvent(3, "set", { condition: "lint is clean" }))).toEqual({
+      condition: "lint is clean",
+      checks: 0,
+    });
+  });
+
+  it("draws no block for a goal set or cleared and keeps a group of calls together past it", () => {
+    const call = (seq: number) =>
+      ev("event.tool.call", (e) => {
+        e.seq = seq;
+        e.payload.call_id = `c${seq}`;
+      });
+    const t = new Timeline();
+    for (const e of [call(1), goalEvent(2, "set"), call(3), goalEvent(4, "cleared")]) t.apply(e);
+    const blocks = buildFeed(t.items(), t);
+    expect(blocks.map((b) => b.kind)).toEqual(["tools"]);
+    expect((blocks[0] as any).rows).toHaveLength(2);
+    const shown = new Timeline();
+    shown.apply(goalEvent(1, "unmet"));
+    expect(buildFeed(shown.items(), shown)).toHaveLength(1);
+  });
+
+  it("draws a goal's end and each check that failed as the runtime's terminal does", () => {
+    const t = new Timeline();
+    t.apply(goalEvent(1, "met", { checks: 3, duration_ms: 55000, tokens: 918 }, "Goal achieved"));
+    t.apply(goalEvent(2, "unmet", {}, "Goal not yet met… continuing"));
+    t.apply(goalEvent(3, "failed", { reason: "The build is still red." }, "Goal could not be achieved"));
+    t.apply(goalEvent(4, "met", {}, "Goal achieved"));
+    show(t);
+    const lines = [...root.querySelectorAll(".line-system-goal")];
+    expect(lines).toHaveLength(4);
+    expect(lines[0].textContent).toBe("Goal achieved (55s · 3 checks · 918 tokens)");
+    expect(lines[0].classList.contains("line-goal-met")).toBe(true);
+    expect(lines[0].querySelector(".goal-note")).not.toBeNull();
+    expect(lines[1].textContent).toBe("Goal not yet met… continuing");
+    expect(lines[1].classList.contains("line-goal-unmet")).toBe(true);
+    expect(lines[2].classList.contains("line-warning")).toBe(true);
+    expect(lines[2].querySelector(".warn-icon")).not.toBeNull();
+    expect(lines[2].textContent).toBe("Goal could not be achieved" + "The build is still red.");
+    expect(lines[2].querySelector(".goal-reason")!.textContent).toBe("The build is still red.");
+    // What the runtime did not say is left out.
+    expect(lines[3].textContent).toBe("Goal achieved");
   });
 });

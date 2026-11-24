@@ -2225,6 +2225,7 @@ pub async fn first_text(db: &PgPool, id: Uuid, kind: &str) -> sqlx::Result<Optio
          WHERE session_id = $1 AND type = $2
            AND ($2 <> 'agent.message' OR payload->>'final' = 'true')
            AND coalesce(payload->>'text', '') <> ''
+           AND delivery IS DISTINCT FROM 'withdrawn'
          ORDER BY seq LIMIT 1",
     )
     .bind(id)
@@ -2869,6 +2870,29 @@ pub async fn retractable(db: &PgPool, session_id: Uuid, ids: &[Uuid]) -> sqlx::R
         .collect())
 }
 
+/// Whether the worker's `side.answer` `answer_id` to `question` may be stored (SPEC 0.232):
+/// `question` is a `side.question` of `session_id` and no other answer to it is stored. The
+/// answer itself, sent again after a lost `ack`, passes (it is a duplicate then).
+pub async fn side_answer_wanted(
+    db: &PgPool,
+    session_id: Uuid,
+    question: Uuid,
+    answer_id: Uuid,
+) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM events
+                        WHERE session_id = $1 AND event_id = $2 AND type = 'side.question')
+            AND NOT EXISTS (SELECT 1 FROM events
+                            WHERE session_id = $1 AND type = 'side.answer'
+                              AND payload ->> 'question' = $2::text AND event_id <> $3)",
+    )
+    .bind(session_id)
+    .bind(question)
+    .bind(answer_id)
+    .fetch_one(db)
+    .await
+}
+
 /// [`insert_event`] of an event that is read for `user` at once: the read cursor moves over
 /// it in the same transaction, so an imported record costs one commit (SPEC §9.1).
 pub async fn insert_event_read(db: &PgPool, e: &NewEvent, user: Uuid) -> sqlx::Result<Inserted> {
@@ -3009,21 +3033,49 @@ pub async fn events_by_ids(db: &PgPool, ids: &[Uuid]) -> sqlx::Result<Vec<EventR
     .await
 }
 
+/// Whether a read of a session's events returns the inputs the owner took back (`delivery`
+/// `withdrawn`, SPEC 0.219). A client gets them: a device that missed the `delivery` frame
+/// learns from the event itself that the message is gone, and its timeline hides it. What an
+/// agent or a search reads leaves them out: they never reached the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Withdrawn {
+    Included,
+    Excluded,
+}
+
 /// Events with `seq > after_seq`, oldest first.
 pub async fn events_after(
     db: &PgPool,
     session_id: Uuid,
     after_seq: i64,
     limit: i64,
+    withdrawn: Withdrawn,
 ) -> sqlx::Result<Vec<EventRow>> {
     sqlx::query_as(&format!(
-        "SELECT {EVENT_COLS} FROM events WHERE session_id = $1 AND seq > $2 ORDER BY seq LIMIT $3"
+        "SELECT {EVENT_COLS} FROM events WHERE session_id = $1 AND seq > $2
+           AND ($4 OR delivery IS DISTINCT FROM 'withdrawn') ORDER BY seq LIMIT $3"
     ))
     .bind(session_id)
     .bind(after_seq)
     .bind(limit)
+    .bind(withdrawn == Withdrawn::Included)
     .fetch_all(db)
     .await
+}
+
+/// The query of [`latest_tasks_event`]: the literal type lets it use the partial index
+/// `events_tasks` (migration `0056`), which a bound type would not.
+/// Its columns are [`EVENT_COLS`], written out because a `const` cannot format them in.
+pub const LATEST_TASKS_EVENT: &str = "SELECT event_id, session_id, seq, ts, author, type, payload,
+     chain, client_op_id, delivery, delivered_at
+     FROM events WHERE session_id = $1 AND type = 'tasks' ORDER BY seq DESC LIMIT 1";
+
+/// The session's newest `tasks` event, if it has one.
+pub async fn latest_tasks_event(db: &PgPool, session_id: Uuid) -> sqlx::Result<Option<EventRow>> {
+    sqlx::query_as(LATEST_TASKS_EVENT)
+        .bind(session_id)
+        .fetch_optional(db)
+        .await
 }
 
 /// The last `limit` events with `seq < before_seq`, oldest first.
@@ -3032,13 +3084,16 @@ pub async fn events_before(
     session_id: Uuid,
     before_seq: i64,
     limit: i64,
+    withdrawn: Withdrawn,
 ) -> sqlx::Result<Vec<EventRow>> {
     let mut v: Vec<EventRow> = sqlx::query_as(&format!(
-        "SELECT {EVENT_COLS} FROM events WHERE session_id = $1 AND seq < $2 ORDER BY seq DESC LIMIT $3"
+        "SELECT {EVENT_COLS} FROM events WHERE session_id = $1 AND seq < $2
+           AND ($4 OR delivery IS DISTINCT FROM 'withdrawn') ORDER BY seq DESC LIMIT $3"
     ))
     .bind(session_id)
     .bind(before_seq)
     .bind(limit)
+    .bind(withdrawn == Withdrawn::Included)
     .fetch_all(db)
     .await?;
     v.reverse();
@@ -3068,23 +3123,40 @@ pub async fn pending_inputs(db: &PgPool, session_id: Uuid) -> sqlx::Result<Vec<I
 /// `joined`: the worker took the input into the turn already running (SPEC §17.2). Kept on
 /// the message as `payload.joined`, only on an input that may join (SPEC §17.2): a person's
 /// message (a `user.message` that is not a run of a schedule), a room's input and a `send` of
-/// another session (a `peer.message` of mode `send`, no schedule).
+/// another session (a `peer.message` of mode `send`, no schedule). `quiet`: the worker wrote it
+/// into the agent's history without a turn, at a Stop (SPEC 0.231); kept as `payload.quiet` on
+/// any input. A joined or a quiet message gets `payload.joined_after`: the greatest `seq` of the
+/// session's events that are not inputs, when it is past the message's own. The worker sends the
+/// ack after the session's own records written before it, so that event is the last one the agent
+/// made before it took the input, or Claude Code recorded the quiet line (SPEC §6).
 pub async fn mark_delivered(
     db: &PgPool,
     event_id: Uuid,
     joined: bool,
+    quiet: bool,
 ) -> sqlx::Result<Option<EventRow>> {
+    // An input that may join (SPEC §17.2).
+    const MAY_JOIN: &str = "((type = 'user.message' AND payload->'schedule_id' IS NULL)
+                            OR (type = 'peer.message' AND (payload ? 'room'
+                                OR (payload->>'mode' = 'send' AND payload->'schedule_id' IS NULL))))";
     sqlx::query_as(&format!(
         "UPDATE events SET delivery = 'delivered', delivered_at = now(),
-           payload = CASE WHEN $2 AND ((type = 'user.message' AND payload->'schedule_id' IS NULL)
-                                       OR (type = 'peer.message' AND (payload ? 'room'
-                                           OR (payload->>'mode' = 'send'
-                                               AND payload->'schedule_id' IS NULL))))
+           payload = CASE WHEN $2 AND {MAY_JOIN}
                           THEN jsonb_set(payload, '{{joined}}', 'true') ELSE payload END
+             || CASE WHEN $3 THEN '{{\"quiet\": true}}'::jsonb ELSE '{{}}'::jsonb END
+             || CASE WHEN $3 OR ($2 AND {MAY_JOIN})
+                     THEN COALESCE((SELECT jsonb_build_object('joined_after', max(e.seq))
+                                    FROM events e
+                                    WHERE e.session_id = events.session_id
+                                      AND e.type NOT IN ('user.message', 'peer.message')
+                                      AND e.seq > events.seq
+                                    HAVING max(e.seq) IS NOT NULL), '{{}}'::jsonb)
+                     ELSE '{{}}'::jsonb END
          WHERE event_id = $1 AND delivery = 'pending' RETURNING {EVENT_COLS}"
     ))
     .bind(event_id)
     .bind(joined)
+    .bind(quiet)
     .fetch_optional(db)
     .await
 }
@@ -3104,6 +3176,41 @@ pub async fn move_inputs(
     .bind(to)
     .fetch_all(db)
     .await
+}
+
+/// The owner took the input back before the agent took it (SPEC 0.219): `withdrawn`, which a
+/// read for an agent or a search leaves out ([`Withdrawn`]); `None` if it was not pending.
+/// `unhanded_only`: only an input the hub never handed to a worker (`handed_at` null): one
+/// handed may be held by a worker, which has to say it let go of it first.
+pub async fn mark_input_withdrawn(
+    db: &PgPool,
+    event_id: Uuid,
+    unhanded_only: bool,
+) -> sqlx::Result<Option<EventRow>> {
+    sqlx::query_as(&format!(
+        "UPDATE events SET delivery = 'withdrawn'
+         WHERE event_id = $1 AND delivery = 'pending' AND (NOT $2 OR handed_at IS NULL)
+         RETURNING {EVENT_COLS}"
+    ))
+    .bind(event_id)
+    .bind(unhanded_only)
+    .fetch_optional(db)
+    .await
+}
+
+/// The hub is about to hand the pending input to a worker (SPEC 0.219): marks the first time
+/// and says whether it may go. `false`: it is not pending any more (the owner took it back), so
+/// it must not be sent. Marked before the frame goes, so a withdrawal on the hub alone, which
+/// needs `handed_at` null, can never take back an input a worker may hold.
+pub async fn mark_input_handed(db: &PgPool, event_id: Uuid) -> sqlx::Result<bool> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "UPDATE events SET handed_at = COALESCE(handed_at, now())
+         WHERE event_id = $1 AND delivery = 'pending' RETURNING event_id",
+    )
+    .bind(event_id)
+    .fetch_optional(db)
+    .await?
+    .is_some())
 }
 
 pub async fn mark_input_failed(db: &PgPool, event_id: Uuid) -> sqlx::Result<Option<EventRow>> {
@@ -3134,7 +3241,19 @@ pub struct PendingRow {
 const PENDING_COLS: &str =
     "id, kind, session_id, request_id, payload, expires_at, worker_id, result, closed_at";
 
-/// Stores an open request; `false` if one with the same `(session, kind, request_id)` exists.
+/// What [`open_request_as`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opened {
+    /// A new open request.
+    New,
+    /// A request of this kind with this `request_id` exists already: a repeat.
+    Repeat,
+    /// An open request of another kind in the session has this `request_id`: none is opened.
+    Taken,
+}
+
+/// Stores an open request; `false` if one with the same `(session, kind, request_id)` exists,
+/// or an open request of another kind in the session has this `request_id` ([`Opened`]).
 pub async fn open_request(
     db: &PgPool,
     kind: &str,
@@ -3144,10 +3263,43 @@ pub async fn open_request(
     expires_at: Option<DateTime<Utc>>,
     worker_id: Option<Uuid>,
 ) -> sqlx::Result<bool> {
-    let r = sqlx::query(
-        "INSERT INTO pending_requests (id, kind, session_id, request_id, payload, expires_at, worker_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (session_id, kind, request_id) DO NOTHING",
+    Ok(open_request_as(
+        db, kind, session_id, request_id, payload, expires_at, worker_id,
+    )
+    .await?
+        == Opened::New)
+}
+
+/// [`open_request`], saying why none was opened. An answer names its request by the id alone
+/// (SPEC §10.1), so an open request's id is its session's alone: a request whose id an open
+/// request of another kind holds is not opened, and the answer cannot land on that one. The
+/// check and the insert are one statement under a lock of the session and the id.
+pub async fn open_request_as(
+    db: &PgPool,
+    kind: &str,
+    session_id: Uuid,
+    request_id: &str,
+    payload: &Value,
+    expires_at: Option<DateTime<Utc>>,
+    worker_id: Option<Uuid>,
+) -> sqlx::Result<Opened> {
+    let mut tx = db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text || '/' || $2, 0))")
+        .bind(session_id)
+        .bind(request_id)
+        .execute(&mut *tx)
+        .await?;
+    let (taken, inserted): (bool, bool) = sqlx::query_as(
+        "WITH taken AS (
+             SELECT EXISTS (SELECT 1 FROM pending_requests
+                 WHERE session_id = $3 AND request_id = $4 AND kind <> $2 AND closed_at IS NULL) AS t
+         ), ins AS (
+             INSERT INTO pending_requests (id, kind, session_id, request_id, payload, expires_at, worker_id)
+             SELECT $1, $2, $3, $4, $5, $6, $7 WHERE NOT (SELECT t FROM taken)
+             ON CONFLICT (session_id, kind, request_id) DO NOTHING
+             RETURNING 1
+         )
+         SELECT (SELECT t FROM taken), EXISTS (SELECT 1 FROM ins)",
     )
     .bind(new_id())
     .bind(kind)
@@ -3156,9 +3308,14 @@ pub async fn open_request(
     .bind(payload)
     .bind(expires_at)
     .bind(worker_id)
-    .execute(db)
+    .fetch_one(&mut *tx)
     .await?;
-    Ok(r.rows_affected() > 0)
+    tx.commit().await?;
+    Ok(match (inserted, taken) {
+        (true, _) => Opened::New,
+        (false, true) => Opened::Taken,
+        (false, false) => Opened::Repeat,
+    })
 }
 
 pub async fn find_open_request(
@@ -3523,16 +3680,16 @@ pub async fn fork_cut_before_input(
 /// stands for: the id it got from the runtime and the transcript it was written in, a copy's
 /// origin (`events.origin_*`), else its own id in `runtime`, the session's transcript. Only
 /// those after the last `/clear` before `seq` (`system conversation_cleared`, the session's own
-/// or copied): the conversation before it is not the agent's any more.
+/// or copied): the conversation before it is not the agent's any more. The third is its `seq`.
 pub async fn agent_messages_before(
     db: &PgPool,
     id: Uuid,
     seq: i64,
     limit: i64,
     runtime: &str,
-) -> sqlx::Result<Vec<(Uuid, String)>> {
+) -> sqlx::Result<Vec<(Uuid, String, i64)>> {
     sqlx::query_as(
-        "SELECT COALESCE(origin_id, event_id), COALESCE(origin_runtime, $4) FROM events
+        "SELECT COALESCE(origin_id, event_id), COALESCE(origin_runtime, $4), seq FROM events
          WHERE session_id = $1 AND seq < $2 AND type = 'agent.message'
            AND author ->> 'kind' = 'agent'
            AND seq > COALESCE((SELECT max(seq) FROM events
@@ -3548,8 +3705,28 @@ pub async fn agent_messages_before(
     .await
 }
 
+/// The `seq` of the last `agent.message` of the agent in session `id` with `after < seq <= upto`.
+pub async fn last_agent_message_between(
+    db: &PgPool,
+    id: Uuid,
+    after: i64,
+    upto: i64,
+) -> sqlx::Result<Option<i64>> {
+    sqlx::query_scalar(
+        "SELECT max(seq) FROM events
+         WHERE session_id = $1 AND seq > $2 AND seq <= $3 AND type = 'agent.message'
+           AND author ->> 'kind' = 'agent'",
+    )
+    .bind(id)
+    .bind(after)
+    .bind(upto)
+    .fetch_one(db)
+    .await
+}
+
 /// The first event of session `id` after `seq` that is not an input stored while the agent's
-/// text was being written (`payload.during_text`, SPEC §6).
+/// text was being written (`payload.during_text`, SPEC §6), and no side question or answer
+/// (SPEC 0.232: a side block stands outside the conversation).
 pub async fn first_after_inputs_during_text(
     db: &PgPool,
     id: Uuid,
@@ -3558,6 +3735,8 @@ pub async fn first_after_inputs_during_text(
     sqlx::query_as(&format!(
         r#"SELECT {EVENT_COLS} FROM events
          WHERE session_id = $1 AND seq > $2
+           AND delivery IS DISTINCT FROM 'withdrawn'
+           AND type NOT IN ('side.question', 'side.answer')
            AND NOT (type IN ('user.message', 'peer.message')
                     AND payload @> '{{"during_text": true}}')
          ORDER BY seq LIMIT 1"#
@@ -3582,6 +3761,10 @@ pub struct TurnMark {
     pub code: Option<String>,
     pub in_reply_to: Option<String>,
     pub joined: bool,
+    /// Written into the agent's history without a turn at a Stop (SPEC 0.231).
+    pub quiet: bool,
+    /// `payload.joined_after` (SPEC §6).
+    pub joined_after: Option<i64>,
     pub delivery: Option<String>,
     pub delivered_at: Option<DateTime<Utc>>,
 }
@@ -3594,40 +3777,65 @@ pub async fn turn_marks(db: &PgPool, id: Uuid) -> sqlx::Result<Vec<TurnMark>> {
                   payload ->> 'state' AS state, payload ->> 'code' AS code,
                   payload ->> 'in_reply_to' AS in_reply_to,
                   COALESCE(payload @> '{"joined": true}', false) AS joined,
+                  COALESCE(payload @> '{"quiet": true}', false) AS quiet,
+                  (payload ->> 'joined_after')::bigint AS joined_after,
                   delivery, delivered_at
-           FROM events WHERE session_id = $1 ORDER BY seq"#,
+           FROM events WHERE session_id = $1 AND delivery IS DISTINCT FROM 'withdrawn'
+           ORDER BY seq"#,
     )
     .bind(id)
     .fetch_all(db)
     .await
 }
 
+/// What a fork's copy takes of the events of its source: those before `seq` and, of those after
+/// it, the ones before `until` that are no input; not those at the `seq`s in `skip`.
+pub struct ForkCut<'a> {
+    pub seq: i64,
+    pub until: Option<i64>,
+    pub skip: &'a [i64],
+}
+
 /// The events of session `from` before `seq` (and those after it and before `until` that are no
 /// input) whose type is in `types`, copied in order into the empty session `to` under new ids,
 /// at `seq` 1.. (SPEC §6 fork): what its feed shows of the conversation it forks. Each keeps its
 /// origin: a copy's, else its own id in `runtime`, the transcript of `from`. Copied inputs are no
-/// inputs to deliver; events a `retraction` of `from` names are left out (SPEC 0.179). The number
-/// copied.
+/// inputs to deliver; events a `retraction` of `from` names are left out (SPEC 0.179), and so are
+/// those at the `seq`s in `skip`. A copied input's `joined_after` is carried into the copy's own
+/// `seq`: the last copied event that is no input and stood at or before it, dropped when that is
+/// not past the input (SPEC 0.221). The number copied.
 pub async fn copy_events(
     db: &PgPool,
     from: Uuid,
     to: Uuid,
-    seq: i64,
-    until: Option<i64>,
+    cut: &ForkCut<'_>,
     types: &[&str],
     runtime: &str,
 ) -> sqlx::Result<i64> {
+    let ForkCut { seq, until, skip } = *cut;
     let mut tx = db.begin().await?;
     let n = sqlx::query(
-        "INSERT INTO events
+        "WITH keep AS (
+           SELECT e.event_id, e.seq, e.type, row_number() OVER (ORDER BY seq) AS nseq
+           FROM events e WHERE session_id = $1 AND type = ANY($4)
+             AND delivery IS DISTINCT FROM 'withdrawn' AND NOT (seq = ANY($7))
+             AND (seq < $3 OR (seq > $3 AND seq < $6
+                               AND type NOT IN ('user.message', 'peer.message')))
+             AND NOT EXISTS (SELECT 1 FROM events r WHERE r.session_id = $1
+                               AND r.type = 'retraction' AND r.payload->'event_ids' ? e.event_id::text))
+         INSERT INTO events
            (event_id, session_id, seq, ts, author, type, payload, origin_id, origin_runtime)
-         SELECT gen_random_uuid(), $2, row_number() OVER (ORDER BY seq), ts, author, type,
-                payload, COALESCE(origin_id, event_id), COALESCE(origin_runtime, $5)
-         FROM events e WHERE session_id = $1 AND type = ANY($4)
-           AND (seq < $3 OR (seq > $3 AND seq < $6
-                             AND type NOT IN ('user.message', 'peer.message')))
-           AND NOT EXISTS (SELECT 1 FROM events r WHERE r.session_id = $1
-                             AND r.type = 'retraction' AND r.payload->'event_ids' ? e.event_id::text)",
+         SELECT gen_random_uuid(), $2, k.nseq, s.ts, s.author, s.type,
+                CASE WHEN s.payload ? 'joined_after'
+                     THEN (s.payload - 'joined_after')
+                          || COALESCE((SELECT jsonb_build_object('joined_after', max(a.nseq))
+                                       FROM keep a
+                                       WHERE a.seq <= (s.payload ->> 'joined_after')::bigint
+                                         AND a.type NOT IN ('user.message', 'peer.message')
+                                       HAVING max(a.nseq) > k.nseq), '{}'::jsonb)
+                     ELSE s.payload END,
+                COALESCE(s.origin_id, s.event_id), COALESCE(s.origin_runtime, $5)
+         FROM keep k JOIN events s ON s.event_id = k.event_id",
     )
     .bind(from)
     .bind(to)
@@ -3635,6 +3843,7 @@ pub async fn copy_events(
     .bind(types)
     .bind(runtime)
     .bind(until)
+    .bind(skip)
     .execute(&mut *tx)
     .await?
     .rows_affected() as i64;
@@ -3785,7 +3994,7 @@ pub async fn push_subs_of(db: &PgPool, user: Uuid) -> sqlx::Result<Vec<PushSubRo
 pub struct ApnsDeviceRow {
     pub token: String,
     pub sandbox: bool,
-    /// The device's key for sealing its notices (SPEC 0.218); absent for an older app.
+    /// The device's key for sealing its notices (SPEC 0.238); absent for an older app.
     pub notice_key: Option<Vec<u8>>,
 }
 

@@ -257,6 +257,17 @@ describe('layout widths', () => {
     }
   });
 
+  it("the stripe around a working project is a turning layer, not a gradient repainted on every frame", () => {
+    // The gradient's angle as an animated custom property made WebKit resolve and repaint the
+    // page on every frame; a transform runs on the stripe's own layer.
+    expect(rule('.rail-run')['animation']).toBeUndefined();
+    expect(rule('.rail-run')['overflow']).toBe('hidden');
+    expect(rule('.rail-run::before')['animation']).toBe('rail-run 18s linear infinite');
+    expect(rule('.rail-run::before')['background']).toBe('conic-gradient(transparent 0deg 220deg, var(--text2) 360deg)');
+    const frames = /@keyframes rail-run\s*\{([\s\S]*?\})\s*\}/.exec(CSS)![1];
+    expect(frames.replace(/\s+/g, ' ').trim()).toBe('to { transform: rotate(360deg); }');
+  });
+
   it("a phone's workers line is its own height in both looks, under the home indicator's room, and the floating button stands on it", () => {
     // `:root.list-compact .wline` (42px) would win over `.sessions-phone .wline` without a height of its own.
     const height = 'calc(var(--wline-h) + env(safe-area-inset-bottom))';

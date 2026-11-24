@@ -27,7 +27,24 @@ pub enum FakeCall {
         session_id: Uuid,
         event_id: Uuid,
     },
+    /// An input written into the running turn with priority now (SPEC 0.219).
+    InjectNow {
+        session_id: Uuid,
+        event_id: Uuid,
+    },
+    /// An input written as a quiet line (SPEC 0.231).
+    InputQuiet {
+        session_id: Uuid,
+        event_id: Uuid,
+    },
+    /// An input taken back from the runtime (SPEC 0.219).
+    Withdraw {
+        session_id: Uuid,
+        event_id: Uuid,
+    },
     Stop(Uuid),
+    /// The owner's Stop of a running turn (SPEC 0.231).
+    StopQuiet(Uuid),
     Kill(Uuid),
     /// A process with nothing running ended through [`Adapter::close`].
     Close(Uuid),
@@ -44,6 +61,13 @@ pub enum FakeCall {
     PermissionMode(Uuid, PermissionMode),
     /// A model switch of the running process.
     Model(Uuid, String),
+    /// A side question asked the running process.
+    SideQuestion {
+        session_id: Uuid,
+        event_id: Uuid,
+        question: String,
+        history: Vec<hqc_proto::frame::SideExchange>,
+    },
 }
 
 #[derive(Default)]
@@ -66,6 +90,9 @@ struct State {
     injectable: bool,
     /// What [`Adapter::runs_own_turn`] answers; false by default.
     own_turn: bool,
+    /// What [`Adapter::withdraw_input`] answers: true by default, as for a runtime that has
+    /// not taken the input yet.
+    withdraw_refused: bool,
     /// The folder of [`Adapter::subagent_transcript`]; none by default.
     subagents: Option<std::path::PathBuf>,
 }
@@ -101,6 +128,12 @@ impl FakeAdapters {
     /// does after a background task's end, until the test ends it with [`Self::end_turn`].
     pub fn set_own_turn(&self, own: bool) {
         self.lock().own_turn = own;
+    }
+
+    /// Whether the agents have taken an input already when it is withdrawn from now on: their
+    /// `withdraw_input` answers `false` then.
+    pub fn set_withdraw_refused(&self, refused: bool) {
+        self.lock().withdraw_refused = refused;
     }
 
     /// The agents' subagent transcripts are `agent-<task_id>.jsonl` in `dir` from now on.
@@ -165,6 +198,18 @@ impl FakeAdapters {
 
     pub async fn accept_input(&self, session_id: Uuid, event_id: Uuid) {
         self.emit(session_id, AdapterEvent::InputAccepted { event_id })
+            .await;
+    }
+
+    /// The runtime dropped the quiet line of an input it had not taken.
+    pub async fn quiet_cancelled(&self, session_id: Uuid, event_id: Uuid) {
+        self.emit(session_id, AdapterEvent::QuietCancelled { event_id })
+            .await;
+    }
+
+    /// The runtime has written the inputs into the history without a turn.
+    pub async fn quiet_taken(&self, session_id: Uuid, event_ids: Vec<Uuid>) {
+        self.emit(session_id, AdapterEvent::QuietTaken { event_ids })
             .await;
     }
 
@@ -266,6 +311,21 @@ impl Adapter for FakeAdapter {
         Ok(())
     }
 
+    async fn side_question(
+        &mut self,
+        event_id: Uuid,
+        question: &str,
+        history: &[hqc_proto::frame::SideExchange],
+    ) -> anyhow::Result<()> {
+        self.record(FakeCall::SideQuestion {
+            session_id: self.session_id,
+            event_id,
+            question: question.into(),
+            history: history.to_vec(),
+        });
+        Ok(())
+    }
+
     async fn set_permission_mode(&mut self, mode: PermissionMode) -> anyhow::Result<()> {
         self.record(FakeCall::PermissionMode(self.session_id, mode));
         if self.shared.lock().refuse_modes {
@@ -288,6 +348,22 @@ impl Adapter for FakeAdapter {
             .inputs
             .push((input.clone(), files.to_vec()));
         self.record(FakeCall::Input {
+            session_id: self.session_id,
+            event_id: input.event_id,
+        });
+        Ok(())
+    }
+
+    async fn input_quiet_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<()> {
+        self.shared
+            .lock()
+            .inputs
+            .push((input.clone(), files.to_vec()));
+        self.record(FakeCall::InputQuiet {
             session_id: self.session_id,
             event_id: input.event_id,
         });
@@ -321,8 +397,40 @@ impl Adapter for FakeAdapter {
         Ok(true)
     }
 
+    async fn inject_now_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<bool> {
+        if !self.can_inject() {
+            return Ok(false);
+        }
+        self.shared
+            .lock()
+            .inputs
+            .push((input.clone(), files.to_vec()));
+        self.record(FakeCall::InjectNow {
+            session_id: self.session_id,
+            event_id: input.event_id,
+        });
+        Ok(true)
+    }
+
+    async fn withdraw_input(&mut self, event_id: Uuid) -> anyhow::Result<bool> {
+        self.record(FakeCall::Withdraw {
+            session_id: self.session_id,
+            event_id,
+        });
+        Ok(!self.shared.lock().withdraw_refused)
+    }
+
     async fn stop(&mut self) -> anyhow::Result<()> {
         self.record(FakeCall::Stop(self.session_id));
+        Ok(())
+    }
+
+    async fn stop_quiet(&mut self) -> anyhow::Result<()> {
+        self.record(FakeCall::StopQuiet(self.session_id));
         Ok(())
     }
 

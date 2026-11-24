@@ -86,6 +86,9 @@ pub struct Inner {
     /// Session -> what its agent waits on, as its worker last reported it
     /// (`session.state.activity`), until the turn ends ([`AppState::activity`]).
     activity: Mutex<HashMap<Uuid, hqc_proto::frame::Activity>>,
+    /// The MCP sessions open to the owners' remote MCP servers and the relay requests in
+    /// flight (SPEC 0.235).
+    pub mcp_upstream: crate::mcp_servers::Upstreams,
 }
 
 /// A session's `agent.delta` text since its last `agent.message` or `status` other than
@@ -153,6 +156,11 @@ pub enum Notice {
         delivered_at: Option<chrono::DateTime<chrono::Utc>>,
         /// The input went into the turn already running (SPEC §17.2).
         joined: bool,
+        /// `payload.joined_after` of the message, set on a joined or a quiet one (SPEC §6).
+        joined_after: Option<i64>,
+        /// The input was written into the agent's history without a turn, at a Stop (SPEC
+        /// 0.231).
+        quiet: bool,
     },
     /// Something that feeds `state`, `queue_len` or unread changed (SPEC §6 `subscribe_summary`).
     SessionChanged { session_id: Uuid },
@@ -209,6 +217,7 @@ impl AppState {
             token_rates: Mutex::default(),
             foreground_calls: Mutex::default(),
             activity: Mutex::default(),
+            mcp_upstream: Default::default(),
             config,
         }))
     }

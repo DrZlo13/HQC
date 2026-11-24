@@ -6,7 +6,9 @@
 //!   `user.message` of a person in it (`404` otherwise).
 //! - The cut is the source's last `agent.message` before the message, or, for one that waited
 //!   for a turn of its own, the last of the turns it waited through ([`waited_place`]), for
-//!   another one with `during_text`, the answer the client shows above it (SPEC §6):
+//!   one the agent took after some of its work (`joined_after`) the last `agent.message` after
+//!   the message and not past `joined_after`, another one with `during_text`, the answer the
+//!   client shows above it (SPEC §6):
 //!   `session.start.fork` names the source transcript and those events, newest first, and the
 //!   worker forks the conversation at the record of the first one it finds (SPEC §5.3, §8.1).
 //!   With none (the message was the first), the new session starts with no conversation and no
@@ -78,16 +80,28 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
         .ok_or(ApiError::NotFound)?;
     let runtime = s.runtime_session_id.clone().unwrap_or(s.id.to_string());
     // A message that waited for a turn of its own stands after the turns it waited through
-    // (SPEC §6): the fork keeps their events, not the inputs among them. The client shows the
-    // answer whose text was being written when a message that did not wait came above it: the
-    // fork keeps that answer. Only inputs like the message lie between them. The fork also keeps
-    // the events after the message and before `until` that are no input.
-    let until = match waited_place(&db::turn_marks(&app.db, s.id).await?, at.seq) {
-        Some(p) => Some(p),
-        None if at.payload["during_text"] == true => {
-            answer_above(app, s, &at).await?.map(|a| a.seq + 1)
+    // (SPEC §6): the fork keeps their events, not the inputs among them. A message the agent
+    // took after some of its work (`joined_after`) stands behind the last event of that work:
+    // the fork keeps up to the last of the agent's messages in it. The client shows the answer
+    // whose text was being written when a message that did not join came above it: the fork
+    // keeps that answer. Only inputs like the message lie between them. The fork also keeps the
+    // events after the message and before `until` that are no input.
+    let marks = db::turn_marks(&app.db, s.id).await?;
+    let waited = waited_place(&marks, at.seq);
+    let until = match at.payload["joined_after"].as_i64().filter(|&a| a > at.seq) {
+        Some(a) => {
+            let taken = db::last_agent_message_between(&app.db, s.id, at.seq, a)
+                .await?
+                .map(|m| m + 1);
+            taken.max(waited)
         }
-        None => None,
+        None => match waited {
+            Some(p) => Some(p),
+            None if at.payload["during_text"] == true => {
+                answer_above(app, s, &at).await?.map(|a| a.seq + 1)
+            }
+            None => None,
+        },
     };
     // The records the cut may be at, in the transcript of the newest: a fork's own turns are in
     // its transcript, its copied history in the one it was first written in (a fork that never
@@ -95,12 +109,17 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
     // message: a fork before the first answer after it starts a new conversation.
     let bound = until.unwrap_or(at.seq);
     let records = db::agent_messages_before(&app.db, s.id, bound, CUTS, &runtime).await?;
-    let source = records.first().map(|(_, r)| r.clone());
+    let source = records.first().map(|(_, r, _)| r.clone());
     let cuts: Vec<Uuid> = records
         .iter()
-        .filter(|(_, r)| Some(r) == source.as_ref())
-        .map(|(e, _)| *e)
+        .filter(|(_, r, _)| Some(r) == source.as_ref())
+        .map(|(e, _, _)| *e)
         .collect();
+    // The copy's conversation is cut at the newest of them. A message written quiet after that
+    // record is in no transcript the copy has: its agent never got it, so the copy leaves it out.
+    let skip = records
+        .first()
+        .map_or_else(Vec::new, |(_, _, cut)| quiet_after(&marks, *cut));
     let title: String = format!("{} (fork)", s.title)
         .chars()
         .take(crate::api::MAX_TITLE)
@@ -126,7 +145,19 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
     if let Some(source) = source {
         let f = json!({"runtime_session_id": source, "at_event_ids": cuts});
         db::set_session_fork(&app.db, id, &f).await?;
-        let n = db::copy_events(&app.db, s.id, id, at.seq, until, COPIED, &runtime).await?;
+        let n = db::copy_events(
+            &app.db,
+            s.id,
+            id,
+            &db::ForkCut {
+                seq: at.seq,
+                until,
+                skip: &skip,
+            },
+            COPIED,
+            &runtime,
+        )
+        .await?;
         // The copy's search words, without the answer waiting for them (SPEC §15): written
         // with the copy, those of a long session kept the user waiting for seconds.
         let pool = app.db.clone();
@@ -170,6 +201,20 @@ pub async fn note(
         "[hqc fork] {from}. The conversation above was copied from that session; this session \
          is {own}, separate from it from here on."
     )))
+}
+
+/// The `seq`s of the quiet inputs (SPEC 0.231) that Claude Code recorded at or after its record at
+/// `cut`: those whose `joined_after`, the last event stored before the worker's ack, is not
+/// before it. The copied agent never got them. Without a `joined_after` (no event after it) the
+/// input's own `seq` stands for it.
+pub fn quiet_after(marks: &[db::TurnMark], cut: i64) -> Vec<i64> {
+    marks
+        .iter()
+        // A copy's inputs have no `delivery`: only the payload says what they are.
+        .filter(|m| matches!(m.kind.as_str(), "user.message" | "peer.message") && m.quiet)
+        .filter(|m| m.joined_after.unwrap_or(m.seq) >= cut)
+        .map(|m| m.seq)
+        .collect()
 }
 
 /// The agent's `agent.message` the client shows above `at`, an input that came while the
@@ -229,6 +274,14 @@ pub fn waited_place(marks: &[db::TurnMark], seq: i64) -> Option<i64> {
     let mut open = false;
     for (i, m) in marks.iter().enumerate() {
         if is_input(m) {
+            // A quiet input (SPEC 0.231) waits for nothing and opens no turn: it stands at its
+            // own place, or where `joined_after` puts it.
+            if m.quiet && m.delivery.as_deref() != Some("failed") {
+                if m.seq == seq {
+                    return None;
+                }
+                continue;
+            }
             if joined(m) && !waiting.is_empty() {
                 // Behind the last waiting input delivered before it (and the inputs that
                 // joined behind that one); it went past those delivered after it or still
@@ -344,12 +397,13 @@ fn may_wait(m: &db::TurnMark) -> bool {
 }
 
 /// An event of the agent's work in a turn: `status running`, `system context_compacted`, or
-/// what its runtime wrote but an input and the turn's `usage`.
+/// what its runtime wrote but an input, the turn's `usage` and a side answer.
 fn agent_work(m: &db::TurnMark) -> bool {
     match m.kind.as_str() {
         "status" => m.state.as_deref() == Some("running"),
         "system" if m.code.as_deref() == Some("context_compacted") => true,
-        "peer.message" | "usage" => false,
+        // A side question and its answer stand outside the agent's work (SPEC §17.5).
+        "peer.message" | "usage" | "side.question" | "side.answer" => false,
         _ => m.author_kind.as_deref() == Some("agent"),
     }
 }
@@ -379,6 +433,8 @@ mod tests {
             code: None,
             in_reply_to: None,
             joined: false,
+            quiet: false,
+            joined_after: None,
             delivery: None,
             delivered_at: None,
         }
@@ -402,6 +458,14 @@ mod tests {
 
     fn work(seq: i64) -> db::TurnMark {
         mark(seq, "tool.call", "agent")
+    }
+
+    /// A side answer is written by the agent's session but is no work of its turn (SPEC 0.232).
+    #[test]
+    fn a_side_answer_is_not_the_agents_work() {
+        assert!(agent_work(&work(1)));
+        assert!(!agent_work(&mark(2, "side.answer", "agent")));
+        assert!(!agent_work(&mark(3, "side.question", "user")));
     }
 
     fn answer(seq: i64, to: i64) -> db::TurnMark {
@@ -454,6 +518,78 @@ mod tests {
             answer(4, 1),
         ];
         assert_eq!(waited_place(&m, 3), None);
+    }
+
+    /// A quiet input (SPEC 0.231) delivered at `delivered`; `after` is its `joined_after`.
+    fn quiet(seq: i64, delivered: f64, after: Option<i64>) -> db::TurnMark {
+        db::TurnMark {
+            quiet: true,
+            joined_after: after,
+            ..input(seq, Some(delivered))
+        }
+    }
+
+    /// SPEC 0.231: a quiet input waits for nothing and opens no turn, whatever the turns around
+    /// it: it stands at its own place (the client moves it by `joined_after`), and an input that
+    /// waits is placed as if it were not there.
+    #[test]
+    fn a_quiet_input_is_no_waiting_input_and_opens_no_turn() {
+        let m = [
+            input(1, Some(1.2)),
+            work(2),
+            quiet(3, 7.1, Some(7)),
+            input(4, Some(6.1)),
+            mark(5, "tool.result", "agent"),
+            answer(6, 1),
+            idle(7, 1),
+            work(8),
+        ];
+        assert_eq!(waited_place(&m, 3), None);
+        // The input that waited is the same as without the quiet one.
+        assert_eq!(waited_place(&m, 4), Some(8));
+        // With no turn running it opens none: the next input is not behind one.
+        let m = [quiet(1, 1.0, Some(2)), system(2, "note"), input(3, None)];
+        assert_eq!(waited_place(&m, 3), None);
+    }
+
+    /// SPEC 0.231: a fork's copy leaves out the quiet inputs Claude Code recorded at or after the
+    /// record where its conversation is cut (`joined_after` is not before it), and keeps those
+    /// recorded before it.
+    #[test]
+    fn the_quiet_inputs_after_a_cut_are_the_ones_the_copied_agent_never_got() {
+        let m = [
+            input(1, Some(1.2)),
+            work(2),
+            quiet(3, 7.1, Some(7)),
+            quiet(4, 7.2, Some(7)),
+            mark(5, "tool.result", "agent"),
+            answer(6, 1),
+            idle(7, 1),
+            input(8, Some(7.3)),
+            answer(9, 8),
+            idle(10, 8),
+            input(11, Some(12.0)),
+        ];
+        // Cut at the stopped turn's last answer: both were recorded after it.
+        assert_eq!(quiet_after(&m, 6), [3, 4]);
+        // Cut at the answer of the turn after it: both were recorded before it.
+        assert!(quiet_after(&m, 9).is_empty());
+        // Recorded right at the cut record (the last event before the ack is it): after it.
+        assert_eq!(quiet_after(&[quiet(1, 1.0, Some(6))], 6), [1]);
+        // The CLI ran a turn of its own (its answer is 9) before the ack: the cut at that answer
+        // still leaves the quiet input out, the cut at the stopped turn's answer too.
+        let own = [
+            input(1, Some(1.2)),
+            quiet(2, 2.0, Some(10)),
+            answer(6, 1),
+            idle(7, 1),
+            answer(9, 0),
+            idle(10, 0),
+        ];
+        assert_eq!(quiet_after(&own, 9), [2]);
+        assert_eq!(quiet_after(&own, 6), [2]);
+        // Nothing quiet: nothing to leave out.
+        assert!(quiet_after(&m[..2], 2).is_empty());
     }
 
     #[test]

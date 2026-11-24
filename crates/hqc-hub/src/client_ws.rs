@@ -4,9 +4,11 @@
 //! - `subscribe {session_id, after_seq?}` — stored events with `seq > after_seq` (default 0),
 //!   the thinking and the answer being written, each as one `agent.delta`
 //!   ([`AppState::live_text`]), the latest `subagents.live` ([`AppState::live_agents`]), the
-//!   session's `schedules.live`, unless it is empty ([`crate::schedules::live_event`]), then
-//!   `subscribed {session_id, last_seq}`, then the live stream: stored events, `agent.delta`,
-//!   `subagents.live` and `schedules.live` (no `seq`), `delivery` changes of inputs;
+//!   session's `schedules.live`, unless it is empty ([`crate::schedules::live_event`]), its
+//!   latest `tasks` when `after_seq` is not below it (the client's loaded history is newer, and
+//!   the list is the latest one stored, SPEC §6), then `subscribed {session_id, last_seq}`, then
+//!   the live stream: stored events, `agent.delta`, `subagents.live` and `schedules.live` (no
+//!   `seq`), `delivery` changes of inputs;
 //! - `unsubscribe {session_id}`;
 //! - `subscribe_summary` — `summary {sessions}` for every session of the user, then
 //!   `session.summary {session}` whenever one of them changes; with it `requests {requests}`,
@@ -144,14 +146,8 @@ impl Client {
                             .await;
                     }
                 }
-                if self
-                    .subs
-                    .insert(
-                        session_id,
-                        i64::try_from(after_seq.unwrap_or(0)).unwrap_or(i64::MAX),
-                    )
-                    .is_none()
-                {
+                let after = i64::try_from(after_seq.unwrap_or(0)).unwrap_or(i64::MAX);
+                if self.subs.insert(session_id, after).is_none() {
                     self.app.watch(self.user.id, session_id, true);
                 }
                 if !self.backfill(session_id).await {
@@ -171,6 +167,9 @@ impl Client {
                     }
                 }
                 if !self.send_schedules(session_id, false).await {
+                    return false;
+                }
+                if !self.send_tasks(session_id, after).await {
                     return false;
                 }
                 let last_seq = self.subs[&session_id].max(0) as u64;
@@ -374,6 +373,25 @@ impl Client {
             Ok(event) => self.send(ServerFrame::Event { event }).await,
             Err(e) => {
                 tracing::error!(error = %e, "schedules.live");
+                self.error("internal", "internal error", None).await
+            }
+        }
+    }
+
+    /// The session's latest stored `tasks` event, when the backfill after `after` did not send
+    /// it: it is not newer than `after`, so a client that loaded only the newest page of history
+    /// may not have it.
+    async fn send_tasks(&mut self, session_id: Uuid, after: i64) -> bool {
+        match db::latest_tasks_event(&self.app.db, session_id).await {
+            Ok(Some(row)) if row.seq <= after => {
+                self.send(ServerFrame::Event {
+                    event: row.to_json(),
+                })
+                .await
+            }
+            Ok(_) => true,
+            Err(e) => {
+                tracing::error!(error = %e, "tasks");
                 self.error("internal", "internal error", None).await
             }
         }

@@ -93,6 +93,11 @@ pub fn summary(cfg: &Config) -> String {
             "off"
         }
     );
+    let _ = writeln!(
+        out,
+        "task_tools: {}",
+        if cfg.task_tools { "on" } else { "off" }
+    );
     out.push_str("workspace keys:\n");
     match cfg.secrets.all() {
         Ok(all) if all.is_empty() => out.push_str("  none\n"),

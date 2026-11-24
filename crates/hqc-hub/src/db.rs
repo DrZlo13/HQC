@@ -3040,6 +3040,21 @@ pub async fn events_after(
     .await
 }
 
+/// The query of [`latest_tasks_event`]: the literal type lets it use the partial index
+/// `events_tasks` (migration `0056`), which a bound type would not.
+/// Its columns are [`EVENT_COLS`], written out because a `const` cannot format them in.
+pub const LATEST_TASKS_EVENT: &str = "SELECT event_id, session_id, seq, ts, author, type, payload,
+     chain, client_op_id, delivery, delivered_at
+     FROM events WHERE session_id = $1 AND type = 'tasks' ORDER BY seq DESC LIMIT 1";
+
+/// The session's newest `tasks` event, if it has one.
+pub async fn latest_tasks_event(db: &PgPool, session_id: Uuid) -> sqlx::Result<Option<EventRow>> {
+    sqlx::query_as(LATEST_TASKS_EVENT)
+        .bind(session_id)
+        .fetch_optional(db)
+        .await
+}
+
 /// The last `limit` events with `seq < before_seq`, oldest first.
 pub async fn events_before(
     db: &PgPool,

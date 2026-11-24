@@ -286,6 +286,19 @@ describe('a chat with a copy on the device', () => {
     expect(await cache.range(SID)).toEqual({ from: 221, to: 320 });
   });
 
+  it('a copy it drops takes its task list along, and the hub\'s list at a lower seq shows', async () => {
+    const tasks = (seq: number, subject: string) =>
+      wire(seq, { type: 'tasks', payload: { items: [{ subject, status: 'in_progress' }] } });
+    const { api, cache, release } = await held([...range(1, 309), tasks(310, 'Hub'), ...range(311, 320)]);
+    await cache.put(SID, [tasks(440, 'Copy')]);
+    const { chat } = session(api, cache);
+    await chat.open();
+    expect(chat.timeline.tasks.map((t) => t.subject)).toEqual(['Copy']);
+    release();
+    await tick(10);
+    expect(chat.timeline.tasks.map((t) => t.subject)).toEqual(['Hub']);
+  });
+
   it('a session the hub does not know shows nothing, and the device forgets it', async () => {
     const { api, cache, release } = await held(range(1, 450));
     const gated = api.eventsBefore.getMockImplementation()!;

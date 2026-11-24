@@ -117,6 +117,79 @@ async fn worker_event_reaches_client() {
     hub.finish().await;
 }
 
+/// SPEC §4, §6: `tasks` is stored like any worker event, and a subscriber whose `after_seq` is
+/// past the latest one gets that one with the backlog, so it has the list although it loaded
+/// only the newest page of history; one the backlog sends is not sent twice.
+#[tokio::test]
+async fn a_subscriber_past_the_latest_tasks_gets_it() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Tasks").await;
+    ack_start(&mut w, &sid).await;
+
+    let tasks = |items: Value| agent_event(&sid, "tasks", json!({ "items": items }));
+    let first = json!([{"subject": "Fix it", "status": "pending"}]);
+    let second = json!([
+        {"subject": "Fix it", "status": "in_progress", "active_form": "Fixing it"},
+        {"subject": "Test it", "status": "pending"}
+    ]);
+    w.event(tasks(first.clone())).await;
+    let latest = w.event(tasks(second.clone())).await["seq"]
+        .as_i64()
+        .unwrap();
+    for text in ["one", "two"] {
+        w.event(agent_event(&sid, "agent.thinking", json!({ "text": text })))
+            .await;
+    }
+
+    // After the list: it comes with the backlog, as stored.
+    let mut c = FakeClient::connect(&hub).await;
+    let backlog = c.subscribe(&sid, latest + 2).await;
+    assert_eq!(backlog.len(), 1, "{backlog:?}");
+    assert_eq!(backlog[0]["type"], "tasks");
+    assert_eq!(backlog[0]["seq"], latest);
+    assert_eq!(backlog[0]["payload"]["items"], second);
+
+    // Before it: the backlog has both, and no third copy of the latest.
+    let mut c = FakeClient::connect(&hub).await;
+    let backlog = c.subscribe(&sid, 0).await;
+    let lists: Vec<&Value> = backlog.iter().filter(|e| e["type"] == "tasks").collect();
+    assert_eq!(lists.len(), 2, "{backlog:?}");
+    assert_eq!(lists[1]["payload"]["items"], second);
+
+    // A session with no list sends none.
+    let other = hub.create_session("None").await;
+    ack_start(&mut w, &other).await;
+    let mut c = FakeClient::connect(&hub).await;
+    assert!(c
+        .subscribe(&other, 5)
+        .await
+        .iter()
+        .all(|e| e["type"] != "tasks"));
+}
+
+/// The query for a session's latest `tasks` event (`db::LATEST_TASKS_EVENT`) can use the partial
+/// index of migration `0056` (a scan of every event of a session without tasks is what it would
+/// be otherwise): with sequential scans off the plan names it.
+#[tokio::test]
+async fn the_latest_tasks_query_uses_its_index() {
+    let hub = TestHub::start().await;
+    let mut tx = hub.app.db.begin().await.unwrap();
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let plan: Vec<String> =
+        sqlx::query_scalar(&format!("EXPLAIN {}", hqc_hub::db::LATEST_TASKS_EVENT))
+            .bind(Uuid::now_v7())
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+    let plan = plan.join("\n");
+    assert!(plan.contains("events_tasks"), "{plan}");
+}
+
 /// 2. The same event_id twice: one stored event, the same seq.
 #[tokio::test]
 async fn duplicate_event_keeps_seq() {

@@ -21,6 +21,8 @@
 //! # session_secrets = false        # take secrets and ssh keys for a session from the chat
 //! # vault = false                  # true: an hqc_secret card may take its value from Vaultwarden (Bitwarden) through this machine's rbw
 //! # browser = false                # a session the owner gives it to drives Chrome here
+//! # task_tools = false             # true: give the agent Claude Code's task tools
+//!                                  # (TaskCreate, TaskUpdate, TaskList, TaskGet)
 //!
 //! [permissions]                  # optional, see crate::permissions
 //! mode = "ask"                   # "ask" | "auto" | "allow_all": sessions that ask for none
@@ -115,6 +117,8 @@ struct RawConfig {
     vault: bool,
     #[serde(default)]
     browser: bool,
+    #[serde(default)]
+    task_tools: bool,
     #[serde(default)]
     permissions: Option<RawPermissions>,
     #[serde(default)]
@@ -437,6 +441,10 @@ pub struct Config {
     /// Chrome on this machine, through the Claude in Chrome extension (SPEC §14, since 0.148).
     /// Off by default; every other session runs with `--no-chrome`.
     pub browser: bool,
+    /// Claude Code's task list tools (`CLAUDE_CODE_ENABLE_TODO_TOOLS=1`): without it CLI
+    /// 2.1.312 gives the 5.x models none, and the chat has no task list to show (SPEC §14, §8.1,
+    /// since 0.223). Off by default.
+    pub task_tools: bool,
     /// `[permissions]`: the worker's allow/deny rules and the ask/auto mode (SPEC §14). A
     /// session runs with its environment's [`Environment::permissions`], built on these.
     pub permissions: Permissions,
@@ -638,6 +646,7 @@ impl Config {
             vault: raw.vault,
             rbw_bin: PathBuf::from("rbw"),
             browser: raw.browser,
+            task_tools: raw.task_tools,
             default_environment: Arc::new(Environment::default_of(&permissions)),
             permissions,
             environments,
@@ -992,6 +1001,24 @@ mod tests {
         let mut foreign = s.clone();
         foreign.owner_is_worker_owner = false;
         assert!(on.check_start(&foreign).unwrap().secrets.is_none());
+    }
+
+    /// SPEC 0.223: `task_tools` is off unless `task_tools = true` is written.
+    #[test]
+    fn the_task_tools_are_off_unless_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = |extra: &str| {
+            format!(
+                "hub_url = \"http://127.0.0.1:1/\"\nallowed_roots = [{:?}]\n{extra}",
+                dir.path().display().to_string(),
+            )
+        };
+        assert!(!Config::parse(&toml("")).unwrap().task_tools);
+        assert!(
+            Config::parse(&toml("task_tools = true\n"))
+                .unwrap()
+                .task_tools
+        );
     }
 
     /// SPEC 0.148: the browser only with `browser = true`, for the owner's unrestricted

@@ -369,6 +369,28 @@ pub struct TaskUsage {
     pub duration_ms: u64,
 }
 
+/// How far a task of the agent's task list is (SPEC §4, since 0.223).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One task of the agent's task list in `tasks` (SPEC §4, since 0.223).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTask {
+    pub subject: String,
+    pub status: TaskStatus,
+    /// What the agent is doing while the task is in progress, as the runtime names it
+    /// (Claude Code: `activeForm`); absent when it names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_form: Option<String>,
+}
+
 /// An answer in `clarify.response.answers`: one string, or several for `multi` questions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -627,6 +649,10 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_ttl_s: Option<u64>,
     },
+    /// The agent's task list as it stands after a change, the whole list; empty: none (SPEC §4,
+    /// since 0.223). Written by the worker, stored: the latest one is the list.
+    #[serde(rename = "tasks")]
+    Tasks { items: Vec<AgentTask> },
     #[serde(rename = "status")]
     Status {
         state: SessionState,
@@ -713,6 +739,7 @@ impl EventKind {
         "attachment",
         "peer.message",
         "usage",
+        "tasks",
         "status",
         "system",
         "retraction",
@@ -880,6 +907,7 @@ mod tests {
         "attachment",
         "peer.message",
         "usage",
+        "tasks",
         "status",
         "system",
         "retraction",
@@ -956,6 +984,7 @@ mod tests {
             include_str!("../examples/wire/event.peer.message.json"),
         ),
         ("usage", include_str!("../examples/wire/event.usage.json")),
+        ("tasks", include_str!("../examples/wire/event.tasks.json")),
         ("status", include_str!("../examples/wire/event.status.json")),
         ("system", include_str!("../examples/wire/event.system.json")),
         (
@@ -987,6 +1016,7 @@ mod tests {
             EventKind::Attachment { .. } => "attachment",
             EventKind::PeerMessage { .. } => "peer.message",
             EventKind::Usage { .. } => "usage",
+            EventKind::Tasks { .. } => "tasks",
             EventKind::Status { .. } => "status",
             EventKind::System { .. } => "system",
             EventKind::Retraction { .. } => "retraction",
@@ -1426,6 +1456,10 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<AnswerInput>(v("date")).unwrap(),
             AnswerInput::Unknown
+        );
+        assert_eq!(
+            serde_json::from_value::<TaskStatus>(v("blocked")).unwrap(),
+            TaskStatus::Unknown
         );
     }
 

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.222, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.223, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -616,6 +616,7 @@ the client renders only them. The "source" column is the component that produces
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; since 0.181 also the worker after a background task's end, the task's output file (§8.1), with the same `author`, `kind: text`; since 0.209 also a publication the owner allowed (`hqc_publish`, §7), with `kind: site` (`event.attachment.site.json`); the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `joined_after?` (since 0.221, with `joined`: as on a `user.message`), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?`, `context_tokens?`, `context_limit?`, `cache_ttl_s?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost. Since 0.222 a `usage` that carries tokens (not the one with the total only) also says how full the main agent's context is and how long its prompt cache lives: `context_tokens` is the context after the turn's last API response of the main agent (§8.1), `context_limit` the tokens it may hold before the runtime compacts it by itself, `cache_ttl_s` the seconds the session's cache has left when the turn ends, counted from the request of the response (3600 or 300, less the seconds since the response started, 0 at the least); each is absent when the runtime does not say it. `context_limit` is the threshold of the model's window; an override of the auto-compaction window or a disabled auto-compaction is not seen in the stream (§8.1). The client's header shows them (§6) |
+| `tasks` | `items[{subject, status, active_form?}]` | Claude Code adapter (since 0.223), stored: the agent's task list after a change, the whole list each time, empty when it has none. `status` is `pending`, `in_progress` or `completed` (another value reads as "unknown", shown as pending); `subject` and `active_form` are at most 512 bytes and the list at most 200 tasks; `active_form` is what the agent is doing while the task is in progress, as the runtime names it (Claude Code: `activeForm`), absent when it names none. The latest one is the list, the client shows it as a row above the input (§6), never as a feed item; the adapter sends one only when the list changed (§8.1) |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.161 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`), `call_id?`, `status?`, `task_id?` (since 0.135, only on `task_notification`), `usage?{total_tokens, tool_uses, duration_ms}` (since 0.181, only on `task_notification`), `from_session_id?` (since 0.172, only on `room_passed`: the agent that passed), `trigger?`, `pre_tokens?`, `post_tokens?` (since 0.179, only on `context_compacted`), `model?` (since 0.179, only on `model_not_switched`) | hub or worker; codes below |
 | `retraction` | `event_ids[]` | adapter (since 0.179): events of the session the runtime took back — Claude Code's answer of a model that refused, replaced by another model's answer (§8.1). The hub keeps of `event_ids` only the session's own `agent.message`, `agent.thinking`, `tool.call` and `tool.result` of the agent, at most 1024, and stores it with those; nothing is deleted: clients do not show the events it names, also ones loaded after it, nor the retraction itself; search (§15) still finds them |
@@ -673,8 +674,9 @@ Rules:
 - Events are tolerant: unknown fields in `payload` are ignored; an event of an unknown
   `type` is parsed as "unknown" and stored and forwarded as is; clients do not
   render it but do not crash; an unknown enum value inside an event
-  (`state`, `canonical`, `mode`, `kind`, `reason`, `policy_hint`, since 0.180 `action`, since 0.207 `place` of an option's `grant`) reads as "unknown". An event
-  of a known `type` with an invalid `payload` is an error.
+  (`state`, `canonical`, `mode`, `kind`, `reason`, `policy_hint`, since 0.180 `action`, since
+  0.207 `place` of an option's `grant`, since 0.223 `status` of a task in `tasks`) reads as
+  "unknown". An event of a known `type` with an invalid `payload` is an error.
 
 - The user's files always go into `user.message.artifact_ids[]`, including without text
   (`text` empty): this is input, and the agent receives them (§8.1, §12) **[decision]** (T16). An
@@ -2851,10 +2853,23 @@ message opens the schedules of the chat ("Schedules" in the menu), and goes when
 is sent or it is paused or deleted (a recurring one then shows its next run). The same one-line
 ellipsis as the other lines, on a computer and on a
 phone; a dropped socket clears these lines too until the next subscribe.
-Since 0.189 the main agent's row stands first in the block ("Main agent: Working", §17.1), and the
-block shows also while that row does (a turn is on, input waits, or an approval is awaited that is
-not an open request of the feed), with no subagent, command or timer; in a room each agent at work
-has a row of its own, led by its name in place of "Main agent: ".
+Since 0.223 the agent's task list (`tasks`, §4, §8.1) is a row of the block, after the goal's
+(below) and ahead of the main agent's, while it has a task that is not completed: "Tasks: 3 of 7
+completed", the completed tasks of all of them, and, when a task is in progress, ` · ` and its
+`active_form` (else its subject), with a ▸ at the right end that turns to ▾ when it is open; a
+press opens the list under the row, a mark and the words of each task in the list's order, ✓
+completed (dimmed), ◐ in progress (its `active_form`, else its subject, in the accent colour), ○
+pending (a status this client does not know is shown as pending), and a second press closes it.
+The block shows for the row alone; with no task left to do (the list is empty or every task
+completed) there is no row, and a list that comes later is closed. The row is the latest stored
+`tasks` event of the session, the one of the highest `seq`: it is not a feed item, and the hub
+sends the session's latest one on subscribe also when the client's `after_seq` is past it (§6
+`subscribe`), which the client takes as the list and as nothing else: it does not move the
+client's `lastSeq` back and leaves no gap in the history. The same on a phone.
+Since 0.189 the main agent's row stands in the block, after the goal's and the task list's ("Main
+agent: Working", §17.1), and the block shows also while that row does (a turn is on, input waits, or
+an approval is awaited that is not an open request of the feed), with no subagent, command or timer;
+in a room each agent at work has a row of its own, led by its name in place of "Main agent: ".
 Since 0.218 the session's goal (`system goal`, §4: the last of them since the last
 `conversation_cleared`, which ends the conversation the goal belonged to, is `set` or `unmet`) has a
 row before all others, shown also while the agent is idle: "Goal: " and the condition on one line,
@@ -2950,6 +2965,10 @@ carries each new one; a client whose part of the hub's event stream fell behind 
 or an empty one when none is kept, with the history it catches up. Since 0.169 the session's
 `schedules.live` (§4, §16) follows it the same way, when its list is not empty, and the stream
 carries each change of the session's schedules; a client that fell behind gets it, empty or not.
+Since 0.223 the session's latest stored `tasks` event (§4) follows them when its `seq` is not above
+`after_seq`, as stored and with its own `seq`: a client that loaded only the newest page of the
+history, which does not reach back to it, still gets the list, and one whose `after_seq` is
+before it has it among the events sent.
 The text ends with the `agent.message` stored for it, a `status` other than `running` and (since
 0.179) a `retraction`, after which the runtime sends no message for the text it took back. Since
 0.208 the thinking being written comes the same way, as one `agent.delta` with `thinking` before
@@ -3084,7 +3103,8 @@ newer copy).
   once the asker's worker acknowledged the reply, to the subscriptions that already had it (the
   client takes the field over its copy);
   `{type: subscribed, session_id, last_seq}`: the history after `after_seq` has been
-  sent, the live stream follows; `{type: delivery, session_id, event_id, seq, delivery,
+  sent (and, since 0.223, the session's latest `tasks` event when it is older than that),
+  the live stream follows; `{type: delivery, session_id, event_id, seq, delivery,
   delivered_at?, joined?, joined_after?}`: the delivery of an input changed; the event itself is not resent, the
   client updates `delivery`/`delivered_at` of its event with this `seq`; `joined: true` (since
   0.112, `client.delivery.joined.json`, absent when false) says the input went into the turn
@@ -5042,6 +5062,49 @@ while it waited, leaves it), and tells the worker each change; idle unload waits
 before it fired, and the process that resumed the session (`x6-wake-resume`), alive past the
 wakeup's time, got no fire.
 
+The task list (since 0.223). Claude Code 2.1.312 gives the models of its list that predate the 5.x
+ones (Opus 4.7 and 4.6, Sonnet 4.6, Haiku 4.5) the tools `TaskCreate`, `TaskUpdate`, `TaskList` and
+`TaskGet` always, and the 5.x models only with `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` in its environment
+(checked with 2.1.329: `init.tools` has none of the four without it and all four with it, and then
+no `TodoWrite`), which the worker sets with `task_tools = true` (§14); the older `TodoWrite` is
+followed too. The CLI keeps the list in its own files, `~/.claude/tasks/<session id>`, not in the
+transcript. The adapter keeps the main agent's list from the results of its calls (a subagent's
+calls and a failed call, `is_error`, change nothing), and sends a `tasks` event (§4) with the whole
+list when it differs from the one sent last. `TodoWrite` `{todos[{content, status, activeForm}]}`
+replaces the list; when every task of it is `completed` the list is empty, as the CLI stores it. The
+CLI corrects the input of a call before it runs it (2.1.312), and nothing else reaches it, the input
+schema being strict: a `TaskCreate` input with neither `subject` nor `description` at the top takes
+the fields of an object in `task`, and `title` or `name` stand for `subject`, `content` for
+`description`, `active_form` for `activeForm`, `subject` is made from `description` and the other
+way; a `TaskUpdate` input takes `id` or `task_id` for `taskId` and `active_form` for `activeForm`
+only (one with `title`, `name` or a `task` wrapper is an error and changes nothing). So the adapter
+takes the id and the subject from the text of the result block the CLI writes after that:
+`TaskCreate` adds a task under the id and subject of `Task #<id> created successfully: <subject>`
+(2.1.312, 2.1.325), else under the result's `tool_use_result.task.id` and the call's `subject` (or
+`title`, `name`), `pending`, with the call's `activeForm` (or `active_form`; both also from the
+`task` wrapper). `TaskUpdate` changes the task of the id of `Updated task #<id> …`, setting the
+`status`, `subject` and `activeForm` (or `active_form`) the call has at the top; a task it did not
+find gives the error or `Task #<id> not found`, and an id the list does not hold changes nothing;
+`status: deleted` removes the task. The block's text is read, not the record's `tool_use_result`,
+which is of one of the calls when a record holds several results (parallel calls): only a record
+with one result gives its `tool_use_result` to a call. `TaskList` replaces the list with the
+result's `tool_use_result.tasks[{id, subject, status}]`, a task whose id it knew keeping its
+`active_form`; a result that is not the only one of its record, or has no `tasks` array, changes
+nothing. A task with a status other than `pending`, `in_progress` and `completed` is left out; a
+subject and an `active_form` are cut at 512 bytes and the list at 200 tasks, so the event stays far
+under the WebSocket frame limit. `/clear` (`conversation_reset`) empties the list. A process that
+resumes a transcript starts with the list the CLI has: the adapter replays the main agent's (not a
+sidechain's) task calls and their results from the transcript (`toolUseResult` for
+`tool_use_result`), in order, through the same rules as the live ones, and sends no event for it,
+the hub has the latest stored one. Only the lines with a task call, and the results of those calls,
+are parsed. A copy made by a fork has the source's records up to the cut in its own transcript, with
+their uuids (§6), but the CLI's list of the copy only the tasks made after the fork, numbered from
+#1 again: when the copy is resumed (its second start; the hub sends `fork` on every start), only the
+records after the cut are replayed, all of them when the cut is not found. A fork starts with an
+empty list: the CLI keeps the list per session id, and `--resume <id> --fork-session` of a session
+with tasks answers `TaskList` with "No tasks found" (checked with 2.1.329); the hub copies no
+`tasks` event into a fork (§6 `POST /api/sessions/{id}/fork`), consistent with it.
+
 Slash commands (since 0.28, T27): `system/init` comes before every turn of a process and lists
 `slash_commands` (built-in commands, skills and plugin commands, e.g. `compact`, `context`,
 `code-review`, `anthropic-skills:pdf`; skills are also listed in `skills`, subagent types in
@@ -6851,6 +6914,15 @@ gives, not what an agent there can reach. A locked `rbw` is refused (unlock it o
 or type the value), and the card stays open. `hello.capabilities.vault` tells the hub (§5.4);
 `hqc-worker env` shows `vault`.
 
+The task list tools (since 0.223). `task_tools = true` at the top of `worker.toml` (off by default;
+the hub cannot turn it on) starts every agent process of the worker with
+`CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, which gives the 5.x models of Claude Code 2.1.312 and later the
+task tools (`TaskCreate`, `TaskUpdate`, `TaskList`, `TaskGet`, §8.1, and then no `TodoWrite`) that
+fill the task list row above the input (§6); the older models of the CLI's list (Opus 4.7 and 4.6,
+Sonnet 4.6, Haiku 4.5) have them without it. The worker's own value wins over one of the
+environment's `env`; without `task_tools` the variable is removed from the child's environment.
+`hqc-worker env` shows `task_tools`.
+
 The browser (since 0.148). `browser = true` at the top of `worker.toml` (off by default; the hub
 cannot turn it on) lets the owner give a session's agent their Chrome on this machine (`PATCH
 /api/sessions/{id} {browser}`, §6): Claude Code runs with `--chrome` and reaches the browser
@@ -7572,6 +7644,23 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.222 → 0.223 (the agent's task list above the input)
+Backlog item "the agent's task list as a pinned block". §4: a stored event `tasks`
+`{items[{subject, status, active_form?}]}`, the whole list after each change, written by the
+Claude Code adapter. §8.1: the adapter follows the main agent's `TodoWrite`, `TaskCreate`,
+`TaskUpdate` and `TaskList` calls through their results, sends `tasks` only when the list
+changed, and `/clear` empties it, and a resumed process starts with the list its transcript makes
+(a fork starts empty, as the CLI's). A `tasks` event is cut at 200 tasks of 512 bytes; the hub
+indexes the type (migration `0056_events_tasks`); an unknown `status` is tolerated; the adapter
+takes the id and subject of a task from the CLI's result text, after the CLI corrected the call.
+§14: the worker's `task_tools = true` sets `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` for its agents;
+without it CLI 2.1.312 gives the 5.x models no task tools (the older models of its list have them
+regardless). §6: "Tasks: 3 of 7 completed" is a row of the block above the input while a task is
+not completed, after the goal's row (0.218) and before the main agent's; a press opens the list
+with a mark per task, the client keeps the event of the highest `seq` and it is no feed item; on
+subscribe the hub also sends the session's latest `tasks` event when it is older than
+`after_seq`, so a client that loaded only the newest page has the list.
 
 ### 0.221 → 0.222 (the context and the prompt cache in the chat header)
 §4 `usage`, §6 chat header, §8.1: the header said what a session cost but not how close its

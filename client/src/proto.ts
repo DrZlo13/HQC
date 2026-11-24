@@ -382,6 +382,21 @@ export interface PeerMessage {
   /** As `UserMessage.joined_after`. */
   joined_after?: number;
 }
+export const TASK_STATUSES = ['pending', 'in_progress', 'completed'] as const;
+/** How far a task of the agent's task list is (SPEC §4, since 0.223). */
+export type TaskStatus = (typeof TASK_STATUSES)[number] | Unknown;
+/** One task of the agent's task list. */
+export interface AgentTask {
+  subject: string;
+  status: TaskStatus;
+  /** What the agent is doing while the task is in progress, as the runtime names it. */
+  active_form?: string;
+}
+/** The agent's task list after a change, the whole list; empty: none (SPEC §4, since 0.223).
+ *  Stored, but never a feed item: the latest one is the list (`Timeline.tasks`). */
+export interface Tasks {
+  items: AgentTask[];
+}
 export interface Usage {
   input_tokens: number;
   output_tokens: number;
@@ -471,6 +486,7 @@ export interface PayloadByType {
   attachment: Attachment;
   'peer.message': PeerMessage;
   usage: Usage;
+  tasks: Tasks;
   status: Status;
   system: SystemNote;
   retraction: Retraction;
@@ -734,6 +750,16 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     context_tokens: optNum(p, 'context_tokens'),
     context_limit: optNum(p, 'context_limit'),
     cache_ttl_s: optNum(p, 'cache_ttl_s'),
+  }),
+  tasks: (p) => ({
+    items: arr(p, 'items').map((v, i) => {
+      const t = obj(v, `items[${i}]`);
+      return {
+        subject: str(t, 'subject'),
+        status: tolerantEnum(t, 'status', TASK_STATUSES),
+        active_form: optStr(t, 'active_form'),
+      };
+    }),
   }),
   status: (p) => ({
     state: tolerantEnum(p, 'state', SESSION_STATES),

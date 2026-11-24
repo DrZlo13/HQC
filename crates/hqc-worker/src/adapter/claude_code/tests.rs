@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hqc_proto::event::{
-    ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
+    AgentTask, ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
     ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, GrantPlace, LiveKind,
-    LiveSubagent, OptionGrant, SessionState,
+    LiveSubagent, OptionGrant, SessionState, TaskStatus,
 };
 use hqc_proto::frame::{Activity, LeftoverCommand, Runtime, SessionInput, SlashCommand};
 use serde_json::{json, Value};
@@ -5234,6 +5234,62 @@ async fn entrypoint_for_the_vscode_history() {
     }
 }
 
+/// `task_tools` (worker config): the child gets `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` over the
+/// environment's own value; without it the variable is removed, that value too.
+#[tokio::test]
+async fn the_task_tools_variable_follows_the_worker_config() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("ws")).unwrap();
+    let cfg = crate::config::Config::parse(&format!(
+        r#"hub_url = "https://h"
+allowed_roots = [{root:?}]
+[environments.e]
+env = {{ CLAUDE_CODE_ENABLE_TODO_TOOLS = "0" }}
+[[env_bindings]]
+path = "{}"
+environment = "e"
+"#,
+        root.join("ws").display()
+    ))
+    .unwrap();
+    let config = tempfile::tempdir().unwrap();
+    for (task_tools, want) in [(true, Some("1")), (false, None)] {
+        let claude = ScriptedClaude::new("");
+        let mut opts = options(config.path());
+        opts.task_tools = task_tools;
+        let factory = ClaudeCodeAdapters::new(opts, Arc::new(claude.clone()));
+        let mut s = spec(Uuid::now_v7(), &root.join("ws"), Uuid::new_v4());
+        s.environment = cfg.environment(&s.workspace);
+        let (tx, _rx) = mpsc::channel(16);
+        let mut a = factory.create(&s, tx);
+        a.start(&s).await.unwrap();
+        let vars: Vec<String> = claude.commands()[0]
+            .env
+            .iter()
+            .filter(|(k, _)| k == "CLAUDE_CODE_ENABLE_TODO_TOOLS")
+            .map(|(_, v)| v.clone())
+            .collect();
+        assert_eq!(vars, want.into_iter().collect::<Vec<_>>());
+        a.kill().await.unwrap();
+    }
+    // The config's key reaches the options.
+    let on = crate::config::Config::parse(&format!(
+        "hub_url = \"https://h\"\nallowed_roots = [{root:?}]\ntask_tools = true\n"
+    ))
+    .unwrap();
+    assert!(
+        ClaudeCodeAdapters::from_config(&on, "default".into())
+            .opts
+            .task_tools
+    );
+    assert!(
+        !ClaudeCodeAdapters::from_config(&cfg, "default".into())
+            .opts
+            .task_tools
+    );
+}
+
 /// A local slash command (`/name x`): the CLI answers with a `result` and no replay echo.
 /// The input still counts as taken, otherwise the supervisor resends it forever; taken before
 /// the turn's `status idle`, whose `ack` after it would open a turn on the hub (SPEC §5.2).
@@ -9424,6 +9480,804 @@ fn a_cron_job_is_a_row_until_it_is_deleted() {
     assert_eq!(lists.len(), 1);
     let ids: Vec<_> = lists[0].iter().map(|r| r.task_id.as_str()).collect();
     assert_eq!(ids, ["5e6f7a8b"]);
+}
+
+/// The whole lists of the `tasks` events in `actions`.
+fn task_lists(actions: Vec<Action>) -> Vec<Vec<AgentTask>> {
+    emitted(actions)
+        .into_iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Event(Event {
+                kind: EventKind::Tasks { items },
+                ..
+            }) => Some(items),
+            _ => None,
+        })
+        .collect()
+}
+
+fn task(subject: &str, status: TaskStatus, active_form: Option<&str>) -> AgentTask {
+    AgentTask {
+        subject: subject.into(),
+        status,
+        active_form: active_form.map(str::to_owned),
+    }
+}
+
+/// The main agent's `TodoWrite` replaces the task list, as the CLI keeps it (every task done:
+/// none). Nothing is sent when the list does not change, for a failed call, a subagent's call
+/// and a task with a status this build does not know (left out).
+#[test]
+fn a_todo_write_replaces_the_task_list() {
+    use TaskStatus::*;
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let write = |core: &mut Core, id: &str, todos: Value, error: bool, parent: Option<&str>| {
+        core.on_line(&tool_call(
+            id,
+            "TodoWrite",
+            json!({ "todos": todos }),
+            parent,
+        ));
+        task_lists(core.on_line(&tool_done(id, error, json!({}), parent)))
+    };
+    let todos = json!([
+        {"content": "Read the test", "status": "completed", "activeForm": "Reading the test"},
+        {"content": "Fix the parser", "status": "in_progress", "activeForm": "Fixing the parser"},
+        {"content": "Run the suite", "status": "pending", "activeForm": "Running the suite"},
+        {"content": "Odd", "status": "blocked", "activeForm": "Oddly"},
+    ]);
+    let want = vec![
+        task("Read the test", Completed, Some("Reading the test")),
+        task("Fix the parser", InProgress, Some("Fixing the parser")),
+        task("Run the suite", Pending, Some("Running the suite")),
+    ];
+    assert_eq!(
+        write(&mut core, "toolu_t1", todos.clone(), false, None),
+        [want]
+    );
+    assert!(write(&mut core, "toolu_t2", todos.clone(), false, None).is_empty());
+    assert!(
+        write(&mut core, "toolu_t3", json!([]), true, None).is_empty(),
+        "failed"
+    );
+    assert!(
+        write(&mut core, "toolu_t4", json!([]), false, Some("toolu_agent")).is_empty(),
+        "a subagent's"
+    );
+    let done = json!([{"content": "Read the test", "status": "completed", "activeForm": "x"}]);
+    assert_eq!(
+        write(&mut core, "toolu_t5", done.clone(), false, None),
+        [vec![]],
+        "every task done"
+    );
+    assert!(write(&mut core, "toolu_t6", done, false, None).is_empty());
+}
+
+/// A call of the task tool `tool` of the main agent and its result block with `text`, `data`
+/// the record's `tool_use_result`: the lists of the `tasks` events it gives.
+fn task_call(
+    core: &mut Core,
+    tool: &str,
+    input: Value,
+    error: bool,
+    text: &str,
+    data: Value,
+) -> Vec<Vec<AgentTask>> {
+    let id = format!("toolu_{}", Uuid::new_v4());
+    core.on_line(&tool_call(&id, tool, input, None));
+    task_lists(core.on_line(&tool_done_text(&id, error, text, data)))
+}
+
+/// The `user` line with the result of call `id`: the block's own `text`, `data` its
+/// `tool_use_result`.
+fn tool_done_text(id: &str, error: bool, text: &str, data: Value) -> String {
+    json!({"type": "user", "message": {"role": "user", "content": [{"tool_use_id": id,
+        "type": "tool_result", "is_error": error, "content": text}]},
+        "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4(),
+        "tool_use_result": data})
+    .to_string()
+}
+
+fn create_input(subject: &str) -> Value {
+    json!({"subject": subject, "description": "d", "activeForm": format!("Doing {subject}")})
+}
+
+fn task_create(core: &mut Core, id: &str, subject: &str) -> Vec<Vec<AgentTask>> {
+    let text = format!("Task #{id} created successfully: {subject}");
+    let data = json!({"task": {"id": id}});
+    task_call(
+        core,
+        "TaskCreate",
+        create_input(subject),
+        false,
+        &text,
+        data,
+    )
+}
+
+/// A `TaskUpdate` whose result block says `Updated task #…` (`updated`) or the error the CLI
+/// writes for a task it did not find; the record's `tool_use_result` says `success: true` either
+/// way, as one that belongs to another block of the record would.
+fn task_update(core: &mut Core, input: Value, updated: bool) -> Vec<Vec<AgentTask>> {
+    let id = input["taskId"].as_str().unwrap().to_owned();
+    let text = if updated {
+        format!("Updated task #{id} status")
+    } else {
+        format!("Task #{id} not found")
+    };
+    task_call(
+        core,
+        "TaskUpdate",
+        input,
+        false,
+        &text,
+        json!({"success": true}),
+    )
+}
+
+/// `TaskCreate` adds a task under the id its result block names, `TaskUpdate` changes it or, with
+/// `deleted`, removes it, `TaskList` replaces the list and a known task keeps its `activeForm`.
+/// A `TaskUpdate` whose block says it found no task, an update of an unknown id and a failed
+/// call change nothing.
+#[test]
+fn the_task_tools_keep_the_task_list() {
+    use TaskStatus::*;
+    let mut core = Core::new(Uuid::now_v7(), false);
+    assert_eq!(
+        task_create(&mut core, "1", "Fix"),
+        [vec![task("Fix", Pending, Some("Doing Fix"))]]
+    );
+    assert_eq!(task_create(&mut core, "2", "Test").len(), 1);
+    let failed = task_call(
+        &mut core,
+        "TaskCreate",
+        json!({"subject": "Lost"}),
+        true,
+        "Task #9 created successfully: Lost",
+        json!({"task": {"id": "9"}}),
+    );
+    assert!(failed.is_empty(), "failed");
+    let started = json!({"taskId": "1", "status": "in_progress"});
+    assert_eq!(
+        task_update(&mut core, started.clone(), true),
+        [vec![
+            task("Fix", InProgress, Some("Doing Fix")),
+            task("Test", Pending, Some("Doing Test")),
+        ]]
+    );
+    let refused = json!({"taskId": "2", "status": "completed"});
+    assert!(
+        task_update(&mut core, refused, false).is_empty(),
+        "the block says it found no task"
+    );
+    let unknown = json!({"taskId": "7", "status": "completed"});
+    assert!(
+        task_update(&mut core, unknown, true).is_empty(),
+        "unknown id"
+    );
+    assert!(
+        task_update(&mut core, started, true).is_empty(),
+        "unchanged"
+    );
+    let done = json!({"taskId": "1", "status": "completed", "subject": "Fix it",
+        "activeForm": "Fixing it"});
+    let lists = task_update(&mut core, done, true);
+    assert_eq!(lists[0][0], task("Fix it", Completed, Some("Fixing it")));
+    // The list the agent asks for replaces ours; a task it knew keeps its active form.
+    let listed = json!({"tasks": [
+        {"id": "1", "subject": "Fix it", "status": "completed"},
+        {"id": "3", "subject": "Ship", "status": "pending"},
+        {"id": "4", "subject": "Odd", "status": "blocked"},
+    ]});
+    let list =
+        |core: &mut Core| task_call(core, "TaskList", json!({}), false, "tasks", listed.clone());
+    assert_eq!(
+        list(&mut core),
+        [vec![
+            task("Fix it", Completed, Some("Fixing it")),
+            task("Ship", Pending, None),
+        ]]
+    );
+    assert!(list(&mut core).is_empty());
+    let deleted = json!({"taskId": "3", "status": "deleted"});
+    assert_eq!(
+        task_update(&mut core, deleted, true),
+        [vec![task("Fix it", Completed, Some("Fixing it"))]]
+    );
+}
+
+/// Parallel `TaskCreate` calls come back in one `user` record, the `tool_use_result` of which
+/// is of one of them (or none): each task takes its id from its own block's text. Without the
+/// text the result's `task.id` is the id.
+#[test]
+fn parallel_task_creates_in_one_record_lose_nothing() {
+    use TaskStatus::*;
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let calls: Vec<Value> = ["A", "B", "C"]
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            json!({"type": "tool_use", "id": format!("toolu_p{i}"), "name": "TaskCreate",
+                "input": create_input(s)})
+        })
+        .collect();
+    core.on_line(
+        &json!({"type": "assistant", "message": {"model": "claude-haiku-5-5", "role": "assistant",
+            "content": calls}, "parent_tool_use_id": null, "session_id": CLI_SESSION,
+            "uuid": Uuid::new_v4()})
+        .to_string(),
+    );
+    let results: Vec<Value> = ["A", "B", "C"]
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            json!({"tool_use_id": format!("toolu_p{i}"), "type": "tool_result",
+                "content": format!("Task #{} created successfully: {s}", i + 1)})
+        })
+        .collect();
+    let record = json!({"type": "user", "message": {"role": "user", "content": results},
+        "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4(),
+        "tool_use_result": {"task": {"id": "1", "subject": "A"}}});
+    let lists = task_lists(core.on_line(&record.to_string()));
+    let Some(last) = lists.last() else {
+        panic!("no list")
+    };
+    assert_eq!(
+        last,
+        &vec![
+            task("A", Pending, Some("Doing A")),
+            task("B", Pending, Some("Doing B")),
+            task("C", Pending, Some("Doing C")),
+        ]
+    );
+    // The ids are the texts': an update of the third finds it.
+    let lists = task_update(
+        &mut core,
+        json!({"taskId": "3", "status": "completed"}),
+        true,
+    );
+    assert_eq!(lists[0][2].status, Completed);
+    // Text of no known form: the result's id.
+    let lists = task_call(
+        &mut core,
+        "TaskCreate",
+        create_input("D"),
+        false,
+        "ok",
+        json!({"task": {"id": "4"}}),
+    );
+    assert_eq!(lists[0][3], task("D", Pending, Some("Doing D")));
+}
+
+/// A call the CLI corrects before it runs (SPEC §8.1): `TaskCreate` with `content` and the `task`
+/// wrapper, `active_form`, no `subject`: the task is the one its result text names, with the
+/// call's `active_form`; `TaskUpdate` with `id` for `taskId`: the task of the id the text names.
+#[test]
+fn a_call_the_cli_corrected_is_read_from_its_result_text() {
+    use TaskStatus::*;
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let lists = task_call(
+        &mut core,
+        "TaskCreate",
+        json!({"task": {"content": "Wrapped one", "active_form": "Wrapping"}}),
+        false,
+        "Task #7 created successfully: Wrapped one",
+        json!({}),
+    );
+    assert_eq!(
+        lists,
+        [vec![task("Wrapped one", Pending, Some("Wrapping"))]]
+    );
+    let lists = task_call(
+        &mut core,
+        "TaskUpdate",
+        json!({"id": "7", "status": "in_progress"}),
+        false,
+        "Updated task #7 status",
+        json!({"success": true}),
+    );
+    assert_eq!(
+        lists,
+        [vec![task("Wrapped one", InProgress, Some("Wrapping"))]]
+    );
+    // A `task` wrapper next to a top-level `subject` is not unwrapped, as in the CLI.
+    let lists = task_call(
+        &mut core,
+        "TaskCreate",
+        json!({"subject": "Top", "task": {"active_form": "Wrapped"}}),
+        false,
+        "ok",
+        json!({"task": {"id": "9"}}),
+    );
+    assert_eq!(lists[0][1], task("Top", Pending, None));
+    // And a `TaskUpdate` takes no `title` (the CLI refuses such a call; nothing reaches us).
+    let lists = task_call(
+        &mut core,
+        "TaskUpdate",
+        json!({"taskId": "9", "title": "Renamed"}),
+        false,
+        "Updated task #9",
+        json!({"success": true}),
+    );
+    assert!(lists.is_empty());
+    // `title` for `subject` when the text names none.
+    let lists = task_call(
+        &mut core,
+        "TaskCreate",
+        json!({"title": "Titled", "activeForm": "Titling"}),
+        false,
+        "Task #8 created",
+        json!({"task": {"id": "8"}}),
+    );
+    assert_eq!(lists[0][2], task("Titled", Pending, Some("Titling")));
+}
+
+/// A record of two results, `TaskList`'s and `TaskGet`'s, carries the `tool_use_result` of one of
+/// them: `TaskList` changes nothing from it, and nor does a `TaskList` result with no `tasks`
+/// array (never an empty list); nor does a `TaskCreate` that names no id in its text take the
+/// `task.id` of such a record.
+#[test]
+fn a_task_list_result_of_a_record_of_several_changes_nothing() {
+    use TaskStatus::*;
+    let mut core = Core::new(Uuid::now_v7(), false);
+    task_create(&mut core, "1", "Keep");
+    let call =
+        |id: &str, tool: &str| json!({"type": "tool_use", "id": id, "name": tool, "input": {}});
+    core.on_line(
+        &json!({"type": "assistant", "message": {"model": "claude-haiku-5-5", "role": "assistant",
+            "content": [call("toolu_l", "TaskList"), call("toolu_g", "TaskGet")]},
+            "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+        .to_string(),
+    );
+    let results = json!([
+        {"tool_use_id": "toolu_l", "type": "tool_result", "content": "#1 [pending] Keep"},
+        {"tool_use_id": "toolu_g", "type": "tool_result", "content": "Task #1: Keep"}
+    ]);
+    // The record's `tool_use_result` is the `TaskGet`'s, or another call's with a `tasks` array.
+    for data in [json!({"task": {"id": "1"}}), json!({"tasks": []})] {
+        let record = json!({"type": "user", "message": {"role": "user", "content": results},
+            "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4(),
+            "tool_use_result": data});
+        assert!(task_lists(core.on_line(&record.to_string())).is_empty());
+        core.on_line(
+            &json!({"type": "assistant", "message": {"model": "claude-haiku-5-5",
+                "role": "assistant", "content": [call("toolu_l", "TaskList"),
+                call("toolu_g", "TaskGet")]}, "parent_tool_use_id": null,
+                "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+            .to_string(),
+        );
+    }
+    // Two `TaskCreate` results whose texts name no id: the record's `task.id` is of one of them,
+    // so neither is added.
+    let create = |id: &str| json!({"type": "tool_use", "id": id, "name": "TaskCreate", "input": create_input("New")});
+    core.on_line(
+        &json!({"type": "assistant", "message": {"model": "claude-haiku-5-5", "role": "assistant",
+            "content": [create("toolu_c1"), create("toolu_c2")]},
+            "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+        .to_string(),
+    );
+    let record = json!({"type": "user", "message": {"role": "user", "content": [
+        {"tool_use_id": "toolu_c1", "type": "tool_result", "content": "ok"},
+        {"tool_use_id": "toolu_c2", "type": "tool_result", "content": "ok"}]},
+        "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4(),
+        "tool_use_result": {"task": {"id": "5"}}});
+    assert!(task_lists(core.on_line(&record.to_string())).is_empty());
+    // Alone, with no `tasks` array: nothing either.
+    assert!(task_call(
+        &mut core,
+        "TaskList",
+        json!({}),
+        false,
+        "No tasks found",
+        json!({})
+    )
+    .is_empty());
+    // Alone, with the array: the list.
+    let lists = task_call(
+        &mut core,
+        "TaskList",
+        json!({}),
+        false,
+        "#1 [completed] Keep",
+        json!({"tasks": [{"id": "1", "subject": "Keep", "status": "completed"}]}),
+    );
+    assert_eq!(lists, [vec![task("Keep", Completed, Some("Doing Keep"))]]);
+}
+
+/// The same in the replay of a transcript: a `TaskList` result sharing its record with another
+/// result does not replace the list, and a `TaskCreate` of such a record takes its id from the
+/// text.
+#[test]
+fn the_replay_of_a_task_list_result_of_a_record_of_several_changes_nothing() {
+    let line = |v: Value| v.to_string();
+    let transcript = [
+        line(json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "c1", "name": "TaskCreate", "input": create_input("Keep")}]}})),
+        line(json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "c1",
+             "content": "Task #1 created successfully: Keep"}]},
+            "toolUseResult": {"task": {"id": "1"}}})),
+        line(json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "l1", "name": "TaskList", "input": {}},
+            {"type": "tool_use", "id": "g1", "name": "TaskGet", "input": {}}]}})),
+        line(json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "l1", "content": "#1 [pending] Keep"},
+            {"type": "tool_result", "tool_use_id": "g1", "content": "Task #1: Keep"}]},
+            "toolUseResult": {"tasks": []}})),
+    ]
+    .join("\n");
+    let list = super::engine::resurrected_tasks(&transcript);
+    assert_eq!(list.len(), 1);
+}
+
+/// A subject and an `active_form` are cut at 512 bytes, the list at 200 tasks.
+#[test]
+fn the_task_list_is_cut_to_its_limits() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let long = "я".repeat(300); // 600 bytes
+    let todos: Vec<Value> = (0..250)
+        .map(|i| {
+            json!({"content": if i == 0 { long.clone() } else { format!("T{i}") },
+                "status": "pending", "activeForm": long})
+        })
+        .collect();
+    let lists = task_call(
+        &mut core,
+        "TodoWrite",
+        json!({"todos": todos}),
+        false,
+        "ok",
+        json!({}),
+    );
+    let [list] = &lists[..] else {
+        panic!("{lists:?}")
+    };
+    assert_eq!(list.len(), 200);
+    assert_eq!(list[0].subject.len(), 512);
+    assert_eq!(list[0].active_form.as_deref().map(str::len), Some(512));
+    // A created task over the limit is not added either.
+    assert!(task_create(&mut core, "9", "Over").is_empty());
+}
+
+/// A transcript of the main agent's tasks: three created (the last two by parallel calls whose
+/// results share a record), the first one completed, a subagent's create and an update that
+/// found no task not counted.
+fn tasks_transcript() -> String {
+    let call = |side: bool, calls: Vec<(&str, &str, Value)>| {
+        let blocks: Vec<Value> = calls
+            .into_iter()
+            .map(|(id, tool, input)| json!({"type": "tool_use", "id": id, "name": tool, "input": input}))
+            .collect();
+        json!({"type": "assistant", "isSidechain": side, "message": {"content": blocks}})
+            .to_string()
+    };
+    let result = |side: bool, results: Vec<(&str, &str)>, data: Value| {
+        let blocks: Vec<Value> = results
+            .into_iter()
+            .map(|(id, text)| json!({"type": "tool_result", "tool_use_id": id, "content": text}))
+            .collect();
+        json!({"type": "user", "isSidechain": side, "message": {"content": blocks},
+            "toolUseResult": data})
+        .to_string()
+    };
+    [
+        call(false, vec![("toolu_r1", "TaskCreate", create_input("One"))]),
+        result(
+            false,
+            vec![("toolu_r1", "Task #1 created successfully: One")],
+            json!({"task": {"id": "1"}}),
+        ),
+        call(
+            false,
+            vec![
+                ("toolu_r2", "TaskCreate", create_input("Two")),
+                ("toolu_r3", "TaskCreate", create_input("Three")),
+            ],
+        ),
+        result(
+            false,
+            vec![
+                ("toolu_r2", "Task #2 created successfully: Two"),
+                ("toolu_r3", "Task #3 created successfully: Three"),
+            ],
+            json!({"task": {"id": "2"}}),
+        ),
+        call(true, vec![("toolu_s1", "TaskCreate", create_input("Sub"))]),
+        result(
+            true,
+            vec![("toolu_s1", "Task #4 created successfully: Sub")],
+            json!({"task": {"id": "4"}}),
+        ),
+        call(
+            false,
+            vec![(
+                "toolu_r4",
+                "TaskUpdate",
+                json!({"taskId": "1", "status": "completed"}),
+            )],
+        ),
+        result(
+            false,
+            vec![("toolu_r4", "Updated task #1 status")],
+            json!({"success": true}),
+        ),
+        call(
+            false,
+            vec![(
+                "toolu_r5",
+                "TaskUpdate",
+                json!({"taskId": "9", "status": "completed"}),
+            )],
+        ),
+        result(
+            false,
+            vec![("toolu_r5", "Task #9 not found")],
+            json!({"success": false}),
+        ),
+    ]
+    .join("\n")
+}
+
+/// A resumed process starts with the task list its transcript makes, as the CLI does: a live
+/// `TaskUpdate` then sends the whole list, the three tasks with their states. Seeding sends no
+/// event (the hub has the latest one).
+#[test]
+fn a_resumed_core_has_the_tasks_of_its_transcript() {
+    use TaskStatus::*;
+    let seeded = super::engine::resurrected_tasks(&tasks_transcript());
+    let mut core = Core::new(Uuid::now_v7(), false).with_resumed_tasks(seeded);
+    assert!(core.resumed_live().is_empty(), "no event for the seed");
+    let lists = task_update(
+        &mut core,
+        json!({"taskId": "2", "status": "in_progress"}),
+        true,
+    );
+    assert_eq!(
+        lists,
+        [vec![
+            task("One", Completed, Some("Doing One")),
+            task("Two", InProgress, Some("Doing Two")),
+            task("Three", Pending, Some("Doing Three")),
+        ]]
+    );
+}
+
+/// Sends one input to a started adapter (the scripted CLI plays its stream after the first
+/// one) and returns the task lists the process sends.
+async fn task_lists_after_input(
+    a: &mut Box<dyn Adapter>,
+    rx: &mut mpsc::Receiver<AdapterEvent>,
+    session_id: Uuid,
+) -> Vec<Vec<AgentTask>> {
+    a.input(&SessionInput {
+        session_id,
+        event_id: Uuid::now_v7(),
+        text: "go".into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+        schedule_id: None,
+        human: false,
+    })
+    .await
+    .unwrap();
+    let mut lists = Vec::new();
+    let mut quiet = false;
+    while !quiet {
+        // Up to 5 s for the first list, then 200 ms of quiet for any more.
+        let wait = if lists.is_empty() { 5000 } else { 200 };
+        match tokio::time::timeout(Duration::from_millis(wait), rx.recv()).await {
+            Ok(Some(AdapterEvent::Event(Event {
+                kind: EventKind::Tasks { items },
+                ..
+            }))) => lists.push(items),
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => quiet = true,
+        }
+    }
+    lists
+}
+
+/// The same through the adapter: a `--resume` of a transcript starts its process with its tasks,
+/// which a `TaskUpdate` the process makes then completes into the whole list; a fork of one (a
+/// copy cut at the fork point) starts with none, as the CLI's, which keeps the list per session
+/// id: the task its process creates is the whole list.
+#[tokio::test]
+async fn a_resume_keeps_the_tasks_of_the_transcript_and_a_fork_starts_without() {
+    use TaskStatus::*;
+    let stream = [
+        tool_call(
+            "toolu_l1",
+            "TaskUpdate",
+            json!({"taskId": "3", "status": "completed"}),
+            None,
+        ),
+        tool_done_text(
+            "toolu_l1",
+            false,
+            "Updated task #3 status",
+            json!({"success": true}),
+        ),
+    ]
+    .join("\n");
+    let want = vec![
+        task("One", Completed, Some("Doing One")),
+        task("Two", Pending, Some("Doing Two")),
+        task("Three", Completed, Some("Doing Three")),
+    ];
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let transcript = tasks_transcript();
+    // Resume.
+    let claude = ScriptedClaude::new(&stream);
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let runtime = Uuid::new_v4();
+    let mut s = spec(Uuid::now_v7(), work.path(), runtime);
+    s.has_history = true;
+    let t = super::paths::transcript_path(config.path(), &s.workdir, &runtime);
+    std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+    std::fs::write(&t, &transcript).unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut a = factory.create(&s, tx);
+    a.resume(&s).await.unwrap();
+    let lists = task_lists_after_input(&mut a, &mut rx, s.session_id).await;
+    assert_eq!(lists, std::slice::from_ref(&want), "resume");
+    a.kill().await.unwrap();
+    // Fork: the transcript up to the point, then a task made after it.
+    let (turns, ids) = two_turns();
+    let (source, copy) = (Uuid::new_v4(), Uuid::new_v4());
+    let from = super::paths::transcript_path(config.path(), work.path(), &source);
+    std::fs::create_dir_all(from.parent().unwrap()).unwrap();
+    let after = transcript
+        .replace("Three", "Later")
+        .replace("toolu_r", "toolu_x");
+    std::fs::write(&from, format!("{transcript}\n{turns}\n{after}")).unwrap();
+    let fork_stream = [
+        tool_call("toolu_f1", "TaskCreate", create_input("Fresh"), None),
+        tool_done_text(
+            "toolu_f1",
+            false,
+            "Task #4 created successfully: Fresh",
+            json!({"task": {"id": "4"}}),
+        ),
+    ]
+    .join("\n");
+    let claude = ScriptedClaude::new(&fork_stream);
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let mut s = spec(Uuid::now_v7(), work.path(), copy);
+    s.fork = Some(hqc_proto::frame::ForkFrom {
+        runtime_session_id: source.to_string(),
+        at_event_ids: vec![super::engine::record_event_id(&ids[1], 1)],
+    });
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let lists = task_lists_after_input(&mut a, &mut rx, s.session_id).await;
+    assert_eq!(
+        lists,
+        [vec![task("Fresh", Pending, Some("Doing Fresh"))]],
+        "fork"
+    );
+    a.kill().await.unwrap();
+}
+
+/// A copy made by a fork has the source's records up to the cut in its own transcript, with their
+/// uuids, and the CLI's list of the copy only the tasks made after the fork (numbered from #1
+/// again). On the copy's second start (its transcript exists, `fork` is still sent) the replay
+/// takes only what follows the cut.
+#[tokio::test]
+async fn a_copys_resume_replays_only_what_follows_its_cut() {
+    use TaskStatus::*;
+    let (turns, ids) = two_turns();
+    let own = [
+        json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "toolu_own", "name": "TaskCreate",
+             "input": create_input("Fresh")}]}}),
+        json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "toolu_own",
+             "content": "Task #1 created successfully: Fresh"}]}}),
+    ]
+    .map(|v| v.to_string())
+    .join("\n");
+    // The source's three tasks, the turns up to the cut, then the copy's own task.
+    let text = format!("{}\n{turns}\n{own}\n", tasks_transcript());
+    let at = vec![super::engine::record_event_id(&ids[1], 1)];
+    let fork = hqc_proto::frame::ForkFrom {
+        runtime_session_id: Uuid::new_v4().to_string(),
+        at_event_ids: at,
+    };
+    // What a live update of task #1 (the copy's own) sends on top of a replay.
+    let shown = |tasks| {
+        let mut core = Core::new(Uuid::now_v7(), false).with_resumed_tasks(tasks);
+        task_update(
+            &mut core,
+            json!({"taskId": "1", "status": "completed"}),
+            true,
+        )
+    };
+    let own_only = vec![vec![task("Fresh", Completed, Some("Doing Fresh"))]];
+    assert_eq!(shown(super::resumed_tasks(&text, Some(&fork))), own_only);
+    // A cut that is not in the transcript: all of it, as a plain resume.
+    let lost = hqc_proto::frame::ForkFrom {
+        runtime_session_id: fork.runtime_session_id.clone(),
+        at_event_ids: vec![Uuid::new_v4()],
+    };
+    let all = shown(super::resumed_tasks(&text, None));
+    assert_ne!(all, own_only);
+    assert_eq!(shown(super::resumed_tasks(&text, Some(&lost))), all);
+}
+
+/// The same through the adapter, which is what passes the fork on: a copy's second start (its
+/// transcript exists, holding the source's records up to the cut and then the copy's own task;
+/// `fork` is still in `StartSpec`) starts its process with the copy's own task only.
+#[tokio::test]
+async fn a_copys_second_start_resumes_with_its_own_tasks_only() {
+    use TaskStatus::*;
+    let (turns, ids) = two_turns();
+    let own = [
+        json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "toolu_own", "name": "TaskCreate",
+             "input": create_input("Fresh")}]}}),
+        json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "toolu_own",
+             "content": "Task #1 created successfully: Fresh"}]}}),
+    ]
+    .map(|v| v.to_string())
+    .join("\n");
+    let text = format!("{}\n{turns}\n{own}\n", tasks_transcript());
+    // The process then completes task #1, the copy's own, which sends the whole list.
+    let stream = [
+        tool_call(
+            "toolu_u1",
+            "TaskUpdate",
+            json!({"taskId": "1", "status": "completed"}),
+            None,
+        ),
+        tool_done_text(
+            "toolu_u1",
+            false,
+            "Updated task #1 status",
+            json!({"success": true}),
+        ),
+    ]
+    .join("\n");
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new(&stream);
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let copy = Uuid::new_v4();
+    let mut s = spec(Uuid::now_v7(), work.path(), copy);
+    s.has_history = true;
+    s.fork = Some(hqc_proto::frame::ForkFrom {
+        runtime_session_id: Uuid::new_v4().to_string(),
+        at_event_ids: vec![super::engine::record_event_id(&ids[1], 1)],
+    });
+    let t = super::paths::transcript_path(config.path(), &s.workdir, &copy);
+    std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+    std::fs::write(&t, &text).unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut a = factory.create(&s, tx);
+    a.resume(&s).await.unwrap();
+    let lists = task_lists_after_input(&mut a, &mut rx, s.session_id).await;
+    assert_eq!(lists, [vec![task("Fresh", Completed, Some("Doing Fresh"))]]);
+    a.kill().await.unwrap();
+}
+
+/// `/clear` starts a new conversation: its task list is empty, said once.
+#[test]
+fn a_clear_empties_the_task_list() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let todos = json!({"todos": [{"content": "A", "status": "pending", "activeForm": "Aing"}]});
+    core.on_line(&tool_call("toolu_c", "TodoWrite", todos, None));
+    assert_eq!(
+        task_lists(core.on_line(&tool_done("toolu_c", false, json!({}), None))).len(),
+        1
+    );
+    let reset =
+        json!({"type": "conversation_reset", "trigger": "clear", "session_id": "s"}).to_string();
+    assert_eq!(task_lists(core.on_line(&reset)), [vec![]]);
+    assert!(task_lists(core.on_line(&reset)).is_empty());
 }
 
 /// The CLI fires a cron job with a `command_lifecycle` `started` with `wakeup_source:

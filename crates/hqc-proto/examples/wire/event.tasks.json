@@ -1,0 +1,15 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000124",
+  "seq": 43,
+  "ts": "2026-10-22T10:00:00Z",
+  "author": { "kind": "agent", "id": "0199f3a2-7c10-7000-8000-000000000001" },
+  "type": "tasks",
+  "payload": {
+    "items": [
+      { "subject": "Read the failing test", "status": "completed" },
+      { "subject": "Fix the parser", "status": "in_progress", "active_form": "Fixing the parser" },
+      { "subject": "Run the suite", "status": "pending" }
+    ]
+  }
+}

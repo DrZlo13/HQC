@@ -223,6 +223,8 @@ export async function startMock({ port = 0, speed = 1, log = () => {}, demo = fa
       last_seq: s.last_seq,
       last_read_seq: s.read_seq,
       ...(s.held_by && !s.holder_hidden ? { held_by: s.held_by } : {}),
+      ...(s.rate ? { output_per_s: s.rate } : {}),
+      ...(s.liveAgents ? { subagents: s.liveAgents } : {}),
       ...modes(s),
     };
   }
@@ -376,6 +378,17 @@ export async function startMock({ port = 0, speed = 1, log = () => {}, demo = fa
     }));
   }
   newSession('Empty session');
+  // The demo's tour (MOCK_DEMO=1): any message runs through everything an agent does.
+  if (demo) {
+    const t = newSession('Start here: a full agent tour');
+    t.tour = true;
+    store(t, mk(t, 'event.agent.message', {
+      text: 'Send me any message, for example "fix the login bug", and I will walk through everything an agent does here: '
+        + 'thinking, a question for you, reading and editing files, a subagent at work, a command that needs your permission, '
+        + 'a screenshot, a published page and a final answer with a table, code and maths.',
+      final: true, in_reply_to: undefined,
+    }));
+  }
 
   // The service session of home-mac (SPEC §10.2): no workspace, no agent, no input.
   {
@@ -456,6 +469,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {}, demo = fa
   }
 
   async function turn(s, input, t) {
+    if (s.tour) return tourTurn(s, input, t);
     const askClarify = /question|clarify|вопрос/i.test(input.payload.text);
     // SPEC 0.147: the agent asks for a secret with hqc_secret; the owner gives it in the card.
     const askSecret = /\bsecret\b|password|парол/i.test(input.payload.text) && !/HQC_SECRETS/.test(input.payload.text);
@@ -537,6 +551,138 @@ export async function startMock({ port = 0, speed = 1, log = () => {}, demo = fa
     await stream(s, t, final);
     store(s, mk(s, 'event.agent.message', { text: final, final: true, in_reply_to: input.event_id }));
     store(s, mk(s, 'event.usage'));
+  }
+
+
+  /** The tour's turn: every kind of step an agent takes, one after another. */
+  const TOUR_ANSWER = `## Done: the login bug is fixed
+
+The session token was compared before it was decoded, so every token with a \`+\` in it failed.
+
+| Step | Result |
+|:-----|:------:|
+| Reproduced the bug | ✓ |
+| Fixed \`check_token\` | ✓ |
+| Tests | **42 passed** |
+| Screenshot | attached |
+
+\`\`\`rust
+pub fn check_token(raw: &str) -> bool {
+    let token = urlencoding::decode(raw).unwrap_or_default();
+    constant_time_eq(token.as_bytes(), STORED.as_bytes())
+}
+\`\`\`
+
+The comparison runs in constant time, $O(n)$ in the token's length $n$, so its duration leaks nothing:
+$$t(n) = c \\cdot n, \\quad \\text{for every token of length } n.$$
+
+- [x] Fix and test
+- [x] Screenshot of the login page
+- [ ] Deploy (say the word)`;
+
+  async function tourTurn(s, input, t) {
+    const rate = (n) => {
+      s.rate = n;
+      sendTo(s.id, mk(s, 'event.tokens.rate', { output_per_s: n }));
+      pushSummary(s);
+    };
+    const tool = async (name, args, result, ms = 500, extra = {}) => {
+      const call_id = `toolu_${randomUUID().slice(0, 8)}`;
+      store(s, mk(s, 'event.tool.call', { call_id, tool: name, args_preview: JSON.stringify(args) }));
+      await step(t, ms);
+      store(s, mk(s, 'event.tool.result', {
+        call_id, result_preview: result, error: false, duration_ms: ms, error_text: undefined, artifact_id: undefined, ...extra,
+      }));
+      return call_id;
+    };
+    status(s, 'running');
+    rate(38);
+    // 1. Thinking, streamed, then kept.
+    const thought = `The user wrote "${input.payload.text.slice(0, 80)}". Before touching code I should ask which part matters most, then reproduce, fix, test and report.`;
+    for (const chunk of thought.match(/\S+\s*/g) ?? []) {
+      sendTo(s.id, mk(s, 'event.agent.delta', { text: chunk, thinking: true }));
+      await step(t, 60);
+    }
+    store(s, mk(s, 'event.agent.thinking', { text: thought }));
+    await step(t, 300);
+    // 2. A question for the user.
+    const asked = await request(s, t, 'clarify', mk(s, 'event.clarify.request', {
+      request_id: `req-${randomUUID().slice(0, 8)}`,
+      questions: [
+        { id: 'focus', text: 'Where should I start?', header: 'Focus', options: ['The login page', 'The API'], option_descriptions: ['What users see first', 'Where the token is checked'] },
+        { id: 'checks', text: 'Which checks should I run after the fix?', header: 'Checks', options: ['Unit tests', 'Lint', 'Screenshot'], multi: true },
+      ],
+    }));
+    if (asked.cancel) return;
+    status(s, 'running');
+    rate(46);
+    const picked = Object.values(asked.answers).flat().join(', ') || 'the defaults';
+    const intro = `Thanks, going with ${picked}. First I'll find where the token is checked.`;
+    await stream(s, t, intro);
+    store(s, mk(s, 'event.agent.message', { text: intro, final: false, in_reply_to: input.event_id }));
+    // 3. Reading and searching.
+    await tool('Glob', { pattern: 'src/**/*.rs' }, 'src/main.rs\nsrc/auth.rs\nsrc/session.rs\nsrc/routes/login.rs', 300);
+    await tool('Grep', { pattern: 'check_token', path: 'src' }, 'src/auth.rs:41:pub fn check_token(raw: &str) -> bool {\nsrc/routes/login.rs:18:    if !check_token(&cookie) {', 350);
+    await tool('Read', { file_path: 'src/auth.rs' }, '41  pub fn check_token(raw: &str) -> bool {\n42      raw == STORED\n43  }', 250);
+    // 4. A subagent at work, shown live above the input, then its report.
+    const task_id = `a${randomUUID().slice(0, 12)}`;
+    const taskCall = `toolu_${randomUUID().slice(0, 8)}`;
+    store(s, mk(s, 'event.tool.call', { call_id: taskCall, tool: 'Task', args_preview: JSON.stringify({ description: 'Reproduce the login failure', subagent_type: 'general-purpose' }) }));
+    const steps = ['Starting the dev server', 'Logging in with a token containing +', 'Reading the server log', 'Writing a failing test'];
+    s.liveAgents = 1;
+    for (const [i, what] of steps.entries()) {
+      sendTo(s.id, mk(s, 'event.subagents.live', { agents: [{
+        task_id, description: 'Reproduce the login failure', activity: what,
+        total_tokens: 3200 * (i + 1), tool_uses: 3 * (i + 1), duration_ms: 1500 * (i + 1), kind: 'agent', stoppable: true,
+      }] }));
+      pushSummary(s);
+      await step(t, 900);
+    }
+    s.liveAgents = 0;
+    sendTo(s.id, mk(s, 'event.subagents.live', { agents: [] }));
+    store(s, mk(s, 'event.system', {
+      text: 'Agent "Reproduce the login failure" completed', code: 'task_notification', call_id: taskCall,
+      status: 'completed', task_id, usage: { total_tokens: 12800, tool_uses: 12, duration_ms: 6000 },
+    }));
+    store(s, mk(s, 'event.tool.result', {
+      call_id: taskCall, result_preview: 'Reproduced: a token with "+" is rejected; the cookie arrives URL-encoded. Failing test: auth::tests::plus_in_token.',
+      error: false, duration_ms: 6000, error_text: undefined, artifact_id: undefined,
+    }));
+    // 5. Editing.
+    await tool('Edit', { file_path: 'src/auth.rs', old_string: 'raw == STORED', new_string: 'constant_time_eq(urlencoding::decode(raw)...)' },
+      '--- src/auth.rs\n+++ src/auth.rs\n@@ -41,3 +41,4 @@\n pub fn check_token(raw: &str) -> bool {\n-    raw == STORED\n+    let token = urlencoding::decode(raw).unwrap_or_default();\n+    constant_time_eq(token.as_bytes(), STORED.as_bytes())\n }', 400);
+    rate(52);
+    // 6. A command that needs permission.
+    const bash = `toolu_${randomUUID().slice(0, 8)}`;
+    store(s, mk(s, 'event.tool.call', { call_id: bash, tool: 'Bash', args_preview: JSON.stringify({ command: 'cargo test', description: 'Run the tests' }) }));
+    const allowed = await request(s, t, 'approval', mk(s, 'event.approval.request', {
+      request_id: `req-${randomUUID().slice(0, 8)}`, tool: 'Bash', description: 'cargo test',
+      expires_at: new Date(Date.now() + 3600_000).toISOString(),
+    }));
+    if (allowed.cancel) return;
+    status(s, 'running');
+    const opt = ex['event.approval.request'].payload.options.find((o) => o.id === allowed.option_id);
+    const denied = opt?.canonical?.startsWith('deny');
+    if (denied) {
+      store(s, mk(s, 'event.tool.result', { call_id: bash, result_preview: '', error: true, error_text: 'Denied by user', duration_ms: 0, artifact_id: undefined }));
+    } else {
+      await step(t, 1200);
+      store(s, mk(s, 'event.tool.result', {
+        call_id: bash, result_preview: 'running 42 tests\n..........................................\ntest result: ok. 42 passed; 0 failed', error: false, duration_ms: 4210, error_text: undefined, artifact_id: undefined,
+      }));
+    }
+    // 7. A screenshot from the browser, and a picture attached.
+    await tool('mcp__browser__screenshot', { url: 'http://localhost:3000/login' }, 'Screenshot of the login page\n[image]', 600,
+      { artifact_ids: ['0199f3a2-7c10-7000-8000-0000000000f3'] });
+    store(s, mk(s, 'event.attachment', { artifact_id: randomUUID(), kind: 'image', name: 'login-after-fix.png', caption: 'The login page after the fix' }));
+    // 8. The final answer: Markdown, a table, code and maths, then the turn's usage.
+    rate(61);
+    const final = denied ? 'OK, I did not run the tests. The fix is in src/auth.rs; run `cargo test` when you are ready.' : TOUR_ANSWER;
+    await stream(s, t, final);
+    store(s, mk(s, 'event.agent.message', { text: final, final: true, in_reply_to: input.event_id }));
+    store(s, mk(s, 'event.usage', { input_tokens: 18400, output_tokens: 2310, cache_read: 52000, cost_usd: 0.0874 }));
+    s.rate = 0;
+    sendTo(s.id, mk(s, 'event.tokens.rate', { output_per_s: 0 }));
   }
 
   /** Stores a request event and waits for its answer or cancellation. */

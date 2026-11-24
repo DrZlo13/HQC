@@ -594,6 +594,11 @@ export class Api {
     return parseInputResponse(data);
   }
 
+  /** Asks the session's agent a side question (SPEC 0.232); returns the stored `side.question`. */
+  async sideQuestion(id: string, text: string): Promise<HqcEvent> {
+    return parseInputResponse(await this.req('POST', `/api/sessions/${enc(id)}/side_question`, { text }));
+  }
+
   /** `POST /api/artifacts` (multipart `file`, `kind?`); the hub derives `kind` from the type
    *  and extension unless given. The same file uploaded again is the same artifact. */
   async uploadArtifact(file: Blob, name: string, kind?: ArtifactKind): Promise<Artifact> {

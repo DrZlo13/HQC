@@ -128,7 +128,8 @@ const agentText = (seq: number, text: string, final: boolean) =>
 describe("every example event renders", () => {
   // Transport only: the stream text, the subagents and the schedules above the input
   // (chat.test.tsx), and the token rate, which reaches the client as the session's
-  // `output_per_s`; a retraction and the agent's task list are stored but not drawn.
+  // `output_per_s`; a retraction and the agent's task list are stored but not drawn, and a side
+  // answer is drawn in its question's block.
   const names = readdirSync(WIRE)
     .filter(
       (f) =>
@@ -140,6 +141,7 @@ describe("every example event renders", () => {
         f !== "event.retraction.json" &&
         f !== "event.tokens.rate.json" &&
         f !== "event.tasks.json" &&
+        !f.startsWith("event.side.answer") &&
         f !== "event.schedules.live.json",
     )
     .map((f) => f.replace(/\.json$/, ""));
@@ -152,6 +154,22 @@ describe("every example event renders", () => {
       expect(root.children.length).toBe(name === "event.status" ? 0 : 1);
     });
   }
+
+  it("a side answer stands in its question's block, not as an item of its own (SPEC 0.232)", () => {
+    const t = new Timeline();
+    t.apply(ev("event.side.question", withSeq(1)));
+    expect(t.sideAnswerFor("0199f3a2-7c10-7000-8000-000000000131")).toBeUndefined();
+    show(t);
+    expect(root.querySelector(".side-wait")?.textContent).toBe("Answering…");
+    // The one with the lowest seq is shown, also when it came later (an older page).
+    t.apply(ev("event.side.answer.error", withSeq(3)));
+    t.apply(ev("event.side.answer", withSeq(2)));
+    expect(t.items().map((i) => (i.kind === "event" ? i.event.type : i.kind))).toEqual(["side.question"]);
+    expect(t.sideAnswerFor("0199f3a2-7c10-7000-8000-000000000131")?.seq).toBe(2);
+    show(t);
+    expect(root.children.length).toBe(1);
+    expect(root.querySelector(".side-answer code")?.textContent).toBe("src/main.rs");
+  });
 
   it("agent.delta streams into a buffer and is not stored", () => {
     const t = new Timeline();
@@ -415,6 +433,23 @@ describe("an input that came while the agent's text was being written (SPEC §6)
     const t = new Timeline();
     t.applyAll([answer(1), input(2, true), answer(3), answer(4)]);
     expect(order(t)).toEqual(["e1", "e3", "e2", "e4"]);
+  });
+
+  it("a side question written during the text stands under the answer, in the order it came (SPEC 0.232)", () => {
+    const side = (seq: number, during: boolean) =>
+      ev("event.side.question", (e) => {
+        e.seq = seq;
+        e.event_id = `0199f3a2-7c10-7000-8000-00000000030${seq}`;
+        if (during) e.payload.during_text = true;
+      });
+    // M (a message during the text), Q (a side question during it), A (the answer).
+    const t = new Timeline();
+    t.applyAll([input(1, true), side(2, true), answer(3)]);
+    expect(order(t)).toEqual(["e3", "e1", "e2"]);
+    // One asked before the text stays where it is.
+    const before = new Timeline();
+    before.applyAll([side(1, false), input(2, true), answer(3)]);
+    expect(order(before)).toEqual(["e1", "e3", "e2"]);
   });
 
   it("stands under the thinking stored after it, and the answer after that stays under it", () => {

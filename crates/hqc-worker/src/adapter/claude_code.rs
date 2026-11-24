@@ -1603,6 +1603,18 @@ impl Adapter for ClaudeCodeAdapter {
         p.io.run(vec![action]).await
     }
 
+    async fn side_question(
+        &mut self,
+        event_id: Uuid,
+        question: &str,
+        history: &[hqc_proto::frame::SideExchange],
+    ) -> anyhow::Result<()> {
+        let p = self.running()?;
+        tracing::info!(session_id = %self.session_id, %event_id, "asking a side question");
+        let action = lock(&p.core).side_question(event_id, question, history);
+        p.io.run(vec![action]).await
+    }
+
     async fn stop_task(&mut self, task_id: &str) -> anyhow::Result<()> {
         let Ok(p) = self.running() else {
             return Ok(());

@@ -2870,6 +2870,29 @@ pub async fn retractable(db: &PgPool, session_id: Uuid, ids: &[Uuid]) -> sqlx::R
         .collect())
 }
 
+/// Whether the worker's `side.answer` `answer_id` to `question` may be stored (SPEC 0.232):
+/// `question` is a `side.question` of `session_id` and no other answer to it is stored. The
+/// answer itself, sent again after a lost `ack`, passes (it is a duplicate then).
+pub async fn side_answer_wanted(
+    db: &PgPool,
+    session_id: Uuid,
+    question: Uuid,
+    answer_id: Uuid,
+) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM events
+                        WHERE session_id = $1 AND event_id = $2 AND type = 'side.question')
+            AND NOT EXISTS (SELECT 1 FROM events
+                            WHERE session_id = $1 AND type = 'side.answer'
+                              AND payload ->> 'question' = $2::text AND event_id <> $3)",
+    )
+    .bind(session_id)
+    .bind(question)
+    .bind(answer_id)
+    .fetch_one(db)
+    .await
+}
+
 /// [`insert_event`] of an event that is read for `user` at once: the read cursor moves over
 /// it in the same transaction, so an imported record costs one commit (SPEC §9.1).
 pub async fn insert_event_read(db: &PgPool, e: &NewEvent, user: Uuid) -> sqlx::Result<Inserted> {
@@ -3702,7 +3725,8 @@ pub async fn last_agent_message_between(
 }
 
 /// The first event of session `id` after `seq` that is not an input stored while the agent's
-/// text was being written (`payload.during_text`, SPEC §6).
+/// text was being written (`payload.during_text`, SPEC §6), and no side question or answer
+/// (SPEC 0.232: a side block stands outside the conversation).
 pub async fn first_after_inputs_during_text(
     db: &PgPool,
     id: Uuid,
@@ -3712,6 +3736,7 @@ pub async fn first_after_inputs_during_text(
         r#"SELECT {EVENT_COLS} FROM events
          WHERE session_id = $1 AND seq > $2
            AND delivery IS DISTINCT FROM 'withdrawn'
+           AND type NOT IN ('side.question', 'side.answer')
            AND NOT (type IN ('user.message', 'peer.message')
                     AND payload @> '{{"during_text": true}}')
          ORDER BY seq LIMIT 1"#

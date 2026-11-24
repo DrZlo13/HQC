@@ -292,6 +292,59 @@ async fn a_fork_before_a_message_written_during_the_answer_keeps_the_answer() {
     hub.finish().await;
 }
 
+/// SPEC 0.232, §6: a side question asked between the message and the answer stands under that
+/// answer's text as well, and is no event the fork's answer is looked for among: the fork
+/// keeps the answer all the same.
+#[tokio::test]
+async fn a_side_question_between_a_message_and_its_answer_above_it_is_skipped() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    let m1 = input(&hub, &mut w, &sid, "Remember APPLE.").await;
+    w.event(agent_event(&sid, "agent.delta", json!({"text": "OK"})))
+        .await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "And BANANA."}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let m2 = r["event"].clone();
+    let si = w.expect("session.input").await;
+    w.reply(
+        &si["id"],
+        "ack",
+        json!({"event_id": m2["event_id"], "joined": true}),
+    )
+    .await;
+    let (s, q) = hub
+        .post(
+            &format!("/api/sessions/{sid}/side_question"),
+            json!({"text": "What now?"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{q}");
+    assert_eq!(q["event"]["payload"]["during_text"], true);
+    w.expect("session.side_question").await;
+    let a1 = agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "OK, APPLE.", "final": true, "in_reply_to": m1["event_id"]}),
+    );
+    w.event(a1.clone()).await;
+
+    let f = fork(&hub, &sid, &m2).await;
+    let fs = ack_start(&mut w, &f).await;
+    assert_eq!(
+        fs["payload"]["fork"]["at_event_ids"],
+        json!([a1["event_id"]])
+    );
+    hub.finish().await;
+}
+
 /// SPEC §6: a message the agent took after some of its work (`joined_after`) stands behind the
 /// last answer up to that work: a fork before it cuts there and keeps the events up to it.
 #[tokio::test]

@@ -103,6 +103,22 @@ describe('examples/wire', () => {
     expect(plain.type === 'tool.result' && plain.payload.artifact_ids).toEqual([]);
   });
 
+  it('reads side questions and their answers, the stored question and the request (SPEC 0.232)', () => {
+    const q = parseEvent(load('event.side.question.json'));
+    expect(q.type === 'side.question' && q.payload.text).toBe('Which file are you editing right now?');
+    const a = parseEvent(load('event.side.answer.json'));
+    expect(a.type === 'side.answer' && [a.payload.question, a.payload.text, a.payload.error]).toEqual([
+      q.event_id,
+      'It is editing `src/main.rs`.',
+      undefined,
+    ]);
+    const e = parseEvent(load('event.side.answer.error.json'));
+    expect(e.type === 'side.answer' && [e.payload.text, e.payload.error]).toEqual([undefined, 'Side question cancelled']);
+    expect(parseInputResponse(load('api.side_question.json')).event_id).toBe(q.event_id);
+    expect((load('api.side_question.request.json') as { text: string }).text).toBe(q.type === 'side.question' ? q.payload.text : '');
+    expect(parseFrame(load('hub.session.side_question.history.json')).type).toBe('session.side_question');
+  });
+
   it('reads the text answer of approval.response (T26)', () => {
     const ev = parseEvent(load('event.approval.response.message.json'));
     expect(ev.type === 'approval.response' && ev.payload.message).toBe('Leave the root alone, look only at ~/work/hqc');

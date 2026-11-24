@@ -922,6 +922,13 @@ pub struct InputRequest {
     pub client_op_id: Option<String>,
 }
 
+/// `POST /api/sessions/{id}/side_question` (SPEC 0.232); the reply is an [`InputResponse`] with
+/// the stored `side.question`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SideQuestionRequest {
+    pub text: String,
+}
+
 /// Reply to `POST /api/sessions/{id}/input`: the stored `user.message` (201), or for a
 /// repeated `client_op_id` the event stored the first time (200).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1368,6 +1375,15 @@ mod tests {
         let c = sp.counts.unwrap();
         assert_eq!((c.all.hits, c.all.sessions, c.command.hits), (24, 2, 4));
         roundtrip::<InputRequest>(include_str!("../examples/wire/api.input.request.json"));
+        roundtrip::<SideQuestionRequest>(include_str!(
+            "../examples/wire/api.side_question.request.json"
+        ));
+        let r: InputResponse = roundtrip(include_str!("../examples/wire/api.side_question.json"));
+        let ev: crate::event::Event = serde_json::from_value(r.event).unwrap();
+        assert!(matches!(
+            ev.kind,
+            crate::event::EventKind::SideQuestion { .. }
+        ));
         let r: InputResponse = roundtrip(include_str!("../examples/wire/api.input.json"));
         let ev: crate::event::Event = serde_json::from_value(r.event).unwrap();
         assert!(ev.client_op_id.is_some() && ev.seq.is_some());

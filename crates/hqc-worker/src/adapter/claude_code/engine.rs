@@ -356,6 +356,11 @@ const MODEL_REQUEST: &str = "hqc-model-";
 const BACKGROUND_REQUEST: &str = "hqc-background-";
 /// `request_id` prefix of our `cancel_async_message` control requests.
 const CANCEL_REQUEST: &str = "hqc-cancel-";
+/// `request_id` prefix of our `side_question` control requests, followed by the `event_id` of
+/// the hub's `side.question`.
+const SIDE_REQUEST: &str = "hqc-side-";
+/// What the CLI's answer to a side question says when it carries no text.
+pub const NO_SIDE_ANSWER: &str = "No answer";
 /// `request_id` prefix of our `stop_task` control requests.
 const STOP_TASK_REQUEST: &str = "hqc-stop-task-";
 const INTERRUPT_REQUEST: &str = "hqc-interrupt-";
@@ -1272,6 +1277,32 @@ impl Core {
         }))
     }
 
+    /// Ask side question `event_id`: `control_request {subtype: side_question, question,
+    /// history}`. The CLI answers outside the conversation (a `system/control_request_progress`
+    /// `started`, then the `control_response`, 2.4 to 3.5 s on 2.1.312): no turn, no
+    /// `system/init`, no transcript line, a running turn untouched, and in a process started
+    /// with `--resume` that has run no turn yet too. Its cost is added to the process's running
+    /// total, so the next turn of the same process shows it. The answer is [`Core::on_control_response`]'s.
+    pub fn side_question(
+        &self,
+        event_id: Uuid,
+        question: &str,
+        history: &[hqc_proto::frame::SideExchange],
+    ) -> Action {
+        let mut request = json!({"subtype": "side_question", "question": question});
+        if !history.is_empty() {
+            request["history"] = history
+                .iter()
+                .map(|h| json!({"question": h.question, "response": h.response}))
+                .collect();
+        }
+        Action::Write(json!({
+            "type": "control_request",
+            "request_id": format!("{SIDE_REQUEST}{event_id}"),
+            "request": request,
+        }))
+    }
+
     /// Stop task `task_id` alone, a `stoppable` row of [`AdapterEvent::LiveSubagents`], a
     /// subagent, a command or a Monitor (2.1.312 registers a Monitor's task as `local_bash`, and
     /// `stop_task` stops a task as its type does): `control_request {subtype: stop_task,
@@ -1817,7 +1848,13 @@ impl Core {
                             self.model = Some(m.to_owned());
                         }
                     }
-                    let mut out = self.retract(&v["retracted_message_uuids"]);
+                    // A `local` one took back no record of the conversation: its uuids are a
+                    // side question's or a subagent's.
+                    let mut out = if v["scope"] == "local" {
+                        vec![]
+                    } else {
+                        self.retract(&v["retracted_message_uuids"])
+                    };
                     out.push(self.emit_system(MODEL_REFUSAL_FALLBACK, switch_line(&v)));
                     out
                 }
@@ -1864,7 +1901,8 @@ impl Core {
     /// The CLI's answer to our `initialize` (its slash commands with their descriptions, its
     /// models and account, or an error), `set_permission_mode`, `set_model` (a refusal of the
     /// latest one is a line and the model kept, another answer logged), `background_tasks` or
-    /// `stop_task` (both logged), or `interrupt` (noted for [`Core::interrupt_answered`]);
+    /// `stop_task` (both logged), `side_question` (its answer, or why there is none, becomes a
+    /// [`AdapterEvent::SideAnswer`]), or `interrupt` (noted for [`Core::interrupt_answered`]);
     /// every other `control_response`, the echo of one of ours, is skipped.
     fn on_control_response(&mut self, v: &Value) -> Vec<Action> {
         let r = &v["response"];
@@ -1885,6 +1923,37 @@ impl Core {
         }
         if id.starts_with(CANCEL_REQUEST) {
             return self.on_cancel_answer(id, r);
+        }
+        if let Some(event_id) = id
+            .strip_prefix(SIDE_REQUEST)
+            .and_then(|e| Uuid::parse_str(e).ok())
+        {
+            // `response` may be null; `synthetic: true` is a notice of the CLI's own, not the
+            // model's answer; an error carries its text (2.1.312).
+            let (answer, error) = if r["subtype"] != "success" {
+                (
+                    None,
+                    Some(
+                        r["error"]
+                            .as_str()
+                            .map_or_else(|| "Side question failed".into(), text),
+                    ),
+                )
+            } else {
+                match (
+                    r["response"]["response"].as_str(),
+                    &r["response"]["synthetic"],
+                ) {
+                    (Some(t), Value::Bool(true)) => (None, Some(text(t))),
+                    (Some(t), _) => (Some(text(t)), None),
+                    (None, _) => (None, Some(NO_SIDE_ANSWER.into())),
+                }
+            };
+            return vec![Action::Emit(AdapterEvent::SideAnswer {
+                event_id,
+                text: answer,
+                error,
+            })];
         }
         if id.starts_with(STOP_TASK_REQUEST) {
             if r["subtype"] == "success" {

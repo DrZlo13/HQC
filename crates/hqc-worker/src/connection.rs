@@ -685,6 +685,7 @@ fn frame_type(f: &HubFrame) -> &'static str {
         HubFrame::SessionStop { .. } => "session.stop",
         HubFrame::SessionBackground { .. } => "session.background",
         HubFrame::SessionStopTask { .. } => "session.stop_task",
+        HubFrame::SessionSideQuestion { .. } => "session.side_question",
         HubFrame::SessionSubagentHistory(_) => "session.subagent_history",
         HubFrame::SessionInputNow(_) => "session.input_now",
         HubFrame::SessionWithdraw(_) => "session.withdraw",

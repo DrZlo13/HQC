@@ -1,0 +1,12 @@
+{
+  "id": "f-17",
+  "type": "session.side_question",
+  "payload": {
+    "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+    "event_id": "0199f3a2-7c10-7000-8000-000000000134",
+    "question": "And the one before it?",
+    "history": [
+      { "question": "Which file are you editing right now?", "response": "It is editing `src/main.rs`." }
+    ]
+  }
+}

@@ -65,6 +65,7 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::Activity(a) => format!("activity:{a:?}"),
         AdapterEvent::Heartbeat => "heartbeat".into(),
         AdapterEvent::ModelKept(m) => format!("model_kept:{m}"),
+        AdapterEvent::SideAnswer { event_id, .. } => format!("side_answer:{event_id}"),
     }
 }
 

@@ -1297,6 +1297,280 @@ async fn idle_timeout_waits_for_background_tasks() {
     w.stop().await;
 }
 
+fn side_question(sid: Uuid, event_id: Uuid, question: &str) -> Value {
+    json!({"session_id": sid, "event_id": event_id, "question": question,
+           "history": [{"question": "Before?", "response": "Earlier."}]})
+}
+
+// SPEC 0.232, §5.3: `session.side_question` is acked and asked of the runtime with its history,
+// and the runtime's answer is one stored `side.answer` naming the question; a second answer to
+// the same question is not stored.
+#[tokio::test]
+async fn a_side_question_is_asked_and_its_answer_stored_once() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let q = Uuid::now_v7();
+    let f = c
+        .frame("session.side_question", side_question(sid, q, "What now?"))
+        .await;
+    assert_eq!(c.expect("ack").await["id"], f.as_str());
+    assert!(adapters.calls().contains(&FakeCall::SideQuestion {
+        session_id: sid,
+        event_id: q,
+        question: "What now?".into(),
+        history: vec![hqc_proto::frame::SideExchange {
+            question: "Before?".into(),
+            response: "Earlier.".into(),
+        }],
+    }));
+    let answer = |text: &str| AdapterEvent::SideAnswer {
+        event_id: q,
+        text: Some(text.into()),
+        error: None,
+    };
+    adapters.emit(sid, answer("It reads.")).await;
+    let e = stored_event(&mut c).await;
+    assert_eq!(e["payload"]["event"]["type"], "side.answer");
+    assert_eq!(
+        e["payload"]["event"]["payload"],
+        json!({"question": q, "text": "It reads."})
+    );
+    // A second answer is dropped: the next stored event is the probe's.
+    adapters.emit(sid, answer("Again.")).await;
+    adapters
+        .emit(
+            sid,
+            AdapterEvent::Event(agent_event(
+                sid,
+                EventKind::AgentThinking {
+                    text: "probe".into(),
+                },
+            )),
+        )
+        .await;
+    let e = stored_event(&mut c).await;
+    assert_eq!(e["payload"]["event"]["type"], "agent.thinking");
+    w.stop().await;
+}
+
+// SPEC 0.232, §5.3: the `session.start` of a side question carries `no_wait`: with no free slot
+// the session is not put in line for one and the feed has no `waiting_for_slot` line; the side
+// question that follows is answered with an error, and no agent starts later with nobody to
+// answer.
+#[tokio::test]
+async fn a_start_for_a_side_question_does_not_wait_for_a_slot() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut config = env.config(&hub.url());
+    config.max_sessions = 1;
+    let w = start_worker_with(&env, config, &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let first = Uuid::now_v7();
+    start_session(&mut c, &env, first).await;
+
+    let second = Uuid::now_v7();
+    let mut start = env.start_payload(second);
+    start["no_wait"] = json!(true);
+    let id = c.frame("session.start", start).await;
+    assert_eq!(c.expect("ack").await["id"], id.as_str());
+    let q = Uuid::now_v7();
+    c.frame(
+        "session.side_question",
+        side_question(second, q, "Is there room?"),
+    )
+    .await;
+    // The first stops: a session in line would start now.
+    c.frame("session.kill", json!({"session_id": first})).await;
+    let mut codes = vec![];
+    let mut answer = None;
+    while let Some(f) = c.try_recv(Duration::from_millis(500)).await {
+        if f["type"] == "event" {
+            let ev = f["payload"]["event"].clone();
+            c.ack_event(&f, 1).await;
+            if ev["type"] == "system" {
+                codes.push(ev["payload"]["code"].clone());
+            }
+            if ev["type"] == "side.answer" {
+                answer = Some(ev);
+            }
+        }
+    }
+    assert!(!codes.contains(&json!("waiting_for_slot")), "{codes:?}");
+    let answer = answer.expect("the side question is answered");
+    assert_eq!(answer["payload"]["question"], q.to_string());
+    assert!(
+        answer["payload"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("slots"),
+        "{answer}"
+    );
+    let calls = adapters.calls();
+    assert!(!calls.contains(&FakeCall::Start(second)), "{calls:?}");
+    assert!(!calls.contains(&FakeCall::Resume(second)), "{calls:?}");
+    w.stop().await;
+}
+
+// SPEC 0.232, §5.3: a `no_wait` start that finds no free slot is acked without starting the
+// agent, but its settings are kept: the agent that starts later, for an input, starts with them.
+#[tokio::test]
+async fn a_start_for_a_side_question_keeps_its_settings_for_the_next_start() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut config = env.config(&hub.url());
+    config.max_sessions = 1;
+    let w = start_worker_with(&env, config, &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    // A session that ran before, with the model "opus".
+    let sid = Uuid::now_v7();
+    let mut start = env.start_payload(sid);
+    start["model"] = json!("opus");
+    let id = c.frame("session.start", start).await;
+    assert_eq!(c.expect("ack").await["id"], id.as_str());
+    c.frame("session.kill", json!({"session_id": sid})).await;
+    adapters
+        .wait_for("close", |c| c.contains(&FakeCall::Close(sid)))
+        .await;
+    // Another one takes the only slot.
+    let other = Uuid::now_v7();
+    let id = c.frame("session.start", env.start_payload(other)).await;
+    assert_eq!(reply_to(&mut c, &id).await["type"], "ack");
+    // The side question's start, with another model, finds no slot.
+    let mut start = env.start_payload(sid);
+    start["mode"] = json!("resume");
+    start["model"] = json!("haiku");
+    start["no_wait"] = json!(true);
+    let id = c.frame("session.start", start).await;
+    assert_eq!(reply_to(&mut c, &id).await["type"], "ack");
+    assert_eq!(models(&adapters), [Some("opus".to_string()), None]);
+    // The slot frees; an input starts the agent with the settings of that start.
+    c.frame("session.kill", json!({"session_id": other})).await;
+    c.frame("session.input", input(sid, Uuid::now_v7(), "hi"))
+        .await;
+    adapters
+        .wait_for("the input", |c| {
+            c.iter()
+                .any(|c| matches!(c, FakeCall::Input { session_id, .. } if *session_id == sid))
+        })
+        .await;
+    assert_eq!(models(&adapters).last().unwrap().as_deref(), Some("haiku"));
+    w.stop().await;
+}
+
+// SPEC 0.232, §5.3: a side question for an agent whose process ended starts it first, resuming,
+// with no input.
+#[tokio::test]
+async fn a_side_question_starts_an_agent_that_is_not_running() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    c.frame("session.kill", json!({"session_id": sid})).await;
+    // Nothing runs in it: the process is let to exit by itself.
+    adapters
+        .wait_for("close", |c| c.contains(&FakeCall::Close(sid)))
+        .await;
+    let q = Uuid::now_v7();
+    c.frame(
+        "session.side_question",
+        side_question(sid, q, "Still there?"),
+    )
+    .await;
+    adapters
+        .wait_for(
+            "the question",
+            |c| matches!(c.last(), Some(FakeCall::SideQuestion { event_id, .. }) if *event_id == q),
+        )
+        .await;
+    let calls = adapters.calls();
+    assert!(
+        index(&calls, &FakeCall::Close(sid)) < index(&calls, &FakeCall::Resume(sid)),
+        "{calls:?}"
+    );
+    assert!(!calls.iter().any(|c| matches!(c, FakeCall::Input { .. })));
+    w.stop().await;
+}
+
+// SPEC 0.232, §17.3: the idle timeout does not unload an agent with a side question
+// unanswered; it counts again once the answer is in.
+#[tokio::test]
+async fn idle_timeout_waits_for_a_side_question() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut cfg = env.config(&hub.url());
+    cfg.idle_timeout = Some(Duration::from_millis(300));
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let q = Uuid::now_v7();
+    c.frame("session.side_question", side_question(sid, q, "Slow one"))
+        .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        ends(&adapters.calls(), sid),
+        0,
+        "never idle while a side question waits"
+    );
+    adapters
+        .emit(
+            sid,
+            AdapterEvent::SideAnswer {
+                event_id: q,
+                text: Some("Done.".into()),
+                error: None,
+            },
+        )
+        .await;
+    adapters.wait_for("idle kill", |c| ends(c, sid) > 0).await;
+    w.stop().await;
+}
+
+// SPEC 0.232, §5.3: a process that ends with a side question unanswered answers it with an
+// error, so the block does not wait for ever.
+#[tokio::test]
+async fn a_side_question_the_process_leaves_unanswered_gets_an_error() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let q = Uuid::now_v7();
+    c.frame("session.side_question", side_question(sid, q, "Slow one"))
+        .await;
+    c.frame("session.kill", json!({"session_id": sid})).await;
+    // The process's end first empties the list above the input, which is transport only.
+    let mut e = stored_event(&mut c).await;
+    while e["payload"]["event"]["type"] == "subagents.live" {
+        e = stored_event(&mut c).await;
+    }
+    assert_eq!(e["payload"]["event"]["type"], "side.answer");
+    assert_eq!(
+        e["payload"]["event"]["payload"],
+        json!({"question": q, "error": "The agent's process ended before the answer"})
+    );
+    w.stop().await;
+}
+
 // idle_timeout (SPEC §17.3): a turn the runtime starts by itself (Claude Code: on the end of a
 // background task) is not idleness, however long it is silent (an approval it waits for); the
 // agent is stopped once that turn ends.

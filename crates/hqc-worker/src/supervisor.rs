@@ -309,6 +309,8 @@ enum Cmd {
         id: String,
         spec: Box<StartSpec>,
         mode: StartMode,
+        /// `session.start.no_wait`: no queueing for a slot.
+        no_wait: bool,
     },
     Input {
         id: String,
@@ -328,6 +330,13 @@ enum Cmd {
     StopTask {
         id: String,
         task_id: String,
+    },
+    /// A side question for the agent (`session.side_question`).
+    SideQuestion {
+        id: String,
+        event_id: Uuid,
+        question: String,
+        history: Vec<hqc_proto::frame::SideExchange>,
     },
     /// `session.subagent_history`: what subagent `task_id` has done, after event `after` and
     /// before event `before`.
@@ -582,6 +591,7 @@ impl Supervisor {
                         id,
                         spec: Box::new(spec),
                         mode: s.mode,
+                        no_wait: s.no_wait,
                     },
                 )
             }
@@ -610,6 +620,20 @@ impl Supervisor {
                 }
                 (session_id, Cmd::StopTask { id, task_id })
             }
+            HubFrame::SessionSideQuestion {
+                session_id,
+                event_id,
+                question,
+                history,
+            } => (
+                session_id,
+                Cmd::SideQuestion {
+                    id,
+                    event_id,
+                    question,
+                    history,
+                },
+            ),
             HubFrame::SessionSubagentHistory(r) => {
                 // The id names a file: the hub is not trusted with paths (SPEC §2.1).
                 if !hqc_proto::frame::valid_history_task_id(&r.task_id) {
@@ -1214,6 +1238,7 @@ impl Supervisor {
             live: None,
             live_cleared: false,
             background_tasks: 0,
+            side_pending: Vec::new(),
             token_rate: 0,
             foreground_calls: Vec::new(),
             activity: None,
@@ -1239,6 +1264,7 @@ fn id_of(c: &Cmd) -> String {
         | Cmd::Stop { id, .. }
         | Cmd::Background { id, .. }
         | Cmd::StopTask { id, .. }
+        | Cmd::SideQuestion { id, .. }
         | Cmd::SubagentHistory { id, .. }
         | Cmd::Withdraw { id, .. }
         | Cmd::InputNow { id, .. }
@@ -1422,6 +1448,10 @@ struct Session {
     /// The background tasks the runtime lists ([`AdapterEvent::BackgroundTasks`]), repeated
     /// in every `session.state`.
     background_tasks: u32,
+    /// The side questions asked of the process and not answered yet, by the `event_id` of
+    /// their `side.question`: idle unload waits for them, and a process that ends answers them
+    /// with an error.
+    side_pending: Vec<Uuid>,
     /// The last `tokens.rate` sent.
     token_rate: u32,
     /// The calls the runtime runs in the foreground ([`AdapterEvent::ForegroundCalls`]),
@@ -1506,7 +1536,7 @@ impl Session {
         // build). A turn the runtime started by itself is a turn as well: it is silent while it
         // waits for an approval or an answer, or runs a long command. An armed wakeup and a cron
         // job die with the process: the agent is idle from the latest of their times on (a job
-        // without a known next fire holds nothing).
+        // without a known next fire holds nothing). A side question waits for its answer.
         (self.state == ProcessState::Running
             && self.turn.is_none()
             && !self.adapter.runs_own_turn()
@@ -1515,24 +1545,30 @@ impl Session {
             && self.lowering.is_none()
             && self.queue.is_empty()
             && self.subagents == 0
-            && self.background_tasks == 0)
-            .then(|| {
-                let crons = self.live.iter().flat_map(|(rows, at)| {
-                    rows.iter()
-                        .filter(|r| r.kind == Some(LiveKind::Cron))
-                        .filter_map(move |r| r.due_in_ms.map(|d| *at + Duration::from_millis(d)))
-                });
-                self.wake_at
-                    .into_iter()
-                    .chain(crons)
-                    .fold(self.last_activity, Instant::max)
-                    + t
-            })
+            && self.background_tasks == 0
+            && self.side_pending.is_empty())
+        .then(|| {
+            let crons = self.live.iter().flat_map(|(rows, at)| {
+                rows.iter()
+                    .filter(|r| r.kind == Some(LiveKind::Cron))
+                    .filter_map(move |r| r.due_in_ms.map(|d| *at + Duration::from_millis(d)))
+            });
+            self.wake_at
+                .into_iter()
+                .chain(crons)
+                .fold(self.last_activity, Instant::max)
+                + t
+        })
     }
 
     async fn on_cmd(&mut self, c: Cmd) {
         match c {
-            Cmd::Start { id, spec, mode } => {
+            Cmd::Start {
+                id,
+                spec,
+                mode,
+                no_wait,
+            } => {
                 if self.state != ProcessState::Stopped {
                     // The hub issued a new token with this start (SPEC §5.3): the running
                     // agent's MCP calls carry it from now on, and so does its next process.
@@ -1562,6 +1598,15 @@ impl Session {
                 self.resume_requested = mode == StartMode::Resume;
                 // A takeover (SPEC §9.3): the hub decided this worker runs the session again.
                 self.released = false;
+                // A start for a side question is no start worth waiting for (SPEC 0.232): with no
+                // free slot the session is not put in line and the feed says nothing; its
+                // settings are kept for the next start, and the side question that follows is
+                // answered with an error.
+                if no_wait && self.slot.is_none() && self.slots.available_permits() == 0 {
+                    tracing::info!(session_id = %self.id, max_sessions = self.max_sessions, "no free slot for a side question; the agent is not started");
+                    self.link.reply(&id, ack(None));
+                    return;
+                }
                 match self.ensure_running().await {
                     Ok(()) => {
                         self.link.reply(&id, ack(None));
@@ -1637,6 +1682,15 @@ impl Session {
                         return;
                     }
                 }
+                self.link.reply(&id, ack(None));
+            }
+            Cmd::SideQuestion {
+                id,
+                event_id,
+                question,
+                history,
+            } => {
+                self.on_side_question(event_id, &question, &history).await;
                 self.link.reply(&id, ack(None));
             }
             Cmd::SubagentHistory {
@@ -2665,6 +2719,57 @@ impl Session {
         self.ask_runtime(own).await;
     }
 
+    /// Asks the agent a side question, starting its process first when none runs (it answers
+    /// outside any turn). One that cannot be asked is answered with the reason at once, as the
+    /// owner's block waits for `side.answer`.
+    async fn on_side_question(
+        &mut self,
+        event_id: Uuid,
+        question: &str,
+        history: &[hqc_proto::frame::SideExchange],
+    ) {
+        if self.released {
+            return self.side_answer(event_id, None, Some("The session continues in VS Code"));
+        }
+        if self.state == ProcessState::Stopped {
+            // The agent starts only for a free slot: waiting for one would start it later for
+            // nobody.
+            if self.slot.is_none() && self.slots.available_permits() == 0 {
+                return self.side_answer(
+                    event_id,
+                    None,
+                    Some("All the agent slots of this worker are in use"),
+                );
+            }
+            if let Err(e) = self.ensure_running().await {
+                return self.side_answer(event_id, None, Some(&format!("{e:#}")));
+            }
+        }
+        self.side_pending.push(event_id);
+        if let Err(e) = self
+            .adapter
+            .side_question(event_id, question, history)
+            .await
+        {
+            tracing::warn!(session_id = %self.id, "side question failed: {e:#}");
+            self.side_answer(event_id, None, Some(&format!("{e:#}")));
+        }
+    }
+
+    /// The stored `side.answer` to side question `event_id`, which is pending no more.
+    fn side_answer(&mut self, event_id: Uuid, text: Option<String>, error: Option<&str>) {
+        self.side_pending.retain(|e| *e != event_id);
+        self.send_event(crate::adapter::new_event(
+            self.id,
+            hqc_proto::event::Author::Agent { id: self.id },
+            EventKind::SideAnswer {
+                question: event_id,
+                text,
+                error: error.map(str::to_owned),
+            },
+        ));
+    }
+
     fn send_event(&self, e: hqc_proto::event::Event) {
         if e.session_id != self.id {
             tracing::warn!(session_id = %self.id, other = %e.session_id, "adapter event for another session dropped");
@@ -2749,6 +2854,16 @@ impl Session {
                     self.upload_result(&mut event, files).await;
                 }
                 self.send_event(event);
+            }
+            AdapterEvent::SideAnswer {
+                event_id,
+                text,
+                error,
+            } => {
+                // One answer per question: a pending one only.
+                if self.side_pending.contains(&event_id) {
+                    self.side_answer(event_id, text, error.as_deref());
+                }
             }
             AdapterEvent::InputAccepted { event_id } => {
                 let transcript = self.transcript();
@@ -3313,6 +3428,9 @@ impl Session {
             }
             self.foreground_calls.clear();
             self.activity = None;
+            for q in std::mem::take(&mut self.side_pending) {
+                self.side_answer(q, None, Some(SIDE_PROCESS_ENDED));
+            }
         }
         if self.state != s {
             self.state = s;
@@ -3407,6 +3525,9 @@ impl Session {
 /// `system.code` of a turn that failed because the worker's Claude Code is signed out (SPEC
 /// 0.185).
 pub const CLAUDE_SIGNED_OUT: &str = "claude_signed_out";
+
+/// The error of a side question whose process ended before it answered.
+pub const SIDE_PROCESS_ENDED: &str = "The agent's process ended before the answer";
 
 /// `system.code` of a session that waits for a slot (#41, SPEC §17.3).
 pub const WAITING_FOR_SLOT: &str = "waiting_for_slot";

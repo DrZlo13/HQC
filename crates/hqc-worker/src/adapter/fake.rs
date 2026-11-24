@@ -61,6 +61,13 @@ pub enum FakeCall {
     PermissionMode(Uuid, PermissionMode),
     /// A model switch of the running process.
     Model(Uuid, String),
+    /// A side question asked the running process.
+    SideQuestion {
+        session_id: Uuid,
+        event_id: Uuid,
+        question: String,
+        history: Vec<hqc_proto::frame::SideExchange>,
+    },
 }
 
 #[derive(Default)]
@@ -301,6 +308,21 @@ impl Adapter for FakeAdapter {
 
     async fn set_model(&mut self, model: &str) -> anyhow::Result<()> {
         self.record(FakeCall::Model(self.session_id, model.into()));
+        Ok(())
+    }
+
+    async fn side_question(
+        &mut self,
+        event_id: Uuid,
+        question: &str,
+        history: &[hqc_proto::frame::SideExchange],
+    ) -> anyhow::Result<()> {
+        self.record(FakeCall::SideQuestion {
+            session_id: self.session_id,
+            event_id,
+            question: question.into(),
+            history: history.to_vec(),
+        });
         Ok(())
     }
 

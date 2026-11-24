@@ -552,6 +552,20 @@ pub enum HubFrame {
     /// `ack`, also when no agent runs; what the runtime answers is the worker's log.
     #[serde(rename = "session.stop_task")]
     SessionStopTask { session_id: Uuid, task_id: String },
+    /// A side question for the session's agent (since SPEC 0.232): the runtime answers it
+    /// outside the conversation, with no turn of its own and no trace in the agent's context
+    /// (Claude Code: `side_question`), a running turn left untouched; an agent not running is
+    /// started first. `event_id` is the hub's `side.question`, named by the worker's
+    /// `side.answer`; `history` the earlier side questions that got an answer, oldest first.
+    /// Answered with `ack`; the answer, or why there is none, comes as `side.answer`.
+    #[serde(rename = "session.side_question")]
+    SessionSideQuestion {
+        session_id: Uuid,
+        event_id: Uuid,
+        question: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        history: Vec<SideExchange>,
+    },
     /// What subagent `task_id` of the session has done, read from its transcript on demand
     /// (since SPEC 0.181): answered with `result` [`SubagentHistoryResult`].
     #[serde(rename = "session.subagent_history")]
@@ -1502,6 +1516,12 @@ pub struct SessionStart {
     /// off: the CLI runs with `--no-chrome`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub browser: bool,
+    /// Since SPEC 0.232: the start is for a side question, which is worth nothing later. With no
+    /// free slot (`max_sessions`) the worker does not put the session in line for one and says
+    /// nothing in the feed; the side question that follows is answered with an error. Absent
+    /// when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_wait: bool,
 }
 
 /// A model provider (SPEC §3 Provider, since 0.144): an Anthropic-compatible endpoint with one
@@ -1759,6 +1779,13 @@ pub struct PeerHeader {
     pub request_id: Option<String>,
 }
 
+/// An earlier side question with its answer, in `session.side_question.history` (SPEC 0.232).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SideExchange {
+    pub question: String,
+    pub response: String,
+}
+
 /// One buffered `send` message in `session.input.peer_prefix` (SPEC §5.3, §7.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerPrefix {
@@ -1797,6 +1824,7 @@ mod tests {
         "session.stop",
         "session.background",
         "session.stop_task",
+        "session.side_question",
         "session.subagent_history",
         "session.input_now",
         "session.withdraw",
@@ -1885,6 +1913,14 @@ mod tests {
         (
             "session.stop_task",
             include_str!("../examples/wire/hub.session.stop_task.json"),
+        ),
+        (
+            "session.side_question",
+            include_str!("../examples/wire/hub.session.side_question.json"),
+        ),
+        (
+            "session.side_question",
+            include_str!("../examples/wire/hub.session.side_question.history.json"),
         ),
         (
             "session.subagent_history",
@@ -2202,6 +2238,7 @@ mod tests {
             HubFrame::SessionStop { .. } => "session.stop",
             HubFrame::SessionBackground { .. } => "session.background",
             HubFrame::SessionStopTask { .. } => "session.stop_task",
+            HubFrame::SessionSideQuestion { .. } => "session.side_question",
             HubFrame::SessionSubagentHistory(_) => "session.subagent_history",
             HubFrame::SessionInputNow(_) => "session.input_now",
             HubFrame::SessionWithdraw(_) => "session.withdraw",

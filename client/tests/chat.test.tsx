@@ -2552,6 +2552,103 @@ describe('composer', () => {
   });
 });
 
+// SPEC 0.232: `/btw <question>` and `/side <question>` in the composer ask the agent a side
+// question; the question and its answer stand as one muted block in the feed.
+describe('side questions', () => {
+  const area = () => $('.composer-input') as HTMLTextAreaElement;
+  const type = (text: string) =>
+    act(() => {
+      area().value = text;
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  const send = () => act(async () => void ($('.composer button[aria-label="Send"]') as HTMLButtonElement).click());
+  async function chat() {
+    const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+    // POST .../side_question: the stored question.
+    Object.assign(api, {
+      input: vi.fn(() => new Promise(() => {})),
+      sideQuestion: vi.fn(async () => ev('event.side.question', 8)),
+      uploadArtifact: vi.fn(async () => ({ id: 'a1' })),
+    });
+    await mount(app);
+    return api as unknown as { input: ReturnType<typeof vi.fn>; sideQuestion: ReturnType<typeof vi.fn> };
+  }
+
+  it('sends /btw and /side with a question to the side question endpoint, not as a message', async () => {
+    const api = await chat();
+    await type('/btw Which file are you editing right now?');
+    await send();
+    await type('/side  and the other one?\n');
+    await send();
+    expect(api.sideQuestion.mock.calls).toEqual([
+      ['s1', 'Which file are you editing right now?'],
+      ['s1', 'and the other one?'],
+    ]);
+    expect(api.input).not.toHaveBeenCalled();
+    expect(area().value).toBe('');
+  });
+
+  it('sends any other text as a message: /btw alone, a longer command name, a question with a file', async () => {
+    const api = await chat();
+    await type('/btw');
+    await send();
+    await type('/btwx why');
+    await send();
+    await type('/btw with a file');
+    const input = $('input[type=file]') as HTMLInputElement;
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'note.txt', { type: 'text/plain' })], configurable: true });
+    await act(async () => void input.dispatchEvent(new Event('change', { bubbles: true })));
+    await vi.waitFor(() => expect($('.composer-files .attachment-chip')?.textContent).toContain('note.txt'));
+    await send();
+    expect(api.sideQuestion).not.toHaveBeenCalled();
+    expect(api.input.mock.calls.map((c) => c[1])).toEqual(['/btw', '/btwx why', '/btw with a file']);
+  });
+
+  it('shows the stored question with "Answering…", then the answer as Markdown in the same block', async () => {
+    await chat();
+    await type('/btw Which file are you editing right now?');
+    await send();
+    const block = () => root.querySelectorAll('.side-question');
+    expect(block().length).toBe(1);
+    expect($('.side-ask')!.textContent).toBe('Which file are you editing right now?');
+    expect($('.side-wait')!.textContent).toBe('Answering…');
+    await act(async () => subscriber!.onEvent(ev('event.side.answer', 9)));
+    expect(block().length).toBe(1);
+    expect($('.side-wait')).toBeNull();
+    expect($('.side-answer code')!.textContent).toBe('src/main.rs');
+    // The answer has no block of its own: the history's blocks and the question's.
+    const before = HISTORY.slice(0, 3).filter((e) => e.type !== 'usage').length;
+    expect(root.querySelectorAll('.feed-block').length).toBe(before + 1);
+  });
+
+  it('shows why there is no answer, and is no message of the agent', async () => {
+    await chat();
+    await type('/btw Which file are you editing right now?');
+    await send();
+    await act(async () => subscriber!.onEvent(ev('event.side.answer.error', 9)));
+    expect($('.side-error')!.textContent).toBe('Side question cancelled');
+    expect($('.side-wait')).toBeNull();
+    // Neither the user's bubble nor the agent's text.
+    expect($('.side-question')!.closest('.feed-block')!.querySelector('.msg, .bubble')).toBeNull();
+  });
+
+  it('says a refusal of the hub in the notice and keeps the feed as it was', async () => {
+    const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+    Object.assign(api, {
+      sideQuestion: vi.fn(async () => {
+        throw new ApiError(409, 'the session is paused: resume it to ask its agent', 'paused');
+      }),
+    });
+    await mount(app);
+    await type('/btw anything');
+    await send();
+    await vi.waitFor(() => expect($('.notice')!.textContent).toBe('Not asked: the session is paused: resume it to ask its agent'));
+    expect($('.side-question')).toBeNull();
+    // The question is back in the field, with its prefix, to send again or edit.
+    expect(area().value).toBe('/btw anything');
+  });
+});
+
 describe('quick messages', () => {
   const MESSAGES = ['Continue', 'Run the tests\nand fix what fails'];
   const area = () => $('.composer-input') as HTMLTextAreaElement;
@@ -3656,6 +3753,16 @@ describe('an input that came while the agent writes (SPEC §6)', () => {
   it('stands under the text being written', async () => {
     const { push } = await writing([first]);
     await act(async () => push(meanwhile(2)));
+    expect(under(block('written meanwhile'))).toBe(true);
+  });
+
+  it('a side question asked meanwhile stands under the text being written, as a message does (SPEC 0.232)', async () => {
+    const { push } = await writing([first]);
+    await act(async () =>
+      push(ev('event.side.question', 2, (e) => (e.payload = { text: 'a side question meanwhile', during_text: true }))),
+    );
+    expect(under(block('a side question meanwhile'))).toBe(true);
+    await act(async () => push(meanwhile(3)));
     expect(under(block('written meanwhile'))).toBe(true);
   });
 

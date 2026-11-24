@@ -4,11 +4,12 @@
 // list shows header names only. A value lives in the form's memory until the form closes and
 // goes nowhere else: no draft, no storage.
 
-import { useEffect, useState } from 'preact/hooks';
-import { ApiError, type McpHeader, type McpServerFields } from '../api';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { ApiError, type McpHeader, type McpProbe, type McpServerFields } from '../api';
 import type { AppState } from '../app';
 import type { McpServer } from '../proto';
 import { projectName } from './Appearance';
+import { useUrlProbe } from './urlprobe';
 
 export const MCP_TIMEOUT_MIN = 30;
 export const MCP_TIMEOUT_MAX = 1800;
@@ -260,6 +261,17 @@ export function McpServersSection({ app }: { app: AppState }) {
 
 const NO_HEADER: McpHeader = { name: '', value: '' };
 
+/** The probe's answer for the line under the URL. */
+export function mcpProbeText(r: McpProbe): { text: string; error?: boolean } {
+  if (r.error) return { text: r.error, error: true };
+  if (r.auth === 'oauth') return { text: 'Signs in with OAuth' };
+  if (r.auth === 'token') return { text: 'Needs a token' };
+  if (r.auth === 'none') return { text: 'No sign-in needed' };
+  return { text: 'Could not tell how it signs in' };
+}
+
+type Probe = { state: 'busy' } | { state: 'done'; text: string; error?: boolean };
+
 /** The add or edit form. `initial`: the server being edited. On save the parent closes it,
  *  so the header values typed go with its state. */
 function McpServerForm({
@@ -290,9 +302,35 @@ function McpServerForm({
   const [clientId, setClientId] = useState(initial?.oauth_client_id ?? '');
   const [clientSecret, setClientSecret] = useState('');
   const [scope, setScope] = useState(initial?.oauth_scope ?? '');
+  // SPEC 0.236: the URL is checked when it is pasted or typed, and the fields the owner has not
+  // touched yet are filled from the answer; an edit starts with all of them touched.
+  const touched = useRef(new Set<'name' | 'auth' | 'headers'>(initial ? ['name', 'auth', 'headers'] : []));
+  const [probe, setProbe] = useState<Probe | null>(null);
+  const urlProbe = useUrlProbe(url, (u, current) => {
+    setProbe({ state: 'busy' });
+    // Through a promise: an api without the call (a stub) is a failed check, not a throw.
+    Promise.resolve(u).then((x) => app.api.probeMcp(x)).then(
+      (r) => {
+        if (!current()) return;
+        setProbe({ state: 'done', ...mcpProbeText(r) });
+        const t = touched.current;
+        if (r.name && !t.has('name')) setName(r.name);
+        if (r.auth === 'oauth' && !t.has('auth')) setAuth('oauth');
+        if ((r.auth === 'token' || r.auth === 'none') && !t.has('auth')) setAuth('headers');
+        // Rows not touched are the form's own: the empty one it starts with, or one filled here.
+        if (r.auth === 'token' && !t.has('headers')) setRows([{ name: 'Authorization', value: '' }]);
+        if (r.auth === 'none' && !t.has('headers')) setRows([]);
+      },
+      (e) => {
+        if (current()) setProbe({ state: 'done', text: mcpErrorText(e), error: true });
+      },
+    );
+  });
 
-  const setRow = (i: number, patch: Partial<McpHeader>) =>
+  const setRow = (i: number, patch: Partial<McpHeader>) => {
+    touched.current.add('headers');
     setRows((cur) => cur.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  };
 
   const cancel = () => {
     setRows([]);
@@ -336,18 +374,6 @@ function McpServerForm({
   return (
     <form class="mcp-form" onSubmit={submit}>
       <label class="field">
-        <span class="field-label">Name</span>
-        <input
-          class="input mono"
-          name="mcp_name"
-          placeholder="github"
-          autocomplete="off"
-          value={name}
-          onInput={(e) => setName((e.currentTarget as HTMLInputElement).value)}
-        />
-        <span class="muted small">The agents see its tools as mcp__{name.trim() || '<name>'}__&lt;tool&gt;.</span>
-      </label>
-      <label class="field">
         <span class="field-label">URL</span>
         <input
           class="input mono"
@@ -357,7 +383,28 @@ function McpServerForm({
           autocomplete="off"
           value={url}
           onInput={(e) => setUrl((e.currentTarget as HTMLInputElement).value)}
+          {...urlProbe}
         />
+        {probe && (
+          <span class={`small mcp-probe ${probe.state === 'done' && probe.error ? 'error-text' : 'muted'}`} role="status">
+            {probe.state === 'busy' ? 'Checking…' : probe.text}
+          </span>
+        )}
+      </label>
+      <label class="field">
+        <span class="field-label">Name</span>
+        <input
+          class="input mono"
+          name="mcp_name"
+          placeholder="github"
+          autocomplete="off"
+          value={name}
+          onInput={(e) => {
+            touched.current.add('name');
+            setName((e.currentTarget as HTMLInputElement).value);
+          }}
+        />
+        <span class="muted small">The agents see its tools as mcp__{name.trim() || '<name>'}__&lt;tool&gt;.</span>
       </label>
       <label class="field">
         <span class="field-label">
@@ -378,7 +425,10 @@ function McpServerForm({
           class="input"
           name="mcp_auth"
           value={auth}
-          onChange={(e) => setAuth((e.currentTarget as HTMLSelectElement).value === 'oauth' ? 'oauth' : 'headers')}
+          onChange={(e) => {
+            touched.current.add('auth');
+            setAuth((e.currentTarget as HTMLSelectElement).value === 'oauth' ? 'oauth' : 'headers');
+          }}
         >
           <option value="headers">A token in a header</option>
           <option value="oauth">OAuth (sign in on the service's page)</option>
@@ -474,14 +524,20 @@ function McpServerForm({
                 <button
                   type="button"
                   class="btn btn-small btn-ghost btn-remove-header"
-                  onClick={() => setRows((cur) => cur.filter((_, j) => j !== i))}
+                  onClick={() => {
+                    touched.current.add('headers');
+                    setRows((cur) => cur.filter((_, j) => j !== i));
+                  }}
                 >
                   Remove
                 </button>
               </div>
             ))}
             {rows.length < MAX_HEADERS && (
-              <button type="button" class="btn btn-small btn-add-header" onClick={() => setRows((cur) => [...cur, NO_HEADER])}>
+              <button type="button" class="btn btn-small btn-add-header" onClick={() => {
+                  touched.current.add('headers');
+                  setRows((cur) => [...cur, NO_HEADER]);
+                }}>
                 Add a header
               </button>
             )}

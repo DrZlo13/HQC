@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.235, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.236, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1423,6 +1423,14 @@ MCP calls (worker → hub → worker):
   0.147) — the ssh keys the worker keeps for the workspace at `path` (a folder inside
   `allowed_roots`, after resolving symlinks), with `session_secrets` only, else `error
   {invalid_frame}`. `key_deleted: false`: the workspace has no such key.
+- `provider.probe` {request_id, base_url} → `result {request_id, provider_probe {models[{id,
+  context_tokens?}], error?}}` (since 0.236) — the models the endpoint at `base_url` lists: `GET
+  /v1/models` (vLLM's `max_model_len`, llama.cpp's `meta.n_ctx_train`, `context_length`), then
+  llama.cpp's `/props` (`n_ctx`, for its one model) and LM Studio's `/api/v0/models` for a missing
+  window, and Ollama's `/api/tags` without `/v1/models`; with the key `worker.toml` keeps for that
+  `base_url`. Only http(s), no redirects, 10 s a request, 1 MiB an answer, and only model ids
+  (printable, at most 200 characters, at most 200 of them) and windows (1000 to 10 000 000) go
+  back, never the endpoint's text.
 - `claude.auth` {request_id} → `result {request_id, claude_auth {logged_in, auth_method?, email?,
   org_name?, subscription_type?, expires_at?, error?}}` (since 0.185) — how the worker's own
   Claude Code is signed in (`claude auth status`); `error` when it could not be read.
@@ -1891,6 +1899,12 @@ the rest is marked "later"):
   name the owner has, `409 provider_in_use` on deleting one sessions run on): {name, label,
   base_url, model, context_tokens?} (`context_tokens` 1000 to 10 000 000); a provider object has
   `workers[]`, the owner's workers whose last `hello` allowed it.
+  `POST /api/providers/probe {base_url, name?}` (since 0.236) → `{models[{id, context_tokens?}],
+  error?, worker_id?}`: what the endpoint lists, as one of the owner's online workers reads it
+  (`provider.probe`, §5.3), a worker that allows `name` first, then the others until one answers
+  with models; `409 worker_offline` when none is online. The client's provider form starts with
+  the base URL and fills from it the model (a list it can type over), the context window, the
+  name and the label, each only while the owner has not edited it.
   Remote MCP servers (since 0.235, `docs/ITERATION-7.md`): `GET/POST /api/mcp/servers`
   ({servers: [...]} and `201`), `PATCH/DELETE /api/mcp/servers/{id}`, `POST
   /api/mcp/servers/{id}/test`, the owner's only. A server: {id, name, url, header_names[],
@@ -1912,6 +1926,13 @@ the rest is marked "later"):
   `404` for it, and closed (`DELETE`) when the agent's process stops or after an hour unused;
   redirects are not followed, and the address connected to is the one checked against private
   ranges (§20).
+  `POST /api/mcp/probe {url}` (since 0.236) → `{name?, server_name?, auth, error?}`: the hub sends
+  the server an `initialize` without credentials; `auth` is `none` (it answered; `server_name` is
+  its `serverInfo.name`, and the session it opened is closed), `oauth` (`401` and it names an
+  authorization server), `token` (`401` without one) or `unknown`; `name` is a valid server name
+  from `serverInfo.name` (`github-mcp-server` → `github`) or the host (`mcp.linear.app` →
+  `linear`). The client's form starts with the URL and fills the name and the way to sign in
+  from it while the owner has not edited them; every field stays editable.
   OAuth (T65): a server with `auth: oauth` ({auth, oauth_client_id?, oauth_client_secret?,
   oauth_scope?} in `POST`/`PATCH`; the secret write-only; status `sign_in` until signed in, and
   `signed_in` in the server object) signs in through its authorization server, as MCP's
@@ -7855,6 +7876,11 @@ is not asked, does not see the question or the answer, and does not work on it.
   `HQC_HUB_LISTEN` address and without `HQC_ACCESS_*` or `HQC_OIDC_*`; otherwise the hub does
   not start (§6).
 - Worker tokens: random 256 bits, only the hash in the database; revocation from the UI.
+- `provider.probe` (since 0.236), what is accepted: the hub can make a worker `GET` an http(s)
+  URL it names, in the worker's own network, which the hub could not reach. What comes back is
+  only model ids and context windows parsed from a models list, so a compromised hub learns at
+  most whether an address answers like a model server; nothing is sent there but the key the
+  worker keeps for that same `base_url`.
 - Remote MCP servers (since 0.235), what is accepted: the relay authenticates to the worker with
   the session token, which is on the CLI's command line as for the hqc server (§7.2), so an agent
   allowed to run commands can start a relay of its session's servers itself and call their tools
@@ -8027,6 +8053,13 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.235 → 0.236 (a provider and an MCP server filled from their URL)
+§5.3 `provider.probe`, §6 `POST /api/providers/probe`, `POST /api/mcp/probe`. Adding a model
+provider asked for its name, model and context window, and an MCP server for its name and how it
+signs in, which the endpoint itself can tell. Both forms start with the URL; the hub probes it (a
+provider through a worker, which reaches the owner's network) and fills the rest while the owner
+has not edited it; every field stays visible and editable.
 
 ### 0.234 → 0.235 (iteration 7: remote MCP servers relayed by the hub)
 §19: a new iteration 7, remote MCP servers the owner adds once on the hub (#59); the generic ACP

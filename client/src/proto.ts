@@ -1113,6 +1113,11 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'method');
     if (p.params !== undefined) obj(p.params, 'params');
   },
+  // SPEC 0.236: the hub asks a worker for the models a provider endpoint lists.
+  'provider.probe': (p) => {
+    str(p, 'request_id');
+    str(p, 'base_url');
+  },
   'mcp.result': (p) => {
     str(p, 'request_id');
     if (p.error !== undefined) {

@@ -204,6 +204,41 @@ pub async fn ingest_worker_event(
         delivery: None,
         delivered_at: None,
     };
+    // A worker's request is opened before its card is stored. One whose `request_id` an open
+    // request of another kind in the session holds is not stored at all: an answer names its
+    // request by the id alone, so the owner's answer to that card would answer the other one
+    // (a publication, SPEC §10.1). A repeat of the same request is stored as before.
+    let opens = match &ev.kind {
+        EventKind::ApprovalRequest {
+            request_id,
+            expires_at,
+            ..
+        } => Some(("approval", request_id, *expires_at)),
+        EventKind::ClarifyRequest { request_id, .. } => Some((
+            "clarify",
+            request_id,
+            new.payload
+                .get("expires_at")
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        )),
+        _ => None,
+    };
+    if let Some((kind, request_id, expires_at)) = opens {
+        let opened = db::open_request_as(
+            &app.db,
+            kind,
+            s.id,
+            request_id,
+            &new.payload,
+            expires_at,
+            s.worker_id,
+        )
+        .await?;
+        if opened == db::Opened::Taken {
+            tracing::warn!(session_id = %s.id, worker_id = %conn.worker_id, %request_id, kind, "a worker's request with the id of an open request of another kind dropped");
+            return Ok(dropped);
+        }
+    }
     // A cancel from the worker is stored in the transaction that closes its request, so one
     // that fails to be stored leaves the request open for its resend. One the hub closed
     // already (`POST /stop` cancels before it stops the turn, an answer that crossed the
@@ -499,39 +534,9 @@ async fn after_store(
         seq: row.seq,
         event: row.to_json(),
     });
+    // A worker's `approval.request` and `clarify.request` opened their request before they were
+    // stored (`ingest_worker_event`).
     match kind {
-        EventKind::ApprovalRequest {
-            request_id,
-            expires_at,
-            ..
-        } if source == Source::Worker => {
-            db::open_request(
-                &app.db,
-                "approval",
-                s.id,
-                request_id,
-                &row.payload,
-                *expires_at,
-                s.worker_id,
-            )
-            .await?;
-        }
-        EventKind::ClarifyRequest { request_id, .. } if source == Source::Worker => {
-            let expires_at = row
-                .payload
-                .get("expires_at")
-                .and_then(|v| serde_json::from_value(v.clone()).ok());
-            db::open_request(
-                &app.db,
-                "clarify",
-                s.id,
-                request_id,
-                &row.payload,
-                expires_at,
-                s.worker_id,
-            )
-            .await?;
-        }
         EventKind::AgentMessage {
             r#final: true,
             text,

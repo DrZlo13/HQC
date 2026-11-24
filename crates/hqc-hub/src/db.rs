@@ -3212,7 +3212,19 @@ pub struct PendingRow {
 const PENDING_COLS: &str =
     "id, kind, session_id, request_id, payload, expires_at, worker_id, result, closed_at";
 
-/// Stores an open request; `false` if one with the same `(session, kind, request_id)` exists.
+/// What [`open_request_as`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opened {
+    /// A new open request.
+    New,
+    /// A request of this kind with this `request_id` exists already: a repeat.
+    Repeat,
+    /// An open request of another kind in the session has this `request_id`: none is opened.
+    Taken,
+}
+
+/// Stores an open request; `false` if one with the same `(session, kind, request_id)` exists,
+/// or an open request of another kind in the session has this `request_id` ([`Opened`]).
 pub async fn open_request(
     db: &PgPool,
     kind: &str,
@@ -3222,10 +3234,43 @@ pub async fn open_request(
     expires_at: Option<DateTime<Utc>>,
     worker_id: Option<Uuid>,
 ) -> sqlx::Result<bool> {
-    let r = sqlx::query(
-        "INSERT INTO pending_requests (id, kind, session_id, request_id, payload, expires_at, worker_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (session_id, kind, request_id) DO NOTHING",
+    Ok(open_request_as(
+        db, kind, session_id, request_id, payload, expires_at, worker_id,
+    )
+    .await?
+        == Opened::New)
+}
+
+/// [`open_request`], saying why none was opened. An answer names its request by the id alone
+/// (SPEC §10.1), so an open request's id is its session's alone: a request whose id an open
+/// request of another kind holds is not opened, and the answer cannot land on that one. The
+/// check and the insert are one statement under a lock of the session and the id.
+pub async fn open_request_as(
+    db: &PgPool,
+    kind: &str,
+    session_id: Uuid,
+    request_id: &str,
+    payload: &Value,
+    expires_at: Option<DateTime<Utc>>,
+    worker_id: Option<Uuid>,
+) -> sqlx::Result<Opened> {
+    let mut tx = db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text || '/' || $2, 0))")
+        .bind(session_id)
+        .bind(request_id)
+        .execute(&mut *tx)
+        .await?;
+    let (taken, inserted): (bool, bool) = sqlx::query_as(
+        "WITH taken AS (
+             SELECT EXISTS (SELECT 1 FROM pending_requests
+                 WHERE session_id = $3 AND request_id = $4 AND kind <> $2 AND closed_at IS NULL) AS t
+         ), ins AS (
+             INSERT INTO pending_requests (id, kind, session_id, request_id, payload, expires_at, worker_id)
+             SELECT $1, $2, $3, $4, $5, $6, $7 WHERE NOT (SELECT t FROM taken)
+             ON CONFLICT (session_id, kind, request_id) DO NOTHING
+             RETURNING 1
+         )
+         SELECT (SELECT t FROM taken), EXISTS (SELECT 1 FROM ins)",
     )
     .bind(new_id())
     .bind(kind)
@@ -3234,9 +3279,14 @@ pub async fn open_request(
     .bind(payload)
     .bind(expires_at)
     .bind(worker_id)
-    .execute(db)
+    .fetch_one(&mut *tx)
     .await?;
-    Ok(r.rows_affected() > 0)
+    tx.commit().await?;
+    Ok(match (inserted, taken) {
+        (true, _) => Opened::New,
+        (false, true) => Opened::Taken,
+        (false, false) => Opened::Repeat,
+    })
 }
 
 pub async fn find_open_request(

@@ -227,10 +227,12 @@ export function formatAge(ts: string, now: number): string {
   return shortDate(ts);
 }
 
-/** Token counts: `555`, `14.4k`, `1.2M`. */
+/** Token counts: `555`, `14.4k`, `1.2M`, `8.7B`. The unit steps up where the count would round to
+ *  1000 of the smaller one: 999,500 is `1M`, not `1000k`. */
 export function formatTokens(n: number): string {
   if (n < 1000) return String(n);
-  const [v, unit] = n < 1_000_000 ? [n / 1000, 'k'] : [n / 1_000_000, 'M'];
+  const [v, unit] =
+    n < 999_500 ? [n / 1000, 'k'] : n < 999_500_000 ? [n / 1_000_000, 'M'] : [n / 1_000_000_000, 'B'];
   return `${v.toFixed(v < 10 ? 1 : 0).replace(/\.0$/, '')}${unit}`;
 }
 
@@ -269,10 +271,12 @@ export function compactionNote(p: SystemNote): string {
   return parts.map((x) => ` · ${x}`).join('');
 }
 
-/** Cost in dollars: `$0.07` (from a cent up; below it three digits), `precise`: always three,
- *  as under an answer (`$0.073`). */
+/** Cost in dollars: `$0.07` (from a cent up; below it three digits), `precise`: three, as under
+ *  an answer (`$0.073`); from $100 up whole dollars either way (`$3325`). */
 export function formatCost(usd: number, precise = false): string {
-  return `$${usd.toFixed(precise || usd < 0.01 ? 3 : 2)}`;
+  // By the rounded text, so that $99.996 is `$100`, not `$100.00`.
+  const text = usd.toFixed(precise || usd < 0.01 ? 3 : 2);
+  return `$${Number(text) >= 100 ? Math.round(usd) : text}`;
 }
 
 /** The header's spending item (SPEC 0.229): `$2.25 · 3.4M tokens this session`, with only

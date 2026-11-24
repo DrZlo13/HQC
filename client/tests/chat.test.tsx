@@ -24,7 +24,7 @@ import {
   type SpawnedBy,
   type SubagentHistory,
 } from '../src/proto';
-import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, modelName, shownModel } from '../src/ui/labels';
+import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, formatCost, formatTokens, modelName, shownModel } from '../src/ui/labels';
 import { limitNotice } from '../src/ui/limits';
 import { Timeline } from '../src/timeline';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
@@ -2938,6 +2938,19 @@ describe('the session\'s tokens in the header (SPEC 0.229)', () => {
     await mount(app, true);
     await act(async () => $('.btn-more')!.click());
     expect($('.menu-info')!.textContent).toContain('$2.25 · 3.4M tokens this session');
+  });
+
+  it('drops the cents from $100 up and counts billions as B', async () => {
+    const big = [
+      ...history.slice(0, 2),
+      ev('event.usage', 3, (e) => (e.payload = { input_tokens: 2, output_tokens: 5, cost_usd: 150.4, session_cost_usd: 3324.84, session_tokens: 8_672_000_000 })),
+    ];
+    const { app } = setup('idle', { history: big, commands: [] });
+    await mount(app);
+    expect($('.chat-cost')!.textContent).toBe('$3325 · 8.7B tokens this session');
+    expect([...root.querySelectorAll('.usage')].map((l) => l.textContent!).join()).toMatch(/ · \$150(?![.\d])/);
+    expect([formatCost(99.994), formatCost(99.996), formatCost(0.0734, true)]).toEqual(['$99.99', '$100', '$0.073']);
+    expect([999_499, 999_500, 999_400_000, 999_500_000, 12_345_000_000].map(formatTokens)).toEqual(['999k', '1M', '999M', '1B', '12B']);
   });
 });
 

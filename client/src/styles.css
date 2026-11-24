@@ -3350,10 +3350,10 @@ button.btn-mode-pill.perm-allow-all:hover,
   color: var(--text);
   overflow-wrap: anywhere;
 }
-/* A message's buttons (Search, Copy, Quote and the user's Take back, Send now, Add to quick
-   messages and Fork): always shown, in the line's flow so that they cover no text, at the bottom
-   right of the message: the right end of its usage line or of a reasoning's summary, else the
-   end of the text's last line (`.msg-tail`); by the time only in a bubble with no text. */
+/* A message's buttons (Copy and the user's Take back, Send now, Add to quick messages and
+   Fork): always shown, in the line's flow so that they cover no text, at the bottom right of
+   the message: the right end of its usage line or of a reasoning's summary, else the end of
+   the text's last line (`.msg-tail`); by the time only in a bubble with no text. */
 .msg-buttons {
   display: inline-flex;
   gap: 2px;
@@ -3389,11 +3389,6 @@ button.btn-mode-pill.perm-allow-all:hover,
 /* A reasoning has its buttons in the summary while folded, at the end of its text when open. */
 .thinking[open] summary .msg-buttons {
   display: none;
-}
-/* Search keeps its place while the message holds no selection, so that the line does not
-   re-wrap when one is made. */
-.btn-msg-search-idle {
-  visibility: hidden;
 }
 .chat:not(.chat-phone) .msg-buttons .btn-copy-idle {
   width: 18px;
@@ -5241,9 +5236,38 @@ a.relay-peer {
 
 /* The buttons stay at the bottom while the field grows. */
 .composer-row {
+  position: relative;
   display: flex;
   align-items: flex-end;
   gap: 4px;
+}
+
+/* Quote: over the right end of the field, left of Send, taking no room (the field, its wraps
+   and the feed stay as they are when it comes and goes); the end of the draft's last line fades
+   under it. */
+.btn-quote {
+  position: absolute;
+  right: 40px;
+  bottom: 0;
+  height: 36px;
+  padding: 0 8px 0 20px;
+  border: 0;
+  border-radius: 8px;
+  background: linear-gradient(to right, transparent, var(--surface) 20px);
+  color: var(--muted);
+  font: 500 13px var(--sans);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.btn-quote:hover {
+  background: linear-gradient(to right, transparent, var(--row-hover) 20px);
+  color: var(--text);
+}
+.composer-phone .btn-quote {
+  font-size: 14px;
+  padding: 0 6px 0 20px;
 }
 
 .btn-attach {
@@ -5320,6 +5344,11 @@ a.relay-peer {
 }
 :root.feed-column .composer:not(.composer-phone) :is(.btn-attach, .btn-secret, .btn-quick, .btn-send) {
   width: 28px;
+  height: 28px;
+}
+/* The buttons are 28 px here: Quote follows Send's width and the field's line. */
+:root.feed-column .composer:not(.composer-phone) .btn-quote {
+  right: 32px;
   height: 28px;
 }
 

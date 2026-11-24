@@ -1912,6 +1912,24 @@ the rest is marked "later"):
   `404` for it, and closed (`DELETE`) when the agent's process stops or after an hour unused;
   redirects are not followed, and the address connected to is the one checked against private
   ranges (§20).
+  OAuth (T65): a server with `auth: oauth` ({auth, oauth_client_id?, oauth_client_secret?,
+  oauth_scope?} in `POST`/`PATCH`; the secret write-only; status `sign_in` until signed in, and
+  `signed_in` in the server object) signs in through its authorization server, as MCP's
+  authorization spec has it. `POST /api/mcp/servers/{id}/sign_in` → {url}: the hub discovers the
+  server's protected-resource metadata (RFC 9728, named by its `401` or at the well-known path)
+  and the authorization server's metadata (RFC 8414 or OpenID), registers itself (RFC 7591) when
+  no client id is given and the server offers it (`422 client_id_needed` otherwise), and answers
+  the authorization URL with PKCE (S256), a state bound to the owner for ten minutes, the
+  `resource` (RFC 8707) and the scope given or the server's. The browser comes back to `GET
+  /api/mcp/oauth/callback`, behind the hub's sign-in like `/api/*`, which exchanges the code and
+  answers a plain page; the redirect URI is the first of `HQC_PUBLIC_ORIGINS`, else the request's
+  host. Tokens and the client secret are sealed under `HQC_MCP_KEY`; the access token is refreshed
+  a minute before it expires and once when the server refuses it (one refresh per server at a
+  time, a rotated refresh token kept); a failed refresh sets `sign_in`, and the call's error says
+  to sign in again. `DELETE /api/mcp/servers/{id}/sign_in` forgets the tokens. The client shows
+  the section "MCP servers" in Settings (the list with status and tools, add and edit with
+  headers or OAuth, Test, Sign in, Sign out, Delete) and the servers a project gets in its
+  settings (T66).
   `POST /api/sessions/{id}/secrets` (since 0.147, §14) {kind, name, value?, vault?, passphrase?,
   remember?, request_id?} (unknown fields: `422`; one of `value` and `vault` exactly, else `400`;
   `vault` since 0.216 — a Vaultwarden entry the worker reads itself, §5.3, only on a worker whose
@@ -8017,7 +8035,7 @@ adapter becomes iteration 8, sharing 9, Tauri 10, and the references to them fol
 A server's address and token stay on the hub: the worker gives the CLI a stdio relay per server
 under the server's own name (`mcp__<name>__<tool>`), and the hub makes the calls, one MCP session
 per hqc session and server, a large result as an artifact, a timeout per server. Migration
-`0057`. OAuth sign-in and the client's screens follow (T65, T66).
+`0057`. OAuth sign-in (T65) and the client's screens (T66).
 
 ### 0.233 → 0.234 (one Quote button over the input, Copy alone on a message)
 §6: a message's buttons were Search, Copy and Quote: Search worked on the selection inside that

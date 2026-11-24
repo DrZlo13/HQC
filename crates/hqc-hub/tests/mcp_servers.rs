@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -409,5 +410,275 @@ async fn without_a_key_no_headers_and_private_addresses_only_when_allowed() {
             .contains("HQC_MCP_ALLOW_PRIVATE"),
         "{v}"
     );
+    hub.finish().await;
+}
+
+// ---------------------------------------------------------------- OAuth (T65)
+
+#[derive(Default)]
+struct AuthSeen {
+    registered: usize,
+    challenge: Option<String>,
+    refreshed_with: Vec<String>,
+    bearers: Vec<String>,
+}
+
+#[derive(Clone)]
+struct AuthFake {
+    base: Arc<Mutex<String>>,
+    seen: Arc<Mutex<AuthSeen>>,
+}
+
+async fn auth_mcp(State(f): State<AuthFake>, h: HeaderMap, Json(m): Json<Value>) -> Response {
+    let bearer = h
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_string();
+    f.seen.lock().unwrap().bearers.push(bearer.clone());
+    if bearer != "access-2" {
+        let base = f.base.lock().unwrap().clone();
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(
+                "www-authenticate",
+                format!(
+                    "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\""
+                ),
+            )],
+        )
+            .into_response();
+    }
+    let id = m["id"].clone();
+    match m["method"].as_str() {
+        Some("initialize") => Json(json!({"jsonrpc": "2.0", "id": id, "result": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "serverInfo": {"name": "linear-like", "version": "1"}}}))
+        .into_response(),
+        Some("notifications/initialized") => StatusCode::ACCEPTED.into_response(),
+        Some("tools/list") => Json(json!({"jsonrpc": "2.0", "id": id, "result": {"tools": [{"name": "issues", "inputSchema": {"type": "object"}}]}})).into_response(),
+        _ => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+async fn prm(State(f): State<AuthFake>) -> Json<Value> {
+    let base = f.base.lock().unwrap().clone();
+    Json(
+        json!({"resource": format!("{base}/mcp"), "authorization_servers": [base], "scopes_supported": ["read"]}),
+    )
+}
+
+async fn as_meta(State(f): State<AuthFake>) -> Json<Value> {
+    let b = f.base.lock().unwrap().clone();
+    Json(
+        json!({"issuer": b, "authorization_endpoint": format!("{b}/authorize"),
+                "token_endpoint": format!("{b}/token"), "registration_endpoint": format!("{b}/register"),
+                "code_challenge_methods_supported": ["S256"]}),
+    )
+}
+
+async fn register(State(f): State<AuthFake>, Json(m): Json<Value>) -> (StatusCode, Json<Value>) {
+    f.seen.lock().unwrap().registered += 1;
+    assert!(m["redirect_uris"][0]
+        .as_str()
+        .unwrap()
+        .ends_with("/api/mcp/oauth/callback"));
+    (StatusCode::CREATED, Json(json!({"client_id": "client-1"})))
+}
+
+async fn authorize(
+    State(f): State<AuthFake>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    assert_eq!(q["client_id"], "client-1");
+    assert_eq!(q["code_challenge_method"], "S256");
+    assert_eq!(q["scope"], "read");
+    f.seen.lock().unwrap().challenge = Some(q["code_challenge"].clone());
+    let to = format!("{}?code=code-1&state={}", q["redirect_uri"], q["state"]);
+    (StatusCode::FOUND, [("location", to)]).into_response()
+}
+
+async fn token(State(f): State<AuthFake>, body: String) -> Response {
+    let q: HashMap<String, String> = body
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| (k.to_string(), urlencoding_decode(v)))
+        .collect();
+    match q["grant_type"].as_str() {
+        "authorization_code" => {
+            let want = f.seen.lock().unwrap().challenge.clone().unwrap();
+            let got = base64_url(&sha2::Sha256::digest(q["code_verifier"].as_bytes()));
+            if got != want || q["code"] != "code-1" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "invalid_grant"})),
+                )
+                    .into_response();
+            }
+            // Expires at once: the first call refreshes it.
+            Json(json!({"access_token": "access-1", "refresh_token": "refresh-1", "expires_in": 1}))
+                .into_response()
+        }
+        "refresh_token" => {
+            f.seen
+                .lock()
+                .unwrap()
+                .refreshed_with
+                .push(q["refresh_token"].clone());
+            if q["refresh_token"] != "refresh-1" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "invalid_grant"})),
+                )
+                    .into_response();
+            }
+            Json(json!({"access_token": "access-2", "refresh_token": "refresh-2", "expires_in": 3600})).into_response()
+        }
+        _ => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+fn urlencoding_decode(v: &str) -> String {
+    let v = v.replace('+', " ");
+    let b = v.as_bytes();
+    let mut out = vec![];
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            out.push(u8::from_str_radix(&v[i + 1..i + 3], 16).unwrap());
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
+fn base64_url(b: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+}
+
+#[tokio::test]
+async fn oauth_signs_in_with_pkce_and_refreshes_the_token() {
+    let hub = TestHub::start().await;
+    let f = AuthFake {
+        base: Arc::default(),
+        seen: Arc::default(),
+    };
+    let app = Router::new()
+        .route("/mcp", post(auth_mcp))
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            axum::routing::get(prm),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            axum::routing::get(as_meta),
+        )
+        .route("/register", post(register))
+        .route("/authorize", axum::routing::get(authorize))
+        .route("/token", post(token))
+        .with_state(f.clone());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    *f.base.lock().unwrap() = base.clone();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+
+    let (s, v) = hub
+        .post(
+            "/api/mcp/servers",
+            json!({"name": "linear", "url": format!("{base}/mcp"), "auth": "oauth"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(
+        (
+            v["auth"].as_str(),
+            v["signed_in"].as_bool(),
+            v["status"].as_str()
+        ),
+        (Some("oauth"), Some(false), Some("sign_in"))
+    );
+    let id = v["id"].as_str().unwrap().to_string();
+
+    let (s, v) = hub
+        .post(&format!("/api/mcp/servers/{id}/sign_in"), json!({}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        f.seen.lock().unwrap().registered,
+        1,
+        "dynamic client registration"
+    );
+    // The browser: the authorization server sends it back to the hub's callback.
+    let no_redirect = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let r = no_redirect
+        .get(v["url"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    let back = r.headers()["location"].to_str().unwrap().to_string();
+    let path = back.splitn(4, '/').nth(3).unwrap();
+    let page = hub
+        .http
+        .get(format!("{}/{path}", hub.base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains("Signed in to linear"), "{page}");
+    // The same state again is refused.
+    let again = hub
+        .http
+        .get(format!("{}/{path}", hub.base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(again.contains("unknown or expired"), "{again}");
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mcp_servers t WHERE row_to_json(t)::text LIKE '%access-1%' OR row_to_json(t)::text LIKE '%refresh-1%'",
+    )
+    .fetch_one(&hub.app.db)
+    .await
+    .unwrap();
+    assert_eq!(rows, 0, "the tokens are sealed");
+
+    // The first use refreshes the expired token; the rotated refresh token is kept.
+    let (s, v) = hub
+        .post(&format!("/api/mcp/servers/{id}/test"), json!({}))
+        .await;
+    assert_eq!((s, v["status"].as_str()), (200, Some("ok")), "{v}");
+    assert_eq!(v["tools"], json!(["issues"]));
+    assert_eq!(v["signed_in"], true);
+    assert_eq!(f.seen.lock().unwrap().refreshed_with, ["refresh-1"]);
+    assert!(f
+        .seen
+        .lock()
+        .unwrap()
+        .bearers
+        .iter()
+        .any(|b| b == "access-2"));
+
+    // Signed out: the next use asks to sign in again.
+    assert_eq!(
+        hub.delete(&format!("/api/mcp/servers/{id}/sign_in")).await,
+        204
+    );
+    let (_, v) = hub
+        .post(&format!("/api/mcp/servers/{id}/test"), json!({}))
+        .await;
+    assert_eq!(v["signed_in"], false, "{v}");
+    assert!(v["last_error"].as_str().unwrap().contains("sign in"), "{v}");
     hub.finish().await;
 }

@@ -12,6 +12,16 @@ CREATE TABLE mcp_servers (
     -- nonce (24 bytes) || ciphertext of the JSON object {name: value}; NULL: no headers.
     sealed bytea,
     timeout_s integer NOT NULL DEFAULT 300 CHECK (timeout_s BETWEEN 30 AND 1800),
+    -- headers | oauth: with oauth the hub signs in through the server's authorization server
+    -- (OAuth 2.1 with PKCE) and sends its access token, refreshing it itself.
+    auth text NOT NULL DEFAULT 'headers' CHECK (auth IN ('headers', 'oauth')),
+    oauth_client_id text,
+    oauth_scope text,
+    -- The authorization server's endpoints as discovered, and the resource signed in for.
+    oauth_meta jsonb,
+    -- Sealed like `sealed` (with its own associated data): {client_secret?, access_token?,
+    -- refresh_token?, expires_at?}.
+    oauth_sealed bytea,
     all_projects boolean NOT NULL DEFAULT true,
     -- ok | failing | unknown; `last_error` says why it failed last.
     status text NOT NULL DEFAULT 'unknown',

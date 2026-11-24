@@ -181,7 +181,7 @@ Acceptance: the common checks. Hub tests against a fake MCP server:
 - `instructions` reach the relay's `initialize`;
 - a new MCP session after the server's `404`.
 
-## T65. OAuth
+## T65. OAuth (done, SPEC 0.235)
 
 Sections: §6, §20.
 - `POST /api/mcp/servers/{id}/sign_in` returns the authorization URL, after discovery and dynamic
@@ -203,7 +203,7 @@ Acceptance: the common checks. Hub tests against a fake authorization server:
 
 By hand: Linear or Notion signed in from a phone.
 
-## T66. The client
+## T66. The client (done, SPEC 0.235)
 
 Sections: §6 client layout.
 - Settings → MCP servers:
@@ -253,4 +253,10 @@ stops, the refusals, the checks of what the owner gives, no key, a private addre
 `without_hub_mcp_no_server_is_relayed`), `config::tests::the_hubs_mcp_servers_only_where_hub_mcp_is_on`,
 `adapter::claude_code::tests::the_hubs_mcp_servers_are_relays_under_their_own_names`.
 
-Next: T65 (OAuth) and T66 (the client's screens). Until T66 a server is added with the REST API.
+T65 and T66 in #164 too. Hub `mcp_servers/oauth.rs` (discovery, registration, PKCE, the
+callback, sealed tokens, refresh with a lock per server), `credentials` and one retry with a
+forced refresh in the relay; test `oauth_signs_in_with_pkce_and_refreshes_the_token` against a
+fake authorization server. Client `ui/McpServers.tsx` (Settings → MCP servers, the project's
+list), `api.ts`, `proto.ts`, the mock; tests `mcp-servers.test.tsx`.
+
+Left for the acceptance by hand: GitHub with a token and Linear or Notion with OAuth from a phone.

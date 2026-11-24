@@ -16,6 +16,7 @@ import { AppearanceDialog, ProjectGlyph, projectName } from './Appearance';
 import { useSubscription } from './hooks';
 import { IconBack, IconCross, IconPlus, IconShield } from './icons';
 import { Loading } from './Loading';
+import { ProjectMcpServers } from './McpServers';
 import { UNPUBLISH_PROJECT, homePath } from './labels';
 import { atWorkAfterTurn } from './sessions';
 
@@ -484,6 +485,8 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
               </div>
             )}
           </section>
+
+          <ProjectMcpServers app={app} projectId={projectId} />
         </div>
       </div>
       {appearance && project && (

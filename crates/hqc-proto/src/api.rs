@@ -279,6 +279,26 @@ pub struct McpServer {
     pub tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// `headers` or `oauth` (SPEC 0.235, T65).
+    #[serde(default = "headers_auth")]
+    pub auth: String,
+    /// With `oauth`: the hub holds a token for it.
+    #[serde(default)]
+    pub signed_in: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_scope: Option<String>,
+}
+
+fn headers_auth() -> String {
+    "headers".into()
+}
+
+/// `POST /api/mcp/servers/{id}/sign_in`: the page to sign in on, opened in the browser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpSignIn {
+    pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -311,6 +331,17 @@ pub struct McpServerRequest {
     pub all_projects: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_ids: Option<Vec<Uuid>>,
+    /// `headers` (the default) or `oauth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    /// With `oauth`, a client registered by hand at the authorization server; absent: the hub
+    /// registers itself where the server offers it. The secret is write-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_scope: Option<String>,
 }
 
 /// `GET /api/projects/{id}/sessions`.

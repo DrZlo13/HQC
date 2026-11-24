@@ -51,6 +51,9 @@ use crate::{
     error::{ApiError, ApiResult},
 };
 
+mod oauth;
+pub use oauth::{callback as oauth_callback, sign_in, sign_out};
+
 /// The MCP protocol version the hub asks a server for.
 const PROTOCOL: &str = "2025-06-18";
 /// How long `serverInfo`, `instructions` and the tools stay cached.
@@ -87,6 +90,11 @@ pub struct Upstreams {
     next_id: AtomicI64,
     /// Session -> its relay requests in flight, at most [`IN_FLIGHT`].
     busy: Mutex<HashMap<Uuid, usize>>,
+    /// OAuth sign-ins started, by their state (T65).
+    oauth: Mutex<HashMap<String, oauth::Pending>>,
+    /// Server -> the lock its token refresh holds, and when it last refreshed.
+    refreshing: Mutex<HashMap<Uuid, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    refreshed: Mutex<HashMap<Uuid, Instant>>,
 }
 
 /// Relay requests of one session carried out at once: each may hold a large result in memory.
@@ -173,10 +181,16 @@ struct Row {
     instructions: Option<String>,
     tools: Option<Value>,
     cached_at: Option<DateTime<Utc>>,
+    auth: String,
+    oauth_client_id: Option<String>,
+    oauth_scope: Option<String>,
+    oauth_meta: Option<Value>,
+    oauth_sealed: Option<Vec<u8>>,
 }
 
 const COLS: &str = "id, name, url, header_names, sealed, timeout_s, all_projects, \
-                    status, last_error, server_info, instructions, tools, cached_at";
+                    status, last_error, server_info, instructions, tools, cached_at, auth, \
+                    oauth_client_id, oauth_scope, oauth_meta, oauth_sealed";
 
 impl Row {
     fn fresh(&self) -> bool {
@@ -219,6 +233,10 @@ async fn to_api(db: &sqlx::PgPool, r: &Row) -> sqlx::Result<McpServer> {
         last_error: r.last_error.clone(),
         tools: r.tool_names(),
         instructions: r.instructions.clone(),
+        auth: r.auth.clone(),
+        signed_in: r.auth == "oauth" && oauth::signed_in(r),
+        oauth_client_id: r.oauth_client_id.clone(),
+        oauth_scope: r.oauth_scope.clone(),
     })
 }
 
@@ -262,41 +280,37 @@ fn cipher(key: &[u8; 32]) -> XChaCha20Poly1305 {
     XChaCha20Poly1305::new(key.into())
 }
 
-/// `nonce || ciphertext` of the headers, bound to the server's id.
-fn seal(key: &[u8; 32], id: Uuid, headers: &HashMap<String, String>) -> Vec<u8> {
+/// `nonce || ciphertext` of `plain`, bound to `aad`.
+fn seal_bytes(key: &[u8; 32], aad: &[u8], plain: &[u8]) -> Vec<u8> {
     use rand::RngCore;
     let mut nonce = [0u8; 24];
     rand::thread_rng().fill_bytes(&mut nonce);
-    let plain = serde_json::to_vec(headers).expect("headers serialize");
     let ct = cipher(key)
-        .encrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: &plain,
-                aad: id.as_bytes(),
-            },
-        )
+        .encrypt(XNonce::from_slice(&nonce), Payload { msg: plain, aad })
         .expect("encryption does not fail");
     let mut out = nonce.to_vec();
     out.extend(ct);
     out
 }
 
-fn unseal(key: &[u8; 32], id: Uuid, sealed: &[u8]) -> Option<HashMap<String, String>> {
+fn unseal_bytes(key: &[u8; 32], aad: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
     if sealed.len() < 24 {
         return None;
     }
     let (nonce, ct) = sealed.split_at(24);
-    let plain = cipher(key)
-        .decrypt(
-            XNonce::from_slice(nonce),
-            Payload {
-                msg: ct,
-                aad: id.as_bytes(),
-            },
-        )
-        .ok()?;
-    serde_json::from_slice(&plain).ok()
+    cipher(key)
+        .decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad })
+        .ok()
+}
+
+/// The headers, bound to the server's id.
+fn seal(key: &[u8; 32], id: Uuid, headers: &HashMap<String, String>) -> Vec<u8> {
+    let plain = serde_json::to_vec(headers).expect("headers serialize");
+    seal_bytes(key, id.as_bytes(), &plain)
+}
+
+fn unseal(key: &[u8; 32], id: Uuid, sealed: &[u8]) -> Option<HashMap<String, String>> {
+    serde_json::from_slice(&unseal_bytes(key, id.as_bytes(), sealed)?).ok()
 }
 
 /// The headers of a server as the hub sends them; `Err`: they cannot be read (no key, another
@@ -718,7 +732,7 @@ pub fn process_stopped(app: &AppState, session_id: Uuid) {
             let Some(row) = row.filter(|r| r.url == live.url) else {
                 return;
             };
-            let headers = headers_of(&app, &row).unwrap_or_default();
+            let headers = credentials(&app, &row, false).await.unwrap_or_default();
             close(&app, live, headers).await;
         });
     }
@@ -848,20 +862,67 @@ async fn run(
                 ),
             )
         })?;
-    let headers = headers_of(app, &row)
-        .map_err(|m| McpError::new(error_code::MCP_UNAVAILABLE, format!("{}: {m}", row.name)))?;
-    let result = match up.method.as_str() {
+    if !matches!(
+        up.method.as_str(),
+        "initialize" | "tools/list" | "tools/call"
+    ) {
+        return Err(McpError::new(
+            error_code::INVALID_ARGS,
+            format!("{} is not relayed", up.method),
+        ));
+    }
+    // A server signed in with OAuth that refuses its token gets one refreshed token more.
+    let mut outcome = match credentials(app, &row, false).await {
+        Ok(h) => dispatch(app, &row, &h, caller.id, up).await,
+        Err(e) => Err(e),
+    };
+    if row.auth == "oauth" && matches!(outcome, Err(UpErr::SignIn(_))) {
+        outcome = match credentials(app, &row, true).await {
+            Ok(h) => {
+                forget_sessions(app, row.id);
+                dispatch(app, &row, &h, caller.id, up).await
+            }
+            Err(e) => Err(e),
+        };
+    }
+    let result = match outcome {
+        Ok(v) => v,
+        Err(e) => return Err(failed(app, &row, e).await),
+    };
+    set_status(app, row.id, None).await;
+    encode(app, &caller, &row.name, result).await
+}
+
+/// The headers to send the server: the owner's, and with OAuth its access token (refreshed when
+/// due, or now with `force`).
+async fn credentials(app: &AppState, r: &Row, force: bool) -> Result<Vec<(String, String)>, UpErr> {
+    let mut h = headers_of(app, r).map_err(UpErr::Unavailable)?;
+    if r.auth == "oauth" {
+        let token = oauth::bearer(app, r.id, force).await?;
+        h.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
+        h.push(("Authorization".into(), format!("Bearer {token}")));
+    }
+    Ok(h)
+}
+
+/// One relayed request, as the method asks.
+async fn dispatch(
+    app: &AppState,
+    row: &Row,
+    headers: &[(String, String)],
+    sid: Uuid,
+    up: &McpUpstream,
+) -> Result<Value, UpErr> {
+    Ok(match up.method.as_str() {
         "initialize" => {
             if row.fresh() && row.server_info.is_some() {
                 json!({"serverInfo": row.server_info, "instructions": row.instructions})
             } else {
-                let r = session(app, &row, &headers, caller.id, true).await;
-                let info = match r {
-                    Ok((_, Some(init))) => init,
-                    Ok((_, None)) => {
+                let info = match session(app, row, headers, sid, true).await? {
+                    (_, Some(init)) => init,
+                    (_, None) => {
                         json!({"serverInfo": row.server_info, "instructions": row.instructions})
                     }
-                    Err(e) => return Err(failed(app, &row, e).await),
                 };
                 json!({"serverInfo": info.get("serverInfo"), "instructions": info.get("instructions")})
             }
@@ -870,25 +931,11 @@ async fn run(
             if row.fresh() && row.tools.is_some() {
                 json!({"tools": row.tools})
             } else {
-                match list_tools(app, &row, &headers, caller.id).await {
-                    Ok(t) => json!({"tools": t}),
-                    Err(e) => return Err(failed(app, &row, e).await),
-                }
+                json!({"tools": list_tools(app, row, headers, sid).await?})
             }
         }
-        "tools/call" => match call(app, &row, &headers, caller.id, &up.params).await {
-            Ok(v) => v,
-            Err(e) => return Err(failed(app, &row, e).await),
-        },
-        m => {
-            return Err(McpError::new(
-                error_code::INVALID_ARGS,
-                format!("{m} is not relayed"),
-            ))
-        }
-    };
-    set_status(app, row.id, None).await;
-    encode(app, &caller, &row.name, result).await
+        _ => call(app, row, headers, sid, &up.params).await?,
+    })
 }
 
 /// Records the failure on the server and gives the tool error.
@@ -1188,6 +1235,28 @@ async fn set_projects(app: &AppState, id: Uuid, ids: &[Uuid]) -> ApiResult<()> {
     Ok(())
 }
 
+/// `auth`, the client id and the scope as given (`default`: when `auth` is not).
+fn oauth_fields(
+    b: &McpServerRequest,
+    default: &str,
+) -> ApiResult<(String, Option<String>, Option<String>)> {
+    let auth = b.auth.clone().unwrap_or_else(|| default.to_string());
+    if auth != "headers" && auth != "oauth" {
+        return Err(bad("auth is headers or oauth"));
+    }
+    let one_line = |v: &Option<String>, what: &str, max: usize| -> ApiResult<Option<String>> {
+        match v.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            None => Ok(None),
+            Some(v) if v.len() <= max && !v.chars().any(char::is_control) => Ok(Some(v.into())),
+            Some(_) => Err(bad(format!("{what} is one line of at most {max} bytes"))),
+        }
+    };
+    let client_id = one_line(&b.oauth_client_id, "oauth_client_id", 200)?;
+    let scope = one_line(&b.oauth_scope, "oauth_scope", 500)?;
+    one_line(&b.oauth_client_secret, "oauth_client_secret", 500)?;
+    Ok((auth, client_id, scope))
+}
+
 fn timeout_of(t: Option<u32>) -> ApiResult<i32> {
     let t = t.unwrap_or(DEFAULT_TIMEOUT_S);
     if !(30..=1800).contains(&t) {
@@ -1262,12 +1331,25 @@ pub async fn create(
     }
     let id = db::new_id();
     let sealed = sealed_for(&app, id, &headers)?;
+    let (auth, client_id, scope) = oauth_fields(&b, "headers")?;
+    let oauth_sealed = if auth == "oauth" {
+        oauth::sealed_client(
+            &app,
+            id,
+            b.oauth_client_secret.clone().filter(|s| !s.is_empty()),
+        )?
+    } else {
+        None
+    };
     let mut names: Vec<String> = headers.keys().cloned().collect();
     names.sort();
     let inserted = sqlx::query(
         "INSERT INTO mcp_servers (id, owner_id, name, url, header_names, sealed, timeout_s,
-                                  all_projects)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (owner_id, name) DO NOTHING",
+                                  all_projects, auth, oauth_client_id, oauth_scope, oauth_sealed,
+                                  status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                 CASE WHEN $9 = 'oauth' THEN 'sign_in' ELSE 'unknown' END)
+         ON CONFLICT (owner_id, name) DO NOTHING",
     )
     .bind(id)
     .bind(user.id)
@@ -1277,6 +1359,10 @@ pub async fn create(
     .bind(sealed)
     .bind(timeout)
     .bind(b.all_projects.unwrap_or(true))
+    .bind(&auth)
+    .bind(client_id)
+    .bind(scope)
+    .bind(oauth_sealed)
     .execute(&app.db)
     .await?;
     if inserted.rows_affected() == 0 {
@@ -1329,14 +1415,47 @@ pub async fn update(
     if let Some(p) = &b.project_ids {
         check_projects(&app, user.id, p).await?;
     }
+    // OAuth: another way to sign in, client or resource needs a new sign-in.
+    let (auth, given_client, given_scope) = oauth_fields(&b, &r.auth)?;
+    let oauth_changed = auth != r.auth
+        || b.oauth_client_id.is_some()
+        || b.oauth_client_secret.is_some()
+        || (auth == "oauth" && url != r.url);
+    let client_id = if b.oauth_client_id.is_some() {
+        given_client
+    } else {
+        r.oauth_client_id.clone()
+    };
+    let scope = if b.oauth_scope.is_some() {
+        given_scope
+    } else {
+        r.oauth_scope.clone()
+    };
+    let oauth_sealed = match (auth.as_str(), oauth_changed) {
+        ("oauth", true) => oauth::sealed_client(
+            &app,
+            id,
+            b.oauth_client_secret.clone().filter(|s| !s.is_empty()),
+        )?,
+        ("oauth", false) => r.oauth_sealed.clone(),
+        _ => None,
+    };
     // Another address or other credentials: what was cached and the sessions open are not its.
-    let changed = url != r.url || b.headers.is_some();
+    let changed = url != r.url || b.headers.is_some() || oauth_changed;
+    let status = if auth == "oauth" && oauth_changed {
+        "sign_in"
+    } else {
+        "unknown"
+    };
     let updated = sqlx::query(
         "UPDATE mcp_servers SET name = $3, url = $4, header_names = $5, sealed = $6,
                                 timeout_s = $7, all_projects = $8, updated_at = now(),
                                 cached_at = CASE WHEN $9 THEN NULL ELSE cached_at END,
-                                status = CASE WHEN $9 THEN 'unknown' ELSE status END,
-                                last_error = CASE WHEN $9 THEN NULL ELSE last_error END
+                                status = CASE WHEN $9 THEN $14 ELSE status END,
+                                last_error = CASE WHEN $9 THEN NULL ELSE last_error END,
+                                auth = $10, oauth_client_id = $11, oauth_scope = $12,
+                                oauth_sealed = $13,
+                                oauth_meta = CASE WHEN $9 THEN NULL ELSE oauth_meta END
          WHERE id = $1 AND owner_id = $2
            AND NOT EXISTS (SELECT 1 FROM mcp_servers o
                            WHERE o.owner_id = $2 AND o.name = $3 AND o.id <> $1)",
@@ -1350,6 +1469,11 @@ pub async fn update(
     .bind(timeout)
     .bind(b.all_projects.unwrap_or(r.all_projects))
     .bind(changed)
+    .bind(&auth)
+    .bind(client_id)
+    .bind(scope)
+    .bind(oauth_sealed)
+    .bind(status)
     .execute(&app.db)
     .await?;
     if updated.rows_affected() == 0 {
@@ -1402,7 +1526,7 @@ pub async fn test(
 ) -> ApiResult<Json<McpServer>> {
     let r = own(&app, &user, id).await?;
     let outcome: Result<(), UpErr> = async {
-        let headers = headers_of(&app, &r).map_err(UpErr::Unavailable)?;
+        let headers = credentials(&app, &r, false).await?;
         // A session of its own, keyed by a fresh id: no agent's session is touched.
         let probe = Uuid::new_v4();
         let res = async {

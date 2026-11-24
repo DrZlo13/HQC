@@ -146,6 +146,11 @@ pub fn router(app: AppState) -> Router {
         )
         .route("/api/mcp/servers/{id}/test", post(mcp_servers::test))
         .route(
+            "/api/mcp/servers/{id}/sign_in",
+            post(mcp_servers::sign_in).delete(mcp_servers::sign_out),
+        )
+        .route("/api/mcp/oauth/callback", get(mcp_servers::oauth_callback))
+        .route(
             "/api/providers",
             get(providers::list).post(providers::create),
         )

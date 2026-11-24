@@ -7837,6 +7837,13 @@ is not asked, does not see the question or the answer, and does not work on it.
   `HQC_HUB_LISTEN` address and without `HQC_ACCESS_*` or `HQC_OIDC_*`; otherwise the hub does
   not start (§6).
 - Worker tokens: random 256 bits, only the hash in the database; revocation from the UI.
+- Remote MCP servers (since 0.235), what is accepted: the relay authenticates to the worker with
+  the session token, which is on the CLI's command line as for the hqc server (§7.2), so an agent
+  allowed to run commands can start a relay of its session's servers itself and call their tools
+  without the CLI's permission card for each; the servers it reaches are only those of its
+  project, with the owner's credentials. Give a server to the projects whose agents may act on it.
+  The hub itself, not only the worker, refuses a restricted session, another runtime, and a
+  session on a worker that is not its owner's: a foreign worker holds the session's token.
 - Remote MCP servers (since 0.235): their header values are sealed under `HQC_MCP_KEY` and never
   leave the hub but to the server itself; no worker, agent, transcript or log line sees them. A
   server's URL is https, and the hub refuses to connect to a private, loopback, link-local or

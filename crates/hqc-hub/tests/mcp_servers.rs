@@ -251,6 +251,20 @@ async fn a_server_is_relayed_with_the_hubs_token_and_never_shown() {
     let r = upstream(&mut w, &st, "fake", "resources/list", json!({})).await;
     assert_eq!(r["error"]["code"], "invalid_args", "{r}");
 
+    // The hub's own check: a restricted session gets nothing, whatever its worker sends.
+    sqlx::query("UPDATE sessions SET restricted = true WHERE id = $1::uuid")
+        .bind(&sid)
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    let r = upstream(&mut w, &st, "fake", "tools/list", json!({})).await;
+    assert_eq!(r["error"]["code"], "not_found", "{r}");
+    sqlx::query("UPDATE sessions SET restricted = false WHERE id = $1::uuid")
+        .bind(&sid)
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+
     // The agent's process stops: its MCP session is closed at the server.
     w.send(
         "session.state",

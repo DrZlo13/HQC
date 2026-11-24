@@ -85,6 +85,41 @@ pub struct Upstreams {
     sessions: Mutex<HashMap<(Uuid, Uuid), Live>>,
     calls: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     next_id: AtomicI64,
+    /// Session -> its relay requests in flight, at most [`IN_FLIGHT`].
+    busy: Mutex<HashMap<Uuid, usize>>,
+}
+
+/// Relay requests of one session carried out at once: each may hold a large result in memory.
+const IN_FLIGHT: usize = 4;
+
+/// One of a session's [`IN_FLIGHT`] places, given back when dropped.
+struct Slot<'a> {
+    up: &'a Upstreams,
+    session: Uuid,
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        let mut g = self.up.busy.lock().unwrap();
+        if let Some(n) = g.get_mut(&self.session) {
+            *n -= 1;
+            if *n == 0 {
+                g.remove(&self.session);
+            }
+        }
+    }
+}
+
+impl Upstreams {
+    fn slot(&self, session: Uuid) -> Option<Slot<'_>> {
+        let mut g = self.busy.lock().unwrap();
+        let n = g.entry(session).or_default();
+        if *n >= IN_FLIGHT {
+            return None;
+        }
+        *n += 1;
+        Some(Slot { up: self, session })
+    }
 }
 
 #[derive(Clone)]
@@ -359,17 +394,29 @@ pub fn is_private(ip: IpAddr) -> bool {
                 || v.is_multicast()
                 || o[0] == 0
                 || (o[0] == 100 && (o[1] & 0xc0) == 64)
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+                || (o[0] == 198 && (o[1] & 0xfe) == 18)
         }
         IpAddr::V6(v) => {
             if let Some(m) = v.to_ipv4_mapped() {
                 return is_private(IpAddr::V4(m));
             }
-            let s = v.segments()[0];
+            let seg = v.segments();
+            // NAT64 (64:ff9b::/96, 64:ff9b:1::/48) and IPv4-compatible addresses carry an IPv4 one.
+            let compat = seg[..6] == [0, 0, 0, 0, 0, 0] && !v.is_loopback() && !v.is_unspecified();
+            if (seg[0] == 0x64 && seg[1] == 0xff9b) || compat {
+                let o = v.octets();
+                return is_private(IpAddr::V4(std::net::Ipv4Addr::new(
+                    o[12], o[13], o[14], o[15],
+                )));
+            }
+            let s = seg[0];
             v.is_loopback()
                 || v.is_unspecified()
                 || v.is_multicast()
                 || (s & 0xfe00) == 0xfc00
                 || (s & 0xffc0) == 0xfe80
+                || (s & 0xffc0) == 0xfec0
         }
     }
 }
@@ -667,10 +714,11 @@ pub fn process_stopped(app: &AppState, session_id: Uuid) {
                     .await
                     .ok()
                     .flatten();
-            let headers = row
-                .as_ref()
-                .and_then(|r| headers_of(&app, r).ok())
-                .unwrap_or_default();
+            // The server moved or was deleted: its new credentials do not go to the old address.
+            let Some(row) = row.filter(|r| r.url == live.url) else {
+                return;
+            };
+            let headers = headers_of(&app, &row).unwrap_or_default();
             close(&app, live, headers).await;
         });
     }
@@ -692,6 +740,7 @@ pub async fn idle_loop(app: AppState) {
         for (session, _) in old {
             process_stopped(&app, session);
         }
+        sweep_results(&app).await;
     }
 }
 
@@ -758,6 +807,22 @@ async fn run(
             "this session is archived; its agent acts no more",
         ));
     }
+    // The hub's own check, not only the worker's: a foreign worker holds the token of the
+    // session it runs and must not reach its owner's servers with it (SPEC 0.235).
+    let worker_owner: Option<Uuid> =
+        sqlx::query_scalar("SELECT owner_id FROM workers WHERE id = $1")
+            .bind(worker_id)
+            .fetch_optional(&app.db)
+            .await
+            .map_err(internal)?;
+    if caller.restricted || caller.runtime != "claude_code" || worker_owner != Some(caller.owner_id)
+    {
+        return Err(McpError::new(
+            error_code::NOT_FOUND,
+            "only an unrestricted Claude Code session on its owner's own worker gets the hub's \
+             MCP servers",
+        ));
+    }
     if !per_minute(
         app,
         "mcp_calls_session",
@@ -766,6 +831,11 @@ async fn run(
     ) {
         return Err(too_often("MCP calls from this session"));
     }
+    let Some(_slot) = app.mcp_upstream.slot(caller.id) else {
+        return Err(too_often(&format!(
+            "MCP calls at once from this session (at most {IN_FLIGHT})"
+        )));
+    };
     let row = server_for(&app.db, caller.owner_id, caller.project_id, &up.server)
         .await
         .map_err(internal)?
@@ -976,6 +1046,24 @@ async fn call(
     }
 }
 
+/// The name prefix of a large result's artifact, which [`idle_loop`] removes after an hour also
+/// when the hub restarted in between.
+const RESULT_PREFIX: &str = "hqc-mcp-result-";
+
+/// Removes the large results older than an hour.
+async fn sweep_results(app: &AppState) {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM artifacts WHERE name LIKE $1 AND created_at < now() - interval '1 hour'",
+    )
+    .bind(format!("{RESULT_PREFIX}%"))
+    .fetch_all(&app.db)
+    .await
+    .unwrap_or_default();
+    for id in ids {
+        crate::artifacts::forget(app, id).await;
+    }
+}
+
 /// The answer as the frame carries it: in it, or as an artifact for a large one.
 async fn encode(
     app: &AppState,
@@ -995,7 +1083,7 @@ async fn encode(
         app,
         caller.owner_id,
         caller.id,
-        &format!("{server}-result.json"),
+        &format!("{RESULT_PREFIX}{server}.json"),
         "application/json",
         bytes,
     )
@@ -1366,10 +1454,15 @@ mod tests {
             "169.254.1.1",
             "100.64.0.1",
             "0.0.0.0",
+            "192.0.0.8",
+            "198.18.0.1",
             "::1",
             "fd00::1",
             "fe80::1",
+            "fec0::1",
             "::ffff:192.168.0.1",
+            "64:ff9b::a00:1",
+            "::10.0.0.1",
         ] {
             assert!(is_private(p.parse().unwrap()), "{p}");
         }

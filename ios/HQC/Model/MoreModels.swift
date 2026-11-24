@@ -184,6 +184,8 @@ nonisolated struct LimitWindow: Codable, Hashable, Sendable {
     let utilization: Double
     let resets_at: Double
     var resetsAt: Date { Date(timeIntervalSince1970: resets_at) }
+    /// The reset time has passed since the worker reported it.
+    var hasReset: Bool { resetsAt <= Date() }
 }
 
 nonisolated struct WorkerLimits: Codable, Hashable, Sendable {
@@ -195,6 +197,21 @@ nonisolated struct WorkerLimits: Codable, Hashable, Sendable {
     let status: String?
     let rate_limit_type: String?
     let resets_at: Double?
+
+    /// The limits as they stand now. The worker reports them only when a turn runs, so a
+    /// report can outlive its windows: a window whose reset time has passed is empty again,
+    /// and a limit hit before that reset no longer holds.
+    func current(_ now: Date = Date()) -> WorkerLimits {
+        func fresh(_ w: LimitWindow?) -> LimitWindow? {
+            guard let w else { return nil }
+            return w.resetsAt <= now ? LimitWindow(utilization: 0, resets_at: w.resets_at) : w
+        }
+        let rejectedStill = status == "rejected"
+            && (resets_at.map { Date(timeIntervalSince1970: $0) > now } ?? true)
+        return WorkerLimits(five_hour: fresh(five_hour), seven_day: fresh(seven_day),
+                            status: rejectedStill ? status : (status == "rejected" ? "allowed" : status),
+                            rate_limit_type: rate_limit_type, resets_at: resets_at)
+    }
 }
 
 /// What a subagent has done, from its transcript on the worker.

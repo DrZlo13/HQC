@@ -278,9 +278,15 @@ struct UsageLine: View {
 /// `› Thinking · the first line`, dimmed and in italics; it opens to all of it.
 struct ThinkingView: View {
     @Environment(\.palette) private var palette
+    @AppStorage(ChatViewMode.key) private var mode = ChatViewMode.regular
     let text: String
     let live: Bool
-    @State private var expanded = false
+    /// The user's own tap; until then the viewing mode decides.
+    @State private var tapped: Bool?
+    private var expanded: Bool {
+        get { tapped ?? mode.expandsThinking }
+        nonmutating set { tapped = newValue }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -323,8 +329,13 @@ struct ThinkingView: View {
 /// opens to a row per call, each opening to its arguments and output.
 struct ToolGroup: View {
     @Environment(\.palette) private var palette
+    @AppStorage(ChatViewMode.key) private var mode = ChatViewMode.regular
     let calls: [ToolCallItem]
-    @State private var expanded = false
+    @State private var tapped: Bool?
+    private var expanded: Bool {
+        get { tapped ?? mode.expandsTools }
+        nonmutating set { tapped = newValue }
+    }
 
     private var running: Bool { calls.contains { $0.result == nil } }
     private var failed: Int { calls.filter(\.failed).count }
@@ -383,8 +394,13 @@ struct ToolGroup: View {
 struct ToolCallRow: View {
     @Environment(\.palette) private var palette
     @Environment(\.chatActions) private var actions
+    @AppStorage(ChatViewMode.key) private var mode = ChatViewMode.regular
     let item: ToolCallItem
-    @State private var open = false
+    @State private var tapped: Bool?
+    private var open: Bool {
+        get { tapped ?? mode.expandsTools }
+        nonmutating set { tapped = newValue }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -919,4 +935,22 @@ struct RefusalRow: View {
             }
         }
     }
+}
+
+/// How much of the agent's work a chat shows unfolded, as Claude desktop's view setting:
+/// Regular folds thinking and tool calls, Thinking unfolds the model's thoughts and keeps
+/// tool calls folded, Verbose unfolds everything. A row the user taps keeps its own state.
+enum ChatViewMode: String, CaseIterable, Identifiable {
+    case regular, thinking, verbose
+    static let key = "chatViewMode"
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .regular: "Regular"
+        case .thinking: "Thinking"
+        case .verbose: "Verbose"
+        }
+    }
+    var expandsThinking: Bool { self != .regular }
+    var expandsTools: Bool { self == .verbose }
 }

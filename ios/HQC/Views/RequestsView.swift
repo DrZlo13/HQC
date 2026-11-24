@@ -107,6 +107,7 @@ struct SettingsView: View {
     @AppStorage(Feedback.hapticsKey) private var haptics = true
     @AppStorage(Feedback.soundsKey) private var sounds = true
     @AppStorage(WebSearch.key) private var webSearch = WebSearch.google.rawValue
+    @AppStorage(ChatViewMode.key) private var chatViewMode = ChatViewMode.regular
 
     private var notificationState: String {
         if !app.pushEnabledOnHub { return "Off on the hub" }
@@ -174,6 +175,18 @@ struct SettingsView: View {
                 }
             } footer: {
                 Text("For \"Search in …\" in a message's menu.")
+            }
+            Section {
+                Picker("Chat view", selection: $chatViewMode) {
+                    ForEach(ChatViewMode.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+            } header: {
+                Text("Chat view")
+            } footer: {
+                Text(chatViewMode == .regular ? "Thinking and tool calls folded; tap one to open it."
+                     : chatViewMode == .thinking ? "The model's thinking open, tool calls folded."
+                     : "Everything open: thinking, tool groups and each call's input and output.")
             }
             Section("Projects") {
                 NavigationLink {

@@ -394,7 +394,10 @@ struct SecretSheet: View {
 /// The 5-hour and 7-day windows of the session's worker account, as the worker last reported
 /// them: in the model sheet, as the web client puts them under the model pill's menu.
 struct LimitsSection: View {
-    let limits: WorkerLimits
+    let reported: WorkerLimits
+    private var limits: WorkerLimits { reported.current() }
+
+    init(limits: WorkerLimits) { reported = limits }
 
     var body: some View {
         Section {
@@ -426,7 +429,8 @@ struct LimitRow: View {
             }
             ProgressView(value: min(window.utilization, 100), total: 100)
                 .tint(window.utilization >= 90 ? palette.danger : window.utilization >= 70 ? palette.waiting : .accentColor)
-            Text("Resets \(window.resetsAt, format: .relative(presentation: .named))")
+            Text(window.hasReset ? "Reset since the last report"
+                 : "Resets \(window.resetsAt.formatted(.relative(presentation: .named)))")
                 .font(.caption)
                 .foregroundStyle(palette.muted)
         }
@@ -438,17 +442,31 @@ struct LimitRow: View {
 /// has hit a limit.
 struct LimitBar: View {
     @Environment(\.palette) private var palette
-    let limits: WorkerLimits
+    let reported: WorkerLimits
     let noticePercent: Double
 
-    private var worst: (String, LimitWindow)? {
+    init(limits: WorkerLimits, noticePercent: Double) {
+        reported = limits
+        self.noticePercent = noticePercent
+    }
+
+    var body: some View {
+        // Looked at again every half minute, so the bar leaves when its window resets even
+        // before the worker reports again.
+        TimelineView(.periodic(from: .now, by: 30)) { _ in
+            bar(reported.current())
+        }
+    }
+
+    private func worst(_ limits: WorkerLimits) -> (String, LimitWindow)? {
         [("5-hour", limits.five_hour), ("weekly", limits.seven_day)]
             .compactMap { name, w in w.map { (name, $0) } }
             .max { $0.1.utilization < $1.1.utilization }
     }
 
-    var body: some View {
-        if limits.status == "rejected" || (worst?.1.utilization ?? 0) >= noticePercent, let (name, w) = worst {
+    @ViewBuilder private func bar(_ limits: WorkerLimits) -> some View {
+        if limits.status == "rejected" || (worst(limits)?.1.utilization ?? 0) >= noticePercent,
+           let (name, w) = worst(limits), !w.hasReset {
             HStack(spacing: 8) {
                 Image(systemName: limits.status == "rejected" ? "exclamationmark.octagon.fill" : "gauge.with.dots.needle.67percent")
                     .foregroundStyle(limits.status == "rejected" ? palette.danger : palette.waiting)

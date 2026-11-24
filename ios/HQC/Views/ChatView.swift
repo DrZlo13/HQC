@@ -459,7 +459,7 @@ struct Composer: View {
     var onSecret: (() -> Void)?
     let onSend: () -> Void
     let onStop: () -> Void
-    @FocusState private var focused: Bool
+    @State private var focused = false
     @Namespace private var glass
     @State private var pickingPhotos = false
     @State private var pickingFiles = false
@@ -546,13 +546,13 @@ struct Composer: View {
                         .accessibilityLabel("Hide keyboard")
                     }
 
-                    TextField("Message", text: $text, axis: .vertical)
-                        .lineLimit(1...8)
-                        .focused($focused)
-                        .font(.body)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .frame(minHeight: Self.control)
+                    ComposerField(text: $text, focused: $focused, placeholder: "Message",
+                                  textColor: UIColor(palette.text),
+                                  placeholderColor: UIColor(palette.muted)) { items in
+                        for item in items { Task { await addPasted(item) } }
+                        Feedback.play(.tap)
+                    }
+                    .frame(minHeight: Self.control)
                         .glassEffect(.regular.interactive(), in: .rect(cornerRadius: Self.control / 2))
                         .glassEffectID("field", in: glass)
 
@@ -642,6 +642,28 @@ struct Composer: View {
             : (data, type.mime, type.preferredFilenameExtension ?? "jpg")
         let name = "photo-\(Int(Date().timeIntervalSince1970)).\(ext)"
         await upload(bytes, name: name, mime: mime, preview: image)
+    }
+
+    /// An image, a PDF or a file pasted from the clipboard, uploaded as the + menu's are.
+    private func addPasted(_ item: NSItemProvider) async {
+        let types = item.registeredTypeIdentifiers.compactMap(UTType.init)
+        if let image = types.first(where: { $0.conforms(to: .image) }),
+           let data = try? await item.loadData(for: image) {
+            let preview = UIImage(data: data)
+            // HEIC and the rest go up as JPEG, which every agent and browser reads.
+            let (bytes, mime, ext): (Data, String, String) =
+                image.conforms(to: .png) ? (data, "image/png", "png")
+                : image.conforms(to: .jpeg) ? (data, "image/jpeg", "jpg")
+                : (preview?.jpegData(compressionQuality: 0.9) ?? data, "image/jpeg", "jpg")
+            let name = item.suggestedName.map { "\($0).\(ext)" } ?? "pasted-\(Int(Date().timeIntervalSince1970)).\(ext)"
+            await upload(bytes, name: name, mime: mime, preview: preview)
+            return
+        }
+        guard let type = types.first(where: { !$0.conforms(to: .text) }) ?? types.first,
+              let data = try? await item.loadData(for: type) else { return }
+        let ext = type.preferredFilenameExtension ?? "bin"
+        let name = item.suggestedName.map { $0.hasSuffix(".\(ext)") ? $0 : "\($0).\(ext)" } ?? "pasted.\(ext)"
+        await upload(data, name: name, mime: type.mime, preview: nil)
     }
 
     private func addFile(_ url: URL) async {
@@ -991,5 +1013,16 @@ struct ComposerArea<Content: View>: View {
                                startPoint: .top, endPoint: .bottom)
                     .ignoresSafeArea()
             }
+    }
+}
+
+extension NSItemProvider {
+    /// The item's bytes in `type`.
+    func loadData(for type: UTType) async throws -> Data {
+        try await withCheckedThrowingContinuation { c in
+            _ = loadDataRepresentation(forTypeIdentifier: type.identifier) { data, error in
+                if let data { c.resume(returning: data) } else { c.resume(throwing: error ?? CocoaError(.fileReadUnknown)) }
+            }
+        }
     }
 }

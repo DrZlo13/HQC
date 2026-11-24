@@ -76,7 +76,9 @@ final class ChatModel {
 
     /// A cue when a usage window is used up since the last look: the 5-hour one, or the week.
     private func cueLimits(from old: WorkerLimits?, to new: WorkerLimits?) {
-        guard let new else { return }
+        // A stale report (its window already reset) is no limit reached.
+        guard let new = new?.current() else { return }
+        let old = old?.current()
         func used(_ w: LimitWindow?) -> Bool { (w?.utilization ?? 0) >= 100 }
         let rejected = new.status == "rejected" && old?.status != "rejected"
         if (used(new.seven_day) && !used(old?.seven_day)) || (rejected && new.rate_limit_type?.contains("seven") == true) {

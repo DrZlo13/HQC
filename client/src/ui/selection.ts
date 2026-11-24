@@ -128,6 +128,13 @@ function quotable(scope: HTMLElement | null): Range | null {
   return feed && scope.contains(feed) && sel.toString().trim() ? range.cloneRange() : null;
 }
 
+/** The text of the selection in `scope` (the chat) that starts in a feed, as the Quote button
+ *  takes it: what the keys for Quote and Search read (SPEC §6). */
+export function feedSelectionText(scope: HTMLElement | null): string | undefined {
+  const range = quotable(scope);
+  return range ? selectedText(scope, range) : undefined;
+}
+
 /** Follows the selection in `scope` (the chat) while `enabled`; `shown` changes only when there
  *  is a quotable selection or is none, not on every `selectionchange` of a drag. */
 export function useQuoteSelection(scope: RefObject<HTMLElement | null>, enabled: boolean): QuoteSelection {

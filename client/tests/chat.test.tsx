@@ -4540,6 +4540,99 @@ describe('Quote', () => {
     vi.unstubAllGlobals();
   });
 
+  /** A key pressed where the focus is (`code`: its place, as a layout-free key reads); whether
+   *  the browser keeps it (not prevented). */
+  const press = async (code: string, mods: { metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean; repeat?: boolean }) => {
+    let kept = true;
+    await act(() => {
+      const at = document.activeElement ?? document.body;
+      kept = at.dispatchEvent(new KeyboardEvent('keydown', { code, key: code === 'Quote' ? "'" : code.slice(3).toLowerCase(), bubbles: true, cancelable: true, ...mods }));
+    });
+    return kept;
+  };
+
+  it('⌘\' quotes the text selected in the feed and ⌘E searches it, with Ctrl off a Mac; else the keys are the browser\'s', async () => {
+    const open = vi.fn();
+    vi.stubGlobal('open', open);
+    const platform = vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    try {
+      const { app } = setup('idle');
+      await mount(app);
+      await typeDraft('Look at this');
+      // Nothing selected.
+      expect(await press('Quote', { metaKey: true })).toBe(true);
+      await select(textNode('All tests pass.'), 4, 9);
+      // Ctrl on a Mac, with Shift, another key.
+      expect(await press('Quote', { ctrlKey: true })).toBe(true);
+      expect(await press('Quote', { metaKey: true, shiftKey: true })).toBe(true);
+      expect(await press('KeyQ', { metaKey: true })).toBe(true);
+      expect(area().value).toBe('Look at this');
+      // The tooltips name the keys.
+      expect(quoteButton()!.title).toBe("Quote the selected text into the message (⌘')");
+      await rightClick(textNode('All tests pass.'));
+      expect($('.ctx-menu .menu-quote')!.getAttribute('title')).toBe("Quote into the message (⌘')");
+      expect($('.ctx-menu .menu-web-search')!.getAttribute('title')).toBe('Search the selected text (⌘E)');
+      // Quote, pressed while the menu is open: after the draft, the caret in the field, the
+      // selection cleared, the menu gone as on a pick in it.
+      expect(await press('Quote', { metaKey: true })).toBe(false);
+      expect(area().value).toBe('Look at this\n\n> tests\n\n');
+      expect(document.activeElement).toBe(area());
+      expect(document.getSelection()!.rangeCount).toBe(0);
+      expect($('.ctx-menu')).toBeNull();
+      // Search: in a new tab, without the opener.
+      await select(textNode('All tests pass.'), 4, 9);
+      expect(await press('KeyE', { metaKey: true })).toBe(false);
+      expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=tests', '_blank', 'noopener');
+      // The key held down repeats: still taken, no second tab.
+      expect(await press('KeyE', { metaKey: true, repeat: true })).toBe(false);
+      expect(open).toHaveBeenCalledTimes(1);
+      // Off a Mac: Ctrl, not ⌘.
+      platform.mockReturnValue('Linux x86_64');
+      expect(await press('KeyE', { metaKey: true })).toBe(true);
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(await press('Quote', { ctrlKey: true })).toBe(false);
+      expect(area().value).toBe('Look at this\n\n> tests\n\n> tests\n\n');
+      // A selection that starts in the header, or the field's own, is not the feed's.
+      await select(textNode('test 12', '.chat-head'));
+      expect(await press('KeyE', { ctrlKey: true })).toBe(true);
+      await select(null);
+      area().setSelectionRange(0, 4);
+      expect(await press('Quote', { ctrlKey: true })).toBe(true);
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(area().value).toBe('Look at this\n\n> tests\n\n> tests\n\n');
+    } finally {
+      platform.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('searches with ⌘E where there is no input, where ⌘\' stays the browser\'s, and quotes once the input is back', async () => {
+    const open = vi.fn();
+    vi.stubGlobal('open', open);
+    const platform = vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    try {
+      const { api, app } = setup('locked_vscode');
+      await mount(app);
+      await select(textNode('All tests pass.'), 4, 9);
+      expect(await press('Quote', { metaKey: true })).toBe(true);
+      expect(await press('KeyE', { metaKey: true })).toBe(false);
+      expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=tests', '_blank', 'noopener');
+      // VS Code lets go of the open chat's session: the input comes back, and ⌘' quotes into it.
+      const idle = { ...app.sessions.get('s1')!, state: 'idle' as const };
+      api.session.mockResolvedValue(idle);
+      await act(async () =>
+        app.mergeSummary([{ session_id: 's1', project_id: 'p1', title: idle.title, state: 'idle', queue_len: 0, unread: 0, last_seq: 7, last_read_seq: 7 }]),
+      );
+      expect(area(), 'the input is back').not.toBeNull();
+      await select(textNode('All tests pass.'), 4, 9);
+      expect(await press('Quote', { metaKey: true })).toBe(false);
+      expect(area().value).toBe('> tests\n\n');
+    } finally {
+      platform.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('takes any selection in the feed on a right click, and has no Quote where there is no input', async () => {
     const call = ev('event.tool.call', 3, (e) => ((e.payload.call_id = 'toolu_x'), (e.payload.args_preview = '{"command":"ls /"}')));
     const result = ev('event.tool.result', 4, (e) => ((e.payload.call_id = 'toolu_x'), (e.payload.error = false), (e.payload.result_preview = 'bin etc')));

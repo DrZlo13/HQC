@@ -105,6 +105,9 @@ impl Worker {
         if self.config.session_secrets && self.config.vault {
             if let Some(o) = capabilities.as_object_mut() {
                 o.insert("vault".into(), true.into());
+                // A worker that reads fields of an entry says so; an older one would ignore
+                // `vault_field` and give the password.
+                o.insert("vault_fields".into(), true.into());
             }
         }
         // Workspaces are hub objects (SPEC §3); only `allowed_roots` bounds them here.

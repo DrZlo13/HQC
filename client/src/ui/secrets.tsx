@@ -42,9 +42,12 @@ export function SecretForm({
   const [kind, setKind] = useState<SecretFields['kind']>(asked?.kind ?? 'secret');
   const [name, setName] = useState(asked?.name ?? '');
   const [value, setValue] = useState('');
-  // The agent proposed a Vaultwarden entry: the card starts there; "Type it" is today's form.
+  // The worker reads Vaultwarden: the card offers it. It starts there only when the agent
+  // proposed an entry; "Type it" is today's form.
+  const offersVault = !!asked?.vault || !!asked?.reads_vault;
   const [fromVault, setFromVault] = useState(!!asked?.vault);
   const [entry, setEntry] = useState(asked?.vault ?? '');
+  const [vaultField, setVaultField] = useState(asked?.vault_field ?? '');
   const [passphrase, setPassphrase] = useState('');
   const [remember, setRemember] = useState(false);
   const { busy, error, run } = useAction();
@@ -62,6 +65,7 @@ export function SecretForm({
   const give = () => {
     if (!canGive) return;
     const f: SecretFields = fromVault ? { kind, name, vault: entry.trim() } : { kind, name, value };
+    if (fromVault && vaultField.trim()) f.vault_field = vaultField.trim();
     if (key) {
       if (passphrase) f.passphrase = passphrase;
       if (remember) f.remember = true;
@@ -121,7 +125,7 @@ export function SecretForm({
         </div>
       )}
       {nameError && <div class="error-text small">{nameError}</div>}
-      {asked?.vault && (
+      {offersVault && (
         <div class="seg-group secret-source" role="radiogroup" aria-label="Source">
           {(
             [
@@ -144,17 +148,39 @@ export function SecretForm({
         </div>
       )}
       {fromVault ? (
-        <input
-          class="input mono secret-entry"
-          aria-label="Vaultwarden entry"
-          placeholder="Vaultwarden entry"
-          value={entry}
-          disabled={busy}
-          autocomplete="off"
-          autocapitalize="off"
-          spellcheck={false}
-          onInput={(e) => setEntry((e.currentTarget as HTMLInputElement).value)}
-        />
+        <>
+          <input
+            class="input mono secret-entry"
+            aria-label="Vaultwarden entry"
+            placeholder="Vaultwarden entry"
+            value={entry}
+            disabled={busy}
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck={false}
+            onInput={(e) => setEntry((e.currentTarget as HTMLInputElement).value)}
+          />
+          {/* A field's name, not a secret: shown as typed, and named in the worker's log and the
+              feed line. Labelled, so it is not taken for a place to type the password. Only on a
+              card of a worker that reads fields: an older one would ignore it and give the
+              password. */}
+          {asked?.reads_vault && (
+            <label class="secret-field-row">
+              <span class="secret-field-label">Field</span>
+              <input
+                class="input mono secret-field"
+                aria-label="Vaultwarden field"
+                placeholder={key ? 'empty: private key' : 'empty: password'}
+                value={vaultField}
+                disabled={busy}
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck={false}
+                onInput={(e) => setVaultField((e.currentTarget as HTMLInputElement).value)}
+              />
+            </label>
+          )}
+        </>
       ) : key ? (
         <textarea
           ref={valueField}

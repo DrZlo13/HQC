@@ -295,8 +295,8 @@ describe('the agent’s hqc_secret card', () => {
     expect(actions.approve).not.toHaveBeenCalled();
   });
 
-  describe('with a Vaultwarden entry the agent proposes', () => {
-    const asksVault = () =>
+  describe('the Vaultwarden source on the card', () => {
+    const asksVault = (secret: object = { name: 'WIFI_PASS', kind: 'secret', vault: 'home-wifi' }) =>
       ev('event.approval.request', 6, (e) => {
         e.author = { kind: 'system' };
         e.payload = {
@@ -304,12 +304,12 @@ describe('the agent’s hqc_secret card', () => {
           tool: 'hqc_secret',
           description: 'The Wi-Fi password to write into the camera config',
           options: [{ id: 'deny', label: 'Decline', canonical: 'deny' }],
-          secret: { name: 'WIFI_PASS', kind: 'secret', vault: 'home-wifi' },
+          secret,
         };
       });
-    const showVault = (over: Partial<ChatActions> = {}) => {
+    const showVault = (over: Partial<ChatActions> = {}, secret?: object) => {
       const t = new Timeline();
-      t.apply(asksVault());
+      t.apply(asksVault(secret));
       const actions: ChatActions = {
         timeline: t,
         approve: vi.fn(async () => {}),
@@ -377,6 +377,79 @@ describe('the agent’s hqc_secret card', () => {
       await act(async () => buttonByText('Give')!.click());
       await flush();
       expect(actions.giveSecret).toHaveBeenCalledWith('toolu_1', { kind: 'secret', name: 'WIFI_PASS', value: PASSWORD });
+    });
+
+    describe('on a worker that reads Vaultwarden', () => {
+      const seg = (label: string) => $$('.secret-source [role="radio"]').find((b) => b.textContent === label)!;
+      it('offers the switch with no entry proposed, starts on "Type it" and focuses the value', async () => {
+        const actions = showVault({}, { name: 'WIFI_PASS', kind: 'secret', reads_vault: true });
+        await flush();
+        expect(seg('Vaultwarden').getAttribute('aria-checked')).toBe('false');
+        expect(seg('Type it').getAttribute('aria-checked')).toBe('true');
+        expect(document.activeElement).toBe($('.secret-value'));
+        // Switching over: an entry and a field of the owner's own.
+        await act(async () => seg('Vaultwarden').click());
+        await typeInto($<HTMLInputElement>('.secret-entry')!, 'home-wifi');
+        await typeInto($<HTMLInputElement>('.secret-field')!, 'username');
+        await act(async () => buttonByText('Give')!.click());
+        await flush();
+        expect(actions.giveSecret).toHaveBeenCalledWith('toolu_1', {
+          kind: 'secret',
+          name: 'WIFI_PASS',
+          vault: 'home-wifi',
+          vault_field: 'username',
+        });
+      });
+
+      it('prefills the field the agent proposed and gives it', async () => {
+        const actions = showVault({}, { name: 'WIFI_PASS', kind: 'secret', vault: 'home-wifi', vault_field: 'username', reads_vault: true });
+        expect(seg('Vaultwarden').getAttribute('aria-checked')).toBe('true');
+        expect($<HTMLInputElement>('.secret-field')!.value).toBe('username');
+        expect($<HTMLInputElement>('.secret-field')!.getAttribute('aria-label')).toBe('Vaultwarden field');
+        // Labelled, not masked, and the placeholder says what an empty field gives.
+        expect($('.secret-field-label')!.textContent).toBe('Field');
+        expect($<HTMLInputElement>('.secret-field')!.type).not.toBe('password');
+        expect($<HTMLInputElement>('.secret-field')!.placeholder).toBe('empty: password');
+        await act(async () => buttonByText('Give')!.click());
+        await flush();
+        expect(actions.giveSecret).toHaveBeenCalledWith('toolu_1', {
+          kind: 'secret',
+          name: 'WIFI_PASS',
+          vault: 'home-wifi',
+          vault_field: 'username',
+        });
+      });
+
+      it('sends no field when the field is empty', async () => {
+        const actions = showVault({}, { name: 'WIFI_PASS', kind: 'secret', vault: 'home-wifi', vault_field: 'username', reads_vault: true });
+        await typeInto($<HTMLInputElement>('.secret-field')!, '  ');
+        await act(async () => buttonByText('Give')!.click());
+        await flush();
+        expect(actions.giveSecret).toHaveBeenCalledWith('toolu_1', { kind: 'secret', name: 'WIFI_PASS', vault: 'home-wifi' });
+      });
+
+      it('says an empty field is the private key for an ssh key', () => {
+        showVault({}, { name: 'pi-lab', kind: 'ssh_key', vault: 'pi-lab', reads_vault: true });
+        expect($<HTMLInputElement>('.secret-field')!.placeholder).toBe('empty: private key');
+      });
+
+      it('has no field input on a card that names an entry but not reads_vault (an older worker)', async () => {
+        const actions = showVault({}, { name: 'WIFI_PASS', kind: 'secret', vault: 'home-wifi' });
+        expect(seg('Vaultwarden').getAttribute('aria-checked')).toBe('true');
+        expect($('.secret-field')).toBeNull();
+        await act(async () => buttonByText('Give')!.click());
+        await flush();
+        expect(actions.giveSecret).toHaveBeenCalledWith('toolu_1', { kind: 'secret', name: 'WIFI_PASS', vault: 'home-wifi' });
+      });
+
+      it('sends no field with a typed value', async () => {
+        const actions = showVault({}, { name: 'WIFI_PASS', kind: 'secret', vault: 'home-wifi', vault_field: 'username' });
+        await act(async () => seg('Type it').click());
+        await typeInto($<HTMLInputElement>('.secret-value')!, PASSWORD);
+        await act(async () => buttonByText('Give')!.click());
+        await flush();
+        expect(actions.giveSecret).toHaveBeenCalledWith('toolu_1', { kind: 'secret', name: 'WIFI_PASS', value: PASSWORD });
+      });
     });
   });
 

@@ -515,7 +515,8 @@ pub const TOOLS: &[Tool] = &[
             it); the user may keep it for this workspace. Where the worker reads Vaultwarden \
             (Bitwarden) and you know the entry that holds it, pass it as `vault`: the card shows \
             it for the user to confirm or change and the worker reads the value itself; \
-            elsewhere `vault` is dropped and the user types the value. \
+            elsewhere `vault` is dropped and the user types the value. When it is not the entry's \
+            password that you need, pass `vault_field` with `vault`. \
             Returns `{note, path?, fingerprint?}`. \
             Ask only for what the task needs, once: a secret you were given is still there.",
         input_schema: || {
@@ -538,6 +539,10 @@ pub const TOOLS: &[Tool] = &[
                     "vault": {
                         "type": "string",
                         "description": "The Vaultwarden (Bitwarden) entry that holds it: its exact name or its id."
+                    },
+                    "vault_field": {
+                        "type": "string",
+                        "description": "The field of that entry to give when it is not the password: username, notes, totp (the stored key, not a code), a card's or an identity's field, an SSH key's public_key, or a custom field's exact name. Leave it out for the password (for an SSH key entry: its private key)."
                     }
                 },
                 "required": ["name", "purpose"],

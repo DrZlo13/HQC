@@ -8447,6 +8447,19 @@ button.ps-look {
   flex: 1 1 140px;
   min-width: 0;
 }
+.secret-field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.secret-field-label {
+  flex: none;
+  font-size: 13px;
+}
+.secret-field-row .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .secret-key {
   resize: vertical;
   font-size: 12px;

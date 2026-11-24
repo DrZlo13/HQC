@@ -48,6 +48,7 @@
 //! [providers.qwen-local]         # SPEC 0.144: a model provider of the hub this worker runs
 //! base_url = "http://192.168.1.229:8082"   # must equal the hub's description
 //! # api_key = "..."              # for an endpoint that needs one; never in `hello` or logs
+//! # api_key = { vault = "zai key", field = "password" }   # or read from Vaultwarden (rbw) at every agent start; `field` optional
 //! ```
 
 use std::collections::BTreeMap;
@@ -134,7 +135,27 @@ struct RawConfig {
 struct RawProvider {
     base_url: String,
     #[serde(default)]
-    api_key: Option<String>,
+    api_key: Option<RawProviderKey>,
+}
+
+/// A provider's `api_key`: the key itself, or the Vaultwarden entry (and its field) the worker
+/// reads it from with `rbw` whenever it starts the agent.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(
+    untagged,
+    expecting = "a key, or a table { vault = \"<entry>\", field = \"<field>\" }"
+)]
+enum RawProviderKey {
+    Value(String),
+    Vault(RawVaultKey),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawVaultKey {
+    vault: String,
+    #[serde(default)]
+    field: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -266,10 +287,28 @@ fn parse_provider(name: &str, raw: RawProvider) -> anyhow::Result<AllowedProvide
     {
         bail!("base_url must be an http:// or https:// URL");
     }
+    let (api_key, api_key_vault) = match raw.api_key {
+        Some(RawProviderKey::Value(k)) if !k.is_empty() => (Some(Secret::new(k)), None),
+        Some(RawProviderKey::Vault(v)) => {
+            hqc_proto::frame::check_vault_entry(&v.vault).map_err(anyhow::Error::msg)?;
+            if let Some(f) = &v.field {
+                hqc_proto::frame::check_vault_field(f).map_err(anyhow::Error::msg)?;
+            }
+            (
+                None,
+                Some(VaultRef {
+                    entry: v.vault,
+                    field: v.field,
+                }),
+            )
+        }
+        _ => (None, None),
+    };
     Ok(AllowedProvider {
         name: name.to_string(),
         base_url,
-        api_key: raw.api_key.filter(|k| !k.is_empty()).map(Secret::new),
+        api_key,
+        api_key_vault,
     })
 }
 
@@ -384,6 +423,25 @@ pub struct AllowedProvider {
     pub base_url: String,
     /// `ANTHROPIC_AUTH_TOKEN` for an endpoint that needs one; never in `hello` or logs.
     pub api_key: Option<Secret>,
+    /// Instead of `api_key`: the Vaultwarden entry the worker reads it from at every start of
+    /// the agent.
+    pub api_key_vault: Option<VaultRef>,
+}
+
+/// A Vaultwarden entry and, when it is not the password, the field of it (as
+/// [`crate::vault::read_for`] takes them): neither is secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultRef {
+    pub entry: String,
+    pub field: Option<String>,
+}
+
+/// A [`VaultRef`] with the `rbw` that reads it ([`Config::rbw_bin`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultKey {
+    pub entry: String,
+    pub field: Option<String>,
+    pub rbw: PathBuf,
 }
 
 /// A provider a session runs on: the hub's description, checked against the worker's
@@ -395,6 +453,9 @@ pub struct SessionProvider {
     pub model: String,
     pub context_tokens: Option<u32>,
     pub api_key: Option<Secret>,
+    /// The key is in Vaultwarden: the supervisor reads it into a copy of the spec at every
+    /// start of the agent, so `api_key` is empty here.
+    pub api_key_vault: Option<VaultKey>,
 }
 
 /// Validated config. Paths are absolute and normalized (canonical when they exist).
@@ -777,6 +838,11 @@ impl Config {
             model: p.model.clone(),
             context_tokens: p.context_tokens,
             api_key: allowed.api_key.clone(),
+            api_key_vault: allowed.api_key_vault.as_ref().map(|v| VaultKey {
+                entry: v.entry.clone(),
+                field: v.field.clone(),
+                rbw: self.rbw_bin.clone(),
+            }),
         })
     }
 
@@ -1056,6 +1122,82 @@ mod tests {
         assert!(!on.check_start(&restricted).unwrap().browser);
     }
 
+    /// SPEC 0.241: a provider's `api_key` is the key, or a Vaultwarden entry (and field) the
+    /// session's provider carries with the worker's `rbw`.
+    #[test]
+    fn a_providers_key_is_a_value_or_a_vault_entry() {
+        let toml = |key: &str| {
+            format!(
+                "hub_url = \"http://127.0.0.1:1/\"\nallowed_roots = [\"/a\"]\n\
+                 [providers.zai]\nbase_url = \"https://api.z.ai/api/anthropic\"\n{key}\n"
+            )
+        };
+        let key = |k: &str| Config::parse(&toml(k)).map(|c| c.providers[0].clone());
+        // A string, as before.
+        let p = key("api_key = \"sk-zai\"").unwrap();
+        assert_eq!(p.api_key.unwrap().expose(), "sk-zai");
+        assert!(p.api_key_vault.is_none());
+        // A table: the entry, and the field when there is one; no key of its own.
+        let p = key("api_key = { vault = \"zai key\" }").unwrap();
+        assert!(p.api_key.is_none());
+        assert_eq!(
+            p.api_key_vault,
+            Some(VaultRef {
+                entry: "zai key".into(),
+                field: None
+            })
+        );
+        let p = key("api_key = { vault = \"zai\", field = \"token\" }").unwrap();
+        assert_eq!(
+            p.api_key_vault,
+            Some(VaultRef {
+                entry: "zai".into(),
+                field: Some("token".into())
+            })
+        );
+        // Neither a stray key in the table, nor a table without an entry, nor a bad entry or
+        // field.
+        for bad in [
+            "api_key = { vault = \"zai\", feild = \"x\" }",
+            "api_key = { field = \"x\" }",
+            "api_key = { vault = \"\" }",
+            "api_key = { vault = \"a\\nb\" }",
+            "api_key = { vault = \"zai\", field = \"\" }",
+            "api_key = { vault = \"zai\", field = \"a\\nb\" }",
+        ] {
+            assert!(key(bad).is_err(), "{bad}");
+        }
+        // A table that is not a vault reference says what is expected.
+        let e = format!(
+            "{:#}",
+            key("api_key = { vault = \"zai\", feild = \"x\" }").unwrap_err()
+        );
+        assert!(
+            e.contains("a key, or a table { vault = \"<entry>\", field = \"<field>\" }"),
+            "{e}"
+        );
+        // The session's provider carries the entry with the worker's `rbw`.
+        let mut c = Config::parse(&toml("api_key = { vault = \"zai\" }")).unwrap();
+        c.rbw_bin = PathBuf::from("/opt/rbw");
+        let p = c
+            .provider(&hqc_proto::frame::Provider {
+                name: "zai".into(),
+                base_url: "https://api.z.ai/api/anthropic".into(),
+                model: "glm-5".into(),
+                context_tokens: None,
+            })
+            .unwrap();
+        assert!(p.api_key.is_none());
+        assert_eq!(
+            p.api_key_vault,
+            Some(VaultKey {
+                entry: "zai".into(),
+                field: None,
+                rbw: PathBuf::from("/opt/rbw")
+            })
+        );
+    }
+
     /// SPEC 0.144: a provider runs only by its name in `[providers.*]` with the same
     /// `base_url`; any other description starts the session without it and says why. The
     /// key is never in `hello` or in `Debug`.
@@ -1097,6 +1239,7 @@ mod tests {
         s.provider = Some(described("zai", "https://api.z.ai/api/anthropic"));
         let p = c.check_start(&s).unwrap().provider.unwrap();
         assert_eq!(p.api_key.unwrap().expose(), "sk-zai-secret");
+        assert!(p.api_key_vault.is_none());
 
         for (name, url, why) in [
             ("other", "http://192.168.1.229:8082", "does not allow"),

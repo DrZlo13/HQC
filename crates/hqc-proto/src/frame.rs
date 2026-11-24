@@ -1098,22 +1098,35 @@ pub const MAX_VAULT_ENTRY: usize = 200;
 
 /// Check the `vault` of `secret.put`: one shown line of 1 to [`MAX_VAULT_ENTRY`] characters.
 pub fn check_vault_entry(entry: &str) -> Result<(), String> {
-    if (1..=MAX_VAULT_ENTRY).contains(&entry.chars().count()) && shown_line(entry) {
+    check_vault_line("vault", entry)
+}
+
+/// Check the `vault_field` of `secret.put`: the same shape as the entry's name, so a field of a
+/// custom name is as long as an entry's.
+pub fn check_vault_field(field: &str) -> Result<(), String> {
+    check_vault_line("vault_field", field)
+}
+
+fn check_vault_line(what: &str, s: &str) -> Result<(), String> {
+    if (1..=MAX_VAULT_ENTRY).contains(&s.chars().count()) && shown_line(s) {
         Ok(())
     } else {
         Err(format!(
-            "vault is one line of 1 to {MAX_VAULT_ENTRY} characters, without control characters"
+            "{what} is one line of 1 to {MAX_VAULT_ENTRY} characters, without control characters"
         ))
     }
 }
 
-/// `secret.put {request_id, session_id, kind, name, value?, vault?, passphrase?, remember?,
-/// comment?}` -> `result` [`SecretPutResult`] or `error` (since SPEC 0.147, §5.3). `request_id` equals the
+/// `secret.put {request_id, session_id, kind, name, value?, vault?, vault_field?, passphrase?,
+/// remember?, comment?}` -> `result` [`SecretPutResult`] or `error` (since SPEC 0.147, §5.3). `request_id` equals the
 /// frame `id`. The worker takes it only with `session_secrets`, for a session of its owner
 /// that is not restricted and whose agent runs now; `value` is the secret (`secret`) or the
 /// private key (`ssh_key`), absent for `ssh_keygen`; instead of `value`, `vault` names the
 /// Vaultwarden (Bitwarden) entry that holds it, which the worker reads itself with `rbw` (only
 /// with `vault` on in its `worker.toml`): exactly one of the two for `secret` and `ssh_key`;
+/// `vault_field`, only with `vault`, names the field of that entry to give instead of its
+/// password (`username`, `notes`, `totp`, a card's or an identity's field, an ssh key's
+/// `public_key`, or a custom field's exact name);
 /// `passphrase` decrypts a key and is not kept; `remember` keeps an `ssh_key` for the session's
 /// workspace (`ssh_keygen` always does); `comment` is the comment of a made key. Never logged, never in the outbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1126,6 +1139,8 @@ pub struct SecretPut {
     pub value: Option<SecretValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_field: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passphrase: Option<SecretValue>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

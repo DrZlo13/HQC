@@ -309,7 +309,7 @@ enum NotificationScript {
           // carries the options of the card's Allow and Deny buttons.
           // A publication's text (the hub's publish.rs card()) for the card's few lines: its
           // fixed sentence gives way to the path; the files stay in the hub's order, which puts
-          // the names that look like a secret first and the hidden files and folders next, so
+          // the names that look like a secret first and the hidden files next, so
           // they are on the card first. Text of another form stays as it is.
           const publication = (d) => {
             const lines = d.split('\\n');

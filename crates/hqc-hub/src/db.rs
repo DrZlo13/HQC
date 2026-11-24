@@ -3085,7 +3085,11 @@ pub async fn pending_inputs(db: &PgPool, session_id: Uuid) -> sqlx::Result<Vec<I
 /// `joined`: the worker took the input into the turn already running (SPEC §17.2). Kept on
 /// the message as `payload.joined`, only on an input that may join (SPEC §17.2): a person's
 /// message (a `user.message` that is not a run of a schedule), a room's input and a `send` of
-/// another session (a `peer.message` of mode `send`, no schedule).
+/// another session (a `peer.message` of mode `send`, no schedule). With it the message gets
+/// `payload.joined_after`: the greatest `seq` of the session's events that are not inputs, when
+/// it is past the message's own. The worker sends the ack after the session's own records
+/// written before it, so that event is the last one the agent made before it took the input
+/// (SPEC §6).
 pub async fn mark_delivered(
     db: &PgPool,
     event_id: Uuid,
@@ -3097,7 +3101,14 @@ pub async fn mark_delivered(
                                        OR (type = 'peer.message' AND (payload ? 'room'
                                            OR (payload->>'mode' = 'send'
                                                AND payload->'schedule_id' IS NULL))))
-                          THEN jsonb_set(payload, '{{joined}}', 'true') ELSE payload END
+                          THEN jsonb_set(payload, '{{joined}}', 'true')
+                               || COALESCE((SELECT jsonb_build_object('joined_after', max(e.seq))
+                                            FROM events e
+                                            WHERE e.session_id = events.session_id
+                                              AND e.type NOT IN ('user.message', 'peer.message')
+                                              AND e.seq > events.seq
+                                            HAVING max(e.seq) IS NOT NULL), '{{}}'::jsonb)
+                          ELSE payload END
          WHERE event_id = $1 AND delivery = 'pending' RETURNING {EVENT_COLS}"
     ))
     .bind(event_id)
@@ -3600,6 +3611,25 @@ pub async fn agent_messages_before(
     .await
 }
 
+/// The `seq` of the last `agent.message` of the agent in session `id` with `after < seq <= upto`.
+pub async fn last_agent_message_between(
+    db: &PgPool,
+    id: Uuid,
+    after: i64,
+    upto: i64,
+) -> sqlx::Result<Option<i64>> {
+    sqlx::query_scalar(
+        "SELECT max(seq) FROM events
+         WHERE session_id = $1 AND seq > $2 AND seq <= $3 AND type = 'agent.message'
+           AND author ->> 'kind' = 'agent'",
+    )
+    .bind(id)
+    .bind(after)
+    .bind(upto)
+    .fetch_one(db)
+    .await
+}
+
 /// The first event of session `id` after `seq` that is not an input stored while the agent's
 /// text was being written (`payload.during_text`, SPEC §6).
 pub async fn first_after_inputs_during_text(
@@ -3660,8 +3690,10 @@ pub async fn turn_marks(db: &PgPool, id: Uuid) -> sqlx::Result<Vec<TurnMark>> {
 /// input) whose type is in `types`, copied in order into the empty session `to` under new ids,
 /// at `seq` 1.. (SPEC §6 fork): what its feed shows of the conversation it forks. Each keeps its
 /// origin: a copy's, else its own id in `runtime`, the transcript of `from`. Copied inputs are no
-/// inputs to deliver; events a `retraction` of `from` names are left out (SPEC 0.179). The number
-/// copied.
+/// inputs to deliver; events a `retraction` of `from` names are left out (SPEC 0.179). A copied
+/// input's `joined_after` is carried into the copy's own `seq`: the last copied event that is no
+/// input and stood at or before it, dropped when that is not past the input (SPEC 0.221). The
+/// number copied.
 pub async fn copy_events(
     db: &PgPool,
     from: Uuid,
@@ -3673,16 +3705,27 @@ pub async fn copy_events(
 ) -> sqlx::Result<i64> {
     let mut tx = db.begin().await?;
     let n = sqlx::query(
-        "INSERT INTO events
+        "WITH keep AS (
+           SELECT e.event_id, e.seq, e.type, row_number() OVER (ORDER BY seq) AS nseq
+           FROM events e WHERE session_id = $1 AND type = ANY($4)
+             AND delivery IS DISTINCT FROM 'withdrawn'
+             AND (seq < $3 OR (seq > $3 AND seq < $6
+                               AND type NOT IN ('user.message', 'peer.message')))
+             AND NOT EXISTS (SELECT 1 FROM events r WHERE r.session_id = $1
+                               AND r.type = 'retraction' AND r.payload->'event_ids' ? e.event_id::text))
+         INSERT INTO events
            (event_id, session_id, seq, ts, author, type, payload, origin_id, origin_runtime)
-         SELECT gen_random_uuid(), $2, row_number() OVER (ORDER BY seq), ts, author, type,
-                payload, COALESCE(origin_id, event_id), COALESCE(origin_runtime, $5)
-         FROM events e WHERE session_id = $1 AND type = ANY($4)
-           AND delivery IS DISTINCT FROM 'withdrawn'
-           AND (seq < $3 OR (seq > $3 AND seq < $6
-                             AND type NOT IN ('user.message', 'peer.message')))
-           AND NOT EXISTS (SELECT 1 FROM events r WHERE r.session_id = $1
-                             AND r.type = 'retraction' AND r.payload->'event_ids' ? e.event_id::text)",
+         SELECT gen_random_uuid(), $2, k.nseq, s.ts, s.author, s.type,
+                CASE WHEN s.payload ? 'joined_after'
+                     THEN (s.payload - 'joined_after')
+                          || COALESCE((SELECT jsonb_build_object('joined_after', max(a.nseq))
+                                       FROM keep a
+                                       WHERE a.seq <= (s.payload ->> 'joined_after')::bigint
+                                         AND a.type NOT IN ('user.message', 'peer.message')
+                                       HAVING max(a.nseq) > k.nseq), '{}'::jsonb)
+                     ELSE s.payload END,
+                COALESCE(s.origin_id, s.event_id), COALESCE(s.origin_runtime, $5)
+         FROM keep k JOIN events s ON s.event_id = k.event_id",
     )
     .bind(from)
     .bind(to)

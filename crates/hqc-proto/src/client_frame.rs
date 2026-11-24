@@ -57,6 +57,10 @@ pub enum ServerFrame {
         /// `payload.joined` with this change. Sent only when true.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         joined: bool,
+        /// With `joined`: `payload.joined_after`, the last event of the agent stored before the
+        /// hub took the ack (SPEC §6). Sent only when set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        joined_after: Option<i64>,
     },
     /// Reply to `subscribe_summary`: every session of the user.
     #[serde(rename = "summary")]

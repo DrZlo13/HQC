@@ -292,6 +292,166 @@ async fn a_fork_before_a_message_written_during_the_answer_keeps_the_answer() {
     hub.finish().await;
 }
 
+/// SPEC §6: a message the agent took after some of its work (`joined_after`) stands behind the
+/// last answer up to that work: a fork before it cuts there and keeps the events up to it.
+#[tokio::test]
+async fn a_fork_before_a_message_the_agent_took_after_its_work_cuts_at_the_last_answer_before_it() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    let m1 = input(&hub, &mut w, &sid, "Remember APPLE.").await;
+    // m2 is sent while the agent works; it makes a text, a call and a result before it takes it.
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "And BANANA."}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let m2 = r["event"].clone();
+    let si = w.expect("session.input").await;
+    let a1 = agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "Looking.", "final": false, "in_reply_to": m1["event_id"]}),
+    );
+    w.event(a1.clone()).await;
+    w.event(agent_event(
+        &sid,
+        "tool.call",
+        json!({"call_id": "toolu_01", "tool": "Bash", "args_preview": "ls"}),
+    ))
+    .await;
+    w.event(agent_event(
+        &sid,
+        "tool.result",
+        json!({"call_id": "toolu_01", "result_preview": "x", "error": false}),
+    ))
+    .await;
+    w.reply(
+        &si["id"],
+        "ack",
+        json!({"event_id": m2["event_id"], "joined": true}),
+    )
+    .await;
+    reply(&mut w, &sid, "OK, APPLE and BANANA.").await;
+
+    let f = fork(&hub, &sid, &m2).await;
+    let fs = ack_start(&mut w, &f).await;
+    assert_eq!(
+        fs["payload"]["fork"]["at_event_ids"],
+        json!([a1["event_id"]])
+    );
+    let types: Vec<(String, Value)> = hub
+        .events(&f)
+        .await
+        .iter()
+        .map(|e| {
+            (
+                e["type"].as_str().unwrap().to_string(),
+                e["payload"]["text"].clone(),
+            )
+        })
+        .collect();
+    assert!(
+        types.contains(&("agent.message".to_string(), json!("Looking."))),
+        "{types:?}"
+    );
+    assert!(
+        !types
+            .iter()
+            .any(|(_, t)| t == "OK, APPLE and BANANA." || t == "And BANANA."),
+        "{types:?}"
+    );
+    hub.finish().await;
+}
+
+/// SPEC 0.221: a fork leaves out `usage` and `status`, so its `seq` are not the source's. Its copy
+/// of a message the agent took after some of its work names that place in the fork's own `seq`
+/// (the copy of the result), and a fork of the fork before the copy cuts where a fork of the
+/// source would, not at an answer after it.
+#[tokio::test]
+async fn a_forks_copy_of_a_joined_message_keeps_its_place_in_the_forks_seq() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    // A turn before, whose `usage` and `status` no fork copies.
+    input(&hub, &mut w, &sid, "Hello.").await;
+    let hello = reply(&mut w, &sid, "Hello.").await;
+    w.event(agent_event(
+        &sid,
+        "usage",
+        json!({"input_tokens": 1, "output_tokens": 1}),
+    ))
+    .await;
+    w.event(agent_event(&sid, "status", json!({"state": "idle"})))
+        .await;
+    let m1 = input(&hub, &mut w, &sid, "Remember APPLE.").await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "And BANANA."}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let m2 = r["event"].clone();
+    let si = w.expect("session.input").await;
+    let a1 = agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "Looking.", "final": false, "in_reply_to": m1["event_id"]}),
+    );
+    w.event(a1.clone()).await;
+    w.event(agent_event(
+        &sid,
+        "tool.call",
+        json!({"call_id": "toolu_01", "tool": "Bash", "args_preview": "ls"}),
+    ))
+    .await;
+    w.event(agent_event(
+        &sid,
+        "tool.result",
+        json!({"call_id": "toolu_01", "result_preview": "x", "error": false}),
+    ))
+    .await;
+    w.reply(
+        &si["id"],
+        "ack",
+        json!({"event_id": m2["event_id"], "joined": true}),
+    )
+    .await;
+    reply(&mut w, &sid, "OK, APPLE and BANANA.").await;
+    let m3 = input(&hub, &mut w, &sid, "And CHERRY.").await;
+
+    // The fork before CHERRY: BANANA's copy stands behind the copy of the result.
+    let f = fork(&hub, &sid, &m3).await;
+    ack_start(&mut w, &f).await;
+    let copied = hub.events(&f).await;
+    let banana = copied
+        .iter()
+        .find(|e| e["payload"]["text"] == "And BANANA.")
+        .unwrap()
+        .clone();
+    let result = copied.iter().find(|e| e["type"] == "tool.result").unwrap();
+    assert_eq!(
+        banana["payload"]["joined_after"], result["seq"],
+        "{copied:?}"
+    );
+
+    // A fork of the fork before BANANA's copy cuts at "Looking.", not at the answer after it.
+    let ff = fork(&hub, &f, &banana).await;
+    let ffs = ack_start(&mut w, &ff).await;
+    assert_eq!(
+        ffs["payload"]["fork"]["at_event_ids"],
+        json!([a1["event_id"], hello["event_id"]])
+    );
+    hub.finish().await;
+}
+
 /// SPEC §6: an answer to the message itself is no answer shown above it, so a fork before the
 /// message neither cuts at it nor copies it.
 #[tokio::test]

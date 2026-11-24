@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.220, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.221, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -598,7 +598,7 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise), `human?` (since 0.219: `true` on a message the owner typed in `POST /api/sessions/{id}/input` (§6), written there and nowhere else, so it is absent on a hub's own note (a resume, `hqc_move`, subagent leftovers), a run of a schedule, a room's post to its agent and a message from the Claude Code transcript; it is what Take back and Send now require (§6, §17.2) and what the worker writes Claude Code's `origin: human` for (§5.3, §8.1)) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.203: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
+| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `joined_after?` (since 0.221, with `joined`, set by the hub in the same write: the `seq` of the last event of the session that is no `user.message` or `peer.message`, stored before the hub took the ack, when it is past the message's own; absent when there is none and on a message joined before 0.221; §6), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise), `human?` (since 0.219: `true` on a message the owner typed in `POST /api/sessions/{id}/input` (§6), written there and nowhere else, so it is absent on a hub's own note (a resume, `hqc_move`, subagent leftovers), a run of a schedule, a room's post to its agent and a message from the Claude Code transcript; it is what Take back and Send now require (§6, §17.2) and what the worker writes Claude Code's `origin: human` for (§5.3, §8.1)) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.203: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text`, `reset?` (since 0.161: `true` when the runtime abandoned the attempt that wrote the text so far, which the hub and the client drop, and (since 0.208) the thinking being written with it, §6, §8.1; `text` is then empty; absent when false), `thinking?` (since 0.208: `true` for a piece of the agent's thinking being written, not of its answer; absent when false; §6, §8.1) | adapter; transport only, not written to the database |
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?, due_in_ms?, retry?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands and (since 0.169) Monitor watchers, in the order they became rows, then (since 0.169) the wakeup the agent armed and its cron jobs, empty when none (§8.1); since 0.181 a task the CLI marks `ambient` is no row, and the commands and subagents it starts are rows as the agent's own (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.161; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row, a command's and (since 0.169) a Monitor's say, `retry` (since 0.179) `{attempt, max_retries, retry_delay_ms, error_status?}` while its request to the model API failed and waits to be retried (`error_status` absent: the attempt got no response; §8.1), `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row, `command` for a command's and, since 0.169, `monitor` for a Monitor's, `wakeup` for the agent's wakeup and `cron` for one of its cron jobs; a command's or a Monitor's row carries only `task_id`, `description` (its Bash call's description, or the command; the Monitor's description), `duration_ms`, `call_id?`, `kind` and `stoppable`; a wakeup's and a job's row also `due_in_ms` (since 0.169), the milliseconds until it fires when the list was sent, by the worker's clock, 0 once due, absent on a job whose next fire is not known |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops, and (since 0.179) again, unchanged, at each heartbeat of a long call of the main agent (§8.1, §17.3) |
@@ -614,7 +614,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`), `action?` (since 0.180, only for a request with `server`: `accept` — the answers, also none, are the input; `decline` — the person declined, `answers` empty; the client shows "Declined") | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; since 0.181 also the worker after a background task's end, the task's output file (§8.1), with the same `author`, `kind: text`; since 0.209 also a publication the owner allowed (`hqc_publish`, §7), with `kind: site` (`event.attachment.site.json`); the user's files go into `user.message.artifact_ids` (rule below) |
-| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
+| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `joined_after?` (since 0.221, with `joined`: as on a `user.message`), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.161 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`), `call_id?`, `status?`, `task_id?` (since 0.135, only on `task_notification`), `usage?{total_tokens, tool_uses, duration_ms}` (since 0.181, only on `task_notification`), `from_session_id?` (since 0.172, only on `room_passed`: the agent that passed), `trigger?`, `pre_tokens?`, `post_tokens?` (since 0.179, only on `context_compacted`), `model?` (since 0.179, only on `model_not_switched`) | hub or worker; codes below |
@@ -720,9 +720,9 @@ Rules:
   worker disconnects or says `hello` again (the worker sends a rate above 0 again after
   `hello.ack`), and a session's when it or its project is deleted.
 - History is never rewritten: besides an input's `delivery` and `delivered_at` (§3 Event), the
-one change of a stored event is `joined` of a person's `user.message` (since 0.112, §17.2),
-since 0.172 of a room's input to its agent (§7.1.1) and since 0.174 of a `send`'s
-`peer.message`.
+one change of a stored event is `joined` (and, since 0.221, `joined_after`) of a person's
+`user.message` (since 0.112, §17.2), since 0.172 of a room's input to its agent (§7.1.1) and
+since 0.174 of a `send`'s `peer.message`.
 A `retraction` (since 0.179) hides events in clients and deletes none.
   Protection against forged peer-message headers is applied on delivery to the runtime (§7.1).
 
@@ -2040,7 +2040,16 @@ the rest is marked "later"):
   without the source's events. Since 0.108 a fork before a message with `during_text` keeps the
   `agent.message` the client shows above it (below, the WebSocket paragraph) as the newest cut
   and the last copied event; an `agent.thinking` the client shows above it (since 0.208) is not
-  kept. Since 0.161 a fork before a message the client shows after the
+  kept. Since 0.221 a fork before a message with `joined_after` cuts at the last `agent.message` after
+  the message and not past `joined_after`, or at the place of the turns it waited through (below)
+  when that is later, and keeps the events up to it but the inputs; with neither it cuts before
+  the message as for any other, and such a message has no `during_text` place. The calls and the
+  thinking after that `agent.message`, which the feed shows above the message, are not kept, as a
+  thinking above is not. A fork's copy of a message keeps `joined_after` in the copy's own `seq`:
+  the last copied event that is no input and stood at or before it, none when that is not past
+  the message (a fork leaves out `usage`, `status` and requests, so its `seq` are not the
+  source's).
+  Since 0.161 a fork before a message the client shows after the
   turns it waited through (the same paragraph; one with `during_text` too) cuts after them: the
   newest cut is the last `agent.message` before the place the client shows the message at, and
   the feed also gets the events after the message and before that place but its inputs. The
@@ -2960,8 +2969,19 @@ followed by "· queued" while it is `pending` ("· awaiting delivery" stays for 
 while no turn ran), as the VS Code tab holds what is typed during a turn. Meanwhile the worker
 may write it into the running turn (§17.2: a person's input or, since 0.174, a `send` of another
 session, at once or after an answer to a permission request): once the agent takes it after its
-current calls (`joined`) it stands at its `seq`, one with `during_text` under that text as above;
-a person's message carries "joined the turn" on its first line, a send's bubble no note.
+current calls (`joined`) it stands where the agent took it (since 0.221; before, at its `seq`,
+one with `during_text` under that text as above): right behind the last event of the session
+that is no input stored before the hub took the worker's `joined` ack (`payload.joined_after`),
+below the text and the calls the agent made before it saw the message, and never above its own
+`seq`; the worker sends that ack after the session's own records written before it (§5.2), so
+every event the agent made before it took the message is stored by then. Several taken behind
+the same event keep their `seq` order. One with `during_text` is placed by `joined_after`, not
+by the rule for such an input: it stands below the text it came during and the calls after it,
+and the thinking or the text being written stands below it, since the agent took it before they
+began. An ack lost while the worker was away (a restart of the hub, a dropped link) comes again
+only after what the worker sends on reconnecting, so such a message then stands behind all of
+that, also under the answer to it. A message joined before 0.221 has no `joined_after` and stands
+at its `seq` as before; a person's message carries "joined the turn" on its first line, a send's bubble no note.
 Otherwise it waits for a turn of its own and, delivered (`delivered_at`, by the `delivery`
 frame), stands where the agent took it: after the events of the turns it waited through, the
 text it came during among them, before the first event of its own turn. The client reads the
@@ -2979,7 +2999,7 @@ input and is no `status` (a `status` there closes the same turn as the end befor
 `joined` input stored behind waiting ones joined a turn after the last of them that was delivered
 before it (since 0.174 an input may join past a waiting one, §17.2): it stays right behind that
 one and is taken with it; if each of them was still pending when it was delivered (or is now) it
-joined the turn running then and stands at its own `seq`. The hub follows this order where it
+joined the turn running then and stands at its own `seq` (with `joined_after`, behind that event when it is below, as above). The hub follows this order where it
 cuts by `seq`: a fork before such an input (above) and the files of a reply to a question
 (§7.1). On open
 the chat loads the newest 100 events (`before_seq`), shows them and subscribes. Since 0.220 it
@@ -3043,10 +3063,13 @@ newer copy).
   client takes the field over its copy);
   `{type: subscribed, session_id, last_seq}`: the history after `after_seq` has been
   sent, the live stream follows; `{type: delivery, session_id, event_id, seq, delivery,
-  delivered_at?, joined?}`: the delivery of an input changed; the event itself is not resent, the
+  delivered_at?, joined?, joined_after?}`: the delivery of an input changed; the event itself is not resent, the
   client updates `delivery`/`delivered_at` of its event with this `seq`; `joined: true` (since
   0.112, `client.delivery.joined.json`, absent when false) says the input went into the turn
-  already running, and the client sets the message's `payload.joined` with it;
+  already running, and the client sets the message's `payload.joined` with it; `joined_after`
+  (since 0.221, with `joined`, `client.delivery.joined.json`, absent when the message has none) is
+  the `seq` after which the agent took it, which the client sets as `payload.joined_after` and
+  places the message by (above);
   `{type: summary, sessions[]}`: the reply to `subscribe_summary`, all of the user's sessions;
   `{type: session.summary, session}`: one session changed; an element is `{session_id,
   project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?,
@@ -7074,7 +7097,8 @@ may join: the cap of §7.1 caps it whenever one of them comes from a session in 
 worker gets without `peer` (§7.1.1), and (since 0.174) a `peer.message` of mode `send` without
 `schedule_id`; a `joined` on any other input is the worker's mistake, logged, not kept, and the
 input's turn opens (since 0.71). Since 0.112 the hub keeps an honoured one on the message,
-`payload.joined: true` (§4), and sends it with the `delivery` frame (§6); the client marks the first line of a person's message with an icon before the time, "Joined the turn" its tooltip (since 0.178; the words in the line before; a send's bubble has no such note).
+`payload.joined: true` (§4) and, since 0.221, `payload.joined_after`, where the agent took it
+(§4, §6), and sends them with the `delivery` frame (§6); the client marks the first line of a person's message with an icon before the time, "Joined the turn" its tooltip (since 0.178; the words in the line before; a send's bubble has no such note).
 What may not join waits for the end of the turn as before (scheduled runs and slash commands
 always do), and a person's inputs keep their `seq` order among themselves. Since 0.75 nothing
 is written into the turn either while a move of the session waits (§5.3): the input is for the
@@ -7496,6 +7520,23 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.220 → 0.221 (an input the agent took after its calls stands where it took it)
+§4, §6, §17.2: a message typed during a turn that the CLI took only after the running tool call's
+result (`joined`) stood at its own `seq`, above the whole turn: above the text and the calls the
+agent made before it ever saw the message. The hub now keeps where it was taken: when it honours
+the worker's `joined` ack it writes `payload.joined_after`, the `seq` of the last event of the
+session that is no input, in the same update, and sends it in the `delivery` frame. The worker
+sends that ack after the session's own records written before it, and the hub handles a worker
+connection's frames one after another, so every event the agent made before it took the message
+is stored by then; the agent events' `ts` is the worker's clock and `delivered_at` the hub's, so
+the client cannot compare them. The client moves such a message down to right behind that event
+(never up, several behind the same one in `seq` order); one with `during_text` is placed by
+`joined_after` too, below the text it came during, and the text or the thinking being written
+stands below it. A fork before it cuts at the last `agent.message` up to that event, and a fork's
+copy carries `joined_after` into the copy's own `seq`. An ack lost while the worker was away
+comes after what the worker sends on reconnecting: the message then stands behind all of that, a
+limitation. A message joined before has no `joined_after` and stands as before.
 
 ### 0.219 → 0.220 (history and attachments kept on the device, the older history on demand)
 §6, §12, §15, §17.2: each open of a chat downloaded its newest page and then the whole older

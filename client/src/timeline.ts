@@ -178,13 +178,15 @@ export class Timeline {
           (seen.delivery !== ev.delivery ||
             seen.delivered_at !== ev.delivered_at ||
             seen.reply_delivered_at !== replyAt ||
-            joined(seen) !== joined(ev))
+            joined(seen) !== joined(ev) ||
+            joinedAfter(seen) !== joinedAfter(ev))
         ) {
           this.bySeq.set(
             ev.seq,
             withJoined(
               { ...seen, delivery: ev.delivery, delivered_at: ev.delivered_at, reply_delivered_at: replyAt },
               joined(ev),
+              joinedAfter(ev),
             ),
           );
           this.sorted = null;
@@ -275,18 +277,21 @@ export class Timeline {
   }
 
   /** A `delivery` frame (SPEC §6): new `delivery` / `delivered_at` of a stored input, and
-   *  `joined` when it went into the turn already running. A change for an event not loaded
+   *  `joined` (and `joined_after`) when it went into the turn already running. A change for an event not loaded
    *  yet is dropped: the event arrives with current fields. */
   applyDelivery(d: DeliveryChange): void {
     const ev = this.bySeq.get(d.seq);
     if (!ev || ev.event_id !== d.event_id) return;
-    this.bySeq.set(d.seq, withJoined({ ...ev, delivery: d.delivery, delivered_at: d.delivered_at }, d.joined === true));
+    this.bySeq.set(
+      d.seq,
+      withJoined({ ...ev, delivery: d.delivery, delivered_at: d.delivered_at }, d.joined === true, d.joined_after),
+    );
     this.sorted = null;
     this.changed();
   }
 
   /** The hub's copies of events already loaded (the newest page fetched again when a kept
-   *  chat opens): `delivery`, `delivered_at`, `reply_delivered_at` and `payload.joined` may
+   *  chat opens): `delivery`, `delivered_at`, `reply_delivered_at` and `payload.joined`, `joined_after` may
    *  have changed while nothing was subscribed, and the hub tells only subscriptions. Events
    *  not loaded, `lastSeq` and `olderFrom` stay: the subscription brings what came after
    *  `lastSeq`. */
@@ -300,12 +305,17 @@ export class Timeline {
         seen.delivery === ev.delivery &&
         seen.delivered_at === ev.delivered_at &&
         seen.reply_delivered_at === replyAt &&
-        joined(seen) === joined(ev)
+        joined(seen) === joined(ev) &&
+        joinedAfter(seen) === joinedAfter(ev)
       )
         continue;
       this.bySeq.set(
         ev.seq!,
-        withJoined({ ...seen, delivery: ev.delivery, delivered_at: ev.delivered_at, reply_delivered_at: replyAt }, joined(ev)),
+        withJoined(
+          { ...seen, delivery: ev.delivery, delivered_at: ev.delivered_at, reply_delivered_at: replyAt },
+          joined(ev),
+          joinedAfter(ev),
+        ),
       );
       changed = true;
     }
@@ -606,12 +616,43 @@ export class Timeline {
       let at = i;
       while (at > floor) {
         const prev = out[at - 1];
-        if (prev.kind !== "event" || !duringText(prev) || prev.queued || prev.event.event_id === answers) break;
+        if (prev.kind !== "event" || prev.queued || prev.event.event_id === answers) break;
+        // An input the agent took after some of its work right before the text is stepped over:
+        // its place is behind this text or later (the next pass moves it there), and the inputs
+        // above it may have come while this text was written.
+        if (!duringText(prev) && joinedAfter(prev.event) === undefined) break;
         at--;
       }
       if (at < i) out.splice(at, 0, ...out.splice(i, n));
       floor = i + n;
       i += n - 1;
+    }
+    // An input the agent took after some of its work (`joined_after`) stands where it took it:
+    // behind the last event of the agent stored before the hub took the runtime's ack (SPEC §6),
+    // below the text and the calls that came before. It only moves down: one `placeQueued`
+    // already put behind a waiting input stays. Several behind the same event keep their `seq`
+    // order.
+    const moved = new Set<Item>();
+    for (let i = 0; i < out.length; i++) {
+      const input = out[i];
+      const after = input.kind === "event" ? joinedAfter(input.event) : undefined;
+      if (input.kind !== "event" || after === undefined || moved.has(input)) continue;
+      // The events that are no input stand in `seq` order here (the passes above move inputs, or
+      // a text up past inputs), so the anchor is the last of them after the input up to `after`.
+      let anchor = -1;
+      for (let j = i + 1; j < out.length; j++) {
+        const e = out[j];
+        if (e.kind !== "event" || e.event.type === "user.message" || e.event.type === "peer.message") continue;
+        if (e.event.seq! > after) break;
+        anchor = j;
+      }
+      if (anchor < 0) continue;
+      out.splice(i, 1);
+      let at = anchor;
+      for (let o = out[at]; o && o.kind === "event" && moved.has(o) && o.event.seq! < input.event.seq!; o = out[at]) at++;
+      out.splice(at, 0, input);
+      moved.add(input);
+      i--;
     }
     // The thinking being written stands after the stored events, above the inputs that came
     // while it was written and those still waiting for a turn of their own, before the
@@ -636,18 +677,21 @@ export class Timeline {
 }
 
 /** A stored input the hub marked as come while the agent's text or thinking was being written
- *  (SPEC §6). */
+ *  (SPEC §6), unless the agent took it after some of its work (`joined_after`): it stands where
+ *  the agent took it, under the text it came during already. */
 export function duringText(it: Item): boolean {
   return (
     it.kind === "event" &&
     (it.event.type === "user.message" || it.event.type === "peer.message") &&
-    it.event.payload.during_text === true
+    it.event.payload.during_text === true &&
+    joinedAfter(it.event) === undefined
   );
 }
 
 /** An input that stands under the thinking being written: one that came while it was written,
  *  unless `placeQueued` moved it after the turn it waited through, or one still waiting for a
- *  turn of its own, as under the text being written. */
+ *  turn of its own, as under the text being written. One the agent took after some of its work
+ *  (`joined_after`) is not under it: the agent took it before it began the thinking. */
 function underThinking(it: Item): boolean {
   if (it.kind !== "event") return false;
   return it.queued ? it.event.delivery === "pending" : duringText(it);
@@ -802,10 +846,20 @@ function joined(e: HqcEvent): boolean {
   return (e.type === "user.message" || e.type === "peer.message") && e.payload.joined === true;
 }
 
-/** `e` with `payload.joined` set when `on`; it is never taken back. */
-function withJoined(e: HqcEvent, on: boolean): HqcEvent {
-  if (!on || (e.type !== "user.message" && e.type !== "peer.message") || e.payload.joined) return e;
-  return { ...e, payload: { ...e.payload, joined: true } } as HqcEvent;
+/** `payload.joined_after` of a joined input (SPEC §6): the `seq` of the last event of the agent
+ *  stored before the hub took the runtime's ack, when it is past the input's own; none for an
+ *  input joined before 0.221. */
+function joinedAfter(e: HqcEvent): number | undefined {
+  if (!joined(e)) return undefined;
+  const a = (e.payload as { joined_after?: number }).joined_after;
+  return typeof a === "number" && a > e.seq! ? a : undefined;
+}
+
+/** `e` with `payload.joined` (and `joined_after`) set when `on`; it is never taken back. */
+function withJoined(e: HqcEvent, on: boolean, after?: number): HqcEvent {
+  if (!on || (e.type !== "user.message" && e.type !== "peer.message")) return e;
+  if (e.payload.joined && (after === undefined || e.payload.joined_after === after)) return e;
+  return { ...e, payload: { ...e.payload, joined: true, joined_after: after ?? e.payload.joined_after } } as HqcEvent;
 }
 
 /** `ev` under `key` in `m` unless an earlier one (by `seq`) is there: an older page may load

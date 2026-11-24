@@ -146,6 +146,8 @@ pub enum Notice {
         delivered_at: Option<chrono::DateTime<chrono::Utc>>,
         /// The input went into the turn already running (SPEC §17.2).
         joined: bool,
+        /// `payload.joined_after` of the message (SPEC §6).
+        joined_after: Option<i64>,
     },
     /// Something that feeds `state`, `queue_len` or unread changed (SPEC §6 `subscribe_summary`).
     SessionChanged { session_id: Uuid },

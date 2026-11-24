@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.223, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.224, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -4418,7 +4418,10 @@ a `control_request` with `subtype: can_use_tool` (`tool_name`, `input`,
 allow|deny`. Options for the client: `once`, `session`, `always`, `deny`
 (`always` only if `permission_suggestions` contains `addRules` in `localSettings`), and since 0.213
 for an MCP tool `server_session` and `server_always` (`server_always` only for a session with a
-workspace that is not restricted; neither on a request only a person may answer; §10.1).
+workspace that is not restricted; neither on a request only a person may answer, nor, since 0.224,
+for a tool name another server's tool could share; §10.1). Since 0.224 the adapter keeps the ids
+of the options it offered with the open request and refuses an answer with any other (the request
+stays open), as the hub does against the stored request (§10.1).
 Mapping: `once` → allow;
 `deny` → deny as the "No" of the VS Code tab (since 0.69; extension 2.1.309): `message` "The user
 doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit,
@@ -4446,7 +4449,7 @@ does, also for a subagent's request) and a `grant` on `session` (`place: session
 rule form: for `Bash` `Bash(<prefix> *)` or `Bash(<command>)`, for another tool `toolName`) and on
 `always` (`place: local_settings`, `rules` — the rules it sends in `updatedPermissions`), so the
 card says what each grants. Under `--restricted` (§8.4) local settings do not apply, so
-`always` maps to `session`. The hub stores no permissions of Claude Code's own; its only
+`always` is not offered (before 0.224 an answer `always` there was taken as `session`). The hub stores no permissions of Claude Code's own; its only
 standing ones are hqc's allow rules of a folder (since 0.52, below). The
 `AskUserQuestion` tool arrives through the same `can_use_tool`: the adapter turns it into
 a `clarify.request`, assigning its own `id`s to the questions, and returns the answers via
@@ -6225,7 +6228,15 @@ no rule lifts the worker's `deny`.
 more answers after the session and always answers: option `server_session` ("Allow all
 <server> tools for this session", `canonical: session`) and, when the session has a workspace and
 is not restricted, option `server_always` ("Always allow all <server> tools in this folder",
-`canonical: always`); a request only a person may answer (§8.1) offers neither. The worker
+`canonical: always`); a request only a person may answer (§8.1) offers neither. Since 0.224
+neither is offered for a tool name another server's tool could share: the tool part starts with
+`_` or has `__` (Claude Code splits the name at the first `__` too, so `mcp__hqc___x`, the tool
+`x` of a server `hqc_`, reads as the tool `_x` of `hqc`, and `mcp__a__b__x` as the tool `b__x`
+of `a`; a rule `mcp__hqc` or `mcp__a` made from such a card would allow another server), and, as
+a precaution, when the server part starts or ends with `_`. The hub stores no folder rule for
+`server_always` on such a tool either (`400`, the request stays open). A rule `mcp__hqc` made
+from a card of the real `hqc` still allows the tools of `hqc_`, as Claude Code's own rule does:
+how a rule matches a tool is unchanged. The worker
 answers `allow` to either and remembers the server for the rest of the process: every
 `mcp__<server>__*` call is then allowed without a card, another server's is not. `server_always`
 is also an answer of the owner that the hub turns into a standing rule: before it forwards the
@@ -7644,6 +7655,20 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.223 → 0.224 (no whole-server answer for an ambiguous name; only an offered option)
+§8.1, §10.1: the card of an MCP tool offered "all tools of this server" for any tool name, and
+the server is the part before the next `__`, as Claude Code reads it; for a server whose name
+starts or ends with `_` or has `__` that part is another server's name (`mcp__hqc___x` of a
+server `hqc_` reads as `hqc`), so "Allow all hqc tools" stored `mcp__hqc` and allowed the real
+`hqc` too. The worker now offers neither answer for a name another server's tool could share
+(the tool part starts with `_` or has `__`; as a precaution also a server part that starts or
+ends with `_`), and the hub stores no folder rule for `server_always` on one. A rule made from a
+card of the real `hqc` still covers `hqc_`, as Claude Code's own does. The worker also took any
+option it knows as the answer: `server_session` and `server_always` on a card that offered
+neither, `session` on a request only a person may answer, `always` in restricted mode (as
+`session`). It now keeps the ids of the options the card offered and refuses any other; the hub
+already refused an option that is not in the request it stores.
 
 ### 0.222 → 0.223 (the agent's task list above the input)
 Backlog item "the agent's task list as a pinned block". §4: a stored event `tasks`

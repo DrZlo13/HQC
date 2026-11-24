@@ -217,6 +217,19 @@ async fn server_always_stores_the_server_rule() {
     assert_eq!(texts(&hub.get(&rules).await.1), ["mcp__srv"]);
     let (s, v) = hub.post(&path, json!({"option_id": "once"})).await;
     assert_eq!(s, 200, "{v}");
+    let f = w.expect("approval.response").await;
+    w.reply(&f["id"], "ack", json!({})).await;
+
+    // A tool name another server's tool could share (`hqc_`'s `x`): no rule for `mcp__hqc`,
+    // even from a worker that offered the answer.
+    w.event(ask("r4", "mcp__hqc___x")).await;
+    hub.wait_session(&sid, "waiting", |v| v["state"] == "waiting")
+        .await;
+    let path = format!("/api/sessions/{sid}/requests/r4");
+    let (s, v) = hub.post(&path, json!({"option_id": "server_always"})).await;
+    assert_eq!(s, 400, "{v}");
+    w.expect_silence(Duration::from_millis(300)).await;
+    assert_eq!(texts(&hub.get(&rules).await.1), ["mcp__srv"]);
     hub.finish().await;
 }
 

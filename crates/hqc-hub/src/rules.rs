@@ -84,15 +84,18 @@ async fn add_rules(app: &AppState, ws: &db::WorkspaceRow, rules: &[String]) -> A
 }
 
 /// The answer `server_always` to the approval of `tool`: the folder of the session `s` gets
-/// the rule `mcp__<server>`, the server being the one of the request's tool, not the client's.
+/// the rule `mcp__<server>`, the server being the one of the request's tool, not the client's;
+/// none for a tool name another server's tool could share, which the worker offers no such
+/// answer for.
 pub async fn allow_server(
     app: &AppState,
     user: &CurrentUser,
     s: &db::SessionRow,
     tool: &str,
 ) -> ApiResult<()> {
-    let server = hqc_proto::rules::mcp_server(tool)
-        .ok_or_else(|| ApiError::BadRequest("the request is not for an MCP tool".into()))?;
+    let server = hqc_proto::rules::unambiguous_mcp_server(tool).ok_or_else(|| {
+        ApiError::BadRequest("the request is not for a tool of one MCP server".into())
+    })?;
     let id = s
         .workspace_id
         .ok_or_else(|| ApiError::BadRequest("the session has no folder".into()))?;

@@ -66,6 +66,7 @@ function settingsApp(api: Partial<Api>) {
     webSearch: WEB_SEARCHES[0],
     providers: [],
     reloadSessions: vi.fn(async () => {}),
+    deviceUser: () => undefined,
   } as unknown as AppState;
 }
 

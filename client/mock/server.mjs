@@ -385,8 +385,11 @@ export async function startMock({ port = 0, speed = 1, log = () => {}, demo = fa
     store(t, mk(t, 'event.agent.message', {
       text: 'Send me any message, for example "fix the login bug", and I will walk through everything an agent does here: '
         + 'thinking, a question for you, reading and editing files, a subagent at work, a command that needs your permission, '
-        + 'a screenshot, a published page and a final answer with a table, code and maths.',
+        + 'a screenshot, a picture and a final answer with a table, code and maths.',
       final: true, in_reply_to: undefined,
+    }, {
+      // A moment after the others, so the tour heads the list, which is newest first.
+      ts: new Date(Date.now() + 2000).toISOString(),
     }));
   }
 

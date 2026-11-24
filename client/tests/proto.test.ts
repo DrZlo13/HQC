@@ -38,6 +38,11 @@ const files = readdirSync(WIRE).filter((f) => f.endsWith('.json'));
 const load = (f: string): unknown => JSON.parse(readFileSync(join(WIRE, f), 'utf8'));
 
 describe('examples/wire', () => {
+  it('parses the context and cache fields of a usage', () => {
+    const ev = parseEvent(load('event.usage.json'));
+    expect(ev.type === 'usage' && [ev.payload.context_tokens, ev.payload.context_limit, ev.payload.cache_ttl_s]).toEqual([329000, 967000, 3600]);
+  });
+
   it('has the files the client depends on', () => {
     expect(files).toContain('event.approval.request.json');
     expect(files).toContain('event.unknown.json');

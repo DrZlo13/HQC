@@ -126,7 +126,15 @@
 //!   `usage` with a `cost_usd` (or since the transcript's last `cost-state` after `--resume`,
 //!   or since 0 after `conversation_reset`), `session_cost_usd` the total itself; the tokens
 //!   of a compaction's `result` (zeros in its `usage`) are the growth of its cumulative
-//!   `modelUsage`, summed over the models, since the same baseline;
+//!   `modelUsage`, summed over the models, since the same baseline; `context_tokens` is the
+//!   sum of the usage of the main agent's last API response (the size `post_tokens` of a
+//!   `compact_boundary` gives, until the next response; none after a boundary without it, the
+//!   runtime not having counted the size),
+//!   `context_limit` the `contextWindow` of the main model's entry in `modelUsage` less the
+//!   reserve for output and the CLI's margin ([`context_limit`], [`usage_entry`]),
+//!   `cache_ttl_s` the TTL of the cache writes the response or `modelUsage` shows, less the
+//!   seconds since that response started ([`ContextUse::cache_ttl_s`]); the output tokens of
+//!   the context are the response's `message_delta` count; `/clear` forgets the context;
 //!   a request of the main agent or of a foreground subagent still open then gets
 //!   `approval.cancel` / `clarify.cancel` `stopped`, any other subagent's stays open until its
 //!   `task_notification`, which cancels it; an input written during the turn and not echoed
@@ -249,6 +257,15 @@ const NOT_REPORTED_YET: &str = "This agent has not reported yet";
 /// How long after a subagent reported, with background commands it started still listed, the
 /// main agent is told of those still listed then ([`Core::leftovers`]).
 const LEFTOVER_AFTER: Duration = Duration::from_secs(30 * 60);
+/// The CLI keeps this many tokens of the model's output out of the window the auto-compaction
+/// counts against, at most (`get_context_usage` of 2.1.329; `yPt` of the VS Code tab): the
+/// reserve is `min(maxOutputTokens, this)`.
+const AUTO_COMPACT_OUTPUT_RESERVE_MAX: u64 = 20_000;
+/// A further margin below the window and the output reserve at which the CLI compacts.
+const AUTO_COMPACT_BUFFER: u64 = 13_000;
+/// `cache_ttl_s` of a prompt cache written with the 1-hour TTL, and of the default 5-minute one.
+const CACHE_TTL_1H_S: u64 = 3600;
+const CACHE_TTL_5M_S: u64 = 300;
 /// `system.code` of stream-json `system` `compact_boundary` (SPEC §4, §8.1).
 pub const CONTEXT_COMPACTED: &str = "context_compacted";
 pub const CONTEXT_COMPACTED_TEXT: &str = "Context compacted";
@@ -575,6 +592,13 @@ pub struct Core {
     /// the baseline of the next turn's cost and of a compaction's tokens, one value so that
     /// both move together.
     cost_base: Option<CostState>,
+    /// The context the main agent's last API response left, or the size a compaction
+    /// reported; the `context_*` and `cache_ttl_s` of the next `usage` ([`ContextUse`]).
+    context: Option<ContextUse>,
+    /// `message.id` of the main agent's latest response and when it started: its first line
+    /// (`message_start` or `assistant`) that came here. The prompt cache is read or written
+    /// at that moment ([`ContextUse::cache_ttl_s`]).
+    response_started: Option<(String, Instant)>,
     /// A `compact_boundary` came since the last `result`: a `result` with no model turn costs
     /// for the compaction itself.
     compacted: bool,
@@ -725,6 +749,8 @@ impl Core {
             model_requested: None,
             model_noticed: None,
             cost_base: None,
+            context: None,
+            response_started: None,
             compacted: false,
             commands: None,
             listed: None,
@@ -766,6 +792,17 @@ impl Core {
     pub fn with_folder(mut self, rules: FolderRules, root: std::path::PathBuf) -> Self {
         self.folder = Some((rules, root));
         self
+    }
+
+    /// Moves the start of the main agent's last response `by` into the past (tests).
+    #[cfg(test)]
+    pub fn rewind_response(&mut self, by: Duration) {
+        if let Some(c) = self.context.as_mut() {
+            c.rewind(by);
+        }
+        if let Some((_, t)) = self.response_started.as_mut() {
+            *t = t.checked_sub(by).unwrap_or(*t);
+        }
     }
 
     /// The session's cumulative cost and `modelUsage` tokens before this process: the
@@ -1434,6 +1471,8 @@ impl Core {
                 self.clearing = true;
                 self.fresh = true;
                 self.cost_base = None;
+                // The new conversation holds nothing of the old one's context.
+                (self.context, self.response_started) = (None, None);
                 vec![self.emit_system(CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT.into())]
             }
             "system" => match v["subtype"].as_str() {
@@ -1567,6 +1606,21 @@ impl Core {
                 // record's. The event waits for the summary ([`Core::compaction`]).
                 Some("compact_boundary") => {
                     self.compacted = true;
+                    // The size after the compaction until the next response, which is in no
+                    // cache yet; a boundary that gives none (the runtime did not count it) must
+                    // not leave the size before it.
+                    let last = self.context.take();
+                    self.context = compact_metadata(&v["compact_metadata"])
+                        .and_then(|m| m.post_tokens)
+                        .map(|tokens| ContextUse {
+                            tokens,
+                            output: 0,
+                            message_id: None,
+                            model: last.and_then(|l| l.model),
+                            cache_1h: false,
+                            cache_5m: false,
+                            started: None,
+                        });
                     tracing::info!(session_id = %self.session_id, trigger = ?v["compact_metadata"]["trigger"].as_str(), "context compacted");
                     self.compaction = Some((
                         record_uuid(&v).map_or_else(Uuid::now_v7, |u| record_event_id(&u, 0)),
@@ -1957,6 +2011,7 @@ impl Core {
             Some("message_start") => {
                 (self.streamed_chars, self.streamed_estimated, self.streamed) = (0, 0, 0);
                 self.streamed_id = ev["message"]["id"].as_str().map(str::to_owned);
+                self.response_started = self.streamed_id.clone().map(|id| (id, Instant::now()));
                 // A new request of the model after text no assistant text took up: the CLI
                 // abandoned the attempt that wrote it (a stream that broke, then a retry), as the
                 // VS Code tab takes it (`web:163707`); the hub and clients drop it, and the
@@ -1973,6 +2028,14 @@ impl Core {
             // of its deltas missed.
             Some("message_delta") => {
                 let n = ev["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                // The lines of a response carry the usage of its `message_start`, with a few
+                // output tokens: its own count is the context's.
+                if let Some(c) = self.context.as_mut().filter(|c| {
+                    c.message_id.is_some() && c.message_id.as_deref() == self.streamed_id.as_deref()
+                }) {
+                    c.tokens = c.tokens.saturating_sub(c.output) + n;
+                    c.output = n;
+                }
                 self.output_tokens += n.saturating_sub(self.streamed);
                 (self.streamed_chars, self.streamed_estimated, self.streamed) = (0, 0, 0);
             }
@@ -2031,6 +2094,21 @@ impl Core {
         // The CLI's own reply, not the model's: marked, but held and flushed like any text,
         // so it is the turn's final message when it ends the turn.
         let synthetic = v["message"]["model"] == SYNTHETIC_MODEL;
+        // The frames of one response repeat its usage: the last one stands.
+        if !synthetic {
+            let id = v["message"]["id"].as_str();
+            // A response whose `message_start` did not come here starts with its first line.
+            if id.is_some() && id != self.response_started.as_ref().map(|(i, _)| i.as_str()) {
+                self.response_started = id.map(|id| (id.to_owned(), Instant::now()));
+            }
+            let started = self
+                .response_started
+                .as_ref()
+                .map_or_else(Instant::now, |(_, t)| *t);
+            if let Some(used) = ContextUse::of_response(&v["message"], started) {
+                self.context = Some(used);
+            }
+        }
         // Cut off by an interrupt before the stream completed (2.1.312).
         let aborted = v["aborted"] == true;
         let refusal = synthetic && v["message"]["stop_reason"] == REFUSAL;
@@ -2894,6 +2972,14 @@ impl Core {
                 )
             };
             let cost_usd = total.map(|t| self.turn_cost(t, model_tokens));
+            let context = self.context.as_ref();
+            let entry = usage_entry(
+                &v["modelUsage"],
+                self.model.as_deref(),
+                context.and_then(|c| c.model.as_deref()),
+            );
+            let context_limit = entry.and_then(context_limit);
+            let cache_ttl_s = context.and_then(|c| c.cache_ttl_s(entry));
             out.push(self.emit_new(EventKind::Usage {
                 input_tokens,
                 output_tokens,
@@ -2902,6 +2988,9 @@ impl Core {
                 cost_usd,
                 session_cost_usd: total,
                 model,
+                context_tokens: context.map(|c| c.tokens),
+                context_limit,
+                cache_ttl_s,
             }));
         } else if spent {
             // The total grew with no tokens in the result: what background subagents spent
@@ -2916,6 +3005,9 @@ impl Core {
                 cost_usd: None,
                 session_cost_usd: total,
                 model,
+                context_tokens: None,
+                context_limit: None,
+                cache_ttl_s: None,
             }));
         }
         let subtype = v["subtype"].as_str().unwrap_or("");
@@ -3828,6 +3920,108 @@ fn api_retry(v: &Value) -> ApiRetry {
             .as_u64()
             .and_then(|s| u16::try_from(s).ok()),
     }
+}
+
+/// What the main agent's context holds, as its last API response says, and what that response
+/// wrote to the prompt cache.
+#[derive(Debug, Clone)]
+struct ContextUse {
+    /// Input, cache reads, cache writes and output of the response: what the next request
+    /// starts with (the VS Code tab's `updateUsage` sums the same).
+    tokens: u64,
+    /// The output part of `tokens`: the lines of a response carry the count of its
+    /// `message_start`, and its `message_delta` the final one.
+    output: u64,
+    /// `message.id` of the response; none for a size a compaction reported.
+    message_id: Option<String>,
+    /// `message.model` of the response.
+    model: Option<String>,
+    /// The response wrote tokens to the cache with the 1-hour or the 5-minute TTL.
+    cache_1h: bool,
+    cache_5m: bool,
+    /// When the response started; none for a size a compaction reported, which is in no
+    /// cache yet.
+    started: Option<Instant>,
+}
+
+impl ContextUse {
+    /// `message` of a main agent's `assistant` line that started at `started`; `None` without
+    /// `usage`.
+    fn of_response(message: &Value, started: Instant) -> Option<Self> {
+        let usage = message["usage"].as_object()?;
+        let num = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let written = |k: &str| usage.get("cache_creation").and_then(|c| c[k].as_u64()) > Some(0);
+        Some(Self {
+            tokens: num("input_tokens")
+                + num("cache_read_input_tokens")
+                + num("cache_creation_input_tokens")
+                + num("output_tokens"),
+            output: num("output_tokens"),
+            message_id: message["id"].as_str().map(str::to_owned),
+            model: message["model"].as_str().map(str::to_owned),
+            cache_1h: written("ephemeral_1h_input_tokens"),
+            cache_5m: written("ephemeral_5m_input_tokens"),
+            started: Some(started),
+        })
+    }
+
+    /// Seconds the session's cache has left, counted from the request of the response: the
+    /// 1-hour TTL when the response or the session's `modelUsage` entry of its model shows a
+    /// write with it, else the 5-minute one when either shows that (Claude Desktop reads 1 hour
+    /// from `ephemeral_1h_input_tokens`, else 5 minutes); none when no write is seen, and none
+    /// for a size a compaction reported.
+    fn cache_ttl_s(&self, entry: Option<&Value>) -> Option<u64> {
+        let started = self.started?;
+        let seen = |k: &str| entry.is_some_and(|e| e[k].as_u64() > Some(0));
+        let ttl = if self.cache_1h || seen("cacheCreationEphemeral1hInputTokens") {
+            CACHE_TTL_1H_S
+        } else if self.cache_5m || seen("cacheCreationEphemeral5mInputTokens") {
+            CACHE_TTL_5M_S
+        } else {
+            return None;
+        };
+        Some(ttl.saturating_sub(started.elapsed().as_secs()))
+    }
+
+    /// Moves the response's start `by` into the past (tests).
+    #[cfg(test)]
+    fn rewind(&mut self, by: Duration) {
+        self.started = self.started.and_then(|t| t.checked_sub(by));
+    }
+}
+
+/// The `result.modelUsage` entry of the main agent's model. The CLI keys it by the model as
+/// requested (`claude-sonnet-4-6[1m]`, a provider's id), not as the response names it: by the
+/// model the main loop runs (`system/init`, a switch), else by `message.model`, else the entry
+/// whose `canonicalModel` is that.
+fn usage_entry<'a>(
+    model_usage: &'a Value,
+    main: Option<&str>,
+    response: Option<&str>,
+) -> Option<&'a Value> {
+    let map = model_usage.as_object()?;
+    main.and_then(|m| map.get(m))
+        .or_else(|| response.and_then(|m| map.get(m)))
+        .or_else(|| {
+            response.and_then(|m| {
+                map.values()
+                    .find(|e| e["canonicalModel"].as_str() == Some(m))
+            })
+        })
+}
+
+/// The tokens the context may hold before the CLI compacts it by itself, from a model's
+/// `result.modelUsage` entry: `contextWindow − min(maxOutputTokens, 20000) − 13000`, the
+/// threshold of the model's window. An override of the auto-compaction window
+/// (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `autoCompactWindow`, `/autocompact`) and a disabled
+/// auto-compaction are not seen in the stream; the VS Code tab computes it the same way.
+fn context_limit(entry: &Value) -> Option<u64> {
+    let window = entry["contextWindow"].as_u64()?;
+    let reserve = entry["maxOutputTokens"]
+        .as_u64()
+        .unwrap_or(0)
+        .min(AUTO_COMPACT_OUTPUT_RESERVE_MAX);
+    Some(window.saturating_sub(reserve + AUTO_COMPACT_BUFFER))
 }
 
 /// `compact_metadata` of `compact_boundary` (2.1.312: `trigger` `auto` | `manual`,

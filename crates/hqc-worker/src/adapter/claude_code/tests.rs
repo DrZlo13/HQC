@@ -633,7 +633,7 @@ async fn permission_allow_once() {
     )));
     assert!(evs.iter().any(|e| matches!(
         &e.kind,
-        EventKind::Usage { input_tokens: 4, output_tokens: 96, cache_read: Some(36251), cache_write: Some(12206), cost_usd: Some(_), session_cost_usd: Some(_), model: Some(m) }
+        EventKind::Usage { input_tokens: 4, output_tokens: 96, cache_read: Some(36251), cache_write: Some(12206), cost_usd: Some(_), session_cost_usd: Some(_), model: Some(m), .. }
             if m == "claude-haiku-5-5"
     )));
     assert!(evs.iter().any(|e| matches!(
@@ -5328,6 +5328,345 @@ fn compact_keeps_its_usage() {
         r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_ms":3,"result":"","total_cost_usd":0.01,"usage":{"input_tokens":0,"output_tokens":0}}"#,
     ));
     assert_eq!(usage, vec![(0, 0, None, Some(0.01))]);
+}
+
+/// A main agent's `assistant` line of a response of `claude-opus-5-5` with this `usage`; with
+/// `sub` it is a subagent's.
+fn response_line(n: u32, usage: Value, sub: bool) -> String {
+    json!({
+        "type": "assistant",
+        "uuid": format!("0f6c1d2e-2222-4a55-9d0e-1a2b3c4d5e{n:02}"),
+        "parent_tool_use_id": if sub { json!("toolu_sub") } else { Value::Null },
+        "message": {
+            "id": format!("msg_{n}"),
+            "model": "claude-opus-5-5",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "x"}],
+            "usage": usage,
+        },
+    })
+    .to_string()
+}
+
+/// A turn's `result` with this `modelUsage` entry under `key`.
+fn turn_result_as(key: &str, entry: Value) -> String {
+    json!({
+        "type": "result", "subtype": "success", "is_error": false, "num_turns": 1,
+        "duration_ms": 9, "result": "x", "total_cost_usd": 0.01,
+        "usage": {"input_tokens": 3, "output_tokens": 4},
+        "modelUsage": {key: entry},
+    })
+    .to_string()
+}
+
+/// A turn's `result` with this `modelUsage` entry of `claude-opus-5-5`.
+fn turn_result(entry: Value) -> String {
+    turn_result_as("claude-opus-5-5", entry)
+}
+
+/// The `init` line of a CLI that runs `model`.
+fn init_line(model: &str) -> String {
+    json!({"type": "system", "subtype": "init", "model": model, "permissionMode": "default",
+        "uuid": "fb2b6af8-8921-4277-a09e-61e710bfcdb2"})
+    .to_string()
+}
+
+/// `(context_tokens, context_limit, cache_ttl_s)` of every `usage` among `actions`.
+fn context_fields(actions: Vec<Action>) -> Vec<(Option<u64>, Option<u64>, Option<u64>)> {
+    events(&emitted(actions))
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Usage {
+                context_tokens,
+                context_limit,
+                cache_ttl_s,
+                ..
+            } => Some((context_tokens, context_limit, cache_ttl_s)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The size of the context is the sum of the usage of the main agent's last response (the
+/// frames of one response repeat it: the last wins); a subagent's frame, even a later one and
+/// a larger one, is not the main agent's context.
+#[test]
+fn the_context_is_the_last_main_response_not_a_subagents() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&response_line(
+        1,
+        json!({"input_tokens": 2, "cache_read_input_tokens": 40, "cache_creation_input_tokens": 30, "output_tokens": 1}),
+        false,
+    ));
+    core.on_line(&response_line(
+        2,
+        json!({"input_tokens": 2, "cache_read_input_tokens": 400, "cache_creation_input_tokens": 30, "output_tokens": 8}),
+        false,
+    ));
+    core.on_line(&response_line(
+        3,
+        json!({"input_tokens": 9000, "cache_read_input_tokens": 9000, "output_tokens": 9000}),
+        true,
+    ));
+    let got = context_fields(core.on_line(&turn_result(json!({}))));
+    assert_eq!(got, vec![(Some(440), None, None)]);
+}
+
+/// A line of the CLI's own (`<synthetic>`, zero usage: an error text, a refusal) after a real
+/// response is no response of the model: the context stays.
+#[test]
+fn a_synthetic_line_leaves_the_context_alone() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&response_line(
+        1,
+        json!({"input_tokens": 700, "output_tokens": 5}),
+        false,
+    ));
+    let synthetic = response_line(2, json!({"input_tokens": 0, "output_tokens": 0}), false)
+        .replace("claude-opus-5-5", "<synthetic>");
+    core.on_line(&synthetic);
+    let got = context_fields(core.on_line(&turn_result(json!({}))));
+    assert_eq!(got, vec![(Some(705), None, None)]);
+}
+
+/// The limit is `contextWindow − min(maxOutputTokens, 20000) − 13000` of the main model's entry:
+/// the threshold of the model's window, not of an overridden auto-compaction window
+/// (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `autoCompactWindow`, `/autocompact`) nor of a disabled
+/// one, which the stream does not show. Checked live on 2.1.329: a window of 1 000 000 gives
+/// 967 000 in `get_context_usage`.
+#[test]
+fn the_context_limit_is_the_window_less_the_reserve_and_the_margin() {
+    let usage = json!({"input_tokens": 1, "output_tokens": 1});
+    let run = |result: String| {
+        let sid = Uuid::now_v7();
+        let mut core = Core::new(sid, false);
+        started(&mut core, sid);
+        core.on_line(&response_line(1, usage.clone(), false));
+        context_fields(core.on_line(&result))
+    };
+    let got = run(turn_result(
+        json!({"contextWindow": 1_000_000, "maxOutputTokens": 128_000}),
+    ));
+    assert_eq!(got, vec![(Some(2), Some(967_000), None)]);
+    let got = run(turn_result(
+        json!({"contextWindow": 200_000, "maxOutputTokens": 20_000}),
+    ));
+    assert_eq!(got, vec![(Some(2), Some(167_000), None)]);
+    // An output limit below the reserve counts as it is.
+    let got = run(turn_result(
+        json!({"contextWindow": 200_000, "maxOutputTokens": 8_192}),
+    ));
+    assert_eq!(got, vec![(Some(2), Some(178_808), None)]);
+    // The entry of a model that is neither the main one nor the response's is not used.
+    let other = turn_result_as("claude-haiku-5-5", json!({"contextWindow": 200_000}));
+    assert_eq!(run(other), vec![(Some(2), None, None)]);
+}
+
+/// The CLI keys `modelUsage` by the model as requested (`claude-opus-5-5[1m]`), the response
+/// names it without the suffix: the main loop's model from `init` finds the entry; so does the
+/// entry whose `canonicalModel` is the response's when the main model is not known; and a turn
+/// with no tracked response (`/compact` first after a restart) still has the limit.
+#[test]
+fn the_limit_is_found_under_the_requested_model() {
+    let entry = json!({"contextWindow": 1_000_000, "maxOutputTokens": 64_000, "canonicalModel": "claude-opus-5-5"});
+    let usage = json!({"input_tokens": 1, "output_tokens": 1});
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    core.on_line(&init_line("claude-opus-5-5[1m]"));
+    started(&mut core, sid);
+    core.on_line(&response_line(1, usage.clone(), false));
+    let got = context_fields(core.on_line(&turn_result_as("claude-opus-5-5[1m]", entry.clone())));
+    assert_eq!(got, vec![(Some(2), Some(967_000), None)]);
+    // No `init`: by `canonicalModel`.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&response_line(1, usage, false));
+    let got = context_fields(core.on_line(&turn_result_as("some-provider-id", entry.clone())));
+    assert_eq!(got, vec![(Some(2), Some(967_000), None)]);
+    // No response of this process: the size is unknown, the limit is not.
+    let mut core = Core::new(sid, false);
+    core.on_line(&init_line("claude-opus-5-5[1m]"));
+    started(&mut core, sid);
+    let got = context_fields(core.on_line(&turn_result_as("claude-opus-5-5[1m]", entry)));
+    assert_eq!(got, vec![(None, Some(967_000), None)]);
+}
+
+/// The cache lives an hour when the response (or the session's `modelUsage` of its model)
+/// shows a write with the 1-hour TTL, else five minutes when it shows a 5-minute write, else
+/// nothing is known.
+#[test]
+fn the_cache_ttl_follows_the_writes_seen() {
+    let run = |usage: Value, entry: Value| {
+        let sid = Uuid::now_v7();
+        let mut core = Core::new(sid, false);
+        started(&mut core, sid);
+        core.on_line(&response_line(1, usage, false));
+        context_fields(core.on_line(&turn_result(entry)))[0].2
+    };
+    // The test runs for far less than a minute, so a TTL read at the end is within a few
+    // seconds of its full value.
+    let near = |ttl: Option<u64>, full: u64| ttl.is_some_and(|t| t <= full && t + 30 >= full);
+    let hour = json!({"cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 33468}});
+    let five = json!({"cache_creation": {"ephemeral_5m_input_tokens": 70, "ephemeral_1h_input_tokens": 0}});
+    let both = json!({"cache_creation": {"ephemeral_5m_input_tokens": 70, "ephemeral_1h_input_tokens": 5}});
+    assert!(near(run(hour, json!({})), 3600));
+    assert!(near(run(five.clone(), json!({})), 300));
+    assert!(near(run(both, json!({})), 3600));
+    assert_eq!(run(json!({}), json!({})), None);
+    // A response that wrote nothing: what the session's entry of the model shows.
+    let written = |k: &str| json!({k: 12});
+    assert!(near(
+        run(json!({}), written("cacheCreationEphemeral1hInputTokens")),
+        3600
+    ));
+    assert!(near(
+        run(json!({}), written("cacheCreationEphemeral5mInputTokens")),
+        300
+    ));
+    assert!(near(
+        run(five, written("cacheCreationEphemeral1hInputTokens")),
+        3600
+    ));
+}
+
+/// The cache is written when the request goes out, not when the turn ends: the TTL sent is
+/// what is left since the response started, from its `message_start` when that came first,
+/// else from its first line; never below 0.
+#[test]
+fn the_cache_ttl_counts_from_the_request() {
+    let hour =
+        json!({"cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 9}});
+    let sid = Uuid::now_v7();
+    let near = |ttl: Option<u64>, full: u64| ttl.is_some_and(|t| t <= full && t + 30 >= full);
+    // A response seen from its first line, which started 100 s before the result.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&response_line(1, hour.clone(), false));
+    core.rewind_response(Duration::from_secs(100));
+    assert!(near(
+        context_fields(core.on_line(&turn_result(json!({}))))[0].2,
+        3500
+    ));
+    // The `message_start` came first: its time stands, the later line does not restart it.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_1"}}}"#,
+    );
+    core.rewind_response(Duration::from_secs(100));
+    core.on_line(&response_line(1, hour.clone(), false));
+    assert!(near(
+        context_fields(core.on_line(&turn_result(json!({}))))[0].2,
+        3500
+    ));
+    // Past the TTL: 0.
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&response_line(1, hour, false));
+    core.rewind_response(Duration::from_secs(4000));
+    assert_eq!(
+        context_fields(core.on_line(&turn_result(json!({}))))[0].2,
+        Some(0)
+    );
+}
+
+/// The lines of a response carry the usage of its `message_start` (a few output tokens): the
+/// context takes the response's own count from its `message_delta`, and only for that response.
+#[test]
+fn the_context_takes_the_output_count_of_the_message_delta() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_1"}}}"#,
+    );
+    core.on_line(&response_line(
+        1,
+        json!({"input_tokens": 100, "output_tokens": 4}),
+        false,
+    ));
+    core.on_line(
+        r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":500}}}"#,
+    );
+    assert_eq!(
+        context_fields(core.on_line(&turn_result(json!({}))))[0].0,
+        Some(600)
+    );
+    // A delta of another response does not touch it.
+    started(&mut core, sid);
+    core.on_line(
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_9"}}}"#,
+    );
+    core.on_line(
+        r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":900}}}"#,
+    );
+    assert_eq!(
+        context_fields(core.on_line(&turn_result(json!({}))))[0].0,
+        Some(600)
+    );
+}
+
+/// After a compaction the context is the `post_tokens` of its boundary until the next
+/// response, and it is in no cache yet: no TTL, though the session's `modelUsage` has writes. A
+/// boundary without `post_tokens` (the runtime did not count the size) leaves no size, not the
+/// one before.
+#[test]
+fn the_context_after_a_compaction_is_its_post_tokens() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let hour = json!({"input_tokens": 80_000, "output_tokens": 20,
+        "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 80_000}});
+    let before = response_line(1, hour, false);
+    let entry = json!({"contextWindow": 200_000, "maxOutputTokens": 64_000,
+        "cacheCreationEphemeral1hInputTokens": 80_000});
+    core.on_line(&before);
+    core.on_line(COMPACT_BOUNDARY);
+    let got = context_fields(core.on_line(&turn_result(entry)));
+    // The model of the response before the boundary is the one whose window gives the limit.
+    assert_eq!(got, vec![(Some(9743), Some(167_000), None)]);
+    // The next response is the size again, and in the cache.
+    core.on_line(&response_line(
+        2,
+        json!({"input_tokens": 12_000, "output_tokens": 5}),
+        false,
+    ));
+    let got = context_fields(core.on_line(&turn_result(
+        json!({"cacheCreationEphemeral1hInputTokens": 5}),
+    )));
+    assert_eq!((got[0].0, got[0].2.is_some()), (Some(12_005), true));
+    // No `post_tokens`: nothing to show for the compaction's `usage`.
+    core.on_line(&before);
+    core.on_line(&COMPACT_BOUNDARY.replace(r#","post_tokens":9743"#, ""));
+    let got = context_fields(core.on_line(&turn_result(json!({}))));
+    assert_eq!(got, vec![(None, None, None)]);
+}
+
+/// `/clear` starts a new conversation: a turn of it that has only a line of the CLI's own
+/// carries nothing of the old conversation's context.
+#[test]
+fn a_clear_forgets_the_context() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&response_line(
+        1,
+        json!({"input_tokens": 90_000, "output_tokens": 5}),
+        false,
+    ));
+    core.on_line(
+        &json!({"type": "conversation_reset", "trigger": "clear", "session_id": "s"}).to_string(),
+    );
+    started(&mut core, sid);
+    let synthetic = response_line(2, json!({"input_tokens": 0, "output_tokens": 0}), false)
+        .replace("claude-opus-5-5", "<synthetic>");
+    core.on_line(&synthetic);
+    let got = context_fields(core.on_line(&turn_result(json!({}))));
+    assert_eq!(got, vec![(None, None, None)]);
 }
 
 /// A cost baseline with `input` and `output` tokens of one model.

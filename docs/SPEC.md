@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.221, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.222, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -615,7 +615,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; since 0.181 also the worker after a background task's end, the task's output file (§8.1), with the same `author`, `kind: text`; since 0.209 also a publication the owner allowed (`hqc_publish`, §7), with `kind: site` (`event.attachment.site.json`); the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `joined_after?` (since 0.221, with `joined`: as on a `user.message`), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
-| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost |
+| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?`, `context_tokens?`, `context_limit?`, `cache_ttl_s?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost. Since 0.222 a `usage` that carries tokens (not the one with the total only) also says how full the main agent's context is and how long its prompt cache lives: `context_tokens` is the context after the turn's last API response of the main agent (§8.1), `context_limit` the tokens it may hold before the runtime compacts it by itself, `cache_ttl_s` the seconds the session's cache has left when the turn ends, counted from the request of the response (3600 or 300, less the seconds since the response started, 0 at the least); each is absent when the runtime does not say it. `context_limit` is the threshold of the model's window; an override of the auto-compaction window or a disabled auto-compaction is not seen in the stream (§8.1). The client's header shows them (§6) |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.161 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`), `call_id?`, `status?`, `task_id?` (since 0.135, only on `task_notification`), `usage?{total_tokens, tool_uses, duration_ms}` (since 0.181, only on `task_notification`), `from_session_id?` (since 0.172, only on `room_passed`: the agent that passed), `trigger?`, `pre_tokens?`, `post_tokens?` (since 0.179, only on `context_compacted`), `model?` (since 0.179, only on `model_not_switched`) | hub or worker; codes below |
 | `retraction` | `event_ids[]` | adapter (since 0.179): events of the session the runtime took back — Claude Code's answer of a model that refused, replaced by another model's answer (§8.1). The hub keeps of `event_ids` only the session's own `agent.message`, `agent.thinking`, `tool.call` and `tool.result` of the agent, at most 1024, and stores it with those; nothing is deleted: clients do not show the events it names, also ones loaded after it, nor the retraction itself; search (§15) still finds them |
@@ -2392,10 +2392,11 @@ the same column with one head row after "‹" back to the projects and no button
 The chat header (since 0.206): the title, then the meta row — the state, the permission mode and
 the model as round pills beside it (below and §6 `permission_mode`; none for a room or the
 service session, and an archived session's are the names alone, without a menu), then, on a
-computer, "started by <address>", "on <worker>", the folder with its copy button, "Browser" and
-the cost. On a phone the header is lines at even gaps, with even padding above and below: "‹",
-the title and the header's buttons, centred on the title's line, the title cut only at the first
-button; the state at its full text and "N agents" (a room's: the state and its mode); the two
+computer, "started by <address>", "on <worker>", the folder with its copy button, "Browser", the
+cost and, since 0.222, the context. On a phone the header is lines at even gaps, with even
+padding above and below: "‹", the title and the header's buttons, centred on the title's line,
+the title cut only at the first button; the state at its full text and "N agents" (a room's: the
+state and its mode); the two
 pills, each at its full text with its chevron, 22 px tall as on a computer (20 px in a phone's
 Compact look), then "started by <address>", whose address gives way to an ellipsis first and a pill's text (a
 provider's long label) only past it. The lines under the first are as wide as the header past
@@ -2410,7 +2411,25 @@ for its alias and for each of its versions, the version after the family's name,
 the checked entry itself (the alias, or the version in the submenu) only closes the menu, a
 family checked for one of its versions switches to its alias. "Another model…" asks for the name
 in the menu (Enter sends it, an empty one nothing); the worker's usage limits stand under the
-items (§6 `GET /api/workers`). The title is renamed in place:
+items (§6 `GET /api/workers`).
+
+Since 0.222 the context item stands after the cost, behind a "/": "<n>% context" — the
+`context_tokens` of the last `usage` that has them, as a share of its `context_limit` (rounded,
+over 100 when the context is past the limit; the hover says "329k of 967k tokens before
+auto-compaction") — and " · cache m:ss", the time left of the session's prompt cache, which ends
+`cache_ttl_s` after that `usage`'s time (the worker has taken the time since the request off
+it), counted down every second while there is time left, by a clock of the item alone, not of
+the chat; after its end "cache expired"; the hover adds "Claude's cache of this session ends at
+<time>; a message after that reads the whole context again". The cache part is shown only while
+the session is not Running (a response in the work renews the cache) and not for a session on a
+provider, whose endpoint has no such cache; a room has no item, and neither has a session VS
+Code holds (its turns are not reported, the numbers would stand still); after VS Code lets the
+session go, the item shows the last hqc turn's numbers until hqc's next turn. A later `usage`
+with the total only leaves the item as it was (once the earlier `usage` is loaded, §6 below),
+and a cache end the date cannot hold leaves the cache part out. A `system
+conversation_cleared` after that `usage` empties it. On a phone the item is short, "34% · cache
+41:12", and stands in the state's line after "N agents". It does not give way in the one-line
+row, as the cost does not. The title is renamed in place:
 on a computer a pencil after it, shown on hover, and on a phone a tap on the title turns it into
 a field; Enter or leaving the field sends `PATCH /api/sessions/{id} {title}` with the name
 trimmed (an empty or unchanged one sends nothing), Esc keeps the old one, a refusal is the
@@ -3031,7 +3050,10 @@ conversation_cleared` (§4) only once that line is loaded.
 The goal's row (above) comes from the loaded history too: the search for the header's `usage`
 loads back to the end of the last finished turn, so a goal set or checked since shows; one whose
 last `set` or `unmet` is older (its turn was stopped, or the search went 1000 events back without
-a `usage`) shows once that part is loaded.
+a `usage`) shows once that part is loaded. The header's context item (0.222) comes from the loaded
+history too: the search for the header's `usage` stops at any `usage`, so when the newest one
+loaded has the total only and the one with `context_tokens` before it is older than what is loaded
+(a long turn stopped while its reply was written, 0.161), the item shows once that part is loaded.
 Since 0.114 the client keeps the 12 most recently used
 chats in memory with what they have loaded (an open one is never dropped): one of them opens
 again at once, with no wait for its newest page, and subscribes after its last `seq`, so the hub
@@ -4581,7 +4603,37 @@ meanwhile. The client's header counts that total and the feed draws no line for 
 process that ends first leaves it out of every `cost_usd`: the next one starts from the `cost-state`
 that has it). Since 0.161 the same holds for any `result` with no tokens, whatever its `num_turns`:
 a turn interrupted while its reply streamed can end with no tokens though its total grew (2.1.312,
-seen live), and gave an empty `0 → 0 tokens` line under the interrupted reply. Since 0.69: an
+seen live), and gave an empty `0 → 0 tokens` line under the interrupted reply. Since 0.222 the
+`usage` that carries tokens has the context and the cache from the stream, not from a
+`get_context_usage` request (that builds the whole system prompt on every call): the adapter keeps
+the `message.usage` and `message.model` of the main agent's latest `assistant` line that is not
+`<synthetic>` (the lines of one response repeat its usage: the last stands; a subagent's lines
+are not the main agent's context). `context_tokens` is its `input_tokens`, `cache_read_input_tokens`,
+`cache_creation_input_tokens` and `output_tokens` summed, as the VS Code tab's `updateUsage` sums
+them. After a `compact_boundary` the size is the `post_tokens` of its `compact_metadata` until
+the next response; a boundary without it (the runtime did not count the size) leaves no size, so
+that a compaction's `usage` does not report the context from before it. The lines of a response
+carry the usage of its `message_start`, with a few output tokens: the main agent's
+`message_delta` of that response (`stream_event`) gives the output count the size takes. A
+`<synthetic>` line is no response of the model and leaves the size as it was; `/clear` forgets it.
+`context_limit` is the `contextWindow` of the main model's entry in `result.modelUsage`, less
+`min(maxOutputTokens, 20000)` and 13000 — the threshold of the model's window (checked on 2.1.329:
+a window of 1 000 000 gives 967 000 in `get_context_usage`; the tab's `yPt` is
+`window - min(maxOutput, 2e4) - 13e3`). An override of the auto-compaction window
+(`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `autoCompactWindow`, `/autocompact`) and a disabled
+auto-compaction are not seen in the stream, so under one the shown limit is not where the CLI
+compacts. The CLI keys the entry by the model as requested (`claude-sonnet-4-6[1m]`, a provider's
+id), not as the response names it: the adapter looks for the model the main loop runs (`system/init`,
+a switch), then for `message.model`, then for the entry whose `canonicalModel` is that; a turn with
+no tracked response (`/compact` first after a restart) still has the limit through the first.
+`cache_ttl_s` is 3600 when that response's `usage.cache_creation.ephemeral_1h_input_tokens` or the
+entry's `cacheCreationEphemeral1hInputTokens` is above 0, else 300 when `ephemeral_5m_input_tokens`
+or `cacheCreationEphemeral5mInputTokens` is (Claude Desktop reads the TTL the same way: an hour
+when `ephemeral_1h_input_tokens` is there, else five minutes), else absent; the cache is written
+when the request goes out, so the seconds since the response started — its `message_start`, else
+its first line — are taken off it (0 at the least). After a compaction boundary there is none until
+the next response: the compacted context is in no cache yet. `context_tokens` and `cache_ttl_s` are
+absent without a tracked response. Since 0.69: an
 `assistant` text whose `message.model` is `<synthetic>` — a reply the CLI wrote itself (an API
 error, "Credit balance is too low"; on 2.1.312 with `is_api_error_message` and the same `uuid` as
 the transcript record) — → `agent.message` with `runtime: true`, held and ended like any other text:
@@ -7520,6 +7572,22 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.221 → 0.222 (the context and the prompt cache in the chat header)
+§4 `usage`, §6 chat header, §8.1: the header said what a session cost but not how close its
+context is to the auto-compaction, nor how long Claude's prompt cache of the session still lives
+(a message after it ends reads the whole context again at the full price). A `usage` that carries
+tokens now has `context_tokens`, `context_limit` and `cache_ttl_s`, built by the Claude Code
+adapter from the stream: the usage of the main agent's last API response, the model's window in
+`result.modelUsage` less the output reserve and the CLI's margin, and the TTL of the cache writes
+seen (an hour or five minutes) less the seconds since the response started; after a compaction the
+size is the boundary's `post_tokens` until the next response. The limit is the model window's
+threshold: an overridden auto-compaction window or a disabled one is not seen. The item is left
+out of a room and of a session VS Code holds. The meta row shows "<n>% context" and, while the
+session is not Running and not on a provider, " · cache m:ss" counted down, "cache expired" after
+the end, on a computer after the cost and on a phone in the state's line; `/clear` empties both.
+Like the goal's row, the item comes from the loaded history (0.220). Worker, protocol and client;
+the new fields are optional, so an older worker's `usage` shows nothing.
 
 ### 0.220 → 0.221 (an input the agent took after its calls stands where it took it)
 §4, §6, §17.2: a message typed during a turn that the CLI took only after the running tool call's

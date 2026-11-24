@@ -9,10 +9,11 @@
 //! entries: after the last entry of the session's stream and of its transcript's
 //! ([`Direct::after`]).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use hqc_proto::event::{Event, EventKind};
-use hqc_proto::frame::{McpCancel, WorkerFrame};
+use hqc_proto::frame::{McpCancel, McpError, McpUpstream, WorkerFrame};
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 use uuid::Uuid;
 
@@ -42,6 +43,9 @@ pub struct HubLink {
     system_session: Arc<watch::Sender<Option<Uuid>>>,
     /// Session tokens and MCP calls waiting for `mcp.result` (SPEC §7.2).
     pub(crate) mcp: Arc<McpCalls>,
+    /// The hub connection is up: a direct frame sent now reaches it (SPEC 0.235's
+    /// `mcp.upstream` fails at once otherwise).
+    online: Arc<AtomicBool>,
 }
 
 impl HubLink {
@@ -53,6 +57,7 @@ impl HubLink {
             direct,
             system_session: Arc::new(watch::channel(None).0),
             mcp: Arc::default(),
+            online: Arc::default(),
         };
         (link, rx)
     }
@@ -89,6 +94,55 @@ impl HubLink {
         }
         self.outbox_ready.notify_one();
         Ok(Some((request_id, rx)))
+    }
+
+    /// The connection came up or went down; going down fails the open `mcp.upstream`
+    /// requests.
+    pub fn set_online(&self, online: bool) {
+        self.online.store(online, Ordering::SeqCst);
+        if !online {
+            self.mcp.fail_upstream();
+        }
+    }
+
+    /// Sends `mcp.upstream` for the relay of the hub's MCP server `server` (SPEC 0.235):
+    /// directly, never through the outbox, and only while connected, since a call to a remote
+    /// service must not be made late. `Err`: refused here, with the tool error to give.
+    pub fn mcp_upstream(
+        &self,
+        session_id: Uuid,
+        server: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<(Uuid, oneshot::Receiver<Outcome>), McpError> {
+        use hqc_proto::mcp::error_code;
+        if !self.online.load(Ordering::SeqCst) {
+            return Err(McpError::new(
+                error_code::MCP_UNAVAILABLE,
+                "the worker is not connected to the hub",
+            ));
+        }
+        let Some((request_id, rx)) = self.mcp.open_upstream(session_id) else {
+            return Err(McpError::new(
+                error_code::UNAVAILABLE,
+                "the session's agent no longer runs",
+            ));
+        };
+        let Some(token) = self.mcp.token_for(request_id) else {
+            self.mcp.forget(request_id);
+            return Err(McpError::new(
+                error_code::UNAVAILABLE,
+                "the session's agent no longer runs",
+            ));
+        };
+        self.send(WorkerFrame::McpUpstream(McpUpstream {
+            request_id: request_id.to_string(),
+            session_token: token.expose().to_string(),
+            server: server.to_string(),
+            method: method.to_string(),
+            params,
+        }));
+        Ok((request_id, rx))
     }
 
     /// The caller gave the call up (SPEC §7.2): a call the hub has not taken yet leaves the

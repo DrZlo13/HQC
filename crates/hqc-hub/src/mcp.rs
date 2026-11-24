@@ -147,7 +147,7 @@ pub const REGISTRY: &[HubTool] = &[
 
 /// The shape `new_secret("hqcs_")` gives session tokens; anything else never reaches the
 /// database.
-fn is_session_token(t: &str) -> bool {
+pub(crate) fn is_session_token(t: &str) -> bool {
     t.strip_prefix("hqcs_").is_some_and(|b| {
         b.len() == 43
             && b.bytes()

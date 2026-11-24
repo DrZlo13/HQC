@@ -52,6 +52,9 @@ pub struct McpServer {
     token: Option<String>,
     socket: PathBuf,
     progress_every: Duration,
+    /// `--upstream <name>` (SPEC 0.235): this process is the relay of the hub's remote MCP
+    /// server `name`, not the hqc server.
+    upstream: Option<String>,
 }
 
 /// The waiting `tools/call`s of one daemon connection, by the connection's call id.
@@ -71,7 +74,16 @@ impl McpServer {
             token,
             socket,
             progress_every: PROGRESS_EVERY,
+            upstream: None,
         }
+    }
+
+    /// The relay of the hub's remote MCP server `name` (SPEC 0.235): `initialize`, `tools/list`
+    /// and `tools/call` go to the hub as `mcp.upstream`, and the server's answers come back as
+    /// they are, its `instructions` and tool results included.
+    pub fn with_upstream(mut self, name: String) -> Self {
+        self.upstream = Some(name);
+        self
     }
 
     /// Another progress period (tests).
@@ -184,6 +196,9 @@ impl Session<'_> {
             }
             return;
         };
+        if let Some(name) = self.server.upstream.clone() {
+            return self.on_upstream(name, method, id, params).await;
+        }
         match method {
             "initialize" => {
                 let asked = params.get("protocolVersion").and_then(Value::as_str);
@@ -212,6 +227,149 @@ impl Session<'_> {
             "tools/call" => self.call(id, &params).await,
             _ => self.error(id, METHOD_NOT_FOUND, &format!("method {method} not found")),
         }
+    }
+
+    /// A request to the relay of the hub's MCP server `name` (SPEC 0.235).
+    async fn on_upstream(&mut self, name: String, method: &str, id: Value, params: Value) {
+        match method {
+            "initialize" => {
+                let asked = params.get("protocolVersion").and_then(Value::as_str);
+                let version = asked
+                    .filter(|v| PROTOCOL_VERSIONS.contains(v))
+                    .unwrap_or(PROTOCOL_VERSIONS[0]);
+                self.protocol_version = Some(version.to_string());
+                self.client = params.get("clientInfo").cloned();
+                // The server's own name, version and instructions, as the hub last had them; a
+                // server the hub cannot reach is still listed, its calls answer why.
+                let info = self.ask(&name, "initialize", json!({})).await.ok();
+                let mut result = json!({
+                    "protocolVersion": version,
+                    "capabilities": {"tools": {"listChanged": false}},
+                    "serverInfo": info
+                        .as_ref()
+                        .and_then(|i| i.get("serverInfo").cloned())
+                        .filter(Value::is_object)
+                        .unwrap_or_else(|| json!({"name": name, "version": "unknown"})),
+                });
+                if let Some(i) = info
+                    .as_ref()
+                    .and_then(|i| i.get("instructions"))
+                    .filter(|i| i.is_string())
+                {
+                    result["instructions"] = i.clone();
+                }
+                self.respond(id, result);
+            }
+            "ping" => self.respond(id, json!({})),
+            "tools/list" => match self.ask(&name, "tools/list", params).await {
+                Ok(r) => self.respond(id, r),
+                Err(e) => self.error(id, -32603, &format!("{}: {}", e.code, e.message)),
+            },
+            "tools/call" => self.call_upstream(name, id, params).await,
+            _ => self.error(id, METHOD_NOT_FOUND, &format!("method {method} not found")),
+        }
+    }
+
+    /// One request to the hub's MCP server, waited for here (`initialize`, `tools/list`).
+    async fn ask(&mut self, name: &str, method: &str, params: Value) -> Result<Value, McpError> {
+        self.connect().await?;
+        self.next_call += 1;
+        let call_id = self.next_call;
+        let daemon = self.daemon.as_ref().expect("connected");
+        let (tx, rx) = oneshot::channel();
+        daemon.waiting.lock().unwrap().insert(call_id, tx);
+        let sent = daemon.tx.send(ToDaemon::Upstream {
+            id: call_id,
+            server: name.to_string(),
+            method: method.to_string(),
+            params,
+        });
+        if sent.is_err() {
+            daemon.waiting.lock().unwrap().remove(&call_id);
+            self.daemon = None;
+            return Err(McpError::new(
+                error_code::UNAVAILABLE,
+                "the hqc worker daemon is gone",
+            ));
+        }
+        rx.await.unwrap_or_else(|_| {
+            Err(McpError::new(
+                error_code::UNAVAILABLE,
+                "the hqc worker daemon is gone",
+            ))
+        })
+    }
+
+    /// `tools/call` of the hub's MCP server: the server's result goes back as it is; an error
+    /// of the hub or the relay is a tool error with its text.
+    async fn call_upstream(&mut self, name: String, id: Value, params: Value) {
+        if params.get("name").and_then(Value::as_str).is_none() {
+            return self.error(id, INVALID_PARAMS, "tools/call without name");
+        }
+        if let Err(e) = self.connect().await {
+            return self.tool_error(id, &e);
+        }
+        self.next_call += 1;
+        let call_id = self.next_call;
+        let daemon = self.daemon.as_ref().expect("connected");
+        let (tx, rx) = oneshot::channel();
+        daemon.waiting.lock().unwrap().insert(call_id, tx);
+        let progress_token = params
+            .get("_meta")
+            .and_then(|m| m.get("progressToken"))
+            .filter(|t| t.is_string() || t.is_number())
+            .cloned();
+        let sent = daemon.tx.send(ToDaemon::Upstream {
+            id: call_id,
+            server: name,
+            method: "tools/call".into(),
+            params,
+        });
+        if sent.is_err() {
+            daemon.waiting.lock().unwrap().remove(&call_id);
+            self.daemon = None;
+            return self.tool_error(
+                id,
+                &McpError::new(error_code::UNAVAILABLE, "the hqc worker daemon is gone"),
+            );
+        }
+        let key = id.to_string();
+        self.calls.lock().unwrap().insert(key.clone(), call_id);
+        let (out, calls, every) = (
+            self.out.clone(),
+            self.calls.clone(),
+            self.server.progress_every,
+        );
+        tokio::spawn(async move {
+            let mut rx = rx;
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            let mut progress = 0u64;
+            let answer = loop {
+                tokio::select! {
+                    r = &mut rx => break r,
+                    _ = tick.tick() => {
+                        let Some(t) = &progress_token else { continue };
+                        progress += 1;
+                        let _ = out.send(json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/progress",
+                            "params": {"progressToken": t, "progress": progress, "message": "waiting for the server"},
+                        }));
+                    }
+                }
+            };
+            let Ok(outcome) = answer else { return };
+            calls.lock().unwrap().remove(&key);
+            let result = match outcome {
+                Ok(r) if r.is_object() => r,
+                Ok(_) => tool_result(Err(McpError::new(
+                    error_code::MCP_UNAVAILABLE,
+                    "the server's result is not an object",
+                ))),
+                Err(e) => tool_result(Err(e)),
+            };
+            let _ = out.send(json!({"jsonrpc": "2.0", "id": id, "result": result}));
+        });
     }
 
     async fn call(&mut self, id: Value, params: &Value) {
@@ -355,9 +513,15 @@ impl Session<'_> {
         });
         let (w, alive) = (waiting.clone(), Arc::new(AtomicBool::new(true)));
         let alive_r = alive.clone();
+        // A relay's answers carry the server's results whole (SPEC 0.235).
+        let limit = if self.server.upstream.is_some() {
+            hqc_proto::mcp::UPSTREAM_MAX + MAX_LINE
+        } else {
+            MAX_LINE * 16
+        };
         tokio::spawn(async move {
             let mut buf = Vec::new();
-            while let Some(m) = read_reply(&mut rd, &mut buf).await {
+            while let Some(m) = read_reply_within(&mut rd, &mut buf, limit).await {
                 if let FromDaemon::Result { id, result, error } = m {
                     let outcome = match (result, error) {
                         (_, Some(e)) => Err(e),
@@ -386,9 +550,17 @@ async fn read_reply<R: tokio::io::AsyncBufRead + Unpin>(
     r: &mut R,
     buf: &mut Vec<u8>,
 ) -> Option<FromDaemon> {
+    read_reply_within(r, buf, MAX_LINE * 16).await
+}
+
+async fn read_reply_within<R: tokio::io::AsyncBufRead + Unpin>(
+    r: &mut R,
+    buf: &mut Vec<u8>,
+    limit: usize,
+) -> Option<FromDaemon> {
     buf.clear();
     let n = (&mut *r)
-        .take(MAX_LINE as u64 * 16)
+        .take(limit as u64)
         .read_until(b'\n', buf)
         .await
         .ok()?;

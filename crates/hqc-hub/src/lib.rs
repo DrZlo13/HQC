@@ -29,6 +29,7 @@ pub mod fork;
 pub mod icons;
 pub mod leftovers;
 pub mod mcp;
+pub mod mcp_servers;
 pub mod mirror;
 pub mod moves;
 pub mod pause;
@@ -135,6 +136,20 @@ pub fn router(app: AppState) -> Router {
         .route("/api/sessions/{id}/restart", post(api::restart))
         .route("/api/sessions/{id}/pause", post(pause::pause))
         .route("/api/sessions/{id}/resume", post(pause::resume))
+        .route(
+            "/api/mcp/servers",
+            get(mcp_servers::list).post(mcp_servers::create),
+        )
+        .route(
+            "/api/mcp/servers/{id}",
+            axum::routing::patch(mcp_servers::update).delete(mcp_servers::delete),
+        )
+        .route("/api/mcp/servers/{id}/test", post(mcp_servers::test))
+        .route(
+            "/api/mcp/servers/{id}/sign_in",
+            post(mcp_servers::sign_in).delete(mcp_servers::sign_out),
+        )
+        .route("/api/mcp/oauth/callback", get(mcp_servers::oauth_callback))
         .route(
             "/api/providers",
             get(providers::list).post(providers::create),
@@ -251,6 +266,7 @@ pub async fn start(db: PgPool, config: Config, push: Arc<dyn push::PushSender>) 
         tokio::spawn(watchdog::turn_watchdog_loop(app.clone(), limit));
     }
     tokio::spawn(schedules::cron_loop(app.clone()));
+    tokio::spawn(mcp_servers::idle_loop(app.clone()));
     if let Some(keep) = app.config.artifacts.retention {
         tokio::spawn(artifacts::cleanup_loop(app.clone(), keep));
     }

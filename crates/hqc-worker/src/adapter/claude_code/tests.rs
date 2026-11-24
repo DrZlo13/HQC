@@ -189,6 +189,7 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         secrets: None,
         browser: false,
         browser_refused: None,
+        mcp_servers: vec![],
         fork: None,
     }
 }
@@ -12868,5 +12869,45 @@ fn a_turn_after_a_quiet_line_is_an_ordinary_turn() {
             "status to N",
             "turn_ended []"
         ]
+    );
+}
+
+/// SPEC 0.235: each of the hub's MCP servers goes in `--mcp-config` under its own name as a relay
+/// `hqc-worker mcp --upstream <name>`, with no address and no header: those stay on the hub. Its
+/// tools are not allowed outright.
+#[tokio::test]
+async fn the_hubs_mcp_servers_are_relays_under_their_own_names() {
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let launch = super::McpLaunch {
+        program: "/opt/hqc/hqc-worker".into(),
+        socket: "/home/u/.hqc/mcp.sock".into(),
+    };
+    let factory =
+        ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone())).with_mcp(launch);
+    let mut s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+    s.session_token = crate::token::Secret::new("hqcs_the_token");
+    s.mcp_servers = vec!["github".into(), "wiki".into()];
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let cmd = claude.commands()[0].clone();
+    let i = cmd.args.iter().position(|a| a == "--mcp-config").unwrap();
+    let cfg: serde_json::Value = serde_json::from_str(&cmd.args[i + 1]).unwrap();
+    assert_eq!(
+        cfg["mcpServers"]["github"],
+        json!({
+            "type": "stdio",
+            "command": "/opt/hqc/hqc-worker",
+            "args": ["mcp", "--socket", "/home/u/.hqc/mcp.sock", "--upstream", "github"],
+            "env": {"HQC_SESSION_TOKEN": "hqcs_the_token"},
+        })
+    );
+    assert_eq!(cfg["mcpServers"]["wiki"]["args"][4], "wiki");
+    assert!(cfg["mcpServers"]["hqc"].is_object());
+    assert!(
+        !cmd.args.iter().any(|a| a.contains("mcp__github")),
+        "not allowed outright"
     );
 }

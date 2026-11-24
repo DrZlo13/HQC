@@ -614,6 +614,22 @@ async fn handle_text(
             }
             Ok(())
         }
+        WorkerFrame::McpUpstream(u) => {
+            // SPEC 0.235: off the connection's loop; the answer may take the server's timeout.
+            let (app2, conn2) = (app.clone(), conn.clone());
+            let rid = u.request_id.clone();
+            let task = tokio::spawn(async move {
+                let r = crate::mcp_servers::relay(&app2, conn2.worker_id, u).await;
+                conn2.reply(&id, HubFrame::McpResult(r));
+            });
+            app.mcp_upstream.track(rid, task.abort_handle());
+            Ok(())
+        }
+        WorkerFrame::McpCancel(c) if app.mcp_upstream.cancel(&c.request_id) => {
+            tracing::info!(worker_id = %conn.worker_id, request_id = %c.request_id, reason = %c.reason, "mcp upstream call cancelled by the worker");
+            conn.reply(&id, HubFrame::Ack(Ack::default()));
+            Ok(())
+        }
         WorkerFrame::McpCancel(c) => {
             // Only a deferred call (`hqc_ask`, an `hqc_move` waiting for the owner) has
             // anything on the hub to close; a fast one was answered already.
@@ -886,6 +902,8 @@ async fn on_session_state(
     if process_state == ProcessState::Stopped {
         // A stopped agent runs nothing and its wakeups and cron jobs died with its process.
         app.drop_live_agents(session_id);
+        // Its MCP sessions with the owner's remote servers end with it (SPEC 0.235).
+        crate::mcp_servers::process_stopped(app, session_id);
     } else if subagents == 0 && background_tasks == 0 {
         // Neither a subagent nor a background task runs: the kept list, which holds the agent's
         // background commands too, goes; the wakeups and cron jobs the agent armed stay, they

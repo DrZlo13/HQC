@@ -79,6 +79,9 @@ pub struct Inner {
     /// Session -> what its agent waits on, as its worker last reported it
     /// (`session.state.activity`), until the turn ends ([`AppState::activity`]).
     activity: Mutex<HashMap<Uuid, hqc_proto::frame::Activity>>,
+    /// The MCP sessions open to the owners' remote MCP servers and the relay requests in
+    /// flight (SPEC 0.235).
+    pub mcp_upstream: crate::mcp_servers::Upstreams,
 }
 
 /// A session's `agent.delta` text since its last `agent.message` or `status` other than
@@ -187,6 +190,7 @@ impl AppState {
             token_rates: Mutex::default(),
             foreground_calls: Mutex::default(),
             activity: Mutex::default(),
+            mcp_upstream: Default::default(),
             config,
         }))
     }

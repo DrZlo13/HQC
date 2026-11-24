@@ -319,22 +319,38 @@ impl McpLaunch {
     /// read (T30, SPEC §7), and not in the CLI's environment, which the agent's Bash tool
     /// inherits. `secret_tools`: the server lists `hqc_secret` and `hqc_ssh_keygen` too
     /// (a session with [`crate::config::SessionSecrets`], SPEC 0.147).
-    pub fn config(&self, token: &crate::token::Secret, secret_tools: bool) -> String {
+    ///
+    /// `upstreams` (SPEC 0.235): the hub's remote MCP servers, each under its own name as a relay
+    /// `<program> mcp --socket <socket> --upstream <name>` with the same token: the CLI names
+    /// their tools `mcp__<name>__<tool>`, as with a direct connection, and the address and the
+    /// server's token stay on the hub.
+    pub fn config(
+        &self,
+        token: &crate::token::Secret,
+        secret_tools: bool,
+        upstreams: &[String],
+    ) -> String {
         let mut env = serde_json::json!({ (crate::mcp::TOKEN_ENV): token.expose() });
         if secret_tools {
             env[crate::secrets::SECRET_TOOLS_ENV] = "1".into();
         }
-        serde_json::json!({
-            "mcpServers": {
-                "hqc": {
-                    "type": "stdio",
-                    "command": self.program,
-                    "args": ["mcp", "--socket", self.socket],
-                    "env": env,
-                }
+        let mut servers = serde_json::json!({
+            "hqc": {
+                "type": "stdio",
+                "command": self.program,
+                "args": ["mcp", "--socket", self.socket],
+                "env": env,
             }
-        })
-        .to_string()
+        });
+        for name in upstreams {
+            servers[name] = serde_json::json!({
+                "type": "stdio",
+                "command": self.program,
+                "args": ["mcp", "--socket", self.socket, "--upstream", name],
+                "env": { (crate::mcp::TOKEN_ENV): token.expose() },
+            });
+        }
+        serde_json::json!({ "mcpServers": servers }).to_string()
     }
 }
 
@@ -787,7 +803,7 @@ impl ClaudeCodeAdapter {
         if let Some(m) = &self.opts.mcp {
             args.extend([
                 "--mcp-config".into(),
-                m.config(&spec.session_token, secrets.is_some()),
+                m.config(&spec.session_token, secrets.is_some(), &spec.mcp_servers),
             ]);
         }
         args.extend(["--allowedTools".into(), "mcp__hqc".into()]);

@@ -214,6 +214,11 @@ pub enum WorkerFrame {
     /// it open (SPEC §5.2, §7.2); answered with `ack {}`.
     #[serde(rename = "mcp.cancel")]
     McpCancel(McpCancel),
+    /// A request of the stdio relay of a remote MCP server the hub keeps (SPEC 0.235, iteration
+    /// 7); answered with `mcp.result` under its `request_id`, cancelled with `mcp.cancel`. Sent
+    /// directly, never through the outbox: a call to a remote service is not made late.
+    #[serde(rename = "mcp.upstream")]
+    McpUpstream(McpUpstream),
     /// The outcome of `workspace.create` (T45, SPEC §5.4); answered with `ack {}`. Sent when
     /// the clone ends and again whenever the hub repeats the `workspace.create`.
     #[serde(rename = "workspace.created")]
@@ -275,6 +280,37 @@ pub struct McpCall {
     /// leaves the hub a turn behind, SPEC §7.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_input: Option<Uuid>,
+}
+
+/// `mcp.upstream {request_id, session_token, server, method, params}` (SPEC 0.235): a JSON-RPC
+/// request of the agent's CLI to the remote MCP server `server`, which the hub makes with the
+/// token or sign-in it keeps. `method` is `initialize`, `tools/list` or `tools/call`. The
+/// answer is `mcp.result` whose `result` is [`UpstreamAnswer`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpUpstream {
+    pub request_id: String,
+    pub session_token: String,
+    pub server: String,
+    pub method: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+}
+
+/// The `result` of the `mcp.result` that answers [`McpUpstream`]: the server's JSON-RPC result
+/// itself, or (a result over [`crate::mcp::UPSTREAM_INLINE`]) the artifact the hub stored it as.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamAnswer {
+    Upstream(serde_json::Value),
+    UpstreamArtifact(UpstreamArtifact),
+}
+
+/// A large upstream result, stored by the hub as a short-lived artifact of the owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamArtifact {
+    pub id: Uuid,
+    pub size: u64,
+    pub sha256: String,
 }
 
 /// `mcp.cancel {request_id, reason}` (SPEC §5.2, §7.2): one of [`crate::mcp::cancel_reason`].
@@ -511,6 +547,9 @@ pub struct Candidate {
 /// `approval.response` with the option whose `canonical` is `deny` (SPEC §5.3, §10.1).
 /// A clarify request is closed the same way: `clarify.cancel` event plus `clarify.response`
 /// with empty `answers`.
+// `session.start` is the largest by far; a frame lives only while it is sent or handled, so its
+// size is not worth a box at every construction and match.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum HubFrame {
@@ -1522,6 +1561,12 @@ pub struct SessionStart {
     /// when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_wait: bool,
+    /// Since SPEC 0.235: the names of the remote MCP servers the hub keeps for the session's
+    /// project. A worker whose environment has `hub_mcp = true` gives each to the CLI under its
+    /// own name, as a stdio relay to the hub (`hqc-worker mcp --upstream <name>`); the address
+    /// and the token stay on the hub. Absent when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<String>,
 }
 
 /// A model provider (SPEC §3 Provider, since 0.144): an Anthropic-compatible endpoint with one
@@ -1865,6 +1910,7 @@ mod tests {
         "mirror.event",
         "mcp.call",
         "mcp.cancel",
+        "mcp.upstream",
         "workspace.created",
         "worker.limits",
         "session.subagent_leftovers",
@@ -2202,6 +2248,10 @@ mod tests {
             include_str!("../examples/wire/worker.mcp.cancel.json"),
         ),
         (
+            "mcp.upstream",
+            include_str!("../examples/wire/worker.mcp.upstream.json"),
+        ),
+        (
             "workspace.created",
             include_str!("../examples/wire/worker.workspace.created.json"),
         ),
@@ -2282,6 +2332,7 @@ mod tests {
             WorkerFrame::MirrorEvent(_) => "mirror.event",
             WorkerFrame::McpCall(_) => "mcp.call",
             WorkerFrame::McpCancel(_) => "mcp.cancel",
+            WorkerFrame::McpUpstream(_) => "mcp.upstream",
             WorkerFrame::WorkspaceCreated(_) => "workspace.created",
             WorkerFrame::WorkerLimits(_) => "worker.limits",
             WorkerFrame::SubagentLeftovers(_) => "session.subagent_leftovers",

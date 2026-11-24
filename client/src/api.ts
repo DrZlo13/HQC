@@ -42,6 +42,8 @@ import {
   type Me,
   type ModelProvider,
   parseModelProvider,
+  type McpServer,
+  parseMcpServer,
   type PermissionMode,
   type Project,
   type ProjectSort,
@@ -153,6 +155,29 @@ export interface ProviderFields {
   base_url: string;
   model: string;
   context_tokens?: number;
+}
+
+/** One header of a remote MCP server as the owner gives it; the value is write-only. */
+export interface McpHeader {
+  name: string;
+  value: string;
+}
+
+/** `POST /api/mcp/servers` and `PATCH /api/mcp/servers/{id}` (SPEC 0.235): in a `PATCH` an
+ *  absent field stays as it is, and `headers` replaces all of the server's headers. */
+export interface McpServerFields {
+  name?: string;
+  url?: string;
+  headers?: McpHeader[];
+  timeout_s?: number;
+  all_projects?: boolean;
+  project_ids?: string[];
+  /** T65: `oauth` signs in at the server's authorization server; the client secret is
+   *  write-only. */
+  auth?: 'headers' | 'oauth';
+  oauth_client_id?: string;
+  oauth_client_secret?: string;
+  oauth_scope?: string;
 }
 
 /** A page of events; `invalid` are raw events that failed validation (shown, not dropped). */
@@ -753,6 +778,41 @@ export class Api {
 
   async deleteProvider(id: string): Promise<void> {
     await this.req('DELETE', `/api/providers/${enc(id)}`);
+  }
+
+  /** The owner's remote MCP servers (SPEC 0.235). */
+  async mcpServers(): Promise<McpServer[]> {
+    const data = (await this.req('GET', '/api/mcp/servers')) as { servers?: unknown };
+    if (!Array.isArray(data?.servers)) throw new ApiError(500, 'mcp servers: expected a list');
+    return data.servers.map(parseMcpServer);
+  }
+
+  async createMcpServer(f: McpServerFields): Promise<McpServer> {
+    return parseMcpServer(await this.req('POST', '/api/mcp/servers', f));
+  }
+
+  async updateMcpServer(id: string, f: McpServerFields): Promise<McpServer> {
+    return parseMcpServer(await this.req('PATCH', `/api/mcp/servers/${enc(id)}`, f));
+  }
+
+  async deleteMcpServer(id: string): Promise<void> {
+    await this.req('DELETE', `/api/mcp/servers/${enc(id)}`);
+  }
+
+  /** Runs `initialize` and `tools/list` against the server: it with a fresh status and tools. */
+  async testMcpServer(id: string): Promise<McpServer> {
+    return parseMcpServer(await this.req('POST', `/api/mcp/servers/${enc(id)}/test`));
+  }
+
+  /** T65: the page of the server's authorization server to sign in on. */
+  async signInMcpServer(id: string): Promise<string> {
+    const v = (await this.req('POST', `/api/mcp/servers/${enc(id)}/sign_in`)) as { url?: unknown };
+    if (typeof v?.url !== 'string') throw new Error('no sign-in page');
+    return v.url;
+  }
+
+  async signOutMcpServer(id: string): Promise<void> {
+    await this.req('DELETE', `/api/mcp/servers/${enc(id)}/sign_in`);
   }
 
   /** A secret or an ssh key for the session's running agent (SPEC 0.147); `requestId`

@@ -120,6 +120,37 @@ impl ArtifactClient {
         self.max_artifact
     }
 
+    /// The artifact's bytes in memory, at most `max`: a large result of a remote MCP server the
+    /// hub stored for its relay (SPEC 0.235).
+    pub async fn fetch_bytes(&self, id: Uuid, max: u64) -> Result<Vec<u8>, InboxError> {
+        let url = format!("{}/worker/artifacts/{id}", self.hub_url);
+        let mut resp = self
+            .http
+            .get(&url)
+            .bearer_auth(self.token.expose())
+            .send()
+            .await
+            .with_context(|| format!("GET /worker/artifacts/{id}"))?;
+        let status = resp.status();
+        if matches!(status.as_u16(), 401 | 403 | 404 | 410) {
+            return Err(InboxError::Unavailable(id, status.to_string()));
+        }
+        if !status.is_success() {
+            return Err(anyhow!("GET /worker/artifacts/{id}: {status}").into());
+        }
+        if resp.content_length().is_some_and(|n| n > max) {
+            return Err(InboxError::TooLarge(id, max));
+        }
+        let mut out = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(anyhow::Error::from)? {
+            if out.len() as u64 + chunk.len() as u64 > max {
+                return Err(InboxError::TooLarge(id, max));
+            }
+            out.extend_from_slice(&chunk);
+        }
+        Ok(out)
+    }
+
     /// Streams the first `size` bytes of `file` to `PUT /worker/artifacts` for `session_id`
     /// (an agent's `hqc_attach`, SPEC §7, §12); the artifact's id.
     pub async fn upload(

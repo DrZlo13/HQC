@@ -1105,6 +1105,14 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'request_id');
     str(p, 'reason');
   },
+  // SPEC 0.235: a request of the relay of the owner's remote MCP server.
+  'mcp.upstream': (p) => {
+    str(p, 'request_id');
+    str(p, 'session_token');
+    str(p, 'server');
+    str(p, 'method');
+    if (p.params !== undefined) obj(p.params, 'params');
+  },
   'mcp.result': (p) => {
     str(p, 'request_id');
     if (p.error !== undefined) {
@@ -1615,6 +1623,55 @@ export function parseModelProvider(v: unknown): ModelProvider {
     model: str(o, 'model'),
     context_tokens: optNum(o, 'context_tokens'),
     workers: optStrArr(o, 'workers') ?? [],
+  };
+}
+
+/** A remote MCP server of the owner (SPEC 0.235, iteration 7): `GET /api/mcp/servers`. The
+ *  hub relays its tools to the agents of `all_projects` or of `project_ids` as
+ *  `mcp__<name>__<tool>`; header values are write-only, only their names come back. */
+export interface McpServer {
+  id: Uuid;
+  name: string;
+  url: string;
+  header_names: string[];
+  timeout_s: number;
+  all_projects: boolean;
+  project_ids: Uuid[];
+  /** `unknown`: not reached yet (also a status this client does not know); `sign_in`: an OAuth
+   *  server to sign in to (again). */
+  status: 'ok' | 'failing' | 'sign_in' | 'unknown';
+  last_error?: string;
+  /** Its tools' names, as it last listed them. */
+  tools: string[];
+  instructions?: string;
+  /** How the hub signs in to it (T65): headers it keeps, or OAuth. */
+  auth: 'headers' | 'oauth';
+  /** With OAuth: the hub holds a token for it. */
+  signed_in: boolean;
+  oauth_client_id?: string;
+  oauth_scope?: string;
+}
+
+export const MCP_STATUSES = ['ok', 'failing', 'sign_in'] as const;
+
+export function parseMcpServer(v: unknown): McpServer {
+  const o = obj(v, 'mcp server');
+  return {
+    id: str(o, 'id'),
+    name: str(o, 'name'),
+    url: str(o, 'url'),
+    header_names: optStrArr(o, 'header_names') ?? [],
+    timeout_s: num(o, 'timeout_s'),
+    all_projects: optBool(o, 'all_projects') ?? false,
+    project_ids: optStrArr(o, 'project_ids') ?? [],
+    status: tolerantEnum(o, 'status', MCP_STATUSES),
+    last_error: optStr(o, 'last_error'),
+    tools: optStrArr(o, 'tools') ?? [],
+    instructions: optStr(o, 'instructions'),
+    auth: optStr(o, 'auth') === 'oauth' ? 'oauth' : 'headers',
+    signed_in: optBool(o, 'signed_in') ?? false,
+    oauth_client_id: optStr(o, 'oauth_client_id'),
+    oauth_scope: optStr(o, 'oauth_scope'),
   };
 }
 

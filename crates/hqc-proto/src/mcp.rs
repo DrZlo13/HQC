@@ -730,6 +730,37 @@ pub mod error_code {
     pub const LIMIT_EXCEEDED: &str = "limit_exceeded";
     /// The worker restarted while `hqc_ask` waited: the blocking call died with it.
     pub const WORKER_RESTART: &str = "worker_restart";
+    /// A remote MCP server the hub keeps (SPEC 0.235) could not be reached or failed.
+    pub const MCP_UNAVAILABLE: &str = "mcp_unavailable";
+    /// The remote MCP server must be signed in to again in Settings → MCP servers.
+    pub const MCP_SIGN_IN: &str = "mcp_sign_in";
+    /// The remote MCP server did not answer within its timeout; the call may still have been
+    /// carried out on the server.
+    pub const MCP_TIMEOUT: &str = "mcp_timeout";
+    /// The remote MCP server's result is over [`super::UPSTREAM_MAX`].
+    pub const MCP_TOO_LARGE: &str = "mcp_too_large";
+}
+
+/// Largest upstream result carried in the `mcp.result` frame itself (SPEC 0.235); a larger one
+/// goes as an artifact ([`crate::frame::UpstreamArtifact`]).
+pub const UPSTREAM_INLINE: usize = 512 * 1024;
+/// Largest upstream result at all (SPEC 0.235).
+pub const UPSTREAM_MAX: usize = 64 * 1024 * 1024;
+/// A remote MCP server's name: the key the CLI names its tools by (`mcp__<name>__<tool>`).
+pub const MAX_SERVER_NAME: usize = 32;
+
+/// A remote MCP server's name is `[a-z0-9_-]{1,32}`, neither `hqc` nor one that starts or ends
+/// with `_` (which would make `mcp__<name>__<tool>` ambiguous, SPEC 0.224).
+pub fn valid_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_SERVER_NAME
+        && name != "hqc"
+        && !name.starts_with('_')
+        && !name.ends_with('_')
+        && !name.contains("__")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
 /// `mcp.cancel.reason` values (SPEC §7.2).
@@ -743,6 +774,26 @@ pub mod cancel_reason {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn server_names() {
+        for ok in ["github", "context7", "my-wiki", "a_b", "x"] {
+            assert!(super::valid_server_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "hqc",
+            "_a",
+            "a_",
+            "a__b",
+            "GitHub",
+            "a b",
+            "a.b",
+            &"x".repeat(33),
+        ] {
+            assert!(!super::valid_server_name(bad), "{bad}");
+        }
+    }
+
     use super::*;
 
     #[test]

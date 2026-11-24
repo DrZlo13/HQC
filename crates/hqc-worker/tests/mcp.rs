@@ -49,6 +49,25 @@ impl Runtime {
         Self { child, stdin, out }
     }
 
+    /// `hqc-worker mcp --upstream <name>`: the relay of the hub's MCP server (SPEC 0.235).
+    fn spawn_upstream(env: &Env, token: &str, name: &str) -> Self {
+        let mut cmd = tokio::process::Command::new(binary());
+        cmd.arg("mcp")
+            .arg("--socket")
+            .arg(env.mcp_socket())
+            .arg("--upstream")
+            .arg(name)
+            .env(hqc_worker::mcp::TOKEN_ENV, token)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("hqc-worker mcp --upstream starts");
+        let stdin = child.stdin.take();
+        let out = BufReader::new(child.stdout.take().unwrap()).lines();
+        Self { child, stdin, out }
+    }
+
     async fn send(&mut self, v: Value) {
         let w = self.stdin.as_mut().unwrap();
         w.write_all(format!("{v}\n").as_bytes()).await.unwrap();
@@ -938,5 +957,166 @@ async fn calls_carry_the_input_of_their_turn() {
     rt.call(3, json!({})).await;
     let f = c.expect("mcp.call").await;
     assert_eq!(f["payload"]["turn_input"], eid.to_string(), "{f}");
+    w.stop().await;
+}
+
+/// SPEC 0.235 (T63): a relay of the hub's remote MCP server sends `mcp.upstream` directly with
+/// the session token and hands the server's answers back as they are; only a server the agent
+/// was started with, only where the environment has `hub_mcp`.
+#[tokio::test]
+async fn a_relay_of_the_hubs_server_goes_to_the_hub_and_back() {
+    let env = Env::new();
+    let mut hub = FakeHub::start().await;
+    let adapters = FakeAdapters::new();
+    let toml = format!(
+        "{}[environments.mcp]\nhub_mcp = true\n[[env_bindings]]\npath = {:?}\nenvironment = \"mcp\"\n",
+        env.config_toml(&hub.url()),
+        env.workspace().display().to_string(),
+    );
+    let cfg = hqc_worker::config::Config::parse(&toml).unwrap();
+    let mut w = start_worker_with(&env, cfg, &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    w.wait_status(|s| matches!(s, hqc_worker::connection::Status::Connected { .. }))
+        .await;
+    let sid = Uuid::now_v7();
+    let mut p = start(&env, sid, TOKEN_A);
+    p["mcp_servers"] = json!(["fake", "Not A Name"]);
+    let id = c.frame("session.start", p).await;
+    let ack = c.expect("ack").await;
+    assert_eq!(ack["id"], id.as_str(), "{ack}");
+
+    let mut rt = Runtime::spawn_upstream(&env, TOKEN_A, "fake");
+    rt.send(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                   "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                              "clientInfo": {"name": "claude-code", "version": "2.1.330"}}}))
+        .await;
+    let f = c.expect("mcp.upstream").await;
+    let up = &f["payload"];
+    assert_eq!(
+        (&up["server"], &up["method"], &up["session_token"]),
+        (&json!("fake"), &json!("initialize"), &json!(TOKEN_A)),
+        "{f}"
+    );
+    c.send(
+        json!({"id": f["id"], "type": "mcp.result", "payload": {"request_id": up["request_id"],
+                  "result": {"upstream": {"serverInfo": {"name": "fake", "version": "1.0"},
+                                          "instructions": "call ping first"}}}}),
+    )
+    .await;
+    let r = rt.recv().await;
+    assert_eq!(r["id"], 1);
+    assert_eq!(r["result"]["serverInfo"]["name"], "fake", "{r}");
+    assert_eq!(r["result"]["instructions"], "call ping first");
+    assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
+
+    rt.send(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}))
+        .await;
+    let f = c.expect("mcp.upstream").await;
+    c.send(json!({"id": f["id"], "type": "mcp.result", "payload": {"request_id": f["payload"]["request_id"],
+                  "result": {"upstream": {"tools": [{"name": "ping", "inputSchema": {"type": "object"}}]}}}}))
+        .await;
+    let r = rt.recv().await;
+    assert_eq!(r["result"]["tools"][0]["name"], "ping", "{r}");
+
+    // The server's result as it is.
+    rt.send(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                   "params": {"name": "ping", "arguments": {"x": 1}}}))
+        .await;
+    let f = c.expect("mcp.upstream").await;
+    assert_eq!(f["payload"]["params"]["arguments"], json!({"x": 1}));
+    let result = json!({"content": [{"type": "text", "text": "pong"}], "isError": false, "structuredContent": {"ok": true}});
+    c.send(json!({"id": f["id"], "type": "mcp.result", "payload": {"request_id": f["payload"]["request_id"],
+                  "result": {"upstream": result}}}))
+        .await;
+    let r = rt.recv().await;
+    assert_eq!(r["result"], result, "{r}");
+
+    // The hub's error is a tool error.
+    rt.send(json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "ping"}}))
+        .await;
+    let f = c.expect("mcp.upstream").await;
+    c.send(json!({"id": f["id"], "type": "mcp.result", "payload": {"request_id": f["payload"]["request_id"],
+                  "error": {"code": "mcp_timeout", "message": "the MCP server fake did not answer in 300 s"}}}))
+        .await;
+    let r = rt.recv().await;
+    assert_eq!(r["result"]["isError"], true, "{r}");
+    assert!(r["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("mcp_timeout:"));
+
+    // A large result: downloaded from the hub and checked.
+    let big = json!({"content": [{"type": "text", "text": "y".repeat(2 * 1024 * 1024)}]});
+    let bytes = serde_json::to_vec(&big).unwrap();
+    let art = Uuid::now_v7();
+    hub.artifacts.insert(
+        art,
+        FakeArtifact {
+            name: "fake-result.json".into(),
+            kind: "file".into(),
+            mime: "application/json".into(),
+            bytes: bytes.clone(),
+        },
+    );
+    use sha2::Digest;
+    let sha: String = sha2::Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    rt.send(json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "big"}}))
+        .await;
+    let f = c.expect("mcp.upstream").await;
+    c.send(json!({"id": f["id"], "type": "mcp.result", "payload": {"request_id": f["payload"]["request_id"],
+                  "result": {"upstream_artifact": {"id": art, "size": bytes.len(), "sha256": sha}}}}))
+        .await;
+    let r = rt.recv().await;
+    assert_eq!(r["result"], big, "the large result whole");
+
+    // A server the agent was not started with gets no frame.
+    let mut other = Runtime::spawn_upstream(&env, TOKEN_A, "other");
+    other
+        .send(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}))
+        .await;
+    let r = other.recv().await;
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not_found"),
+        "{r}"
+    );
+    while let Some(f) = c.try_recv(Duration::from_millis(300)).await {
+        assert_ne!(f["type"], "mcp.upstream", "no frame for it: {f}");
+    }
+    drop(rt);
+    drop(other);
+    w.stop().await;
+}
+
+/// Without `hub_mcp` the names in `session.start` are dropped: a relay gets nothing.
+#[tokio::test]
+async fn without_hub_mcp_no_server_is_relayed() {
+    let (env, _hub, w, mut c, _sid) = setup().await;
+    let sid = Uuid::now_v7();
+    let mut p = start(&env, sid, TOKEN_B);
+    p["mcp_servers"] = json!(["fake"]);
+    c.frame("session.start", p).await;
+    c.expect("ack").await;
+    let mut rt = Runtime::spawn_upstream(&env, TOKEN_B, "fake");
+    rt.send(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}))
+        .await;
+    let r = rt.recv().await;
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not_found"),
+        "{r}"
+    );
+    while let Some(f) = c.try_recv(Duration::from_millis(300)).await {
+        assert_ne!(f["type"], "mcp.upstream", "no frame for it: {f}");
+    }
+    drop(rt);
     w.stop().await;
 }

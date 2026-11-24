@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.234, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.235, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -215,7 +215,7 @@ version, load_session, resume, image, isolation}]` — the result of each agent'
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
 `environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?}}`,
 never the values of `env`; `default` is implied), `env_bindings[]` (`{path, environment}`; the
-Hermes profile in iteration 7),
+Hermes profile in iteration 8),
 `allow_foreign_sessions`, `idle_timeout`, `system_session_id` (§10.2), `machine_hash` (since 0.23:
 the machine fingerprint from enrollment and the last `hello`, §5.1; not part of the API worker object),
 `session_secrets` (since 0.147, hub migration `0044`: its `worker.toml` has `session_secrets = true`,
@@ -1098,6 +1098,15 @@ MCP calls (worker → hub → worker):
   no free slot (`max_sessions`) the worker acks it and does not put the session in line for one
   nor write `system waiting_for_slot`, keeps the start's settings for the agent's next start, and
   the side question that follows is answered with an error; absent — false;
+  `mcp_servers` (since 0.235) — the names of the owner's remote MCP servers the session's project
+  gets (§6 `/api/mcp/servers`), not for a restricted session nor another runtime than Claude Code;
+  the worker takes them only in an environment with `hub_mcp = true` (§14), for an unrestricted
+  session of its owner, valid names only (`[a-z0-9_-]{1,32}`, not `hqc`, no `_` at either end
+  nor `__`), and gives each to the CLI in `--mcp-config` under its own name as a stdio relay
+  `hqc-worker mcp --socket <socket> --upstream <name>` with the session token in its `env`, with
+  no address and no header, so the CLI names its tools `mcp__<name>__<tool>` as with a direct
+  connection and none is allowed outright; a change reaches the agent at its next start; absent —
+  none;
   `allow_rules` (since 0.52, T48) — hqc's allow rules of the
   session's workspace (§3 Workspace), absent when none; the worker keeps the latest list per
   canonical workspace, shared by its sessions there, and drops a rule that is not valid hqc
@@ -1596,7 +1605,26 @@ MCP calls (worker → hub → worker):
 - `mcp.call` {request_id, session_token, tool, args} → `mcp.result` (fast tools) or `ack {}`
   (deferred, §5.2); through the outbox without the token (since 0.33, T30)
 - `mcp.cancel` {request_id, reason} → `ack {}` — a call that died on the worker's side
-  (§5.2, §7.2)
+  (§5.2, §7.2); also a relay request below, which the hub then stops
+- `mcp.upstream` {request_id, session_token, server, method, params} → `mcp.result` (since
+  0.235) — a request of the relay of the owner's remote MCP server `server` (§5.3
+  `mcp_servers`), `method` one of `initialize`, `tools/list`, `tools/call`, `params` as the CLI
+  sent them (at most 64 KiB). Sent directly, never through the outbox, and only while connected:
+  a call to a remote service is not made late; a lost connection fails the open ones on the
+  worker ("may still have been carried out"). The relay asks only for a server its agent was
+  started with. The hub checks the token as for `mcp.call` (the session must be this worker's),
+  that the server is the session owner's and its project's, and answers `result` `{upstream:
+  <the server's JSON-RPC result>}` or, for one over 512 KiB, `{upstream_artifact: {id, size,
+  sha256}}`: an artifact of the owner linked to the session, which the worker downloads with
+  `GET /worker/artifacts/{id}` and checks, removed after an hour; over 64 MiB, and every failure,
+  is `error` `mcp_unavailable` (unreachable, an error of the server, a URL into a private
+  address), `mcp_sign_in` (`401`/`403`: set the credentials again), `mcp_timeout` (the server's
+  timeout; "the call may still have been carried out on the server: check before retrying") or
+  `mcp_too_large`, which the relay gives the CLI as a tool error. `initialize` answers the
+  server's `serverInfo` and `instructions` (cached per server for an hour), which the relay hands
+  the CLI, so the server's instructions reach the agent's context; `tools/list` the server's
+  tools (cached the same way, all pages); `tools/call` goes to the server in the MCP session of
+  this session and server (below). The relay answers `ping` itself.
 - `worker.limits` {five_hour?, seven_day?, status?, rate_limit_type?, resets_at?} → `ack {}`
   (since 0.81) — the usage limits of the account the worker's agents run on, each window
   `{utilization (0..1), resets_at (Unix seconds)}`: the 5-hour window ("Current session" of
@@ -1863,6 +1891,45 @@ the rest is marked "later"):
   name the owner has, `409 provider_in_use` on deleting one sessions run on): {name, label,
   base_url, model, context_tokens?} (`context_tokens` 1000 to 10 000 000); a provider object has
   `workers[]`, the owner's workers whose last `hello` allowed it.
+  Remote MCP servers (since 0.235, `docs/ITERATION-7.md`): `GET/POST /api/mcp/servers`
+  ({servers: [...]} and `201`), `PATCH/DELETE /api/mcp/servers/{id}`, `POST
+  /api/mcp/servers/{id}/test`, the owner's only. A server: {id, name, url, header_names[],
+  timeout_s, all_projects, project_ids[], status (`ok` | `failing` | `unknown`), last_error?,
+  tools[] (names, as last listed), instructions?}. `POST` takes {name, url, headers?[{name,
+  value}], timeout_s?, all_projects?, project_ids?}; `PATCH` the fields given, `headers` replacing
+  all of them. `name` as in `session.start.mcp_servers`, unique per owner (`409 name_taken`); `url`
+  https (http only to a loopback host), without a user or password; at most 8 headers, a name of
+  letters, digits, `-` and `_` and none the hub sets itself (`Host`, `Content-Type`, `Accept`,
+  `Mcp-Session-Id`, `Mcp-Protocol-Version` …), a value of one line up to 4 KiB; `timeout_s` 30 to
+  1800, 300 by default; `project_ids` the owner's; at most 50 servers (`409
+  too_many_servers`). Header values are write-only: sealed with `HQC_MCP_KEY` (XChaCha20-Poly1305,
+  the server's id as associated data), never sent back, logged or put into an event; without the
+  key a server with headers is `422 mcp_key_missing`. `test` runs `initialize` and `tools/list` in
+  an MCP session of its own, closed after, and returns the server with its status. A changed URL
+  or headers drop the cache and the open MCP sessions. The hub speaks Streamable HTTP (`POST` with
+  a JSON or an event-stream answer, `Mcp-Session-Id`, `Mcp-Protocol-Version`), one MCP session per
+  hqc session and server, opened on the first request, opened again once when the server answers
+  `404` for it, and closed (`DELETE`) when the agent's process stops or after an hour unused;
+  redirects are not followed, and the address connected to is the one checked against private
+  ranges (§20).
+  OAuth (T65): a server with `auth: oauth` ({auth, oauth_client_id?, oauth_client_secret?,
+  oauth_scope?} in `POST`/`PATCH`; the secret write-only; status `sign_in` until signed in, and
+  `signed_in` in the server object) signs in through its authorization server, as MCP's
+  authorization spec has it. `POST /api/mcp/servers/{id}/sign_in` → {url}: the hub discovers the
+  server's protected-resource metadata (RFC 9728, named by its `401` or at the well-known path)
+  and the authorization server's metadata (RFC 8414 or OpenID), registers itself (RFC 7591) when
+  no client id is given and the server offers it (`422 client_id_needed` otherwise), and answers
+  the authorization URL with PKCE (S256), a state bound to the owner for ten minutes, the
+  `resource` (RFC 8707) and the scope given or the server's. The browser comes back to `GET
+  /api/mcp/oauth/callback`, behind the hub's sign-in like `/api/*`, which exchanges the code and
+  answers a plain page; the redirect URI is the first of `HQC_PUBLIC_ORIGINS`, else the request's
+  host. Tokens and the client secret are sealed under `HQC_MCP_KEY`; the access token is refreshed
+  a minute before it expires and once when the server refuses it (one refresh per server at a
+  time, a rotated refresh token kept); a failed refresh sets `sign_in`, and the call's error says
+  to sign in again. `DELETE /api/mcp/servers/{id}/sign_in` forgets the tokens. The client shows
+  the section "MCP servers" in Settings (the list with status and tools, add and edit with
+  headers or OAuth, Test, Sign in, Sign out, Delete) and the servers a project gets in its
+  settings (T66).
   `POST /api/sessions/{id}/secrets` (since 0.147, §14) {kind, name, value?, vault?, passphrase?,
   remember?, request_id?} (unknown fields: `422`; one of `value` and `vault` exactly, else `400`;
   `vault` since 0.216 — a Vaultwarden entry the worker reads itself, §5.3, only on a worker whose
@@ -3338,7 +3405,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
 - `hqc_attach(path?, content?, name?, kind?, caption?)` — upload a file as an artifact
   to the current session; `path` for runtimes with a file system, `content` for the bare model.
   Since 0.34 (T31) the worker's MCP server lists `hqc_attach(path, name?, kind?, caption?)`;
-  `content` comes with the bare model (iteration 7) and is refused until then
+  `content` comes with the bare model (iteration 8) and is refused until then
   (`invalid_args`). The worker daemon does the file part itself, trusting neither the hub nor
   the agent's path (§2.1): `path` is absolute or relative to the session's working directory;
   its canonical form (symlinks resolved) must lie inside the session's workspace and inside
@@ -3356,7 +3423,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   live_attach.rs`): the event lands between the call's `tool.call` and `tool.result`.
 - `hqc_send(text, session?)` — a message to another session without waiting for a reply;
   without `session`, to the owner's personal assistant session. Since 0.35 (T32): `session`
-  is required until the personal session exists (iteration 7); the result is `{to,
+  is required until the personal session exists (iteration 8); the result is `{to,
   delivery}`, `to` — the target's address, `delivery` — `queued` (the input queue, the
   target wakes on sends; by default since 0.55) or `buffered` (the send buffer, §7.1); since 0.47 (T42) also
   `with_reply`: the send goes back with the reply to the target's open ask (§7.1). Since 0.54
@@ -3410,7 +3477,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   cap of its chain (§7.1), and so does the spawned session's first turn. `project` — a slug or an id
   of the owner's project; `workspace` — an id, a label or a path of a workspace of that
   project (else `not_found`), absent — the project's `default_workspace_id` (none:
-  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 7 (else
+  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 8 (else
   `invalid_args`); `model` absent — the calling session's model (a cheap spawner does not
   start an expensive agent by default), present — checked as in §6. `prompt` (not blank)
   becomes a `peer.message` with `mode: send` from the calling session in the new session's
@@ -3759,7 +3826,7 @@ to it (`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}`
 server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
 Codes added in 0.35: `timeout` (no reply in time), `limit_exceeded` (a chain limit, §7.1),
 `worker_restart` (the asking worker restarted; never seen by the agent, whose call died).
-Until grants (iteration 8) every tool works only on the calling session's owner's own
+Until grants (iteration 9) every tool works only on the calling session's owner's own
 projects and sessions; anything else is `not_found`.
 
 ### 7.1 Semantics of send and ask **[decision]**
@@ -6838,7 +6905,7 @@ from the `fs.list_dirs` tree or its path is typed in, the worker checks it with 
 the hub stores the canonical path. Since 0.64, when the folder is missing (`400
 path_not_found`) the form offers "Create the folder and add" in place of "Add" (until the path
 or the worker changes), which sends `create: true`. Only the worker's owner can add a workspace to a worker (until
-the sharing of iteration 8 a worker has no other users), so there is no confirmation through the
+the sharing of iteration 9 a worker has no other users), so there is no confirmation through the
 service session yet; if the worker is offline, the workspace is not created. Since 0.58 (T45)
 `clone`: the client gives the URL, the parent folder and a name, the hub checks the parent and
 stores the workspace `creating`, the worker checks the new path itself and clones into it in its
@@ -6897,7 +6964,7 @@ The worker's local config is the only source of truth for:
   old file is ignored with a warning in the log at start;
 - `environments{}` — named environments (`[environments.<name>]`, below; since 0.56, T43);
 - `env_bindings[]` — records `{path, environment, hermes_profile?, foreign_profile?}`
-  (`[[env_bindings]]`; the profiles are iteration 7). A binding is looked up **by the workspace
+  (`[[env_bindings]]`; the profiles are iteration 8). A binding is looked up **by the workspace
   path** (not by the session's `cwd`), canonical (symlinks resolved; the binding's own path is
   resolved again at every lookup, so a binding through a symlink names its target); the longest
   binding that equals or contains the path wins, compared by path components (`/a/b` does not
@@ -6985,6 +7052,7 @@ env = { GITHUB_TOKEN = "..." }        # variables on top of the child allowlist
 ssh_keys = ["infra_ed25519"]          # keys of the worker's store, $HQC_HOME/keys/
 allow_local_mcp = false
 project_settings = false
+hub_mcp = false                       # true: the owner's remote MCP servers from the hub (0.235)
 [environments.infra.permissions]
 unblock = ["Bash(ssh:*)"]             # lift worker-wide deny rules here only
 allow = ["Bash(ssh debian@192.168.1.20:*)"]
@@ -7178,7 +7246,7 @@ it finds commands, their output and word forms and puts the best match first:
 - **Configuration `hqc`.** A copy of `russian` whose Latin words go to an English and the rest
   to a Russian Snowball stemmer, both without stop words, so every word stays searchable and
   "переезд" finds "переезда", "deploy" finds "deployed".
-- **Whose.** Until grants (iteration 8): the user's (the calling session's owner's) sessions,
+- **Whose.** Until grants (iteration 9): the user's (the calling session's owner's) sessions,
   archived ones included and marked `archived: true`, the workers' service sessions left out and
   (since 0.172) of a room's agents' sessions their inputs from the room, which the room has
   (§7.1.1); since 0.175, for an agent of a room (`hqc_search_history`, §7) also the room and
@@ -7745,7 +7813,7 @@ is not asked, does not see the question or the answer, and does not work on it.
    a session started in VS Code (live test `live_takeover`; checked by hand through the UI on a phone on 2026-10-25).
    Closed on 2026-10-25.
 3. hqc MCP: attach, send, ask, spawn, list, search, schedule; `mcp.call` frames;
-   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 8).
+   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 9).
    Tasks: `docs/ITERATION-3.md`. Criterion checked by hand on the production hub on 2026-10-31.
    Closed on 2026-10-31.
 4. Workspaces: ~~clone~~ (0.58, T45), ~~worktree~~ (0.60, T46), ~~ephemeral~~ (0.61, T47). Environments and bindings on the worker. Moved
@@ -7762,12 +7830,18 @@ is not asked, does not see the question or the answer, and does not work on it.
    the hub's storage; a key may be kept for the workspace; only a worker with `session_secrets`
    takes them (§14); and the owner's Chrome for one session (since 0.148, `browser`). Tasks:
    `docs/ITERATION-6.md`.
-7. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
+7. Remote MCP servers from the hub (since 0.235, #59): the owner adds a server reached by URL
+   once, for all projects or chosen ones; a session's agent gets it under its own name
+   (`mcp__<name>__<tool>`) through a stdio relay of the worker, and the hub makes the calls
+   with the token or OAuth sign-in it keeps, so no worker, agent or transcript sees it; only an
+   environment with `hub_mcp = true` takes them (§14). MCP servers that run on the machine and
+   skills from the hub (#62) come after it. Tasks: `docs/ITERATION-7.md`.
+8. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
    worker; the bare model; the personal assistant session (moved from 3: its default runtime is
    the bare model, §8.3), until then `hqc_send` needs `session`.
-8. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
+9. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
    (0.38, T35, with `hqc_schedule`).
-9. Tauri, native notifications, several agents in one session.
+10. Tauri, native notifications, several agents in one session.
 
 ## 20. Hosting and security
 
@@ -7781,6 +7855,21 @@ is not asked, does not see the question or the answer, and does not work on it.
   `HQC_HUB_LISTEN` address and without `HQC_ACCESS_*` or `HQC_OIDC_*`; otherwise the hub does
   not start (§6).
 - Worker tokens: random 256 bits, only the hash in the database; revocation from the UI.
+- Remote MCP servers (since 0.235), what is accepted: the relay authenticates to the worker with
+  the session token, which is on the CLI's command line as for the hqc server (§7.2), so an agent
+  allowed to run commands can start a relay of its session's servers itself and call their tools
+  without the CLI's permission card for each; the servers it reaches are only those of its
+  project, with the owner's credentials. Give a server to the projects whose agents may act on it.
+  The hub itself, not only the worker, refuses a restricted session, another runtime, and a
+  session on a worker that is not its owner's: a foreign worker holds the session's token.
+- Remote MCP servers (since 0.235): their header values are sealed under `HQC_MCP_KEY` and never
+  leave the hub but to the server itself; no worker, agent, transcript or log line sees them. A
+  server's URL is https, and the hub refuses to connect to a private, loopback, link-local or
+  CGNAT address (also behind a name) unless `HQC_MCP_ALLOW_PRIVATE=1`, so an owner's server entry
+  cannot reach the hub's own network by surprise; the name is resolved once per request and the
+  connection goes to that address, and redirects are not followed. A relay request needs the
+  session token of a session the sending worker runs; a server answers only sessions of the
+  projects its owner gave it to.
 - `Origin` **[decision]**: a WebSocket upgrade of `/api/ws` without `Origin`, or with an `Origin`
   that does not match the request's `Host`, gets `403`; non-GET `/api/*` requests with a foreign
   `Origin` get `403` (without `Origin` they pass: that is how non-browser clients come). A match
@@ -7938,6 +8027,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.234 → 0.235 (iteration 7: remote MCP servers relayed by the hub)
+§19: a new iteration 7, remote MCP servers the owner adds once on the hub (#59); the generic ACP
+adapter becomes iteration 8, sharing 9, Tauri 10, and the references to them follow. §5.3
+`session.start.mcp_servers`, §5.4 `mcp.upstream`, §6 `/api/mcp/servers`, §14 `hub_mcp`, §20.
+A server's address and token stay on the hub: the worker gives the CLI a stdio relay per server
+under the server's own name (`mcp__<name>__<tool>`), and the hub makes the calls, one MCP session
+per hqc session and server, a large result as an artifact, a timeout per server. Migration
+`0057`. OAuth sign-in (T65) and the client's screens (T66).
 
 ### 0.233 → 0.234 (one Quote button over the input, Copy alone on a message)
 §6: a message's buttons were Search, Copy and Quote: Search worked on the selection inside that

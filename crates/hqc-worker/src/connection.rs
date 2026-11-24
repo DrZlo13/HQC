@@ -152,6 +152,7 @@ impl Connection {
         let mut backoff = self.opts.backoff_min;
         loop {
             self.status.send_replace(Status::Connecting);
+            self.link.set_online(false);
             let wait = match self.session(&stop).await {
                 Ended::Stopped => break,
                 Ended::UpdateNeeded(min) => {
@@ -167,6 +168,7 @@ impl Connection {
                     self.opts.version_retry
                 }
                 Ended::Lost { connected, why } => {
+                    self.link.set_online(false);
                     if connected {
                         backoff = self.opts.backoff_min;
                     }
@@ -181,6 +183,7 @@ impl Connection {
             }
         }
         self.status.send_replace(Status::Stopped);
+        self.link.set_online(false);
     }
 
     /// Waits while disconnected, dropping direct frames. `false` if stopped.
@@ -244,6 +247,7 @@ impl Connection {
         };
         tracing::info!(%worker_id, "connected to hub");
         self.status.send_replace(Status::Connected { worker_id });
+        self.link.set_online(true);
         let _ = self.inbound.send(Inbound::Connected).await;
 
         let why = match self.connected(&mut ws, stop).await {

@@ -262,6 +262,16 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
         // The worker runs it only if its worker.toml has `browser = true` (SPEC 0.148).
         browser: s.browser,
         no_wait: false,
+        // SPEC 0.235: the names only; the worker takes them where its environment has `hub_mcp`.
+        // Only for the owner's own worker: a foreign worker gets no name of them.
+        mcp_servers: if s.restricted
+            || s.runtime != "claude_code"
+            || worker_owner != Some(s.owner_id)
+        {
+            vec![]
+        } else {
+            crate::mcp_servers::names_for(&app.db, s.owner_id, s.project_id).await?
+        },
     })
 }
 

@@ -25,6 +25,40 @@ pub struct Config {
     /// TCP peer when it is absent), and neither `CF-Connecting-IP` nor `CF-IPCountry` is read
     /// (SPEC §20). `None`: `CF-Connecting-IP`, else the TCP peer. Required in OIDC mode.
     pub client_ip_header: Option<axum::http::HeaderName>,
+    /// The remote MCP servers of owners (SPEC 0.235).
+    pub mcp: McpConfig,
+}
+
+/// `HQC_MCP_KEY` and `HQC_MCP_ALLOW_PRIVATE` (SPEC 0.235).
+#[derive(Clone, Default)]
+pub struct McpConfig {
+    /// 32 bytes, base64 or 64 hex digits: the key the headers of the owners' MCP servers are
+    /// sealed with. `None`: the hub keeps no server with headers (`422 mcp_key_missing`).
+    pub key: Option<[u8; 32]>,
+    /// The URL of an MCP server may lead to a private or loopback address.
+    pub allow_private: bool,
+}
+
+/// `HQC_MCP_KEY`: 32 bytes as base64 or 64 hex digits.
+fn mcp_key_from(v: Option<&str>) -> anyhow::Result<Option<[u8; 32]>> {
+    let Some(v) = v.map(str::trim) else {
+        return Ok(None);
+    };
+    let bytes = if v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()) {
+        (0..32)
+            .map(|i| u8::from_str_radix(&v[2 * i..2 * i + 2], 16))
+            .collect::<Result<Vec<u8>, _>>()?
+    } else {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(v)
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(v))
+            .context("HQC_MCP_KEY: not base64 nor hex")?
+    };
+    let key: [u8; 32] = bytes.try_into().map_err(|_| {
+        anyhow::anyhow!("HQC_MCP_KEY: 32 bytes are needed (openssl rand -base64 32)")
+    })?;
+    Ok(Some(key))
 }
 
 /// The artifact store and its signed links (SPEC §12).
@@ -513,6 +547,10 @@ impl Config {
                         .with_context(|| format!("HQC_CLIENT_IP_HEADER={v}: not a header name"))
                 })
                 .transpose()?,
+            mcp: McpConfig {
+                key: mcp_key_from(var("HQC_MCP_KEY").as_deref())?,
+                allow_private: var("HQC_MCP_ALLOW_PRIVATE").as_deref() == Some("1"),
+            },
         })
     }
 }

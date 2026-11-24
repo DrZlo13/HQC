@@ -1012,7 +1012,7 @@ impl Core {
     /// them. Not watched: a task the CLI runs in the foreground of the main agent's turn
     /// ([`Core::foreground`]: a note would wait for its end), a subagent started by a subagent
     /// that still runs (its parent waits for it, as for the commands of [`Core::parent`]; the
-    /// main agent may have had no request since its parent started), and one that is gone. A
+    /// main agent may have had no request since it started), and one that is gone. A
     /// task seen for the first time is counted as told for the marks it has already passed: a
     /// command or a subagent a subagent left running is watched only once that one reports, long
     /// after its own start.

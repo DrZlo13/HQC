@@ -5002,9 +5002,8 @@ of this session is still running: command "<description>" (task <task_id>, <time
 is no longer needed with TaskStop, or leave it.` (the times as in the note of a pause; each
 description is the model's word, a JSON string escaped as in the note above) as the session
 owner's pending `user.message`, delivered as any input; none to a room nor to a paused session;
-`system`
-`compact_boundary` (`compact_metadata.trigger: manual`
-after `/compact`, 2.1.308 and 2.1.312; an automatic compaction was not checked; its `uuid` is
+`system` `compact_boundary` (`compact_metadata.trigger: manual` after `/compact`, 2.1.308 and
+2.1.312; an automatic compaction was not checked; its `uuid` is
 that of the transcript's `system compact_boundary` record) →
 `system context_compacted` with the `event_id` derived from that `uuid`, held until the summary:
 the main agent's next `user` line with `isSynthetic: true` (the transcript's `isCompactSummary`

@@ -275,6 +275,13 @@ export function formatCost(usd: number, precise = false): string {
   return `$${usd.toFixed(precise || usd < 0.01 ? 3 : 2)}`;
 }
 
+/** The header's spending item (SPEC 0.229): `$2.25 · 3.4M tokens this session`, with only
+ *  the one of the two that is known; `this room` for a room. */
+export function spendLabel(cost: number | undefined, tokens: number | undefined, room: boolean): string {
+  const parts = [cost !== undefined && formatCost(cost), tokens !== undefined && `${formatTokens(tokens)} tokens`];
+  return `${parts.filter(Boolean).join(' · ')} this ${room ? 'room' : 'session'}`;
+}
+
 const MODEL_ID = /^claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-\d{8})?$/;
 
 /** `claude-opus-5-5` → `Opus 5.5`, an alias `fable` → `Fable`; other names as they are. */

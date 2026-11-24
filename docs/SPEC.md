@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.228, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
+Version 0.229, 2026-11-23. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -626,7 +626,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; since 0.181 also the worker after a background task's end, the task's output file (§8.1), with the same `author`, `kind: text`; since 0.209 also a publication the owner allowed (`hqc_publish`, §7), with `kind: site` (`event.attachment.site.json`); the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `joined_after?` (since 0.221, with `joined`: as on a `user.message`), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
-| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?`, `context_tokens?`, `context_limit?`, `cache_ttl_s?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost. Since 0.222 a `usage` that carries tokens (not the one with the total only) also says how full the main agent's context is and how long its prompt cache lives: `context_tokens` is the context after the turn's last API response of the main agent (§8.1), `context_limit` the tokens it may hold before the runtime compacts it by itself, `cache_ttl_s` the seconds the session's cache has left when the turn ends, counted from the request of the response (3600 or 300, less the seconds since the response started, 0 at the least); each is absent when the runtime does not say it. `context_limit` is the threshold of the model's window; an override of the auto-compaction window or a disabled auto-compaction is not seen in the stream (§8.1). The client's header shows them (§6) |
+| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `session_tokens?`, `model?`, `context_tokens?`, `context_limit?`, `cache_ttl_s?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost. Since 0.229 `session_tokens` is the runtime's cumulative tokens of the whole runtime session after the turn — input, output, cache reads and cache writes summed (Claude Code: `result.modelUsage` summed over its models), on every `usage` the adapter sends (the turn's, the compaction's and the total-only one) whose `result` has a `modelUsage`, absent otherwise; the client's header shows the latest one plus the last one before each `system conversation_cleared`, as it does the cost, but with no fallback to summing turns (§6). Since 0.222 a `usage` that carries tokens (not the one with the total only) also says how full the main agent's context is and how long its prompt cache lives: `context_tokens` is the context after the turn's last API response of the main agent (§8.1), `context_limit` the tokens it may hold before the runtime compacts it by itself, `cache_ttl_s` the seconds the session's cache has left when the turn ends, counted from the request of the response (3600 or 300, less the seconds since the response started, 0 at the least); each is absent when the runtime does not say it. `context_limit` is the threshold of the model's window; an override of the auto-compaction window or a disabled auto-compaction is not seen in the stream (§8.1). The client's header shows them (§6) |
 | `tasks` | `items[{subject, status, active_form?}]` | Claude Code adapter (since 0.223), stored: the agent's task list after a change, the whole list each time, empty when it has none. `status` is `pending`, `in_progress` or `completed` (another value reads as "unknown", shown as pending); `subject` and `active_form` are at most 512 bytes and the list at most 200 tasks; `active_form` is what the agent is doing while the task is in progress, as the runtime names it (Claude Code: `activeForm`), absent when it names none. The latest one is the list, the client shows it as a row above the input (§6), never as a feed item; the adapter sends one only when the list changed (§8.1) |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.161 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`), `call_id?`, `status?`, `task_id?` (since 0.135, only on `task_notification`), `usage?{total_tokens, tool_uses, duration_ms}` (since 0.181, only on `task_notification`), `from_session_id?` (since 0.172, only on `room_passed`: the agent that passed), `trigger?`, `pre_tokens?`, `post_tokens?` (since 0.179, only on `context_compacted`), `model?` (since 0.179, only on `model_not_switched`) | hub or worker; codes below |
@@ -2406,7 +2406,10 @@ The chat header (since 0.206): the title, then the meta row — the state, the p
 the model as round pills beside it (below and §6 `permission_mode`; none for a room or the
 service session, and an archived session's are the names alone, without a menu), then, on a
 computer, "started by <address>", "on <worker>", the folder with its copy button, "Browser", the
-cost and, since 0.222, the context. On a phone the header is lines at even gaps, with even
+cost and, since 0.222, the context. Since 0.229 the cost item names the session's tokens after
+the cost ("$2.25 · 3.4M tokens this session"; a room's "this room" sums its agents'; the tokens
+show also for a session on a provider, which has no cost shown; the hover gives the exact
+number). On a phone the header is lines at even gaps, with even
 padding above and below: "‹", the title and the header's buttons, centred on the title's line,
 the title cut only at the first button; the state at its full text and "N agents" (a room's: the
 state and its mode); the two
@@ -2417,7 +2420,7 @@ provider's long label) only past it. The lines under the first are as wide as th
 a room has no pills, and its agents' line stays right under its state's, above "started by" of
 a room an agent made. "More" says where the session runs, "<worker> · <folder>" with the
 folder's copy button (no worker while VS Code holds the session: the state pill names it), and
-the cost. The model pill names the provider (§3 Provider), else
+the cost with the tokens. The model pill names the provider (§3 Provider), else
 the model (the one chosen, or the last usage's when none is or it is the chosen one's full
 name), else "Default"; its menu is the model menu above, the session's model checked (a family
 for its alias and for each of its versions, the version after the family's name, "Opus 4.8"):
@@ -4074,7 +4077,8 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   dot's colors, and the
   room's header names its agents with their state, each a link to its session, has Stop (`POST
   /stop` of the room) and the room's cost, the sum of its agents' (each as its own header counts
-  it, one with a provider left out), "$X this room". A room has no
+  it, one with a provider left out), "$X this room"; since 0.229 with its agents' tokens summed
+  the same way ("$X · N tokens this room"; an agent on a provider counts its tokens). A room has no
   Restart, no Pause and no Move, in its menu or by dragging its row. The room's feed
   shows its agents' open approval requests and questions, an agent's post under its agent's
   title in place of "Message from", a pass as a quiet line, and (since 0.189 in the live block above the input, before 0.189 at
@@ -5062,7 +5066,10 @@ and a total below that baseline does not lower it. `usage.session_cost_usd` is
 transcript's `cost-state` has 0.00232689, so a `--resume` of it goes on from there), and since
 0.162 the baseline goes back to none at `conversation_reset`: the turn after it cost 0.00232689,
 not the 0.0000004 its total grew by over the last one before. The client's header adds the last
-`session_cost_usd` before each `system conversation_cleared` (§4).
+`session_cost_usd` before each `system conversation_cleared` (§4). Since 0.229
+`usage.session_tokens` is the sum of the four token counts of the result's `modelUsage` over its
+models, which the CLI carries over `--resume` and resets on `/clear` with the cost; the header
+counts it the same way (§4).
 
 `/clear` (since 0.162; live run `w1-clear`, 2.1.312): the CLI goes on in a new conversation, its
 own transcript in the same folder, and keeps the process. It sends `conversation_reset`
@@ -7700,6 +7707,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.228 → 0.229 (the session's tokens next to its cost in the chat header)
+§4, §6, §8.1: the header showed only the session's cost. The worker now sends the runtime's
+running token total on `usage` as `session_tokens` (the sum of the cumulative `modelUsage` token
+counts of the `result`, input, output, cache reads and cache writes, carried over `--resume` and
+reset by `/clear` like the cost), and the header shows it after the cost, "$2.25 · 3.4M tokens
+this session" (a room sums its agents'; a session on a provider shows its tokens, not its made-up
+cost). A session whose last `usage` came from an older worker shows no tokens until its next turn.
 
 ### 0.227 → 0.228 (a message's buttons at its bottom right, and the right-click menu again)
 §6: a message's buttons (Search, Copy, Quote; on the user's message also Add to quick messages,

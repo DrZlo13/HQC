@@ -4071,6 +4071,40 @@ fn an_interrupted_turn_without_tokens_gives_no_usage_line() {
     assert_eq!(wire[1]["payload"]["session_cost_usd"], 0.00013);
 }
 
+/// `session_tokens` of every `usage` the `result` line `r` makes, as the wire shows it.
+fn session_tokens_of(r: Value) -> Vec<Option<u64>> {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    events(&emitted(core.on_line(&r.to_string())))
+        .into_iter()
+        .filter(|e| matches!(e.kind, EventKind::Usage { .. }))
+        .map(|e| serde_json::to_value(&e.kind).unwrap()["payload"]["session_tokens"].as_u64())
+        .collect()
+}
+
+/// The `usage` of a turn and the one with the total only carry the runtime's
+/// cumulative tokens: the four `modelUsage` counts summed over all its models; none when the
+/// `result` has no `modelUsage`.
+#[test]
+fn usage_carries_the_session_tokens_of_model_usage() {
+    let model_usage = json!({
+        "claude-opus-5-5": {"inputTokens": 1, "outputTokens": 2, "cacheReadInputTokens": 3, "cacheCreationInputTokens": 4},
+        "claude-haiku-5-5": {"inputTokens": 10, "outputTokens": 20, "cacheReadInputTokens": 30, "cacheCreationInputTokens": 40},
+    });
+    let turn = json!({"type": "result", "num_turns": 1, "total_cost_usd": 0.01,
+        "usage": {"input_tokens": 4, "output_tokens": 2}, "modelUsage": model_usage});
+    assert_eq!(session_tokens_of(turn), [Some(110)]);
+    // No tokens in `usage`, the total grew: the total-only `usage`.
+    let total_only = json!({"type": "result", "num_turns": 1, "total_cost_usd": 0.01,
+        "terminal_reason": "aborted_streaming",
+        "usage": {"input_tokens": 0, "output_tokens": 0}, "modelUsage": model_usage});
+    assert_eq!(session_tokens_of(total_only), [Some(110)]);
+    let bare = json!({"type": "result", "num_turns": 1, "total_cost_usd": 0.01,
+        "usage": {"input_tokens": 4, "output_tokens": 2}});
+    assert_eq!(session_tokens_of(bare), [None]);
+}
+
 /// A turn the CLI ended early for any reason but an interrupt ends with one line that says
 /// why, after its `usage`: the `terminal_reason` (the subtype without one), the API's status
 /// and `errors`, cut to 300 bytes; not the `result` text of `is_error: true`, which the CLI's

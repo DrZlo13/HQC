@@ -38,7 +38,7 @@ import {
   IconSend,
   IconStop,
 } from './icons';
-import { MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatCost, formatTime, formatTimer, formatTokens, homePath, modeConfirm, modelName, shownModel } from './labels';
+import { MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatTime, formatTimer, formatTokens, homePath, modeConfirm, modelName, shownModel, spendLabel } from './labels';
 import { hasOpenTasks, LiveSubagents } from './LiveSubagents';
 import { Loading } from './Loading';
 import { CopyButton } from './Markdown';
@@ -744,11 +744,16 @@ export function Chat({
   // A room has no spending of its own: the sum over its agents', each on the Claude Code price
   // list (an agent on a provider has none, as a session on one shows none).
   let cost = info?.provider ? undefined : usage.cost;
+  // The tokens are real on a provider too: only its cost is made up.
+  let tokens = usage.tokens;
   if (room) {
     cost = undefined;
+    tokens = undefined;
     members.forEach((m, i) => {
-      const spent = m.provider ? undefined : memberChats[i].timeline.usageTotals().cost;
+      const totals = memberChats[i].timeline.usageTotals();
+      const spent = m.provider ? undefined : totals.cost;
       if (spent !== undefined) cost = (cost ?? 0) + spent;
+      if (totals.tokens !== undefined) tokens = (tokens ?? 0) + totals.tokens;
     });
   }
   // Running, as in the list, while a background subagent or task works after the turn; a room,
@@ -871,11 +876,18 @@ export function Chat({
               <span class="chat-room">Room · {ROOM_MODE_LABELS[room]}</span>
             </>
           )}
-          {cost !== undefined && (
+          {(cost !== undefined || tokens !== undefined) && (
             <>
               <span class="sep">/</span>
-              <span class="chat-cost">
-                {formatCost(cost)} this {room ? 'room' : 'session'}
+              <span
+                class="chat-cost"
+                title={
+                  tokens !== undefined
+                    ? `${tokens.toLocaleString('en-US')} tokens: input, output, cache reads and cache writes, as Claude Code counts them for the cost`
+                    : undefined
+                }
+              >
+                {spendLabel(cost, tokens, !!room)}
               </span>
             </>
           )}
@@ -960,6 +972,7 @@ export function Chat({
           worker={locked ? undefined : worker}
           path={path}
           cost={cost}
+          tokens={tokens}
           onRetry={showRetry && phone ? () => void act(() => chat.retry(), 'Retry failed') : undefined}
           onSchedules={() => setSchedules(true)}
           onMove={() => setMoving(true)}
@@ -1681,6 +1694,7 @@ function MoreMenu({
   worker,
   path,
   cost,
+  tokens,
   onRetry,
   onSchedules,
   onMove,
@@ -1693,6 +1707,7 @@ function MoreMenu({
   worker?: string;
   path?: string;
   cost?: number;
+  tokens?: number;
   /** On a phone "Retry" lives here, not in the crowded header. */
   onRetry?: () => void;
   onSchedules: () => void;
@@ -1721,7 +1736,7 @@ function MoreMenu({
       doc.removeEventListener('keydown', esc);
     };
   }, [open]);
-  const facts = phone && (worker || path || cost !== undefined);
+  const facts = phone && (worker || path || cost !== undefined || tokens !== undefined);
   const schedules = !info.room_mode;
   const move = !info.archived && !info.room_mode;
   if (!facts && !onRetry && !schedules && !move && !rules && !onRestart) return null;
@@ -1761,7 +1776,7 @@ function MoreMenu({
                   {path && <CopyButton text={path} label="Copy path" />}
                 </div>
               )}
-              {cost !== undefined && <div class="menu-info-row">{formatCost(cost)} this {info.room_mode ? 'room' : 'session'}</div>}
+              {(cost !== undefined || tokens !== undefined) && <div class="menu-info-row">{spendLabel(cost, tokens, !!info.room_mode)}</div>}
             </div>
           )}
           {onRetry && item('btn-retry', 'Retry', onRetry)}

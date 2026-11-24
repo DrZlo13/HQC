@@ -632,6 +632,12 @@ pub enum EventKind {
         /// (Claude Code: `result.total_cost_usd`, carried over `--resume`), if it reports one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_cost_usd: Option<f64>,
+        /// The runtime's cumulative tokens of the whole runtime session after this turn:
+        /// input, output, cache reads and cache writes summed (Claude Code:
+        /// `result.modelUsage` summed over its models, carried over `--resume` and reset by
+        /// `/clear` like `total_cost_usd`); since SPEC 0.229.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_tokens: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         /// Tokens the main agent's context holds after this turn's last API response (Claude

@@ -124,7 +124,8 @@
 //!   of turn;
 //!   `usage.cost_usd` is the growth of the CLI's cumulative `total_cost_usd` since the previous
 //!   `usage` with a `cost_usd` (or since the transcript's last `cost-state` after `--resume`,
-//!   or since 0 after `conversation_reset`), `session_cost_usd` the total itself; the tokens
+//!   or since 0 after `conversation_reset`), `session_cost_usd` the total itself,
+//!   `session_tokens` the sum of the cumulative `modelUsage` tokens; the tokens
 //!   of a compaction's `result` (zeros in its `usage`) are the growth of its cumulative
 //!   `modelUsage`, summed over the models, since the same baseline; `context_tokens` is the
 //!   sum of the usage of the main agent's last API response (the size `post_tokens` of a
@@ -3016,9 +3017,10 @@ impl Core {
         // costs, so it keeps its `usage`; its tokens are in the cumulative `modelUsage`, and are
         // the growth of it since the baseline of the cost.
         let has_tokens = input_tokens + output_tokens > 0;
+        let model_tokens = model_usage_tokens(&v["modelUsage"]);
+        let session_tokens = v["modelUsage"].is_object().then(|| model_tokens.total());
         let compaction = !has_tokens && spent && compacted;
         if has_tokens || compaction {
-            let model_tokens = model_usage_tokens(&v["modelUsage"]);
             let (input_tokens, output_tokens, cache_read, cache_write) = if compaction {
                 let grown = model_tokens.since(base.tokens);
                 (
@@ -3051,6 +3053,7 @@ impl Core {
                 cache_write,
                 cost_usd,
                 session_cost_usd: total,
+                session_tokens,
                 model,
                 context_tokens: context.map(|c| c.tokens),
                 context_limit,
@@ -3068,6 +3071,7 @@ impl Core {
                 cache_write: None,
                 cost_usd: None,
                 session_cost_usd: total,
+                session_tokens,
                 model,
                 context_tokens: None,
                 context_limit: None,

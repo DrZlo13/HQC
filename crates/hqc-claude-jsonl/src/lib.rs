@@ -366,6 +366,14 @@ impl TokenSums {
             cache_write: self.cache_write.max(other.cache_write),
         }
     }
+
+    /// All four counts added together; saturating.
+    pub fn total(self) -> u64 {
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
+    }
 }
 
 /// The `inputTokens`, `outputTokens`, `cacheReadInputTokens` and `cacheCreationInputTokens`

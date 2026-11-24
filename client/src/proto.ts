@@ -1067,6 +1067,17 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
       num(o, 'running_s');
     }
   },
+  // SPEC 0.242: background commands and subagents that have run for another `long_run_note`.
+  'session.long_runs': (p) => {
+    str(p, 'session_id');
+    for (const t of arr(p, 'tasks')) {
+      const o = obj(t, 'task');
+      str(o, 'task_id');
+      str(o, 'kind');
+      str(o, 'description');
+      num(o, 'running_s');
+    }
+  },
   'workspace.inspect': (p) => {
     str(p, 'request_id');
     str(p, 'path');

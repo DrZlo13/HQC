@@ -112,6 +112,12 @@ pub enum AdapterEvent {
         ended_s: u64,
         commands: Vec<hqc_proto::frame::LeftoverCommand>,
     },
+    /// Background commands or subagents of the agent have each run through another
+    /// `long_run_note` (Claude Code: its rows of `subagents.live`, SPEC §8.1). Sent as `session.long_runs`; the
+    /// hub tells the agent.
+    LongRuns {
+        tasks: Vec<hqc_proto::frame::LongRun>,
+    },
     /// The runtime answered side question `event_id` ([`Adapter::side_question`]): its text, or
     /// in `error` why there is none (the runtime's error or notice, a null answer). Sent as the
     /// stored `side.answer`.

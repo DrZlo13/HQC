@@ -634,6 +634,12 @@ async fn handle_text(
             conn.reply(&id, HubFrame::Ack(Ack::default()));
             r
         }
+        // As the leftovers.
+        WorkerFrame::LongRuns(f) => {
+            let r = crate::leftovers::long_runs(app, conn.worker_id, &f).await;
+            conn.reply(&id, HubFrame::Ack(Ack::default()));
+            r
+        }
         WorkerFrame::WorkspaceCreated(c) => {
             match crate::workspaces::created(app, conn, &c).await {
                 Ok(()) => {

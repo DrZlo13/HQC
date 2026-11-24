@@ -39,7 +39,9 @@
 //!   from the one shown, the placeholder never; a subagent that reported while commands it
 //!   started were listed, and that the CLI neither starts again nor rids of them for 30 min,
 //!   → [`AdapterEvent::SubagentLeftovers`] once ([`Core::leftovers`], on the token rate's
-//!   tick);
+//!   tick); a background command or subagent of the agent that has run for `long_run_note`
+//!   (55 min), and for each as long again → [`AdapterEvent::LongRuns`] ([`Core::long_runs`], on
+//!   the same tick);
 //!   `system` `compact_boundary` → `system context_compacted` with the `trigger`, `pre_tokens`
 //!   and `post_tokens` of its `compact_metadata`, held until the summary the CLI
 //!   writes after it, the main agent's `user` line with `isSynthetic: true`, which gives its
@@ -207,12 +209,15 @@ use hqc_proto::event::{
     GrantPlace, LiveKind, LiveSubagent, OptionGrant, RequestSubagent, SessionState, TaskStatus,
     TaskUsage, GOAL, MODEL_NOT_SWITCHED, OPTION_SERVER_ALWAYS, OPTION_SERVER_SESSION,
 };
-use hqc_proto::frame::{Activity, LeftoverCommand, PermissionMode, SessionInput, SlashCommand};
+use hqc_proto::frame::{
+    Activity, LeftoverCommand, LongRun, PermissionMode, SessionInput, SlashCommand,
+};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::rules::{rule_text, shown, SessionRules};
 use crate::adapter::{new_event, AdapterEvent, ResultFiles, ResultImage, FULL_RESULT_LIMIT};
+use crate::config::DEFAULT_LONG_RUN_NOTE;
 use crate::permissions::{FolderRules, Policy};
 
 /// `*_preview` limit (SPEC §4).
@@ -686,6 +691,12 @@ pub struct Core {
     /// the session's agent. A task of the agent itself that the CLI moves to the background
     /// later (`task_updated` `patch.is_backgrounded: true`) leaves the set.
     quiet_tasks: HashMap<String, bool>,
+    /// How often [`Core::long_runs`] tells of a running task (`long_run_note`), counted from its
+    /// start; `None`: never. [`DEFAULT_LONG_RUN_NOTE`] until [`Core::with_long_run_note`].
+    long_run_note: Option<Duration>,
+    /// For each running task [`Core::long_runs`] watches: how many [`Core::long_run_note`] it
+    /// has run through, as of the latest call.
+    long_told: HashMap<String, u64>,
     /// The latest placeholder `task_notification` ([`not_reported_yet`]) of each subagent the
     /// latest `background_tasks_changed` still held ([`Core::listed`]) when it came: not its
     /// end yet. It is handled as the end when the subagent stops counting
@@ -816,6 +827,8 @@ impl Core {
             permission_mode: None,
             seen: Vec::new(),
             quiet_tasks: HashMap::new(),
+            long_run_note: Some(DEFAULT_LONG_RUN_NOTE),
+            long_told: HashMap::new(),
             held_ends: BTreeMap::new(),
             reported: HashSet::new(),
             announced: HashMap::new(),
@@ -854,6 +867,13 @@ impl Core {
         if let Some((_, t)) = self.response_started.as_mut() {
             *t = t.checked_sub(by).unwrap_or(*t);
         }
+    }
+
+    /// How often [`Core::long_runs`] tells of a running task, `None`: never
+    /// ([`crate::config::Config::long_run_note`]).
+    pub fn with_long_run_note(mut self, every: Option<Duration>) -> Self {
+        self.long_run_note = every;
+        self
     }
 
     /// The session's cumulative cost and `modelUsage` tokens before this process: the
@@ -984,6 +1004,48 @@ impl Core {
             }));
         }
         out
+    }
+
+    /// Each background command ([`LiveKind::Command`], no Monitor) and subagent of
+    /// [`Core::live`] and [`Core::live_commands`] that has run through another
+    /// [`Core::long_run_note`] since the last call → one [`AdapterEvent::LongRuns`] with all of them. A task held on the
+    /// foreground of the main agent's turn is not watched (a note would wait for its end), nor is
+    /// one that is gone. A task seen for the first time is counted as told for the marks it
+    /// has already passed: a command a subagent left running becomes a row only when the
+    /// subagent reports, long after its start.
+    pub fn long_runs(&mut self, now: Instant) -> Vec<Action> {
+        let Some(every) = self.long_run_note else {
+            return vec![];
+        };
+        let watched: Vec<&LiveAgent> = self
+            .live
+            .iter()
+            .chain(&self.live_commands)
+            .filter(|r| matches!(r.kind, LiveKind::Agent | LiveKind::Command))
+            .filter(|r| self.quiet_tasks.get(&r.task_id) != Some(&false))
+            .collect();
+        self.long_told
+            .retain(|id, _| watched.iter().any(|r| r.task_id == *id));
+        let mut due = Vec::new();
+        for r in watched {
+            let running = now.saturating_duration_since(r.since).as_secs();
+            let periods = running / every.as_secs();
+            let told = self.long_told.entry(r.task_id.clone()).or_insert(periods);
+            if periods > *told {
+                *told = periods;
+                due.push(LongRun {
+                    task_id: r.task_id.clone(),
+                    kind: r.kind,
+                    description: r.title.clone(),
+                    running_s: running,
+                });
+            }
+        }
+        if due.is_empty() {
+            return vec![];
+        }
+        tracing::info!(session_id = %self.session_id, tasks = due.len(), "background work runs long");
+        vec![Action::Emit(AdapterEvent::LongRuns { tasks: due })]
     }
 
     // ---- from the supervisor -------------------------------------------------------

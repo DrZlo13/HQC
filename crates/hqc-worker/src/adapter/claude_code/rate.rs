@@ -5,7 +5,8 @@
 //! `<projects folder>/<CLI session id>/subagents/agent-<task_id>.jsonl`) go into a window of
 //! [`WINDOW`]; the rate is their sum over it per second, reported when it changes. While no
 //! turn and no subagent runs ([`Core::working`]) it is 0. The same tick tells of the commands a
-//! subagent left running ([`Core::leftovers`]), and reads what the CLI wrote into the main
+//! subagent left running ([`Core::leftovers`]) and of background work that runs long
+//! ([`Core::long_runs`]), and reads what the CLI wrote into the main
 //! transcript about the session's goal ([`GoalTail`], SPEC 0.218).
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -182,7 +183,7 @@ fn reads_title(working: bool, fresh: bool, titled: bool) -> bool {
 }
 
 /// Counts the rate of the process until it exits, and on each tick runs what
-/// [`Core::leftovers`] gives.
+/// [`Core::leftovers`] and [`Core::long_runs`] give.
 pub(super) async fn meter(
     core: Arc<Mutex<Core>>,
     io: Arc<Io>,
@@ -200,18 +201,21 @@ pub(super) async fn meter(
             _ = tick.tick() => {}
             _ = exited.wait_for(Option::is_some) => return,
         }
-        let (mut tokens, working, fresh, session, live, leftovers) = {
+        let (mut tokens, working, fresh, session, live, told) = {
             let mut c = lock(&core);
+            let now = std::time::Instant::now();
+            let mut told = c.leftovers(now);
+            told.extend(c.long_runs(now));
             (
                 c.take_output_tokens(),
                 c.working(),
                 c.fresh(),
                 c.cli_session().map(str::to_owned),
                 c.live_ids(),
-                c.leftovers(std::time::Instant::now()),
+                told,
             )
         };
-        if let Err(e) = io.run(leftovers).await {
+        if let Err(e) = io.run(told).await {
             tracing::warn!(session_id = %io.session_id, "{e:#}");
         }
         // Beside the session's transcript: `<CLI session id>/subagents`.

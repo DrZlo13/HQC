@@ -101,6 +101,14 @@ pub fn summary(cfg: &Config) -> String {
         "task_tools: {}",
         if cfg.task_tools { "on" } else { "off" }
     );
+    let _ = writeln!(
+        out,
+        "long_run_note: {}",
+        match cfg.long_run_note {
+            Some(every) => format!("{} s", every.as_secs()),
+            None => "off".into(),
+        }
+    );
     out.push_str("workspace keys:\n");
     match cfg.secrets.all() {
         Ok(all) if all.is_empty() => out.push_str("  none\n"),

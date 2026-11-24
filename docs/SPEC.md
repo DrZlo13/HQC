@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.233, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.234, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2680,16 +2680,16 @@ stands at the right end of its first line, inside the bubble or plate for the us
 note on that line (since 0.178 an icon, its words the tooltip: "Joined the turn", §17.2; "Instead
 of the request", §10.1) and before "· scheduled", "· awaiting delivery", "· queued" (since 0.161,
 an input that came while a turn ran, see the WebSocket below), "· not delivered" or "· forking…";
-its buttons are always shown, in the line's flow so that they cover no text: Search, Copy, Quote
+its buttons are always shown, in the line's flow so that they cover no text: Copy
 and, for the user's message, "Add to quick messages" (see quick messages above) and "Fork from
 here", at the message's bottom right, on a computer and a phone alike (since 0.228; from 0.204
-left of the time in its first line, see Quote below): at the right end of an agent message's usage
-line and of the bottom line of "Reply to"; else floated right at the end of the text's last line
-(inside the bubble or plate for the user's and the text answer's), so that a last line with room
-keeps them and a full one puts them on a line of their own under it; after a text that ends in a
-code block, a table, a rule, a quote or a formula, on a line of their own; a message with no text
-(files only) has them left of its time. A user's text and a reasoning are shown without their
-trailing line breaks, which would put the buttons lines below the text. Since
+left of the time in its first line, see Copy and Quote below): at the right end of an agent
+message's usage line and of the bottom line of "Reply to"; else floated right at the end of the
+text's last line (inside the bubble or plate for the user's and the text answer's), so that a last
+line with room keeps them and a full one puts them on a line of their own under it; after a text
+that ends in a code block, a table, a rule, a quote or a formula, on a line of their own; a message
+with no text (files only) has them left of its time. A user's text and a reasoning are shown without
+their trailing line breaks, which would put the buttons lines below the text. Since
 0.156, until the hub answers a fork (it copies the source's history first, seconds for a long
 session) the message says "· forking…" and its "Fork from here" is disabled; the client asks for
 no second fork before the same message meanwhile.
@@ -2765,46 +2765,50 @@ or the result's (an error's `error_text`; a done one's without the CLI's trailer
 Markdown marks; a click on the head opens the whole text as Markdown. In the Compact look the
 start's mark is a pulsing dot while it runs, a check when done, a cross when it failed or stopped
 and a grey dot in the background; the end's a check when done, else a cross.
-Search, Copy and Quote (since 0.204; a phone's "Quote" button is gone): the buttons of an agent
-message, the user's message, a text answer, a message from another session and the reply to it,
-what the session sent to another ("Sent to") and the reply it got ("Reply from"), a room post and
-the agent's reasoning (at the right end of its summary line while folded, since 0.228 at the end of
-its text while open; a click on them neither folds nor unfolds it),
-also in the history of a subagent; tool output has none. They are always shown (see the message's
-time above), Search being a slot at the strip's left end that keeps its place, hidden and not
-clickable, while the message holds no selection, so that the line does not re-wrap when one is made.
-A message holds the selection that starts in it, else the one that ends in it, and its selection is
-the browser's own text when the range lies inside it; one that leaves it is clipped to the message,
-by lines (paragraphs, list items and table rows on separate lines, cells apart by a tab), without
-the message's time and head, its meta line, the summary line of a reasoning (a folded one: only that
-line, without its "Thinking · "), the caption bar of a code block and the buttons (a triple click
-that ends at the start of the next block, or a range across two messages, gives the first message
-its own part). Copy puts the selection into the clipboard, else the message's text; "Quote" puts the
-selection into the input as `> ` lines (and clears the selection), else the message's first two
-sentences (`Intl.Segmenter`, a blank line between paragraphs is not one), with "…" after them when
-text follows (after a space when they end in `.`, `!`, `?` or `…`); it is shown where there is an
-input; "Search in <the search picked in Settings>" (since 0.142), live while the message holds a
-selection, with or without an input, opens its results for the text in a new tab. On a computer a right click on
-text selected in the feed or in a subagent's history opens the client's menu of the same for that
-text (again since 0.228; from 0.204 the browser's): "Quote" where there is an input, "Copy" and
-"Search in …"; a selection within one message is the text its buttons take, one across messages is
-taken whole, without their times, heads and buttons. A right click with nothing selected before it
-or outside the selection (a Mac's browser answers it by selecting the word under the pointer),
-elsewhere in the chat and on a phone gives the browser's own menu; one inside a selection that the
-browser cleared on the press (WebKit off a Mac) selects it again. Firefox, which does not tell the
-text under the pointer, gives the client's menu while the selection stays as it was and the
-browser's when the press cleared it. A press on the
-buttons reads the selection and keeps it as it was when it began: a mouse press does not clear it,
-and a phone's tap, which clears it before the click, still acts on the text it held; the click, a
-press elsewhere or a press the browser takes over lets go of it. The input is
-one row: the paperclip, the field growing with its lines up to 200 px, send; on a computer its
-placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input takes the
-caret when the chat opens, once its newest page is in, unless a request waits for an answer (an open
-approval in the feed, or the session `waiting`), another field has the focus, or a menu or the
-slid-out column is open; on a phone only when the chat replaces a new session's window. An open chat
-stays at its bottom while its images load: only a scroll up lets go of the bottom, and a move up
-while the feed's scroll range changed is the browser's, not a scroll up (since 0.164), unless it
-comes in the user's own scroll up (since 0.198).
+Copy (since 0.204, with Search and Quote until 0.233; a phone's "Quote" button is gone): the button
+of an agent message, the user's message, a text answer, a message from another session and the reply
+to it, what the session sent to another ("Sent to") and the reply it got ("Reply from"), a room post
+and the agent's reasoning (at the right end of its summary line while folded, since 0.228 at the end
+of its text while open; a click on it neither folds nor unfolds it), also in the history of a
+subagent; tool output has none. It is always shown (see the message's time above) and puts the whole
+text of its message into the clipboard, whatever is selected in it. A press on the strip's buttons
+does not take the focus from the input. "Quote" (since 0.234; before it a button of every message,
+which took the selection or, with none, the message's first two sentences) is one button over the
+input, not on the messages: the word "Quote" in the input's row, over the right end of the field,
+left of send, taking no room, so that the field, its wraps and the feed stay as they are while it
+comes and goes (the end of the draft's last line fades under it). It is shown while the chat holds a
+selection that starts in the feed or in a subagent's history, and where there is an input; a
+selection that starts elsewhere (the header, the input) gives none. Following the selection is cheap
+(whether it is there, not its text); the text is read when the button is pressed. A press puts the
+selection into the input after the draft as `> ` lines, with the caret at its end, and clears the
+selection. The selection is the browser's own text when the range lies inside one message; one
+across messages is taken whole, by lines (paragraphs, list items and table rows on separate lines,
+cells apart by a tab), without the messages' times and heads, their meta lines, the summary line of
+a reasoning, the caption bar of a code block, the hidden text of folded blocks and the buttons; a
+range that starts in the line a folded reasoning shows begins with its selected part of that line
+(without "Thinking · "), one that only passes through it leaves the line out; a range that ends
+outside the feed it starts in (a triple click on the last paragraph of the last message) is cut at
+that feed's end, and one that ends at the start of the next block gives its message's own part. A
+press on the button takes the text at once and keeps the button, though the press clears the
+selection (a phone's tap does, before the click); the click, a press elsewhere or a press the
+browser takes over lets go of it. The right-click menu below holds "Search in <the search picked in
+Settings>" (since 0.142; the messages' buttons had it until 0.233) and Copy of the selection. On a
+computer a right click on text selected in the feed or in a subagent's history opens the client's
+menu of the same for that text (again since 0.228; from 0.204 the browser's): "Quote" where there is
+an input, "Copy" and "Search in …"; it takes the text as Quote does, cut at the feed's end too
+(since 0.234). A right click with nothing selected before it or outside the selection (a Mac's
+browser answers it by selecting the word under the pointer), elsewhere in the chat and on a phone
+gives the browser's own menu; one inside a selection that the browser cleared on the press (WebKit
+off a Mac) selects it again. Firefox, which does not tell the text under the pointer, gives the
+client's menu while the selection stays as it was and the browser's when the press cleared it.
+The input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
+computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input
+takes the caret when the chat opens, once its newest page is in, unless a request waits for an
+answer (an open approval in the feed, or the session `waiting`), another field has the focus, or a
+menu or the slid-out column is open; on a phone only when the chat replaces a new session's window.
+An open chat stays at its bottom while its images load: only a scroll up lets go of the bottom, and
+a move up while the feed's scroll range changed is the browser's, not a scroll up (since 0.164),
+unless it comes in the user's own scroll up (since 0.198).
 
 than the text, and an open thinking block is prose in the feed's font. A call without a
 `tool.result` is running (a pulsing dot) until its turn ends; since 0.161 one with an end of a
@@ -2812,38 +2816,42 @@ turn after it in `seq` order (the final `agent.message`, `status` `idle` or `err
 turn_lost`) is not finished, marked with the cross of a failed call, as the VS Code tab marks a
 call without a result once the session is not busy; a run is running while one of its calls
 is, else it takes the mark of its last call.
-Search, Copy and Quote (since 0.204; a phone's "Quote" button is gone): the buttons of an agent
-message, the user's message, a text answer, a message from another session and the reply to it,
-what the session sent to another ("Sent to") and the reply it got ("Reply from"), a room post and
-the agent's reasoning (at the right end of its summary line while folded, since 0.228 at the end of
-its text while open; a click on them neither folds nor unfolds it),
-also in the history of a subagent; tool output has none. They are always shown (see the message's
-time above), Search being a slot at the strip's left end that keeps its place, hidden and not
-clickable, while the message holds no selection, so that the line does not re-wrap when one is made.
-A message holds the selection that starts in it, else the one that ends in it, and its selection is
-the browser's own text when the range lies inside it; one that leaves it is clipped to the message,
-by lines (paragraphs, list items and table rows on separate lines, cells apart by a tab), without
-the message's time and head, its meta line, the summary line of a reasoning (a folded one: only that
-line, without its "Thinking · "), the caption bar of a code block and the buttons (a triple click
-that ends at the start of the next block, or a range across two messages, gives the first message
-its own part). Copy puts the selection into the clipboard, else the message's text; "Quote" puts the
-selection into the input as `> ` lines (and clears the selection), else the message's first two
-sentences (`Intl.Segmenter`, a blank line between paragraphs is not one), with "…" after them when
-text follows (after a space when they end in `.`, `!`, `?` or `…`); it is shown where there is an
-input; "Search in <the search picked in Settings>" (since 0.142), live while the message holds a
-selection, with or without an input, opens its results for the text in a new tab. On a computer a right click on
-text selected in the feed or in a subagent's history opens the client's menu of the same for that
-text (again since 0.228; from 0.204 the browser's): "Quote" where there is an input, "Copy" and
-"Search in …"; a selection within one message is the text its buttons take, one across messages is
-taken whole, without their times, heads and buttons. A right click with nothing selected before it
-or outside the selection (a Mac's browser answers it by selecting the word under the pointer),
-elsewhere in the chat and on a phone gives the browser's own menu; one inside a selection that the
-browser cleared on the press (WebKit off a Mac) selects it again. Firefox, which does not tell the
-text under the pointer, gives the client's menu while the selection stays as it was and the
-browser's when the press cleared it. A press on the
-buttons reads the selection and keeps it as it was when it began: a mouse press does not clear it,
-and a phone's tap, which clears it before the click, still acts on the text it held; the click, a
-press elsewhere or a press the browser takes over lets go of it. The
+Copy (since 0.204, with Search and Quote until 0.233; a phone's "Quote" button is gone): the button
+of an agent message, the user's message, a text answer, a message from another session and the reply
+to it, what the session sent to another ("Sent to") and the reply it got ("Reply from"), a room post
+and the agent's reasoning (at the right end of its summary line while folded, since 0.228 at the end
+of its text while open; a click on it neither folds nor unfolds it), also in the history of a
+subagent; tool output has none. It is always shown (see the message's time above) and puts the whole
+text of its message into the clipboard, whatever is selected in it. A press on the strip's buttons
+does not take the focus from the input. "Quote" (since 0.234; before it a button of every message,
+which took the selection or, with none, the message's first two sentences) is one button over the
+input, not on the messages: the word "Quote" in the input's row, over the right end of the field,
+left of send, taking no room, so that the field, its wraps and the feed stay as they are while it
+comes and goes (the end of the draft's last line fades under it). It is shown while the chat holds a
+selection that starts in the feed or in a subagent's history, and where there is an input; a
+selection that starts elsewhere (the header, the input) gives none. Following the selection is cheap
+(whether it is there, not its text); the text is read when the button is pressed. A press puts the
+selection into the input after the draft as `> ` lines, with the caret at its end, and clears the
+selection. The selection is the browser's own text when the range lies inside one message; one
+across messages is taken whole, by lines (paragraphs, list items and table rows on separate lines,
+cells apart by a tab), without the messages' times and heads, their meta lines, the summary line of
+a reasoning, the caption bar of a code block, the hidden text of folded blocks and the buttons; a
+range that starts in the line a folded reasoning shows begins with its selected part of that line
+(without "Thinking · "), one that only passes through it leaves the line out; a range that ends
+outside the feed it starts in (a triple click on the last paragraph of the last message) is cut at
+that feed's end, and one that ends at the start of the next block gives its message's own part. A
+press on the button takes the text at once and keeps the button, though the press clears the
+selection (a phone's tap does, before the click); the click, a press elsewhere or a press the
+browser takes over lets go of it. The right-click menu below holds "Search in <the search picked in
+Settings>" (since 0.142; the messages' buttons had it until 0.233) and Copy of the selection. On a
+computer a right click on text selected in the feed or in a subagent's history opens the client's
+menu of the same for that text (again since 0.228; from 0.204 the browser's): "Quote" where there is
+an input, "Copy" and "Search in …"; it takes the text as Quote does, cut at the feed's end too
+(since 0.234). A right click with nothing selected before it or outside the selection (a Mac's
+browser answers it by selecting the word under the pointer), elsewhere in the chat and on a phone
+gives the browser's own menu; one inside a selection that the browser cleared on the press (WebKit
+off a Mac) selects it again. Firefox, which does not tell the text under the pointer, gives the
+client's menu while the selection stays as it was and the browser's when the press cleared it. The
 input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
 computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the
 input takes the caret when the chat opens, once its newest page is in, unless a request waits
@@ -7487,7 +7495,7 @@ capped turn runs in the session's mode (§5.3), unless (since 0.44, T40) it carr
 send from a session in a lower mode (§7.1).
 
 Since 0.219 the owner may take a message of theirs back, or send it in at once, while it waits
-for the agent: it shows `queued` or `awaiting delivery` and, beside its Copy and Quote buttons,
+for the agent: it shows `queued` or `awaiting delivery` and, beside its Copy button,
 Take back and (only while the session's turn runs) Send now. A message waits in the hub (the
 worker is away, the session paused), in the worker's queue, or written into the CLI's queue and
 not yet taken. Take back (`POST .../inputs/{event_id}/withdraw`, §6) removes it from wherever it
@@ -7928,6 +7936,25 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.233 → 0.234 (one Quote button over the input, Copy alone on a message)
+§6: a message's buttons were Search, Copy and Quote: Search worked on the selection inside that
+message (hidden without one), Quote on it, else on the message's first two sentences; the Quote
+pop-up was awkward, the menu of a right click a click more, and the buttons at the message's bottom
+right had to be reached in a long message. Search and Quote are gone from the messages: their strip
+is Copy (which now copies the whole message, never the selection) and, on the user's own message,
+Take back, Send now, Add to quick messages and Fork; a press on the strip no longer takes the focus
+from the input. "Quote" is one button, the word itself, over the right end of the input's field
+(left of send, taking no room: the field, its wraps and the feed do not move when it comes and
+goes), shown while the chat holds a selection that starts in the feed or in a subagent's history,
+where there is an input, and it needs a selection; a press appends the selection to the draft as
+`> ` lines. The chat follows the selection cheaply (a copy of its range; its text is read at the
+press, or from that copy when the press cleared the selection) and renders only when a quotable
+selection comes or goes. A range that ends outside the feed it starts in (a triple click on the
+last paragraph of the last message ends past it) is cut at the feed's end, for the right-click
+menu (Quote, Copy, Search in …), which is otherwise as it was, too. A range that starts in the
+line a folded reasoning shows begins with its selected part of that line, as the old Quote of that
+reasoning had it; one that only passes through the reasoning leaves the line out, as before.
 
 ### 0.232 → 0.233 (a compaction before a waiting input is shown)
 §6, §17.1: with the context past its threshold Claude Code runs an auto-compaction before it takes

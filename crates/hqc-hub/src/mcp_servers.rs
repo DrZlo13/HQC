@@ -425,7 +425,9 @@ async fn client_for(
              HQC_MCP_ALLOW_PRIVATE=1"
         )));
     }
+    // No proxy from the environment: the connection must go to the address checked here.
     let mut b = reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .timeout(timeout);

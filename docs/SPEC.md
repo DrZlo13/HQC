@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.239, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.240, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2344,7 +2344,13 @@ below) open a new session in (§3 User `new_session_project_id`), the same on ev
 shows the project in use, the personal one while none is picked or the picked one has left the
 bar, and a pick is stored at once, no "Save"; "Web search" (since
 0.142) picks where "Search in …" of selected text searches: Google (the default), DuckDuckGo,
-Bing or Yandex, kept on this device (`localStorage`), not on the hub; "Models" (since 0.144)
+Bing or Yandex, kept on this device (`localStorage`), not on the hub; "Keys" (since 0.240)
+holds the key of every action below that has one: Quote and Search of selected text, the
+project search, the session column, New session, Archive session, the previous and the next
+session and project, Back and Forward. Each is recorded anew (a press with ⌘, ⌃ or ⌥ held;
+Ctrl or Alt off a Mac; Esc cancels), put back to its default or cleared (Delete), and a key given
+to one action is taken off any other; kept on this device (`localStorage`), not on the hub;
+"Models" (since 0.144)
 lists the user's providers (§3 Provider), each with its model, `base_url` and the workers that
 allow it, or the `[providers.<name>] base_url = "…"` line a `worker.toml` needs when none does,
 with Edit and Delete, and "Add a provider"; the model menus of a session
@@ -2403,7 +2409,8 @@ projects screen), and shows "Archived «name» · find it with the search on the
 s at the bottom of the bar (on a phone "Archived «name» · Undo" at the bottom of the projects
 screen); Undo and Restore send `/unarchive`, and the project comes back in its place; a refusal
 of the hub puts it back on the bar in the hub's order and says why. The project search — its
-magnifier in the bar's head, or ⌘K on a Mac (Ctrl+K elsewhere) from anywhere — finds projects by
+magnifier in the bar's head, or its key from anywhere (⌘K on a Mac, Ctrl+K elsewhere, unless
+changed in Settings ▸ Keys) — finds projects by
 their shown name, the archived ones too (marked "archived") once something is typed: in Compact
 the field takes the place of "HQC" and the bar's list shrinks to the matches, with tiles a 290
 px panel with the names opens over the session column; ↑/↓ select, Enter opens the match, Esc
@@ -2549,7 +2556,8 @@ list on the left." (the time from `archived_at`, none without it), the feed dimm
 
 A window 900–1079 px wide (since 0.114) has no session column in its layout: "Sessions" at the
 left of the chat's header (with the amber count of the project's sessions that wait for the
-user), or ⌘\ (Ctrl+\ off a Mac), slides the column out over the chat from the bar's edge, as
+user), or its key (⌘\, Ctrl+\ off a Mac, unless changed in Settings ▸ Keys), slides the column
+out over the chat from the bar's edge, as
 wide as on a desktop, with a scrim over the rest; a session, a new one, a project or a page
 opened (from the column or elsewhere), Esc, a click on the scrim or leaving that width puts it
 away. With no session open the main column says "Open Sessions to pick a session or start a new
@@ -2586,6 +2594,19 @@ the screen the arrow closed. Each entry keeps in its `history.state` the address
 from. A press on a button of the composer (send, attach, remove a file) leaves the focus in the
 field: a phone keeps its keyboard, and the composer does not grow under the tap by the home
 indicator's room before the click lands.
+
+Keys to move around (since 0.240; before, the macOS app's own shortcuts did this by clicking
+the page), each set in Settings ▸ Keys; the default on a Mac, then elsewhere: New session (⌘N,
+Alt+N) opens the new-session window of the current project — a browser keeps ⌘N and Ctrl+N for a
+new window of its own, so there it needs another key; Archive session (⌃⌘A, Ctrl+Alt+A) archives
+the open session as its row's menu does, with Undo, where the session column shows it (nothing
+where the column is not shown: the Undo is the column's); Previous and Next session (⌥⌘↑ and ⌥⌘↓,
+Alt+↑ and Alt+↓) open the row above or below the current one in the session column, the last or
+the first without one, nothing past either end or where the column is not shown; Previous and
+Next project (⌃⌘↑ and ⌃⌘↓, Alt+Shift+↑ and Alt+Shift+↓) open the tile above or below the current
+one on the project bar; Back and Forward (⌘[ and ⌘], Alt+← and Alt+→) step the page's history.
+They work with the focus in the input too; a key a field or a menu has already taken (prevented)
+is theirs.
 
 The page has one function for a wrapper around it (since 0.188),
 `window.hqc.newSessionInProject()`: it opens that same new-session window, `#/p/<id>/new` of
@@ -2810,10 +2831,11 @@ browser answers it by selecting the word under the pointer), elsewhere in the ch
 gives the browser's own menu; one inside a selection that the browser cleared on the press (WebKit
 off a Mac) selects it again. Firefox, which does not tell the text under the pointer, gives the
 client's menu while the selection stays as it was and the browser's when the press cleared it.
-Keys for the same (since 0.236), with ⌘ on a Mac and Ctrl elsewhere: ⌘' quotes the selection as
-the button does (where there is an input), ⌘E searches it as "Search in …" does, in a new tab;
-they take a selection that starts in the feed or in a subagent's history; without one the key is
-the browser's. The button's tooltip and the menu's Quote and Search name them.
+Keys for the same (since 0.236; set in Settings ▸ Keys since 0.240), by default ⌘' and ⌘E on a
+Mac, Ctrl+' and Ctrl+E elsewhere: the first quotes the selection as the button does (where there
+is an input), the second searches it as "Search in …" does, in a new tab; they take a selection
+that starts in the feed or in a subagent's history; without one the key is the browser's. The
+button's tooltip and the menu's Quote and Search name the keys in use.
 The input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
 computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input
 takes the caret when the chat opens, once its newest page is in, unless a request waits for an
@@ -2865,10 +2887,11 @@ browser answers it by selecting the word under the pointer), elsewhere in the ch
 gives the browser's own menu; one inside a selection that the browser cleared on the press (WebKit
 off a Mac) selects it again. Firefox, which does not tell the text under the pointer, gives the
 client's menu while the selection stays as it was and the browser's when the press cleared it.
-Keys for the same (since 0.236), with ⌘ on a Mac and Ctrl elsewhere: ⌘' quotes the selection as
-the button does (where there is an input), ⌘E searches it as "Search in …" does, in a new tab;
-they take a selection that starts in the feed or in a subagent's history; without one the key is
-the browser's. The button's tooltip and the menu's Quote and Search name them. The input is one
+Keys for the same (since 0.236; set in Settings ▸ Keys since 0.240), by default ⌘' and ⌘E on a
+Mac, Ctrl+' and Ctrl+E elsewhere: the first quotes the selection as the button does (where there
+is an input), the second searches it as "Search in …" does, in a new tab; they take a selection
+that starts in the feed or in a subagent's history; without one the key is the browser's. The
+button's tooltip and the menu's Quote and Search name the keys in use. The input is one
 row: the paperclip, the field growing with its lines up to 200 px, send; on a computer its
 placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input takes the
 caret when the chat opens, once its newest page is in, unless a request waits
@@ -7998,6 +8021,18 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.239 → 0.240 (every key in Settings; the macOS app keeps only its global shortcut)
+§6, the Settings page: the keys of the client — Quote and Search of selected text (0.236), the
+project search, the session column — were fixed, and the macOS app had its own shortcuts in its
+own Settings for a new session, archiving the open session, the previous and the next session and
+project, Back and Forward, which it ran by clicking the page and which a browser did not have. Now
+the client has all of them: a "Keys" section of Settings records each anew, puts it back to its
+default or clears it, kept on the device, and the client does the actions itself, in a browser
+too (where ⌘N and Ctrl+N stay the browser's). The macOS app keeps only the global shortcut of New
+Session in Project; its File and Go menu items stay, without keys. The hub goes first: a client
+before 0.240 has none of these keys, and the new app no longer takes them. The hub's server and
+the worker are unchanged.
 
 ### 0.238 → 0.239 (a capped input that waits at the owner's Stop is dropped, and the agent told so)
 §17.2: since 0.231 the owner's Stop writes what waited into the agent's history without a turn,

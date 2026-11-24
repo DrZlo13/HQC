@@ -360,8 +360,8 @@ impl UpErr {
             UpErr::SignIn(m) => McpError::new(
                 error_code::MCP_SIGN_IN,
                 format!(
-                    "the MCP server {server} refused hqc's credentials ({m}): set them again in \
-                     Settings → MCP servers"
+                    "the MCP server {server} refused hqc's credentials ({m}): set them, or sign \
+                     in, again in Settings → MCP servers"
                 ),
             ),
             UpErr::Timeout(s) => McpError::new(
@@ -944,8 +944,16 @@ async fn failed(app: &AppState, row: &Row, e: UpErr) -> McpError {
         UpErr::Timeout(_) => UpErr::Timeout(row.timeout_s as u32),
         e => e,
     };
+    let sign_in = row.auth == "oauth" && matches!(e, UpErr::SignIn(_));
     let m = e.to_mcp(&row.name);
     set_status(app, row.id, Some(&m.message)).await;
+    if sign_in {
+        // An OAuth server that refuses hqc needs the owner to sign in again.
+        let _ = sqlx::query("UPDATE mcp_servers SET status = 'sign_in' WHERE id = $1")
+            .bind(row.id)
+            .execute(&app.db)
+            .await;
+    }
     m
 }
 

@@ -1588,6 +1588,47 @@ environment = "lab"
         assert!(!c.default_environment.project_settings);
     }
 
+    /// SPEC 0.235: the hub's MCP servers only in an environment with `hub_mcp`, for an
+    /// unrestricted session of the worker's owner, and only valid names.
+    #[cfg(unix)]
+    #[test]
+    fn the_hubs_mcp_servers_only_where_hub_mcp_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for d in ["on", "off"] {
+            std::fs::create_dir(root.join(d)).unwrap();
+        }
+        let c = Config::parse(&format!(
+            r#"
+hub_url = "https://h"
+allowed_roots = [{root:?}]
+[environments.mcp]
+hub_mcp = true
+[[env_bindings]]
+path = {on:?}
+environment = "mcp"
+"#,
+            root = root.display().to_string(),
+            on = root.join("on").display().to_string(),
+        ))
+        .unwrap();
+        let start = |ws: &str, owner: bool, restricted: bool| {
+            let s: hqc_proto::frame::SessionStart = serde_json::from_value(serde_json::json!({
+                "session_id": Uuid::now_v7(), "mode": "new", "runtime": "claude_code",
+                "workspace_path": root.join(ws).display().to_string(), "cwd": ".",
+                "disallowed_tools": [], "restricted": restricted, "auto_approve": false,
+                "session_token": "hqcs_x", "owner_is_worker_owner": owner, "ask_timeout_s": 600,
+                "mcp_servers": ["github", "wiki", "hqc", "Bad Name"],
+            }))
+            .unwrap();
+            c.check_start(&s).map(|s| s.mcp_servers).unwrap_or_default()
+        };
+        assert_eq!(start("on", true, false), ["github", "wiki"]);
+        assert!(start("off", true, false).is_empty(), "no hub_mcp");
+        assert!(start("on", true, true).is_empty(), "restricted");
+        assert!(start("on", false, false).is_empty(), "not the owner's");
+    }
+
     /// T43: a session.start resolves the environment from the canonical workspace path,
     /// whatever the hub's path looked like.
     #[cfg(unix)]

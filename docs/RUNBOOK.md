@@ -103,6 +103,8 @@ The hub is configured by environment variables only; it takes a single command-l
 | `HQC_PEER_HOPS_PER_CHAIN` | no, `20` | messages between sessions one after another in one chain, started by a person's message (SPEC §7.1, §20), and the posts a room's conversation makes after the owner's message before it stops (§7.1.1); a whole number from 1 to 254. Over it `hqc_send`, `hqc_ask`, `hqc_spawn`, `hqc_room`, `hqc_schedule` and `hqc_move` are refused until a person writes. Raise it for a room that should talk longer on its own |
 | `HQC_PEER_MESSAGES_PER_CHAIN` | no, `50` | messages between sessions in one chain in all, a room's posts included (SPEC §7.1, §20), a whole number from 1; over it the next message of the chain is refused. Raise it together with `HQC_PEER_HOPS_PER_CHAIN` when agents of a long room conversation also write to other sessions |
 | `HQC_LIMIT_NOTICE_PERCENT` | no, `70` | from which share of a usage window (5-hour or weekly) of a worker's Claude Code account the chat shows the bar "You've used 82% of your weekly limit" above the input (SPEC §6), a whole number from 0 to 100; `0` shows no bar at all, "You've hit your … limit" included. The "More" menu of the chat shows the limits whatever it is |
+| `HQC_MCP_KEY` | no | 32 random bytes, base64 or 64 hex digits (`openssl rand -base64 32`): the key the headers (tokens) of the owners' remote MCP servers are sealed with in the database (SPEC 0.235). Without it the hub keeps no MCP server that needs a header (`422 mcp_key_missing`); with another key the stored headers cannot be read and must be set again. Keep it out of the database backups |
+| `HQC_MCP_ALLOW_PRIVATE` | no | `1`: a remote MCP server's URL may lead to a private or loopback address (a wiki or Portainer in the home network). Off by default, so that an entry cannot make the hub reach its own network |
 | `RUST_LOG` | no, `info` | log level (`tracing`), e.g. `hqc_hub=debug` |
 
 There is no master key for `api_keys` (§3, §20) in iteration 1: user keys are not stored.
@@ -869,6 +871,7 @@ environment and bind the folder to it:
 env = { GITHUB_TOKEN = "..." }        # variables for the agent, on top of the allowlist below
 ssh_keys = ["infra_ed25519"]          # keys of the store $HQC_HOME/keys/ (below)
 allow_local_mcp = false               # true: the machine's MCP servers too (hqc's stays)
+hub_mcp = false                       # true: the owner's remote MCP servers from the hub (SPEC 0.235)
 project_settings = false              # true: the repository's CLAUDE.md, .claude/settings.json too
 [environments.infra.permissions]
 unblock = ["Bash(ssh:*)"]             # deny rules of [permissions] lifted here only

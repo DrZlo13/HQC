@@ -100,7 +100,7 @@ speaks the old HTTP+SSE transport.
   server that fails `initialize` at a session's start is still listed, and its calls answer with
   the same error. The other servers and `hqc` are not affected.
 
-## T63. The relay on the worker
+## T63. The relay on the worker (done, SPEC 0.235)
 
 Sections: §5.3, §5.4, §7.2, §14.
 - `worker.toml`: `hub_mcp = true` in `[environments.<name>]`; `hqc-worker env` and `env which`
@@ -137,14 +137,15 @@ Acceptance: the common checks. Worker tests:
 - a live test behind `HQC_LIVE_CLAUDE=1` (`claude-haiku-5-5`, max-turns ≤ 2): a fake upstream
   tool shows as `mcp__<name>__<tool>` in `system/init`.
 
-## T64. Servers on the hub: storage, the client, static headers
+## T64. Servers on the hub: storage, the client, static headers (done, SPEC 0.235)
 
 Sections: §3, §5.3, §6, §20.
 - Migration:
   - `mcp_servers`: owner, name, url, auth kind, encrypted headers (one or more), timeout, all
     projects or not, status, last error, and the cached `serverInfo`, `instructions` and tools;
   - `mcp_server_projects`;
-  - `mcp_sessions`: hqc session, server, `Mcp-Session-Id`, last call.
+  - the MCP sessions are kept in the hub's memory, not in a table: after a restart of the hub the
+    next request opens a new one, which a server must handle anyway (`404`).
 - REST, owner only:
   - `GET/POST/PATCH/DELETE /api/mcp/servers`;
   - `POST /api/mcp/servers/{id}/test`: `initialize` and `tools/list` now, returning the status
@@ -154,7 +155,8 @@ Sections: §3, §5.3, §6, §20.
   - the name is unique per owner;
   - header values are write-only.
 - The hub's Streamable HTTP client:
-  - the server's timeout, a bounded number of calls in flight per server and per session;
+  - the server's timeout; the calls are capped by the per-session and per-worker rates of
+    `mcp.call` (SPEC §20), not by a count in flight;
   - a large result stored as an `mcp_result` artifact (above);
   - no redirects to another host;
   - private and loopback addresses refused unless `HQC_MCP_ALLOW_PRIVATE=1`, so a server's URL
@@ -232,3 +234,23 @@ the worker does not trust the hub:
   not get it, instead of failing.
 
 To be planned with skills (#62).
+
+## Done so far
+
+T63 and T64 in #164 (SPEC 0.235). Proto: `session.start.mcp_servers`, `mcp.upstream`,
+`UpstreamAnswer`, the error codes `mcp_*`, `valid_server_name`, the API types `McpServer*`.
+Worker: `hub_mcp` (`config.rs`, `env_cmd.rs`), the relay mode of `hqc-worker mcp --upstream`
+(`mcp/server.rs`), `ToDaemon::Upstream` (`mcp/daemon.rs`, the large result downloaded and
+checked), `HubLink::mcp_upstream` and the online flag (`link.rs`, `connection.rs`),
+`McpCalls::set_upstreams`/`fail_upstream`, the `--mcp-config` entries (`adapter/claude_code.rs`).
+Hub: migration `0057_mcp_servers`, `mcp_servers.rs` (sealing, the Streamable HTTP client, the
+relay, REST), `artifacts::store_for_session`/`forget`, the frames in `worker_ws.rs`, the names in
+`delivery.rs`, `HQC_MCP_KEY` and `HQC_MCP_ALLOW_PRIVATE` (`config.rs`). Tests: hub
+`tests/mcp_servers.rs` (a fake Streamable HTTP server: the relay with the token sealed, an SSE
+answer, a 3 MiB result as an artifact, one MCP session per hqc session closed when the process
+stops, the refusals, the checks of what the owner gives, no key, a private address) and
+`mcp_servers::tests`; worker `tests/mcp.rs` (`a_relay_of_the_hubs_server_goes_to_the_hub_and_back`,
+`without_hub_mcp_no_server_is_relayed`), `config::tests::the_hubs_mcp_servers_only_where_hub_mcp_is_on`,
+`adapter::claude_code::tests::the_hubs_mcp_servers_are_relays_under_their_own_names`.
+
+Next: T65 (OAuth) and T66 (the client's screens). Until T66 a server is added with the REST API.

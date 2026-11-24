@@ -30,6 +30,7 @@ import { storedLook, storedTheme, type DeviceLayout } from './theme';
 import { projectName } from './ui/Appearance';
 import { arrange, bucketOf } from './ui/sessions';
 import { HubSocket, hubSocketUrl, type ConnState } from './ws';
+import { KEY_ACTIONS, defaultKey, keepKeys, sameKey, storedKeys, type Key, type KeyAction } from './keys';
 import { keepWebSearch, storedWebSearch, type WebSearch } from './websearch';
 
 /** How long "Archived «…» · Undo" stays before the archive goes to the hub (T50). */
@@ -751,6 +752,30 @@ export class AppState {
   setWebSearch(s: WebSearch): void {
     this.webSearch = s;
     keepWebSearch(s);
+    this.changed();
+  }
+
+  /** The keys of the client's actions picked on this device (`keys.ts`). */
+  private pickedKeys = storedKeys();
+  /** The key of `action`: the picked one, null where it was cleared, else the default. */
+  keyFor(action: KeyAction): Key | null {
+    const picked = this.pickedKeys[action];
+    return picked === undefined ? defaultKey(action) : picked;
+  }
+  /** Picks `key` for `action`, null for none, undefined for the default again. An action that
+   *  had the same key is left without one: both would fire on it. */
+  setKey(action: KeyAction, key: Key | null | undefined): void {
+    const next = { ...this.pickedKeys };
+    const effective = key === undefined ? defaultKey(action) : key;
+    if (effective) {
+      for (const { id } of KEY_ACTIONS) {
+        if (id !== action && sameKey(this.keyFor(id), effective)) next[id] = null;
+      }
+    }
+    if (key === undefined) delete next[action];
+    else next[action] = key;
+    this.pickedKeys = next;
+    keepKeys(next);
     this.changed();
   }
 

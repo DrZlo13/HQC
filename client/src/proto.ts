@@ -1105,6 +1105,14 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'request_id');
     str(p, 'reason');
   },
+  // SPEC 0.235: a request of the relay of the owner's remote MCP server.
+  'mcp.upstream': (p) => {
+    str(p, 'request_id');
+    str(p, 'session_token');
+    str(p, 'server');
+    str(p, 'method');
+    if (p.params !== undefined) obj(p.params, 'params');
+  },
   'mcp.result': (p) => {
     str(p, 'request_id');
     if (p.error !== undefined) {

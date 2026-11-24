@@ -1494,8 +1494,8 @@ export async function startMock({ port = 0, speed = 1, log = () => {}, demo = fa
   function demoLimits() {
     const t0 = Math.floor(Date.now() / 1000);
     return {
-      five_hour: { utilization: 42, resets_at: t0 - (t0 % 3600) + 2 * 3600 },
-      seven_day: { utilization: 18, resets_at: t0 - (t0 % 86400) + 4 * 86400 },
+      five_hour: { utilization: 0.42, resets_at: t0 - (t0 % 3600) + 2 * 3600 },
+      seven_day: { utilization: 0.18, resets_at: t0 - (t0 % 86400) + 4 * 86400 },
       status: 'allowed',
       reported_at: now(),
     };

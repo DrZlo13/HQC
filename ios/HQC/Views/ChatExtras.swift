@@ -423,12 +423,12 @@ struct LimitRow: View {
             HStack {
                 Text(label).font(.subheadline)
                 Spacer()
-                Text("\(Int(window.utilization.rounded())) %")
+                Text("\(Int(window.percent.rounded())) %")
                     .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(window.utilization >= 90 ? palette.danger : palette.text2)
+                    .foregroundStyle(window.percent >= 90 ? palette.danger : palette.text2)
             }
-            ProgressView(value: min(window.utilization, 100), total: 100)
-                .tint(window.utilization >= 90 ? palette.danger : window.utilization >= 70 ? palette.waiting : .accentColor)
+            ProgressView(value: window.percent, total: 100)
+                .tint(window.percent >= 90 ? palette.danger : window.percent >= 70 ? palette.waiting : .accentColor)
             Text(window.hasReset ? "Reset since the last report"
                  : "Resets \(window.resetsAt.formatted(.relative(presentation: .named)))")
                 .font(.caption)
@@ -461,18 +461,18 @@ struct LimitBar: View {
     private func worst(_ limits: WorkerLimits) -> (String, LimitWindow)? {
         [("5-hour", limits.five_hour), ("weekly", limits.seven_day)]
             .compactMap { name, w in w.map { (name, $0) } }
-            .max { $0.1.utilization < $1.1.utilization }
+            .max { $0.1.percent < $1.1.percent }
     }
 
     @ViewBuilder private func bar(_ limits: WorkerLimits) -> some View {
-        if limits.status == "rejected" || (worst(limits)?.1.utilization ?? 0) >= noticePercent,
+        if limits.status == "rejected" || (worst(limits)?.1.percent ?? 0) >= noticePercent,
            let (name, w) = worst(limits), !w.hasReset {
             HStack(spacing: 8) {
                 Image(systemName: limits.status == "rejected" ? "exclamationmark.octagon.fill" : "gauge.with.dots.needle.67percent")
                     .foregroundStyle(limits.status == "rejected" ? palette.danger : palette.waiting)
                 Text(limits.status == "rejected"
                      ? "Usage limit reached · resets \(w.resetsAt.formatted(.relative(presentation: .named)))"
-                     : "\(Int(w.utilization.rounded())) % of the \(name) limit used · resets \(w.resetsAt.formatted(.relative(presentation: .named)))")
+                     : "\(Int(w.percent.rounded())) % of the \(name) limit used · resets \(w.resetsAt.formatted(.relative(presentation: .named)))")
                     .font(.footnote)
                     .lineLimit(2)
                 Spacer(minLength: 0)
@@ -615,6 +615,12 @@ struct UsageView: View {
                         Circle().fill(w.isOnline ? Color.green : Color.gray).frame(width: 7, height: 7)
                         Text(w.name)
                     }
+                } footer: {
+                    // The worker reports usage only while a turn of hqc runs there, so it can lag
+                    // behind what Claude's own apps show.
+                    if let at = w.limits?.reported_at.flatMap(HubEvent.parseDate) {
+                        Text("As of \(at.formatted(.relative(presentation: .named))), the last turn run through hqc on this machine.")
+                    }
                 }
             }
         }
@@ -642,7 +648,7 @@ struct UsageBar: View {
     let window: LimitWindow
     let notice: Double
 
-    private var percent: Double { min(max(window.utilization, 0), 100) }
+    private var percent: Double { window.percent }
     private var tint: Color {
         percent >= 100 ? palette.danger : percent >= notice ? palette.waiting : .accentColor
     }

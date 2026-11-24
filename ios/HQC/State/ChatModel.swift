@@ -87,7 +87,7 @@ final class ChatModel {
         // A stale report (its window already reset) is no limit reached.
         guard let new = new?.current() else { return }
         let old = old?.current()
-        func used(_ w: LimitWindow?) -> Bool { (w?.utilization ?? 0) >= 100 }
+        func used(_ w: LimitWindow?) -> Bool { (w?.percent ?? 0) >= 100 }
         let rejected = new.status == "rejected" && old?.status != "rejected"
         if (used(new.seven_day) && !used(old?.seven_day)) || (rejected && new.rate_limit_type?.contains("seven") == true) {
             Feedback.play(.limitWeekly)

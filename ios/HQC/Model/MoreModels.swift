@@ -184,6 +184,9 @@ nonisolated struct LimitWindow: Codable, Hashable, Sendable {
     let utilization: Double
     let resets_at: Double
     var resetsAt: Date { Date(timeIntervalSince1970: resets_at) }
+    /// The share used in percent: the worker reports `utilization` as a fraction, 0 to 1, as
+    /// Claude Code's rate limit event does (0.62 is 62 %).
+    var percent: Double { min(max(utilization * 100, 0), 100) }
     /// The reset time has passed since the worker reported it.
     var hasReset: Bool { resetsAt <= Date() }
 }
@@ -197,6 +200,8 @@ nonisolated struct WorkerLimits: Codable, Hashable, Sendable {
     let status: String?
     let rate_limit_type: String?
     let resets_at: Double?
+    /// When the worker reported them: it does so only while a turn runs there.
+    var reported_at: String? = nil
 
     /// The limits as they stand now. The worker reports them only when a turn runs, so a
     /// report can outlive its windows: a window whose reset time has passed is empty again,
@@ -210,7 +215,7 @@ nonisolated struct WorkerLimits: Codable, Hashable, Sendable {
             && (resets_at.map { Date(timeIntervalSince1970: $0) > now } ?? true)
         return WorkerLimits(five_hour: fresh(five_hour), seven_day: fresh(seven_day),
                             status: rejectedStill ? status : (status == "rejected" ? "allowed" : status),
-                            rate_limit_type: rate_limit_type, resets_at: resets_at)
+                            rate_limit_type: rate_limit_type, resets_at: resets_at, reported_at: reported_at)
     }
 }
 

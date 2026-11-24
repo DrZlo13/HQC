@@ -206,6 +206,7 @@ struct ChatView: View {
                 NavigationStack { SchedulesView(sessionID: model.sessionID) }
             case .model:
                 ModelSheet(current: model.info?.model ?? "", currentProvider: model.info?.provider_id,
+                           providerLabel: model.info?.provider_label, lastModel: model.lastModel,
                            limits: model.worker?.limits, onPick: { m in
                     // A Claude model leaves a provider the session ran on.
                     var patch: [String: Any] = ["model": m.isEmpty ? NSNull() : m]
@@ -215,6 +216,9 @@ struct ChatView: View {
                     Task { await model.patch(["provider_id": id.map { $0 as Any } ?? NSNull()]) }
                 })
                 .presentationDetents([.medium])
+            case .usage:
+                NavigationStack { UsageView(focusWorker: model.info?.worker_id) }
+                    .presentationDetents([.medium, .large])
             case .roomAgents:
                 if let info = model.info {
                     NavigationStack { RoomAgentsView(room: info) }
@@ -250,6 +254,13 @@ struct ChatView: View {
         }
     }
 
+    /// The selected model or provider; Default shows what it ran on last, when known.
+    private var modelLabel: String {
+        if let p = model.info?.provider_label { return p }
+        if let m = model.info?.model, !m.isEmpty { return ModelName.pretty(m) }
+        return model.lastModel.map { "Default · \(ModelName.pretty($0))" } ?? "Default"
+    }
+
     private var subtitle: String {
         var parts = [isPaused ? "Paused"
                      : model.state == .locked_vscode ? (model.info?.held_by.map { "Open in \($0.holder)" } ?? model.state.label)
@@ -257,7 +268,7 @@ struct ChatView: View {
         if let mode = model.info?.effective_permission_mode ?? model.info?.permission_mode, mode != .ask {
             parts.append(mode.label)
         }
-        if let p = model.info?.provider_label { parts.append(p) } else if let m = model.info?.model { parts.append(m) }
+        if let p = model.info?.provider_label { parts.append(p) } else if let m = model.info?.model { parts.append(ModelName.pretty(m)) }
         if let r = model.info?.room_mode { parts.append(r == "council" ? "Council" : "Conversation") }
         return parts.joined(separator: " · ")
     }
@@ -267,6 +278,20 @@ struct ChatView: View {
         if model.info?.isRoom == true {
             ToolbarItem(placement: .primaryAction) {
                 Button("Agents", systemImage: "person.3") { sheet = .roomAgents }
+            }
+        }
+        if model.info?.isRoom != true, model.info != nil {
+            // The model, always in view, as the web client's model pill: what is selected, and
+            // when that is Claude Code's default, what the last turn ran on.
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    sheet = .model
+                } label: {
+                    Text(modelLabel)
+                        .font(.footnote.weight(.semibold))
+                        .lineLimit(1)
+                }
+                .accessibilityLabel("Model: \(modelLabel)")
             }
         }
         ToolbarItem(placement: .primaryAction) {
@@ -286,7 +311,8 @@ struct ChatView: View {
                         }
                     }
                     Section {
-                        Button("Model…", systemImage: "cpu") { sheet = .model }
+                        Button("Model: \(modelLabel)", systemImage: "cpu") { sheet = .model }
+                        Button("Usage", systemImage: "gauge.with.dots.needle.50percent") { sheet = .usage }
                         Button("Schedules", systemImage: "calendar.badge.clock") { sheet = .schedules }
                         if isPaused {
                             Button("Resume", systemImage: "play.fill") { Task { await model.act("resume") } }
@@ -424,7 +450,7 @@ struct ChatView: View {
 }
 
 enum ChatSheet: String, Identifiable {
-    case schedules, model, roomAgents
+    case schedules, model, roomAgents, usage
     var id: String { rawValue }
 }
 
@@ -782,6 +808,9 @@ struct ModelSheet: View {
     @Environment(\.dismiss) private var dismiss
     let current: String
     var currentProvider: String?
+    var providerLabel: String?
+    /// What the last turn ran on.
+    var lastModel: String?
     var limits: WorkerLimits?
     /// A Claude model ("" for Claude Code's default) …
     let onPick: (String) -> Void
@@ -802,6 +831,13 @@ struct ModelSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("Now") {
+                    LabeledContent("Selected",
+                                   value: providerLabel ?? (current.isEmpty ? "Default (Claude Code's own)" : ModelName.pretty(current)))
+                    if let lastModel {
+                        LabeledContent("Last turn ran on", value: ModelName.pretty(lastModel))
+                    }
+                }
                 Section {
                     row("Default", selected: currentProvider == nil && current.isEmpty) { pick("") }
                     ForEach(families, id: \.1) { name, alias in

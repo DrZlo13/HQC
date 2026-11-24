@@ -401,8 +401,8 @@ struct LimitsSection: View {
 
     var body: some View {
         Section {
-            if let w = limits.five_hour { LimitRow(label: "Current session (5 h)", window: w) }
-            if let w = limits.seven_day { LimitRow(label: "This week (7 days)", window: w) }
+            if let w = limits.five_hour { UsageBar(label: "5-hour window", window: w, notice: 70) }
+            if let w = limits.seven_day { UsageBar(label: "Weekly", window: w, notice: 70) }
         } header: {
             Text("Usage")
         } footer: {
@@ -570,5 +570,108 @@ private struct HistoryRow: View {
         case .note(_, let text, let level): NoteRow(text: text, level: level)
         default: EmptyView()
         }
+    }
+}
+
+// MARK: usage
+
+/// Each machine's Claude account usage: the 5-hour and the weekly window as bars in percent,
+/// with when each resets, as the worker last reported them. Refreshed while open.
+struct UsageView: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.palette) private var palette
+    /// The worker of the chat this was opened from, listed first.
+    var focusWorker: String?
+    @State private var workers: [WorkerInfo] = []
+    @State private var loaded = false
+
+    private var sorted: [WorkerInfo] {
+        workers.filter { !$0.isRevoked }.sorted { a, b in
+            if (a.id == focusWorker) != (b.id == focusWorker) { return a.id == focusWorker }
+            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
+    }
+
+    var body: some View {
+        List {
+            ForEach(sorted) { w in
+                Section {
+                    if let limits = w.limits?.current() {
+                        if let five = limits.five_hour {
+                            UsageBar(label: "5-hour window", window: five, notice: app.me?.limit_notice_percent ?? 70)
+                        }
+                        if let week = limits.seven_day {
+                            UsageBar(label: "Weekly", window: week, notice: app.me?.limit_notice_percent ?? 70)
+                        }
+                        if limits.five_hour == nil && limits.seven_day == nil {
+                            Text("No usage reported yet.").foregroundStyle(palette.muted)
+                        }
+                    } else {
+                        Text("No usage reported yet: it comes with the first turn on this machine.")
+                            .font(.footnote).foregroundStyle(palette.muted)
+                    }
+                } header: {
+                    HStack(spacing: 6) {
+                        Circle().fill(w.isOnline ? Color.green : Color.gray).frame(width: 7, height: 7)
+                        Text(w.name)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Usage")
+        .navigationBarTitleDisplayMode(.inline)
+        .paletteBackground()
+        .overlay {
+            if !loaded { SkeletonList(rows: 2, icon: 0) }
+            else if sorted.isEmpty { ContentUnavailableView("No machines", systemImage: "desktopcomputer") }
+        }
+        .task {
+            while !Task.isCancelled {
+                if let w = try? await app.client?.workers() { workers = w }
+                loaded = true
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
+    }
+}
+
+/// One window: its name, the percent used, a bar, and when it resets.
+struct UsageBar: View {
+    @Environment(\.palette) private var palette
+    let label: String
+    let window: LimitWindow
+    let notice: Double
+
+    private var percent: Double { min(max(window.utilization, 0), 100) }
+    private var tint: Color {
+        percent >= 100 ? palette.danger : percent >= notice ? palette.waiting : .accentColor
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(label).font(.subheadline.weight(.medium))
+                Spacer()
+                Text("\(Int(percent.rounded())) %")
+                    .font(.title3.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(tint)
+                    .contentTransition(.numericText())
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(palette.text.opacity(0.08))
+                    Capsule().fill(tint.gradient)
+                        .frame(width: max(6, geo.size.width * percent / 100))
+                }
+            }
+            .frame(height: 10)
+            .animation(.smooth, value: percent)
+            Text(window.hasReset ? "Reset since the last report"
+                 : "Resets \(window.resetsAt.formatted(.relative(presentation: .named))) · \(window.resetsAt.formatted(date: .omitted, time: .shortened))")
+                .font(.caption)
+                .foregroundStyle(palette.muted)
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
     }
 }

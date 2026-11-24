@@ -206,6 +206,11 @@ struct SettingsView: View {
                 } label: {
                     Label("Models", systemImage: "cpu")
                 }
+                NavigationLink {
+                    UsageView()
+                } label: {
+                    Label("Usage", systemImage: "gauge.with.dots.needle.50percent")
+                }
                 Button {
                     app.enrollCode = EnrollCode(code: "")
                 } label: {

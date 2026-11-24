@@ -268,3 +268,17 @@ nonisolated extension Color {
         )
     }
 }
+
+/// A model's name as people read it: `claude-opus-5-5` → "Opus 5.5", `sonnet` → "Sonnet".
+nonisolated enum ModelName {
+    static func pretty(_ id: String?) -> String {
+        guard let id, !id.isEmpty else { return "Default" }
+        var s = id.replacingOccurrences(of: "claude-", with: "")
+        // A date suffix (…-20250929) is not part of the name.
+        if let r = s.range(of: #"-\d{8}$"#, options: .regularExpression) { s.removeSubrange(r) }
+        let parts = s.split(separator: "-").map(String.init)
+        guard let family = parts.first else { return id }
+        let version = parts.dropFirst().joined(separator: ".")
+        return family.prefix(1).uppercased() + family.dropFirst() + (version.isEmpty ? "" : " \(version)")
+    }
+}

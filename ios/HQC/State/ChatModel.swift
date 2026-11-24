@@ -59,6 +59,14 @@ final class ChatModel {
 
     // MARK: what the web client's chat also does
 
+    /// The model the agent actually answered with last (the latest `usage` event's `model`):
+    /// what Default resolves to, or what a just-picked model will replace at the next turn.
+    var lastModel: String? {
+        bySeq.keys.sorted(by: >).lazy.compactMap { self.bySeq[$0] }
+            .first { $0.type == "usage" && $0.payload["model"]?.string != nil }?
+            .payload["model"]?.string
+    }
+
     /// The worker the session runs on: its usage limits, and whether it takes secrets.
     private(set) var worker: WorkerInfo?
 

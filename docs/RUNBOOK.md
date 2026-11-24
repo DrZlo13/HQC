@@ -679,9 +679,12 @@ In the browser, after the sign-in the client opens and Settings shows the signed
 ### 1.10 The iOS app: sign-in and notifications
 
 The app (`ios/`, its README) signs in on its own: it opens `/api/native/login` in the system
-browser, where Access signs the person in with any identity provider, and exchanges the one-time
-code at `/worker/native/token`, which the `hqc-worker` Bypass application of §1.6 already lets
-through (SPEC §6). Behind Traefik and oauth2-proxy (§1.9) the app signs in only to Access hubs.
+browser, where Cloudflare Access (§1.6) or an OIDC reverse proxy such as Traefik + oauth2-proxy
++ Keycloak (§1.9) signs the person in with any identity provider, and exchanges the one-time code
+at `/worker/native/token`, which both the `hqc-worker` Bypass application of §1.6 and the
+`hqc-worker` router of §1.9 already let through without sign-in (SPEC §6, 0.220). In OIDC mode
+the app stores the proxy's cookies and updates them from `Set-Cookie` headers whenever the proxy
+refreshes them (`addAuthCookiesToResponse` in §1.9).
 
 **Notifications.** The published app gets Apple push through the relay of its publisher. Add one
 line to `hub.env` and restart the hub:

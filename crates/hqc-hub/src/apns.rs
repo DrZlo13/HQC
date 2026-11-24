@@ -477,9 +477,9 @@ mod tests {
             "type": "approval.request",
             "title": "secret-project · Allow Bash?",
             "body": "rm -rf build",
-            "session_id": "s1",
+            "session_id": "session-secret-1",
             "tag": "t",
-            "payload": {"payload": {"request_id": "r1", "options": [
+            "payload": {"payload": {"request_id": "request-secret-1", "options": [
                 {"id": "o1", "canonical": "once", "label": "Allow once"},
             ]}},
         });
@@ -490,8 +490,8 @@ mod tests {
         for leak in [
             "secret-project",
             "rm -rf",
-            "r1",
-            "s1",
+            "request-secret-1",
+            "session-secret-1",
             "Allow once",
             "APPROVAL",
         ] {
@@ -508,7 +508,7 @@ mod tests {
         let inner = cipher.decrypt(nonce.into(), ct).unwrap();
         let inner: Value = serde_json::from_slice(&inner).unwrap();
         assert_eq!(inner["title"], "secret-project · Allow Bash?");
-        assert_eq!(inner["request_id"], "r1");
+        assert_eq!(inner["request_id"], "request-secret-1");
         assert_eq!(inner["category"], "APPROVAL");
         assert_eq!(inner["options"][0]["id"], "o1");
         // A wrong key opens nothing.

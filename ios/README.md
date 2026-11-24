@@ -95,13 +95,14 @@ working project's tile at the speed of its agents' output tokens.
 ## Signing in
 
 "Sign in" opens the hub in the system browser (`ASWebAuthenticationSession`), so Cloudflare
-Access runs with every identity provider, Google included, and with the browser's own Access
-session. The hub hands back a one-time code, which the app exchanges with a verifier only it
-holds for the Access token (SPEC §6); the token stays in the app's Keychain and goes as the
-`CF_Authorization` cookie with every request and the WebSocket upgrade, with `Origin` set to
-the hub's origin (SPEC §20). When Access lets the session expire, the next
-request comes back as a redirect and the app asks to sign in again. A hub without Access (dev
-mode on loopback) needs no sign-in.
+Access and OIDC proxies (such as Traefik + oauth2-proxy + Keycloak, RUNBOOK §1.9) run with every
+identity provider, Google included, and with the browser's own SSO session. The hub hands back a
+one-time code, which the app exchanges with a verifier only it holds for the Access token or the
+OIDC proxy's session cookies (SPEC §6, 0.220); the credentials stay in the app's Keychain and go
+with every request and the WebSocket upgrade, with `Origin` set to the hub's origin (SPEC §20),
+and refreshed `Set-Cookie` headers from the hub's host update the stored cookies automatically.
+When the session expires, the next request comes back as a redirect or `401` and the app asks to
+sign in again. A hub without auth (dev mode on loopback) needs no sign-in.
 
 ## Build and run
 

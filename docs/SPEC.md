@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.219, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.220, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2134,22 +2134,28 @@ the rest is marked "later"):
   another token;
   the limit and the rules of a push subscription apply (`409 push_limit`, someone else's token
   `409 conflict`); `DELETE {token}` → `204`, the device takes no more notices.
-- Native client sign-in (since 0.214, `crates/hqc-hub/src/native.rs`): the iOS app cannot read
-  the Access cookie of the system browser, and identity providers such as Google refuse a
-  login page embedded in an app. The app opens `GET /api/native/login?challenge=<base64url
-  SHA-256 of a verifier>&state=<s>` in the system browser (`ASWebAuthenticationSession`);
-  like every `/api/*` route it is behind Access, so the person signs in there first. The hub
-  keeps the person's Access token (the `Cf-Access-Jwt-Assertion` it verified) under a random
-  one-time code for 120 s and answers `302 hqc-app://signed-in?code=<code>&state=<s>` (a
-  fixed scheme: the route redirects nowhere else; `challenge` must be 43 base64url
-  characters, `state` 8 to 128 of `[A-Za-z0-9._-]`, else `400`; at most 256 codes wait, the
-  oldest goes first). The app then posts `{code, verifier}` to `POST /worker/native/token`,
-  outside Access as every `/worker/*` (§20), and gets `{token}`, which it sends as the
-  `CF_Authorization` cookie from then on. The code is taken out on the first exchange, also one
-  whose verifier does not match (`400 bad_code`, as for an unknown or expired code), so the
-  token never travels in a URL and another app that catches the redirect cannot use it. In dev
-  mode the token is empty (every request is let in); behind an OIDC proxy the route is `400
-  not_access`: the proxy's own session signs requests in, which an app cannot carry.
+- Native client sign-in (since 0.214, `crates/hqc-hub/src/native.rs`; OIDC mode since 0.220):
+  the iOS app cannot read the session cookies of the system browser, and identity providers such
+  as Google refuse a login page embedded in an app. The app opens
+  `GET /api/native/login?challenge=<base64url SHA-256 of a verifier>&state=<s>` in the system
+  browser (`ASWebAuthenticationSession`); like every `/api/*` route it is behind Cloudflare
+  Access or the OIDC reverse proxy, so the person signs in there first. The hub keeps the
+  credential that gets requests past the front proxy under a random one-time code for 120 s and
+  answers `302 hqc-app://signed-in?code=<code>&state=<s>` (a fixed scheme: the route redirects
+  nowhere else; `challenge` must be 43 base64url characters, `state` 8 to 128 of
+  `[A-Za-z0-9._-]`, else `400`; at most 256 codes wait, the oldest goes first). The app then
+  posts `{code, verifier}` to `POST /worker/native/token`, outside auth as every `/worker/*`
+  (§20), and gets the credential: in Access mode `{token, cookie}` (the verified Access JWT and
+  `CF_Authorization=<jwt>`, keeping `token` for older clients); in OIDC mode `{cookie}` (all
+  `Cookie` headers the proxy forwarded on `/api/native/login`, joined with `"; "`, capped at
+  64 KB, else `400`), or `{bearer}` (the verified OIDC ID token) when no cookies were forwarded;
+  in dev mode `{token: ""}` (every request is let in). The code is taken out on the first
+  exchange, also one whose verifier does not match (`400 bad_code`, as for an unknown or expired
+  code), so the credential never travels in a URL and another app that catches the redirect
+  cannot use it. The app sends the stored cookies (or bearer token) on every request and on the
+  WebSocket upgrade, and merges `Set-Cookie` headers returned by the hub's host into its stored
+  cookies so OIDC proxy cookie refreshes (such as oauth2-proxy's `OAUTH2_PROXY_COOKIE_REFRESH`
+  with Traefik `addAuthCookiesToResponse`, RUNBOOK §1.9) keep the session alive.
 - `/api/schedules` (since 0.38, T35; §3 ScheduledMessage, §16): `GET
   /api/schedules?session_id=` → `{schedules[]}` (`api.schedules.json`; without `session_id`:
   all of the user's), the next due first, finished ones last; `POST /api/schedules`
@@ -7139,8 +7145,8 @@ send from a session in a lower mode (§7.1).
   it); `/api/*` is behind Cloudflare Access with JWT verification (in OIDC mode, behind the
   proxy's sign-in, the hub verifying the provider's ID token, §6); `/worker/*` is outside
   Access, worker tokens only, rate limit on enroll;
-  `/worker/native/token` (since 0.214, §6) is there too: it gives an Access token only for a
-  one-time code with its verifier, and shares the rate limit of enroll; so is
+  `/worker/native/token` (since 0.214, §6) is there too: it gives the Access or OIDC proxy
+  credential only for a one-time code with its verifier, and shares the rate limit of enroll; so is
   `/worker/push/relay` (§16), on a hub that relays, limited per address;
   `artifacts.<hub-domain>` is public, signed links with a TTL only; the publication domain
   (`HQC_PUBLISH_BASE`, since 0.209) is public too, published files only (§12).
@@ -7305,6 +7311,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.219 → 0.220 (native client sign-in behind an OIDC proxy)
+§6, §20: `GET /api/native/login` and `POST /worker/native/token` now work in OIDC mode
+(`HQC_OIDC_*`, e.g. Traefik + oauth2-proxy + Keycloak, RUNBOOK §1.9) instead of answering
+`400 not_access`. After `CurrentUser` verifies the OIDC ID token, the hub stores the forwarded
+`Cookie` header (capped at 64 KB) under the one-time PKCE code and returns `{cookie}` (or
+`{bearer}` when no cookies were forwarded); Access mode returns `{token, cookie}` so older
+iOS builds keep working. The iOS app stores the cookies (or bearer token) in Keychain and
+absorbs `Set-Cookie` headers from the hub's responses so proxy cookie refreshes keep it signed
+in.
 
 ### 0.218 → 0.219 (Apple push whoever else shows the session)
 §16, §6: APNs is skipped only while the user's iOS app (its socket `/api/ws?client=ios`) shows

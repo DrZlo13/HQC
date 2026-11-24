@@ -25,7 +25,12 @@ final class HubSocket {
     var onSignInRequired: (() -> Void)?
 
     private let endpoint: HubEndpoint
-    private let urlSession = URLSession(configuration: .default)
+    private let urlSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.httpShouldSetCookies = false
+        config.httpCookieAcceptPolicy = .never
+        return URLSession(configuration: config)
+    }()
     private var task: URLSessionWebSocketTask?
     private var subs: [String: Subscriber] = [:]
     private var stopped = true
@@ -120,6 +125,9 @@ final class HubSocket {
     }
 
     private func opened(_ t: URLSessionWebSocketTask) {
+        if let http = t.response as? HTTPURLResponse {
+            endpoint.absorb(http, url: http.url ?? endpoint.baseURL)
+        }
         attempt = 0
         state = .open
         for (id, sub) in subs {
@@ -149,7 +157,7 @@ final class HubSocket {
                     self.receive(on: t)
                 case .failure:
                     if let http = t.response as? HTTPURLResponse,
-                       [301, 302, 303, 307, 401, 403].contains(http.statusCode) {
+                       (300..<400).contains(http.statusCode) || http.statusCode == 401 || http.statusCode == 403 {
                         self.onSignInRequired?()
                     }
                     self.closed(t)

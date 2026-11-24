@@ -111,10 +111,15 @@ final class AppModel {
         Task { await connect() }
     }
 
-    /// Called by the login page once Access set its cookie on the hub's host.
-    func signedIn(token: String) {
+    /// Called after browser sign-in once the hub exchanged the one-time code for credentials.
+    func signedIn(credentials: HubCredentials) {
         guard let hubURL else { return }
-        Keychain.write(token, account: tokenAccount(hubURL))
+        let account = tokenAccount(hubURL)
+        if credentials.isEmpty {
+            Keychain.delete(account)
+        } else if let encoded = credentials.encodeStored() {
+            Keychain.write(encoded, account: account)
+        }
         Task { await connect() }
     }
 
@@ -146,7 +151,16 @@ final class AppModel {
         guard let hubURL else { phase = .setup; return }
         phase = .connecting
         lastError = nil
-        let endpoint = HubEndpoint(baseURL: hubURL, accessToken: Keychain.read(tokenAccount(hubURL)))
+        let account = tokenAccount(hubURL)
+        let stored = HubCredentials.decodeStored(Keychain.read(account))
+        let auth = HubAuth(stored) { updated in
+            if updated.isEmpty {
+                Keychain.delete(account)
+            } else if let encoded = updated.encodeStored() {
+                Keychain.write(encoded, account: account)
+            }
+        }
+        let endpoint = HubEndpoint(baseURL: hubURL, auth: auth)
         let client = HubClient(endpoint: endpoint)
         do {
             me = try await client.me()
@@ -341,8 +355,8 @@ final class AppModel {
     func signInWithBrowser() async {
         guard let hubURL else { return }
         do {
-            let token = try await NativeSignIn.run(hub: hubURL)
-            signedIn(token: token)
+            let credentials = try await NativeSignIn.run(hub: hubURL)
+            signedIn(credentials: credentials)
         } catch NativeSignIn.Failure.cancelled {
             return
         } catch {

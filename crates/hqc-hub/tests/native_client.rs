@@ -396,3 +396,208 @@ async fn apns_relay_sends_for_a_hub_without_a_key() {
     assert_eq!((s, v["error"].as_str()), (400, Some("no_relay")));
     plain.finish().await;
 }
+
+const TEST_KID: &str = "test-key-1";
+const TEST_KEY_PEM: &[u8] = include_bytes!("fixtures/test-access-key.pem");
+const TEST_MODULUS_HEX: &str = "94E0DC3E10FFA7CD4E0A1084A6BE2C63A9E65C492A50BB083D2F012946EAE3671FF27B328F89DABD24B0692064BB97515010967EAA54A58764C3150380F47590A5395E44E83FAE4DE06C8431744CA5B9595E4381862FF1FB23186BF9396363099CB7FFEF39D486A5778DAFA977C9C1D3A4D1298C2B5ADBEA1AF134451E7C3B9477D2423FF9C46C235D63AE3FA0E4D4F6BDB41226021EE5A4507ED6B036545A07EADF8BD77163DAFEE87D84A63AB349396B52E0BA2486F2575DCD03AAB9BB531DEC1285CBA622C3F6CE5F6BCC3C5FD14640C7E1443FAB21ECD2FE342602C0F554CCE175B669C2458DD7442B799DDFF653B53D35393E21971F4C1EE56682157C25";
+
+async fn jwks_server() -> String {
+    let n: Vec<u8> = (0..TEST_MODULUS_HEX.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&TEST_MODULUS_HEX[i..i + 2], 16).unwrap())
+        .collect();
+    let n = URL_SAFE_NO_PAD.encode(n);
+    let body = json!({"keys": [{"kty": "RSA", "kid": TEST_KID, "alg": "RS256", "use": "sig", "n": n, "e": "AQAB"}]});
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().route(
+        "/certs",
+        axum::routing::get(move || {
+            let body = body.clone();
+            async move { axum::Json(body) }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}/certs")
+}
+
+fn sign_rs256(claims: Value) -> String {
+    let mut h = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+    h.kid = Some(TEST_KID.into());
+    jsonwebtoken::encode(
+        &h,
+        &claims,
+        &jsonwebtoken::EncodingKey::from_rsa_pem(TEST_KEY_PEM).unwrap(),
+    )
+    .unwrap()
+}
+
+fn extract_code(loc: &str) -> String {
+    loc.split("code=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+/// SPEC 0.220: native sign-in works behind an OIDC reverse proxy (Keycloak + oauth2-proxy,
+/// RUNBOOK §1.9), returning the proxy's cookies (or bearer token when no cookies were sent).
+#[tokio::test]
+async fn native_sign_in_works_in_oidc_and_access_modes() {
+    let jwks = jwks_server().await;
+    let issuer = "https://auth.example.com/realms/home";
+    let aud = "hqc";
+    let oidc_hub = TestHub::start_with(
+        hqc_hub::config::AuthConfig::Oidc {
+            issuer: issuer.into(),
+            aud: aud.into(),
+            jwks_url: jwks.clone(),
+            allowed_emails: vec!["bob@example.com".into()],
+        },
+        String::new(),
+    )
+    .await;
+
+    let now = chrono::Utc::now().timestamp();
+    let id_token = sign_rs256(json!({
+        "iss": issuer,
+        "aud": aud,
+        "email": "bob@example.com",
+        "email_verified": true,
+        "sub": "sub-bob",
+        "typ": "ID",
+        "iat": now,
+        "exp": now + 600,
+    }));
+    let verifier = "o".repeat(64);
+    let path = format!(
+        "/api/native/login?challenge={}&state=oidc-state-1",
+        challenge(&verifier)
+    );
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    // Unauthenticated login attempt is rejected.
+    let r = http
+        .get(format!("{}{path}", oidc_hub.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+
+    // Authenticated via OIDC proxy with split cookies: returns the joined Cookie header.
+    let r = http
+        .get(format!("{}{path}", oidc_hub.base))
+        .header("Authorization", format!("Bearer {id_token}"))
+        .header("Cookie", "_oauth2_proxy_0=part0==; _oauth2_proxy_1=part1==")
+        .header("Cookie", "extra=1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 302);
+    let loc = r
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(loc.starts_with("hqc-app://signed-in?code="), "{loc}");
+    assert!(loc.ends_with("&state=oidc-state-1"), "{loc}");
+    let code = extract_code(&loc);
+    let (s, v) = oidc_hub
+        .post(
+            "/worker/native/token",
+            json!({"code": code, "verifier": verifier}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        v["cookie"].as_str(),
+        Some("_oauth2_proxy_0=part0==; _oauth2_proxy_1=part1==; extra=1")
+    );
+    assert!(v.get("token").is_none());
+    // Single-use.
+    let (s, _) = oidc_hub
+        .post(
+            "/worker/native/token",
+            json!({"code": code, "verifier": verifier}),
+        )
+        .await;
+    assert_eq!(s, 400);
+
+    // OIDC without cookies falls back to returning the verified bearer token.
+    let r = http
+        .get(format!("{}{path}", oidc_hub.base))
+        .header("Authorization", format!("Bearer {id_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 302);
+    let code = extract_code(r.headers().get("location").unwrap().to_str().unwrap());
+    let (s, v) = oidc_hub
+        .post(
+            "/worker/native/token",
+            json!({"code": code, "verifier": verifier}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["bearer"].as_str(), Some(id_token.as_str()));
+
+    // Over-limit Cookie header is rejected.
+    let huge = format!("_oauth2_proxy={}", "x".repeat(65 * 1024));
+    let r = http
+        .get(format!("{}{path}", oidc_hub.base))
+        .header("Authorization", format!("Bearer {id_token}"))
+        .header("Cookie", huge)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 400);
+    oidc_hub.finish().await;
+
+    // Access mode still returns both `token` (for older builds) and `cookie`.
+    let team = "test-team.cloudflareaccess.com";
+    let access_hub = TestHub::start_with(
+        hqc_hub::config::AuthConfig::Access {
+            team_domain: team.into(),
+            aud: aud.into(),
+            jwks_url: Some(jwks),
+        },
+        String::new(),
+    )
+    .await;
+    let cf_jwt = sign_rs256(json!({
+        "iss": format!("https://{team}"),
+        "aud": [aud],
+        "email": "alice@example.com",
+        "sub": "u1",
+        "iat": now,
+        "exp": now + 600,
+    }));
+    let r = http
+        .get(format!("{}{path}", access_hub.base))
+        .header("Cf-Access-Jwt-Assertion", &cf_jwt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 302);
+    let code = extract_code(r.headers().get("location").unwrap().to_str().unwrap());
+    let (s, v) = access_hub
+        .post(
+            "/worker/native/token",
+            json!({"code": code, "verifier": verifier}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["token"].as_str(), Some(cf_jwt.as_str()));
+    assert_eq!(
+        v["cookie"].as_str(),
+        Some(format!("CF_Authorization={cf_jwt}").as_str())
+    );
+    access_hub.finish().await;
+}

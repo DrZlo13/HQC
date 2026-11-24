@@ -3,10 +3,11 @@ import CryptoKit
 import Foundation
 import UIKit
 
-/// Sign-in through the system browser (SPEC §6 "Native client sign-in"): Cloudflare Access
-/// runs there with the person's own browser session, so Google and other providers that refuse
-/// embedded web views work. The hub hands back a one-time code, which the app exchanges with
-/// a verifier only it holds for the Access token.
+/// Sign-in through the system browser (SPEC §6 "Native client sign-in"): Cloudflare Access or an
+/// OIDC reverse proxy (Keycloak + oauth2-proxy, RUNBOOK §1.9) runs there with the person's own
+/// browser session, so Google and other providers that refuse embedded web views work. The hub
+/// hands back a one-time code, which the app exchanges with a verifier only it holds for the
+/// proxy's cookies (or bearer token).
 @MainActor
 enum NativeSignIn {
     enum Failure: LocalizedError {
@@ -23,7 +24,7 @@ enum NativeSignIn {
         }
     }
 
-    static func run(hub: URL) async throws -> String {
+    static func run(hub: URL) async throws -> HubCredentials {
         let verifier = random(48)
         let challenge = Data(SHA256.hash(data: Data(verifier.utf8))).base64URL
         let state = random(16)
@@ -41,7 +42,7 @@ enum NativeSignIn {
                     cont.resume(throwing: error ?? Failure.badCallback)
                 }
             }
-            // Keep the browser's Access session: the next sign-in is one tap.
+            // Keep the browser's SSO session: the next sign-in is one tap.
             session.prefersEphemeralWebBrowserSession = false
             session.presentationContextProvider = Anchor.shared
             if !session.start() { cont.resume(throwing: Failure.badCallback) }
@@ -52,7 +53,7 @@ enum NativeSignIn {
               let code = items.first(where: { $0.name == "code" })?.value else {
             throw Failure.badCallback
         }
-        let client = HubClient(endpoint: HubEndpoint(baseURL: hub, accessToken: nil))
+        let client = HubClient(endpoint: HubEndpoint(baseURL: hub))
         do {
             return try await client.nativeToken(code: code, verifier: verifier)
         } catch HubError.http(let status, _, _) where status == 404 || status == 405 {

@@ -16,12 +16,115 @@ nonisolated enum HubError: LocalizedError, Sendable {
     }
 }
 
+/// Credentials that get requests past the hub's front proxy (SPEC §6): either cookies
+/// (`CF_Authorization` for Cloudflare Access, `_oauth2_proxy*` or similar for an OIDC proxy)
+/// or an `Authorization: Bearer` token, or neither (dev mode).
+nonisolated struct HubCredentials: Codable, Equatable, Sendable {
+    var cookies: [String: String] = [:]
+    var bearer: String?
+
+    var isEmpty: Bool { cookies.isEmpty && (bearer?.isEmpty ?? true) }
+
+    /// Splits a `Cookie` header (`a=1; b=2==`) on the first `=` of each pair.
+    static func parseCookieHeader(_ header: String) -> [String: String] {
+        var out: [String: String] = [:]
+        for part in header.split(separator: ";") {
+            let trimmed = part.trimmingCharacters(in: .whitespaces)
+            guard let eq = trimmed.firstIndex(of: "=") else { continue }
+            let name = String(trimmed[..<eq]).trimmingCharacters(in: .whitespaces)
+            let value = String(trimmed[trimmed.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { continue }
+            out[name] = value
+        }
+        return out
+    }
+
+    /// Reads either the JSON format or a legacy raw Access JWT saved by builds 17–18.
+    static func decodeStored(_ raw: String?) -> HubCredentials {
+        guard let raw, !raw.isEmpty else { return HubCredentials() }
+        if raw.hasPrefix("{"),
+           let data = raw.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode(HubCredentials.self, from: data) {
+            return decoded
+        }
+        return HubCredentials(cookies: ["CF_Authorization": raw])
+    }
+
+    func encodeStored() -> String? {
+        guard let data = try? JSONEncoder().encode(self) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+}
+
+/// Shared, lock-protected credentials for one hub connection. `HubClient` and `HubSocket` hold
+/// the same instance so `Set-Cookie` refreshes from an OIDC reverse proxy (e.g. oauth2-proxy's
+/// `OAUTH2_PROXY_COOKIE_REFRESH` via Traefik `addAuthCookiesToResponse`, RUNBOOK §1.9) apply to
+/// every subsequent HTTP request and WebSocket reconnect, and persist to Keychain.
+nonisolated final class HubAuth: @unchecked Sendable {
+    private let lock = NSLock()
+    private var creds: HubCredentials
+    private let onUpdate: (@Sendable (HubCredentials) -> Void)?
+
+    init(_ creds: HubCredentials = HubCredentials(), onUpdate: (@Sendable (HubCredentials) -> Void)? = nil) {
+        self.creds = creds
+        self.onUpdate = onUpdate
+    }
+
+    func authorize(_ req: inout URLRequest) {
+        let current = lock.withLock { creds }
+        if !current.cookies.isEmpty {
+            let header = current.cookies
+                .sorted { $0.key < $1.key }
+                .map { "\($0.key)=\($0.value)" }
+                .joined(separator: "; ")
+            req.setValue(header, forHTTPHeaderField: "Cookie")
+        }
+        if let bearer = current.bearer, !bearer.isEmpty {
+            req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        }
+    }
+
+    /// Merges `Set-Cookie` headers returned by the hub's own host into the cookie jar.
+    func absorb(response: HTTPURLResponse, url: URL, hubHost: String?) {
+        guard let hubHost, url.host()?.lowercased() == hubHost.lowercased() else { return }
+        var fields: [String: String] = [:]
+        for (k, v) in response.allHeaderFields {
+            if let ks = k as? String, let vs = v as? String { fields[ks] = vs }
+        }
+        let incoming = HTTPCookie.cookies(withResponseHeaderFields: fields, for: url)
+        guard !incoming.isEmpty else { return }
+        let now = Date()
+        let updated: HubCredentials? = lock.withLock {
+            var next = creds
+            for cookie in incoming {
+                if !cookie.path.isEmpty, cookie.path != "/", !url.path.hasPrefix(cookie.path) {
+                    continue
+                }
+                if (cookie.expiresDate.map { $0 <= now } ?? false) || cookie.value.isEmpty {
+                    next.cookies.removeValue(forKey: cookie.name)
+                } else {
+                    next.cookies[cookie.name] = cookie.value
+                }
+            }
+            guard next != creds else { return nil }
+            creds = next
+            return next
+        }
+        if let updated { onUpdate?(updated) }
+    }
+}
+
 /// Where the hub is and how the app proves who it is: the hub's origin and, behind Cloudflare
-/// Access, the `CF_Authorization` cookie the login page set (RUNBOOK §1.6). Without Access (a dev
-/// hub) the cookie is absent and requests go out bare.
-nonisolated struct HubEndpoint: Sendable, Equatable {
+/// Access or an OIDC reverse proxy (RUNBOOK §1.6, §1.9), the proxy's cookies (or bearer token).
+/// Without auth (a dev hub) the credentials are empty and requests go out bare.
+nonisolated struct HubEndpoint: Sendable {
     let baseURL: URL
-    var accessToken: String?
+    let auth: HubAuth
+
+    init(baseURL: URL, auth: HubAuth = HubAuth()) {
+        self.baseURL = baseURL
+        self.auth = auth
+    }
 
     /// `https://host[:port]`, the value the hub compares `Origin` with (SPEC §20).
     var origin: String {
@@ -40,10 +143,11 @@ nonisolated struct HubEndpoint: Sendable, Equatable {
         return c.url!
     }
 
-    func authorize(_ req: inout URLRequest) {
-        if let accessToken {
-            req.setValue("CF_Authorization=\(accessToken)", forHTTPHeaderField: "Cookie")
-        }
+    func authorize(_ req: inout URLRequest) { auth.authorize(&req) }
+
+    func absorb(_ response: HTTPURLResponse, url: URL?) {
+        guard let url else { return }
+        auth.absorb(response: response, url: url, hubHost: baseURL.host())
     }
 }
 
@@ -92,11 +196,14 @@ nonisolated final class HubClient: Sendable {
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else { throw HubError.badResponse("not HTTP") }
         if (300..<400).contains(http.statusCode) { throw HubError.signInRequired }
-        if (200..<300).contains(http.statusCode) { return data }
+        if (200..<300).contains(http.statusCode) {
+            endpoint.absorb(http, url: http.url ?? url)
+            return data
+        }
         let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         let code = obj?["error"] as? String
         let message = obj?["message"] as? String ?? String(data: data, encoding: .utf8) ?? ""
-        if (http.statusCode == 401 || http.statusCode == 403) && code == nil {
+        if http.statusCode == 401 || (http.statusCode == 403 && code == nil) {
             throw HubError.signInRequired
         }
         throw HubError.http(status: http.statusCode, code: code, message: message)

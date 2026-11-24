@@ -11,12 +11,20 @@ extension HubClient {
 
     // MARK: native sign-in and Apple push
 
-    /// `POST /worker/native/token`: a one-time code and its verifier for the Access token.
-    func nativeToken(code: String, verifier: String) async throws -> String {
+    /// `POST /worker/native/token`: a one-time code and its verifier for the hub credentials.
+    func nativeToken(code: String, verifier: String) async throws -> HubCredentials {
         let data = try await send("POST", "/worker/native/token", body: ["code": code, "verifier": verifier])
         let v = try decode(data, as: JSONValue.self)
-        guard let t = v["token"]?.string else { throw HubError.badResponse("no token") }
-        return t
+        if let cookie = v["cookie"]?.string, !cookie.isEmpty {
+            return HubCredentials(cookies: HubCredentials.parseCookieHeader(cookie))
+        }
+        if let bearer = v["bearer"]?.string, !bearer.isEmpty {
+            return HubCredentials(bearer: bearer)
+        }
+        if let token = v["token"]?.string {
+            return token.isEmpty ? HubCredentials() : HubCredentials(cookies: ["CF_Authorization": token])
+        }
+        throw HubError.badResponse("no credentials")
     }
 
     func apnsEnabled() async -> Bool {
@@ -118,12 +126,15 @@ extension HubClient {
         let (resp, r) = try await session.upload(for: req, from: body)
         guard let http = r as? HTTPURLResponse else { throw HubError.badResponse("not HTTP") }
         if (300..<400).contains(http.statusCode) { throw HubError.signInRequired }
-        guard (200..<300).contains(http.statusCode) else {
-            let obj = (try? JSONSerialization.jsonObject(with: resp)) as? [String: Any]
-            throw HubError.http(status: http.statusCode, code: obj?["error"] as? String,
-                                message: obj?["message"] as? String ?? "Upload failed")
+        if (200..<300).contains(http.statusCode) {
+            endpoint.absorb(http, url: http.url ?? url)
+            return try decode(resp)
         }
-        return try decode(resp)
+        let obj = (try? JSONSerialization.jsonObject(with: resp)) as? [String: Any]
+        let code = obj?["error"] as? String
+        if http.statusCode == 401 || (http.statusCode == 403 && code == nil) { throw HubError.signInRequired }
+        throw HubError.http(status: http.statusCode, code: code,
+                            message: obj?["message"] as? String ?? "Upload failed")
     }
 
     func artifact(_ id: String) async throws -> Artifact {
@@ -137,12 +148,14 @@ extension HubClient {
             throw HubError.badResponse("bad artifact link")
         }
         var req = URLRequest(url: url)
-        // The link may be on the hub's own domain, behind Access.
-        if url.host() == endpoint.baseURL.host() { endpoint.authorize(&req) }
+        // The link may be on the hub's own domain, behind the front proxy.
+        let sameHost = url.host() == endpoint.baseURL.host()
+        if sameHost { endpoint.authorize(&req) }
         let (data, r) = try await session.data(for: req)
         guard let http = r as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw HubError.badResponse("artifact download failed")
         }
+        if sameHost { endpoint.absorb(http, url: http.url ?? url) }
         return data
     }
 
@@ -343,11 +356,15 @@ extension HubClient {
         let (resp, r) = try await session.upload(for: req, from: body)
         guard let http = r as? HTTPURLResponse else { throw HubError.badResponse("not HTTP") }
         if (300..<400).contains(http.statusCode) { throw HubError.signInRequired }
-        guard (200..<300).contains(http.statusCode) else {
-            let obj = (try? JSONSerialization.jsonObject(with: resp)) as? [String: Any]
-            throw HubError.http(status: http.statusCode, code: obj?["error"] as? String,
-                                message: obj?["message"] as? String ?? "Upload failed")
+        if (200..<300).contains(http.statusCode) {
+            endpoint.absorb(http, url: http.url ?? url)
+            return
         }
+        let obj = (try? JSONSerialization.jsonObject(with: resp)) as? [String: Any]
+        let code = obj?["error"] as? String
+        if http.statusCode == 401 || (http.statusCode == 403 && code == nil) { throw HubError.signInRequired }
+        throw HubError.http(status: http.statusCode, code: code,
+                            message: obj?["message"] as? String ?? "Upload failed")
     }
 
     /// Bytes at a path of the hub, signed in (a project's icon image).
@@ -359,6 +376,7 @@ extension HubClient {
         guard let http = r as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw HubError.badResponse("icon")
         }
+        endpoint.absorb(http, url: http.url ?? url)
         return data
     }
 }

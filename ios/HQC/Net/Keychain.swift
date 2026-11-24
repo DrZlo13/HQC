@@ -1,8 +1,8 @@
 import Foundation
 import Security
 
-/// A generic-password item per account in the app's own Keychain, for the Cloudflare Access
-/// cookie that signs the app in to the hub.
+/// A generic-password item per account in the app's own Keychain, for the session cookies or
+/// bearer token that sign the app in to the hub.
 nonisolated enum Keychain {
     private static let service = "xyz.drewnja.hqc"
 

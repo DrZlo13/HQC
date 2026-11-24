@@ -1,17 +1,22 @@
 //! Sign-in of the native iOS client (SPEC §6 "Native client sign-in"). The app cannot read the
-//! Cloudflare Access cookie of the system browser, and identity providers such as Google refuse
-//! a login page embedded in the app, so the app signs in through the system browser
+//! session cookies of the system browser, and identity providers such as Google refuse a login
+//! page embedded in the app, so the app signs in through the system browser
 //! (`ASWebAuthenticationSession`) with a PKCE-style exchange:
 //!
 //! 1. The app opens `GET /api/native/login?challenge=<base64url(sha256(verifier))>&state=<s>`.
-//!    The route is behind Access like every `/api/*`, so the person signs in there first; the
-//!    hub then keeps the person's Access token under a random one-time code for
-//!    [`CODE_TTL`] and redirects to `hqc-app://signed-in?code=<code>&state=<s>`.
-//! 2. The app posts `{code, verifier}` to `POST /worker/native/token`, outside Access as every
-//!    `/worker/*` (RUNBOOK §1.6), and gets `{token}`: the Access token it then sends as the
-//!    `CF_Authorization` cookie.
+//!    The route is behind Access or the OIDC reverse proxy like every `/api/*`, so the person
+//!    signs in there first; the hub then keeps the credential that gets requests past the front
+//!    proxy under a random one-time code for [`CODE_TTL`] and redirects to
+//!    `hqc-app://signed-in?code=<code>&state=<s>`.
+//! 2. The app posts `{code, verifier}` to `POST /worker/native/token`, outside auth as every
+//!    `/worker/*` (RUNBOOK §1.6, §1.9), and gets the credential:
+//!    - Access mode: `{token, cookie}` (the Access JWT and `CF_Authorization=<jwt>`, keeping
+//!      `token` for older builds);
+//!    - OIDC mode: `{cookie}` (the proxy's `Cookie` header, e.g. `_oauth2_proxy*`), or `{bearer}`
+//!      (the verified ID token) when no cookies were forwarded;
+//!    - Dev mode: `{token: ""}`.
 //!
-//! The token never travels in a URL: another app that claims the `hqc-app` scheme and catches
+//! The credential never travels in a URL: another app that claims the `hqc-app` scheme and catches
 //! the redirect holds a code it cannot exchange without the verifier, which never leaves the app.
 
 use std::time::Duration;
@@ -41,11 +46,38 @@ pub const APP_SCHEME: &str = "hqc-app";
 pub const CODE_TTL: Duration = Duration::from_secs(120);
 /// Codes kept at once; a flood of sign-ins drops the oldest.
 const MAX_CODES: usize = 256;
+/// Largest `Cookie` header kept for an OIDC proxy sign-in (split oauth2-proxy sessions are
+/// commonly 4–12 KB, RUNBOOK §1.9).
+const MAX_COOKIE_BYTES: usize = 64 * 1024;
+
+enum NativeCredential {
+    Access(String),
+    Cookie(String),
+    Bearer(String),
+    None,
+}
 
 pub struct NativeCode {
-    token: String,
+    credential: NativeCredential,
     challenge: String,
     issued: Instant,
+}
+
+/// Join all `Cookie` headers of the request into one `Cookie` header value (HTTP/2 splits them).
+fn cookie_header(headers: &HeaderMap) -> Option<String> {
+    let joined = headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,23 +121,31 @@ pub async fn login(
             "state must be 8 to 128 characters of [A-Za-z0-9._-]".into(),
         ));
     }
-    let token = match &app.auth {
+    let credential = match &app.auth {
         // `CurrentUser` checked the header already.
-        Auth::Access(_) => headers
-            .get(ACCESS_HEADER)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or_default()
-            .to_string(),
-        // Dev mode lets every request in: the app needs no token.
-        Auth::Dev { .. } => String::new(),
-        // Behind an OIDC proxy the proxy's own session cookie signs requests in, which the app
-        // cannot carry: the native client signs in to Access hubs only.
-        Auth::Oidc(_) => {
-            return Err(ApiError::Invalid(
-                "not_access",
-                "the native client signs in to hubs behind Cloudflare Access".into(),
-            ))
-        }
+        Auth::Access(_) => NativeCredential::Access(
+            headers
+                .get(ACCESS_HEADER)
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        // Dev mode lets every request in: the app needs no credential.
+        Auth::Dev { .. } => NativeCredential::None,
+        // Behind an OIDC reverse proxy (e.g. Traefik + oauth2-proxy, RUNBOOK §1.9), the proxy's
+        // session cookie(s) carry the sign-in; fall back to the verified bearer token when a
+        // gateway authenticates without cookies.
+        Auth::Oidc(_) => match cookie_header(&headers) {
+            Some(c) if c.len() > MAX_COOKIE_BYTES => {
+                return Err(ApiError::BadRequest("cookie header is too large".into()));
+            }
+            Some(c) => NativeCredential::Cookie(c),
+            None => NativeCredential::Bearer(
+                crate::auth::bearer(&headers)
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
+        },
     };
     let code = crate::auth::new_secret("nc");
     {
@@ -123,7 +163,7 @@ pub async fn login(
         m.insert(
             code.clone(),
             NativeCode {
-                token,
+                credential,
                 challenge: q.challenge,
                 issued: Instant::now(),
             },
@@ -178,11 +218,16 @@ pub async fn token(
             "the verifier does not match".into(),
         ));
     }
-    Ok((
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(json!({ "token": entry.token })),
-    )
-        .into_response())
+    let body = match entry.credential {
+        NativeCredential::Access(t) => json!({
+            "token": t,
+            "cookie": format!("CF_Authorization={t}"),
+        }),
+        NativeCredential::Cookie(c) => json!({ "cookie": c }),
+        NativeCredential::Bearer(b) => json!({ "bearer": b }),
+        NativeCredential::None => json!({ "token": "" }),
+    };
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(body)).into_response())
 }
 
 #[cfg(test)]
@@ -200,5 +245,19 @@ mod tests {
         assert!(!valid_state("short"));
         assert!(!valid_state("has space in it"));
         assert!(!valid_state("a&b=c&evil=xxxxx"));
+    }
+
+    #[test]
+    fn cookie_header_joins_multiple_headers() {
+        let mut h = HeaderMap::new();
+        assert_eq!(cookie_header(&h), None);
+        h.append(header::COOKIE, "  ".parse().unwrap());
+        assert_eq!(cookie_header(&h), None);
+        h.append(header::COOKIE, "_oauth2_proxy_0=aaa==".parse().unwrap());
+        h.append(header::COOKIE, "_oauth2_proxy_1=bbb==".parse().unwrap());
+        assert_eq!(
+            cookie_header(&h).as_deref(),
+            Some("_oauth2_proxy_0=aaa==; _oauth2_proxy_1=bbb==")
+        );
     }
 }

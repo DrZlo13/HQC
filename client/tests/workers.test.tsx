@@ -12,6 +12,7 @@ import type { SessionInfo } from '../src/proto';
 import type { HubSocket } from '../src/ws';
 import { Settings } from '../src/ui/Settings';
 import { SessionList } from '../src/ui/SessionList';
+import { defaultKey } from '../src/keys';
 import { WEB_SEARCHES } from '../src/websearch';
 
 let root: HTMLElement;
@@ -39,6 +40,8 @@ function settingsApp(api: Partial<Api>) {
     newSessionProject: () => undefined,
     sortedProjects: () => [],
     webSearch: WEB_SEARCHES[0],
+    keyFor: defaultKey,
+    setKey: vi.fn(),
     providers: [],
     reloadSessions: vi.fn(async () => {}),
     deviceUser: () => undefined,

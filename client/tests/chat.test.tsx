@@ -4542,7 +4542,7 @@ describe('Quote', () => {
 
   /** A key pressed where the focus is (`code`: its place, as a layout-free key reads); whether
    *  the browser keeps it (not prevented). */
-  const press = async (code: string, mods: { metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean; repeat?: boolean }) => {
+  const press = async (code: string, mods: { metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean; repeat?: boolean }) => {
     let kept = true;
     await act(() => {
       const at = document.activeElement ?? document.body;
@@ -4627,6 +4627,51 @@ describe('Quote', () => {
       await select(textNode('All tests pass.'), 4, 9);
       expect(await press('Quote', { metaKey: true })).toBe(false);
       expect(area().value).toBe('> tests\n\n');
+    } finally {
+      platform.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('quotes and searches by the keys picked in Settings, and names them in the tooltips; a key left without is the browser\'s and named nowhere', async () => {
+    const open = vi.fn();
+    vi.stubGlobal('open', open);
+    const platform = vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    try {
+      const { app } = setup('idle');
+      await mount(app);
+      await typeDraft('Look at this');
+      await act(() => {
+        app.setKey('quote', { code: 'KeyJ', meta: false, ctrl: false, alt: true, shift: false });
+        app.setKey('search', { code: 'KeyL', meta: true, ctrl: false, alt: false, shift: true });
+      });
+      await select(textNode('All tests pass.'), 4, 9);
+      // The old keys are the browser's now.
+      expect(await press('Quote', { metaKey: true })).toBe(true);
+      expect(await press('KeyE', { metaKey: true })).toBe(true);
+      expect(area().value).toBe('Look at this');
+      expect(open).not.toHaveBeenCalled();
+      expect(quoteButton()!.title).toBe('Quote the selected text into the message (⌥J)');
+      await rightClick(textNode('All tests pass.'));
+      expect($('.ctx-menu .menu-quote')!.getAttribute('title')).toBe('Quote into the message (⌥J)');
+      expect($('.ctx-menu .menu-web-search')!.getAttribute('title')).toBe('Search the selected text (⇧⌘L)');
+      expect(await press('KeyL', { metaKey: true, shiftKey: true })).toBe(false);
+      expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=tests', '_blank', 'noopener');
+      expect(await press('KeyJ', { altKey: true })).toBe(false);
+      expect(area().value).toBe('Look at this\n\n> tests\n\n');
+      // Without keys: the browser's, and no key in the tooltips.
+      await act(() => {
+        app.setKey('quote', null);
+        app.setKey('search', null);
+      });
+      await select(textNode('All tests pass.'), 4, 9);
+      expect(await press('KeyJ', { altKey: true })).toBe(true);
+      expect(await press('KeyL', { metaKey: true, shiftKey: true })).toBe(true);
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(quoteButton()!.title).toBe('Quote the selected text into the message');
+      await rightClick(textNode('All tests pass.'));
+      expect($('.ctx-menu .menu-quote')!.getAttribute('title')).toBe('Quote into the message');
+      expect($('.ctx-menu .menu-web-search')!.getAttribute('title')).toBe('Search the selected text');
     } finally {
       platform.mockRestore();
       vi.unstubAllGlobals();

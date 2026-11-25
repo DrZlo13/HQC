@@ -84,7 +84,7 @@ A 12-megapixel photo takes about a second. libheif is LGPL-3.0; its license is i
   - `ProjectRail.tsx` — project tiles with their icon on their color, the current one with the
     pill and `--mark-bg`, a project's mark: the "needs you" count, else a stripe running around the
     icon while a session works, else the unread dot; a star on a favorite; the project search
-    (⌘K / Ctrl+K), the order menu (Custom, Name, Recent), the project's menu and archived
+    (its key, ⌘K / Ctrl+K by default), the keys of the previous and the next project, the order menu (Custom, Name, Recent), the project's menu and archived
     projects; in the Compact look, a row per project with its icon and full name; a project
     takes a session row dropped on it;
   - `SessionList.tsx` + `sessions.ts` — the session column: a head of one row (name, search, "⋯"
@@ -116,7 +116,8 @@ A 12-megapixel photo takes about a second. libheif is LGPL-3.0; its license is i
   - `cards.tsx` — messages, tool groups, service lines, the agent's question;
     `permission.tsx` — the permission card (Enter/Esc, reply with text, collapsed line);
   - `Settings` (the app theme first: a row of dark and a row of light tiles, applied on a
-    click; the look, Compact or Spacious, the user's like the theme; notifications; workers), `Enroll` — pages; `Markdown.tsx` — markdown and code blocks with
+    click; the look, Compact or Spacious, the user's like the theme; the keys of the actions,
+    Keys, kept on the device by `keys.ts`; notifications; workers), `Enroll` — pages; `Markdown.tsx` — markdown and code blocks with
     "Copy"; `icons.tsx` — icons; `labels.ts` — labels and formats.
   `src/clipboard.ts` — copying through `navigator.clipboard`, or a hidden textarea if the API is missing
   (http in a LAN).

@@ -315,10 +315,11 @@ final class MainViewController: NSViewController {
         tab.answer(session: sessionID, request: requestID, option: optionID, done: done)
     }
 
-    // MARK: - Shortcut actions
+    // MARK: - Menu actions and the global shortcut
 
-    // Runs a shortcut action in the active tab; Back and Forward step the active tab's history.
-    func perform(_ action: ShortcutAction) {
+    // Runs a menu item's or the global shortcut's action in the active tab; Back and Forward
+    // step the active tab's history.
+    func perform(_ action: MenuAction) {
         switch action {
         case .back: return goBack(nil)
         case .forward: return goForward(nil)
@@ -331,7 +332,7 @@ final class MainViewController: NSViewController {
     }
 
     // MARK: - Reload, back, forward and zoom: View menu items (responder chain targets), the
-    // title bar's arrows and the Back and Forward shortcuts
+    // title bar's arrows and the Go menu's Back and Forward
 
     @objc func reloadCurrent(_ sender: Any?) {
         activeTab?.reload()

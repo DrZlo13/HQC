@@ -14,6 +14,7 @@ import { deviceArtifactCache } from '../src/artifactcache';
 import { deviceHistoryCache, memoryHistoryCache, type HistoryCache } from '../src/historycache';
 import type { Me, SessionInfo } from '../src/proto';
 import { Settings } from '../src/ui/Settings';
+import { defaultKey } from '../src/keys';
 import { WEB_SEARCHES } from '../src/websearch';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
 
@@ -299,6 +300,8 @@ describe('Forget this device', () => {
       newSessionProject: () => undefined,
       sortedProjects: () => [],
       webSearch: WEB_SEARCHES[0],
+      keyFor: defaultKey,
+      setKey: vi.fn(),
       providers: [],
       reloadSessions: vi.fn(async () => {}),
       deviceUser: () => app.deviceUser(),
@@ -340,6 +343,8 @@ describe('Forget this device', () => {
       newSessionProject: () => undefined,
       sortedProjects: () => [],
       webSearch: WEB_SEARCHES[0],
+      keyFor: defaultKey,
+      setKey: vi.fn(),
       providers: [],
       reloadSessions: vi.fn(async () => {}),
       forgetDevice,

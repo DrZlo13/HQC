@@ -57,14 +57,15 @@ enum MenuBuilder {
         return item
     }
 
-    // A shortcut action's item: routed to AppDelegate.performShortcutAction(_:) through the
-    // responder chain; ShortcutMonitor keeps its key equivalent in step with Settings.
-    private static func actionItem(_ action: ShortcutAction) -> NSMenuItem {
+    // An action's item: routed to AppDelegate.performMenuAction(_:) through the responder
+    // chain. Only the global action's item shows a key, its shortcut, which ShortcutMonitor
+    // keeps in step with Settings; the client takes the other actions' keys itself.
+    private static func actionItem(_ action: MenuAction) -> NSMenuItem {
         let item = NSMenuItem(title: action.title,
-                              action: #selector(AppDelegate.performShortcutAction(_:)),
+                              action: #selector(AppDelegate.performMenuAction(_:)),
                               keyEquivalent: "")
         item.representedObject = action.rawValue
-        ShortcutMonitor.shared.menuItems[action] = item
+        if action == ShortcutMonitor.globalAction { ShortcutMonitor.shared.menuItem = item }
         return item
     }
 

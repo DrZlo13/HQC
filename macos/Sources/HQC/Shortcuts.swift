@@ -1,11 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
 
-extension Notification.Name {
-    // Posted when any action's shortcut is recorded or cleared.
-    static let shortcutsDidChange = Notification.Name("ShortcutsDidChange")
-}
-
 // A recorded shortcut: the key, its modifiers, the menu key equivalent and how it reads in the UI.
 struct Shortcut: Codable, Equatable {
     let keyCode: UInt16
@@ -56,19 +51,12 @@ struct Shortcut: Codable, Equatable {
         }
         return symbols + name
     }
-
-    func matches(_ event: NSEvent) -> Bool {
-        event.keyCode == keyCode && event.modifierFlags.intersection(Self.relevantFlags) == flags
-    }
-
-    // The same keys, whatever the stored character and display.
-    func sameKeys(as other: Shortcut) -> Bool {
-        keyCode == other.keyCode && modifiers == other.modifiers
-    }
 }
 
-// What the app's shortcuts do, each run in the active tab's page.
-enum ShortcutAction: String, CaseIterable {
+// What the File and Go menu items do, each run in the active tab's page; New Session in
+// Project is also the app's global shortcut. Every other key is the web client's own, set in
+// the client's Settings, so the app does not take them.
+enum MenuAction: String {
     case newSession
     case newSessionInProject
     case archiveSession
@@ -92,112 +80,73 @@ enum ShortcutAction: String, CaseIterable {
         case .forward: return "Forward"
         }
     }
-
-    private var defaultsKey: String { "shortcut.\(rawValue)" }
-
-    private static let up = String(UnicodeScalar(UInt16(NSUpArrowFunctionKey))!)
-    private static let down = String(UnicodeScalar(UInt16(NSDownArrowFunctionKey))!)
-
-    var defaultShortcut: Shortcut {
-        switch self {
-        case .newSession: return Shortcut(keyCode: kVK_ANSI_N, flags: [.command], key: "n")
-        // Not ⇧⌘N: a global one would take it from every other app (Finder's New Folder).
-        case .newSessionInProject: return Shortcut(keyCode: kVK_ANSI_N, flags: [.control, .option, .command], key: "n")
-        case .archiveSession: return Shortcut(keyCode: kVK_ANSI_A, flags: [.control, .command], key: "a")
-        case .previousSession: return Shortcut(keyCode: kVK_UpArrow, flags: [.option, .command], key: Self.up)
-        case .nextSession: return Shortcut(keyCode: kVK_DownArrow, flags: [.option, .command], key: Self.down)
-        case .previousProject: return Shortcut(keyCode: kVK_UpArrow, flags: [.control, .command], key: Self.up)
-        case .nextProject: return Shortcut(keyCode: kVK_DownArrow, flags: [.control, .command], key: Self.down)
-        case .back: return Shortcut(keyCode: kVK_ANSI_LeftBracket, flags: [.command], key: "[")
-        case .forward: return Shortcut(keyCode: kVK_ANSI_RightBracket, flags: [.command], key: "]")
-        }
-    }
-
-    // The action's shortcut kept in UserDefaults: the default until the user records another
-    // one; nil when the user cleared it (stored as empty data).
-    var shortcut: Shortcut? {
-        get {
-            guard let data = UserDefaults.standard.data(forKey: defaultsKey) else { return defaultShortcut }
-            return try? JSONDecoder().decode(Shortcut.self, from: data)
-        }
-        nonmutating set {
-            let data = newValue.flatMap { try? JSONEncoder().encode($0) } ?? Data()
-            UserDefaults.standard.set(data, forKey: defaultsKey)
-            NotificationCenter.default.post(name: .shortcutsDidChange, object: nil)
-        }
-    }
-
-    // Records `shortcut` for this action and clears it from any other action that had the
-    // same keys, which would otherwise never fire.
-    func record(_ shortcut: Shortcut) {
-        for other in Self.allCases where other != self {
-            if let theirs = other.shortcut, theirs.sameKeys(as: shortcut) {
-                other.shortcut = nil
-            }
-        }
-        self.shortcut = shortcut
-    }
 }
 
-// The app's shortcuts: one local key monitor, which sees the keys before the web page and the
-// menu do, for every action but New Session in Project, whose shortcut is a system hot key
-// working from any app; and the menu items showing the same keys.
+// The app's one shortcut, New Session in Project's: a system hot key working from any app,
+// and the menu item showing the same keys.
 final class ShortcutMonitor {
 
     static let shared = ShortcutMonitor()
 
-    // The action whose shortcut works while another app is active too.
-    static let globalAction = ShortcutAction.newSessionInProject
+    // The action of the global shortcut.
+    static let globalAction = MenuAction.newSessionInProject
 
-    // Called with the action whose shortcut was pressed.
-    var onPress: ((ShortcutAction) -> Void)?
+    private static let defaultsKey = "shortcut.newSessionInProject"
 
-    // On while a recorder in Settings takes the keys; the hot key is let go meanwhile, so its
+    // The shortcut kept in UserDefaults: ⌃⌥⌘N until the user records another one (not ⇧⌘N: a
+    // global one would take it from every other app, Finder's New Folder); nil when the user
+    // cleared it (stored as empty data).
+    static var shortcut: Shortcut? {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: defaultsKey) else {
+                return Shortcut(keyCode: kVK_ANSI_N, flags: [.control, .option, .command], key: "n")
+            }
+            return try? JSONDecoder().decode(Shortcut.self, from: data)
+        }
+        set {
+            let data = newValue.flatMap { try? JSONEncoder().encode($0) } ?? Data()
+            UserDefaults.standard.set(data, forKey: defaultsKey)
+            shared.updateMenuItem()
+            shared.updateHotKey()
+        }
+    }
+
+    // Called when the shortcut is pressed.
+    var onPress: (() -> Void)?
+
+    // On while the recorder in Settings takes the keys; the hot key is let go meanwhile, so its
     // keys reach the recorder.
     var isPaused = false {
         didSet { updateHotKey() }
     }
 
-    // The menu item of each action; its key equivalent mirrors the action's shortcut.
-    var menuItems: [ShortcutAction: NSMenuItem] = [:]
+    // The global action's menu item; its key equivalent mirrors the shortcut.
+    var menuItem: NSMenuItem?
 
-    private var monitor: Any?
+    private var started = false
     private var hotKey: EventHotKeyRef?
 
     func start() {
-        guard monitor == nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, !self.isPaused,
-                  let action = ShortcutAction.allCases.first(where: {
-                      $0 != Self.globalAction && $0.shortcut?.matches(event) == true
-                  }) else {
-                return event
-            }
-            self.onPress?(action)
-            return nil
-        }
+        guard !started else { return }
+        started = true
         // The hot key's presses, delivered on the main thread.
         var pressed = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
-            ShortcutMonitor.shared.onPress?(ShortcutMonitor.globalAction)
+            ShortcutMonitor.shared.onPress?()
             return noErr
         }, 1, &pressed, nil, nil)
-        NotificationCenter.default.addObserver(forName: .shortcutsDidChange, object: nil, queue: .main) { [weak self] _ in
-            self?.updateMenuItems()
-            self?.updateHotKey()
-        }
-        updateMenuItems()
+        updateMenuItem()
         updateHotKey()
     }
 
-    // Registers the global action's shortcut as the system hot key, again whenever it changes;
-    // none while paused or with the shortcut cleared.
+    // Registers the shortcut as the system hot key, again whenever it changes; none while
+    // paused or with the shortcut cleared.
     private func updateHotKey() {
         if let hotKey {
             UnregisterEventHotKey(hotKey)
             self.hotKey = nil
         }
-        guard monitor != nil, !isPaused, let shortcut = Self.globalAction.shortcut else { return }
+        guard started, !isPaused, let shortcut = Self.shortcut else { return }
         var modifiers: UInt32 = 0
         if shortcut.flags.contains(.command) { modifiers |= UInt32(cmdKey) }
         if shortcut.flags.contains(.option) { modifiers |= UInt32(optionKey) }
@@ -208,11 +157,9 @@ final class ShortcutMonitor {
                             GetApplicationEventTarget(), 0, &hotKey)
     }
 
-    private func updateMenuItems() {
-        for (action, item) in menuItems {
-            let shortcut = action.shortcut
-            item.keyEquivalent = shortcut?.key ?? ""
-            item.keyEquivalentModifierMask = shortcut?.flags ?? []
-        }
+    private func updateMenuItem() {
+        let shortcut = Self.shortcut
+        menuItem?.keyEquivalent = shortcut?.key ?? ""
+        menuItem?.keyEquivalentModifierMask = shortcut?.flags ?? []
     }
 }

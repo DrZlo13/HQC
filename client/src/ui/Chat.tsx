@@ -5,6 +5,7 @@ import type { AppState } from '../app';
 import { ArtifactStore, formatSize, type LinkCache } from '../artifacts';
 import { copyText } from '../clipboard';
 import { HEIC_NAME, dataUrl, heicToJpeg } from '../heic';
+import { keyMatches, withKey, type Key } from '../keys';
 import { onBack } from '../nav';
 import { PERMISSION_MODES, type EventOf, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState, type SlashCommand } from '../proto';
 import { sideQuestionOf, type OutgoingFile } from '../session';
@@ -43,7 +44,6 @@ import { hasOpenTasks, LiveSubagents } from './LiveSubagents';
 import { Loading } from './Loading';
 import { CopyButton } from './Markdown';
 import { feedSelectionText, selectedText, useQuoteSelection, type QuoteSelection } from './selection';
-import { onMac } from './ProjectRail';
 import { PermissionBlock, SECRET_GIVEN } from './permission';
 import { MoveSession } from './ProjectSettings';
 import { WaitedRequests } from './requests';
@@ -70,13 +70,6 @@ const losesScrollInGesture = () => {
   const ua = navigator.userAgent;
   return /AppleWebKit/.test(ua) && !/Chrome\/|Chromium\/|Edg\//.test(ua);
 };
-
-/** The keys for the text selected in a feed (SPEC §6), held with ⌘ on a Mac, Ctrl elsewhere:
- *  `code` (the key's place, whatever the layout) and the name the tooltips give. */
-const QUOTE_KEY = { code: 'Quote', name: "'" };
-const SEARCH_KEY = { code: 'KeyE', name: 'E' };
-/** A key's name with its modifier: ⌘' on a Mac, Ctrl+' elsewhere. */
-const shortcut = (key: { name: string }) => (onMac() ? `⌘${key.name}` : `Ctrl+${key.name}`);
 
 /** The signed links of all chats of the page, one map: a chat opened again gets the same links
  *  while they live, and the browser shows its images from its cache. Emptied whenever the
@@ -648,18 +641,17 @@ export function Chat({
   // A right click on selected text (a computer's; a phone has its own menu for it): Quote, Copy
   // and Search in one place.
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
-  // The keys of the same for a selection that starts in the feed or in a subagent's history:
-  // ⌘' quotes it where there is an input, ⌘E searches it (Ctrl off a Mac). Without such a
+  // The keys of the same for a selection that starts in the feed or in a subagent's history: the
+  // quote key quotes it where there is an input, the search key searches it. Without such a
   // selection the key is the browser's. `actions` is new on every render: the press reads the
   // latest Quote.
   const quoteNow = useRef(actions.quote);
   quoteNow.current = actions.quote;
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
-      const mod = onMac() ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-      if (!mod || e.altKey || e.shiftKey || e.isComposing || e.defaultPrevented) return;
-      const quote = e.code === QUOTE_KEY.code ? quoteNow.current : undefined;
-      if (!quote && e.code !== SEARCH_KEY.code) return;
+      if (e.isComposing || e.defaultPrevented) return;
+      const quote = keyMatches(app.keyFor('quote'), e) ? quoteNow.current : undefined;
+      if (!quote && !keyMatches(app.keyFor('search'), e)) return;
       const text = feedSelectionText(section.current);
       if (!text) return;
       e.preventDefault();
@@ -1238,6 +1230,7 @@ export function Chat({
           insertQuote={insertQuote}
           insertText={insertText}
           quoteSelection={actions.quote ? quoteSelection : undefined}
+          quoteKey={app.keyFor('quote')}
           phone={phone}
           commands={info?.commands}
           commandInfo={info?.command_info}
@@ -1293,7 +1286,7 @@ export function Chat({
                   {
                     label: 'Quote',
                     icon: <IconQuote />,
-                    title: `Quote into the message (${shortcut(QUOTE_KEY)})`,
+                    title: withKey('Quote into the message', app.keyFor('quote')),
                     cls: 'menu-quote',
                     onSelect: () => {
                       actions.quote!(selectionMenu.text);
@@ -1306,7 +1299,7 @@ export function Chat({
             {
               label: `Search in ${app.webSearch.label}`,
               icon: <IconSearch size={16} />,
-              title: `Search the selected text (${shortcut(SEARCH_KEY)})`,
+              title: withKey('Search the selected text', app.keyFor('search')),
               cls: 'menu-web-search',
               onSelect: () => void window.open(app.webSearch.url(selectionMenu.text), '_blank', 'noopener'),
             },
@@ -1934,6 +1927,7 @@ export function Composer({
   onRemove = () => {},
   insertQuote,
   quoteSelection,
+  quoteKey = null,
   insertText,
   initial = '',
   onDraft,
@@ -1962,6 +1956,8 @@ export function Composer({
   /** The chat's selection: with it set, "Quote" shows over the field's right end while the chat
    *  holds a selection to quote, and a press puts the text in as `insertQuote` does. */
   quoteSelection?: QuoteSelection;
+  /** The key of Quote, named in its tooltip. */
+  quoteKey?: Key | null;
   /** Set here to a function that adds a text to the message (`withText`), focused, the caret at
    *  its end: a message the user took back. */
   insertText?: { current: ((text: string) => void) | null };
@@ -2319,7 +2315,7 @@ export function Composer({
             <button
               type="button"
               class="btn-quote"
-              title={`Quote the selected text into the message (${shortcut(QUOTE_KEY)})`}
+              title={withKey('Quote the selected text into the message', quoteKey)}
               // The press takes the text before it clears the selection; the form keeps the field's focus.
               onPointerDown={(e) => {
                 e.preventDefault();

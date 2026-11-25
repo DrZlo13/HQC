@@ -1,9 +1,9 @@
-// The page scripts of the shortcut actions, run in the active tab by callAsyncJavaScript (a
-// function body; it may await). They drive the hqc client's own controls and resolve to
-// whether they did something. The session column is `aside.sidebar`; a narrow window (until
-// "Sessions" slides it out), the search page and the phone layout have none, and then the
-// session actions do nothing.
-extension ShortcutAction {
+// The page scripts of the File and Go menu actions and of the global shortcut, run in the
+// active tab by callAsyncJavaScript (a function body; it may await). They drive the hqc
+// client's own controls and resolve to whether they did something. The session column is
+// `aside.sidebar`; a narrow window (until "Sessions" slides it out), the search page and the
+// phone layout have none, and then the session actions do nothing.
+extension MenuAction {
 
     // None for Back and Forward: MainViewController steps the web view's history instead.
     var script: String? {

@@ -31,26 +31,29 @@ Settings… (⌘,) holds:
   scheme and port too: the notifications, the Dock badge, the bar's colour and the cards' Allow
   and Deny work only on the server's own origin, so a server typed as `http://` that redirects
   to `https://` gets none of them.
-- **Shortcuts**: the app's own shortcuts, working while the app is active; New Session in
-  Project works from any app, and brings the window up. They act on the active tab's page
-  through the client's own controls (New Session in Project: the client's own function, which
-  opens the project picked in the client's Settings; Back and Forward: the page's history, as
-  ‹ ›); each is also an item in the File or Go menu. To change one, click its button, then
-  press a key with at least one of ⌘ ⌃ ⌥; Esc cancels, Delete clears it. A shortcut recorded
-  for one action is taken off any other action that had it.
+- **Shortcut**: New Session in Project, ⌃⌥⌘N by default. It works from any app and brings the
+  window up: a new session in the project picked in the client's Settings (on the hub; the
+  personal project until one is picked), in the active tab, through the client's own function.
+  To change it, click its button, then press a key with at least one of ⌘ ⌃ ⌥; Esc cancels,
+  Delete clears it. The keys of the other actions below are the client's own, set in the
+  client's Settings under Keys, and work in a browser too: the app does not take them.
 
-  | action | default | menu | what it does |
-  |---|---|---|---|
-  | New Session | ⌘N | File | a new session in the current project |
-  | New Session in Project | ⌃⌥⌘N | File | a new session in the project picked in the client's Settings (on the hub; the personal project until one is picked), in the active tab |
-  | Archive Session | ⌃⌘A | File | archives the open session, as its row's menu does (with Undo) |
-  | Previous Session / Next Session | ⌥⌘↑ / ⌥⌘↓ | Go | the row above or below in the session column |
-  | Previous Project / Next Project | ⌃⌘↑ / ⌃⌘↓ | Go | the project above or below on the project bar |
-  | Back / Forward | ⌘[ / ⌘] | Go | the page's previous or next address, as ‹ › in the window's bar |
+  The File and Go menus hold the same actions as items, without keys; they act on the active
+  tab's page through the client's own controls (New Session in Project: the client's own
+  function; Back and Forward: the page's history, as ‹ ›):
 
-  Where the session column is not shown (a narrow window, the search page) the session
-  shortcuts other than the two New Session ones do nothing; below 900 px the client has no
-  project bar, and the project shortcuts do nothing either.
+  | item | menu | what it does |
+  |---|---|---|
+  | New Session | File | a new session in the current project |
+  | New Session in Project | File | a new session in the project picked in the client's Settings, as the shortcut does |
+  | Archive Session | File | archives the open session, as its row's menu does (with Undo) |
+  | Previous Session / Next Session | Go | the row above or below in the session column |
+  | Previous Project / Next Project | Go | the project above or below on the project bar |
+  | Back / Forward | Go | the page's previous or next address, as ‹ › in the window's bar |
+
+  Where the session column is not shown (a narrow window, the search page) the session items
+  other than the two New Session ones do nothing; below 900 px the client has no project bar,
+  and the project items do nothing either.
 - **Notifications**: Stay on screen, how long a notification card other than a permission
   request stays (1–120 s, 5 s by default); a new card takes the new time, a card replaced in
   place keeps its own.

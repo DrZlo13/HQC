@@ -1158,18 +1158,27 @@ function Quote({ lines, lead }: { lines: string[]; lead?: boolean }) {
   );
 }
 
-/** A message that starts with a quote shows it above the time, full width, as Telegram does: an
+/** A message that starts with quotes shows them above the time, full width, as Telegram does: an
  *  inline quote as wide as the bubble would not fit beside the time and drop under it, leaving the
- *  first line empty. `lead` is that quote (none when the text does not start with one), `rest`
- *  the text after it, without the blank lines between them. */
+ *  first line empty. `lead` is the quotes the text starts with, the blank lines between them
+ *  included (none when the text does not start with one), `rest` the text after them, without the
+ *  blank lines before it. */
 function leadQuote(text: string): { lead?: ComponentChildren; rest: string } {
   const lines = text.trimEnd().split('\n');
   if (!QUOTE_LINE.test(lines[0])) return { rest: text };
-  const n = lines.findIndex((l) => !QUOTE_LINE.test(l));
-  const end = n < 0 ? lines.length : n;
-  const rest = lines.slice(end);
-  while (rest.length && !rest[0].trim()) rest.shift();
-  return { lead: <Quote lines={lines.slice(0, end)} lead />, rest: rest.join('\n') };
+  const runs: string[][] = [];
+  let end = 0;
+  for (; end < lines.length; end++) {
+    const line = lines[end];
+    if (QUOTE_LINE.test(line)) {
+      if (end > 0 && QUOTE_LINE.test(lines[end - 1])) runs.at(-1)!.push(line);
+      else runs.push([line]);
+    } else if (line.trim()) break;
+  }
+  return {
+    lead: runs.map((r, i) => <Quote key={i} lines={r} lead />),
+    rest: lines.slice(end).join('\n'),
+  };
 }
 
 /** What the user typed, as the tab shows it: the text as is with its line breaks, no

@@ -4671,6 +4671,24 @@ describe("the feed like the Claude Code tab", () => {
     expect(pending.querySelector(".msg-text")!.textContent).toBe("pending rest");
   });
 
+  it("puts every quote the message starts with above the time, the blank lines between them too", () => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.user.message", (e) => {
+        e.payload.text = "> first\n\n> second\n\nthe reply";
+        e.payload.artifact_ids = [];
+      }),
+    );
+    show(t);
+    const bubble = root.querySelector(".msg-user .msg-bubble")!;
+    const leads = [...bubble.children].filter((c) => c.classList.contains("msg-quote-lead"));
+    expect(leads.map((q) => q.textContent)).toEqual(["first", "second"]);
+    expect(leads[1].nextElementSibling!.classList.contains("msg-time")).toBe(true);
+    const text = bubble.querySelector(".msg-text")!;
+    expect(text.querySelector(".msg-quote")).toBeNull();
+    expect(text.firstChild!.textContent).toBe("the reply");
+  });
+
   it("a quote in the middle or at the end of a message stays inline, beside the text", () => {
     const t = new Timeline();
     t.apply(

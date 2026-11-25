@@ -15,12 +15,16 @@
 // iOS would or would not have made.
 
 /** What a tap presses on its lift: a button, a link, a details summary, an element in the role of a
- *  button or a menu item. The innermost one under the finger. */
-const PRESSABLE = 'button, a[href], summary, [role="button"], [role="menuitem"]';
+ *  button, a menu item or an option (a slash command over the input). The innermost one under the
+ *  finger. */
+const PRESSABLE = 'button, a[href], summary, [role="button"], [role="menuitem"], [role="option"]';
+/** What the browser's own press takes the focus from: a field being typed in. */
+const TYPED = 'input, textarea, select, [contenteditable]';
 /** A finger that goes farther than this from where it went down scrolls or drags: no press. */
 const SLOP_PX = 10;
-/** A touch held longer is a long press (a phone row opens its menu at 450 ms): no press, iOS and
- *  the page handle it as before. */
+/** A touch held longer is a long press: no press, iOS and the page handle it as before. A phone row
+ *  opens its menu at 450 ms; a lift between 450 and 500 ms presses the row, whose own click then
+ *  sees its menu open and does not open the session. */
 const HOLD_MS = 500;
 /** Scroll events no farther apart than this after a swipe are its momentum (in the iOS simulator a
  *  feed's come every 16 ms, 50–80 ms apart as it slows down); a finger that comes down in them on
@@ -30,9 +34,12 @@ const COAST_GAP_MS = 100;
 /** Listens to every touch on the page (passive where a listener could hold up a scroll) and
  *  presses the button or link a tap was on when its finger is lifted. */
 export function listenForTaps(doc: Document = document): void {
-  // The touch in progress: where it went down, when, and the pressable element it went down on
-  // (none for a touch that stops a scroll).
-  let down: { x: number; y: number; at: number; el: Element | null; moved: boolean } | null = null;
+  // The touch in progress: where it went down, when, the pressable element it went down on (none
+  // for a touch that stops a scroll), and whether the page's pointerdown kept the focus where it is.
+  let down: { x: number; y: number; at: number; el: Element | null; moved: boolean; kept: boolean } | null = null;
+  // Whether the last pointerdown was prevented (the buttons of a message keep the input's focus so):
+  // read here in the bubble phase, after the element's own handlers.
+  let pointerKept = false;
   // Whether scroll events have followed the last swipe without a pause, when the last came, and
   // what it scrolled (the document or an element).
   let coasting = false;
@@ -55,8 +62,18 @@ export function listenForTaps(doc: Document = document): void {
     { capture: true, passive: true },
   );
   doc.addEventListener(
+    'pointerdown',
+    (e) => {
+      pointerKept = e.defaultPrevented;
+    },
+    { passive: true },
+  );
+  doc.addEventListener(
     'touchstart',
     (e) => {
+      // The pointerdown of this touch comes before it.
+      const kept = pointerKept;
+      pointerKept = false;
       const now = performance.now();
       // A finger on what coasts stops it; one elsewhere (Send under a coasting feed) is a tap.
       const on = e.target instanceof Node && (scrolled === doc || (scrolled instanceof Node && scrolled.contains(e.target)));
@@ -69,7 +86,7 @@ export function listenForTaps(doc: Document = document): void {
         return;
       }
       const el = !stops && e.target instanceof Element ? e.target.closest(PRESSABLE) : null;
-      down = { x: t.clientX, y: t.clientY, at: now, el, moved: false };
+      down = { x: t.clientX, y: t.clientY, at: now, el, moved: false, kept };
     },
     { passive: true },
   );
@@ -93,12 +110,18 @@ export function listenForTaps(doc: Document = document): void {
     if (d.moved || !el || !t || e.touches.length > 0) return;
     // A handler of the page took the touch, or iOS already made it a gesture of its own.
     if (e.defaultPrevented || !e.cancelable) return;
-    if (!el.isConnected || performance.now() - d.at > HOLD_MS) return;
-    if (el.matches(':disabled') || el.getAttribute('aria-disabled') === 'true') return;
+    // Rendered away during the touch, held for a long press, or disabled.
+    if (!el.isConnected || performance.now() - d.at > HOLD_MS || el.matches(':disabled')) return;
     // Lifted off the element (it moved from under the finger, or the finger slid off it).
     const r = el.getBoundingClientRect();
     if (t.clientX < r.left || t.clientX > r.right || t.clientY < r.top || t.clientY > r.bottom) return;
     e.preventDefault();
+    // What the cancelled mousedown did: a press takes the focus from a field being typed in (a
+    // title being renamed is saved on its blur; a phone's keyboard goes down), unless the page's
+    // pointerdown or mousedown keeps it (the input's own buttons, a message's buttons).
+    const active = doc.activeElement;
+    const kept = d.kept || !el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    if (!kept && active instanceof HTMLElement && active.matches(TYPED) && !active.contains(el) && !el.contains(active)) active.blur();
     (el as HTMLElement).click();
   });
 }

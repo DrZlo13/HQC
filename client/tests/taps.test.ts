@@ -22,11 +22,16 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
+/** Lays `el` out 100 × 40 px at the top left. */
+function box(el: Element) {
+  el.getBoundingClientRect = () => ({ left: 0, top: 0, right: 100, bottom: 40, width: 100, height: 40, x: 0, y: 0, toJSON: () => ({}) });
+}
+
 /** `html`'s first element, 100 × 40 px at the top left, and how many clicks it got. */
 function make(html: string): { el: HTMLElement; clicks: () => number } {
   doc.body.innerHTML = html;
   const el = doc.body.firstElementChild as HTMLElement;
-  el.getBoundingClientRect = () => ({ left: 0, top: 0, right: 100, bottom: 40, width: 100, height: 40, x: 0, y: 0, toJSON: () => ({}) });
+  box(el);
   let n = 0;
   el.addEventListener('click', (e) => {
     n++;
@@ -76,8 +81,14 @@ describe('listenForTaps', () => {
     expect(clicks()).toBe(1);
   });
 
-  it('presses a link, a summary and an element in the role of a button or a menu item', () => {
-    for (const html of ['<a href="#/s/1">row</a>', '<summary>Thinking</summary>', '<div role="button">x</div>', '<div role="menuitem">Copy</div>']) {
+  it('presses a link, a summary and an element in the role of a button, a menu item or an option', () => {
+    for (const html of [
+      '<a href="#/s/1">row</a>',
+      '<summary>Thinking</summary>',
+      '<div role="button">x</div>',
+      '<div role="menuitem">Copy</div>',
+      '<li role="option">/compact</li>',
+    ]) {
       const { el, clicks } = make(html);
       tap(el);
       expect(clicks(), html).toBe(1);
@@ -107,6 +118,63 @@ describe('listenForTaps', () => {
     now += 500;
     touch(el, 'touchend', { x: 56, y: 28 });
     expect(clicks()).toBe(1);
+  });
+
+  it('presses no button rendered away while the finger was down', () => {
+    const { el, clicks } = make('<button>Allow</button>');
+    touch(el, 'touchstart', { x: 50, y: 20 });
+    el.remove();
+    now += 80;
+    // An end sent to the removed node does not reach the page at all; one that does (the finger
+    // lifted where the next card now stands) presses nothing either.
+    expect(touch(el, 'touchend', { x: 50, y: 20 }).defaultPrevented).toBe(false);
+    doc.body.append(el);
+    touch(el, 'touchstart', { x: 50, y: 20 });
+    el.remove();
+    now += 80;
+    expect(touch(doc.body, 'touchend', { x: 50, y: 20 }).defaultPrevented).toBe(false);
+    expect(clicks()).toBe(0);
+  });
+
+  it('takes the focus from a field being typed in, as the press of the browser does', () => {
+    doc.body.innerHTML = '<input class="title"><a href="#/p/1">‹</a>';
+    const field = doc.querySelector<HTMLElement>('.title')!;
+    const back = doc.querySelector('a')!;
+    box(back);
+    Object.defineProperty(doc, 'activeElement', { configurable: true, get: () => field });
+    const blur = vi.spyOn(field, 'blur');
+    const order: string[] = [];
+    blur.mockImplementation(() => order.push('blur'));
+    back.addEventListener('click', (e) => {
+      order.push('click');
+      e.preventDefault();
+    });
+    tap(back);
+    // Blurred first: a renamed title is saved before the chat goes.
+    expect(order).toEqual(['blur', 'click']);
+  });
+
+  it('leaves the focus in the field when the press keeps it (its mousedown or pointerdown prevented)', () => {
+    doc.body.innerHTML = '<form><textarea></textarea><button>Send</button></form><span class="mb"><button>Copy</button></span>';
+    const field = doc.querySelector<HTMLElement>('textarea')!;
+    const send = doc.querySelector<HTMLElement>('form button')!;
+    const copy = doc.querySelector<HTMLElement>('.mb button')!;
+    box(send);
+    box(copy);
+    Object.defineProperty(doc, 'activeElement', { configurable: true, get: () => field });
+    const blur = vi.spyOn(field, 'blur');
+    let clicks = 0;
+    for (const b of [send, copy]) b.addEventListener('click', () => clicks++);
+    // The composer's form keeps the focus on the mousedown of its buttons.
+    doc.querySelector('form')!.addEventListener('mousedown', (e) => e.preventDefault());
+    doc.querySelector('form')!.addEventListener('submit', (e) => e.preventDefault());
+    tap(send);
+    // A message's buttons keep it on their pointerdown, which comes before the touchstart.
+    doc.querySelector('.mb')!.addEventListener('pointerdown', (e) => e.preventDefault());
+    copy.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }));
+    tap(copy);
+    expect(clicks).toBe(2);
+    expect(blur).not.toHaveBeenCalled();
   });
 
   it('presses no disabled button', () => {

@@ -1043,7 +1043,10 @@ async fn live_bash_turn_with_approval() {
         at += i + 1;
     }
     assert_eq!(shape.last().unwrap(), "turn_ended");
-    assert!(evs.contains(&AdapterEvent::InputAccepted { event_id: input_id }));
+    assert!(evs.contains(&AdapterEvent::InputAccepted {
+        event_id: input_id,
+        joined: false
+    }));
     let events: Vec<&Event> = evs
         .iter()
         .filter_map(|e| match e {
@@ -1580,7 +1583,7 @@ async fn live_input_joins_turn() {
                 } => finals.push(text.clone()),
                 _ => {}
             },
-            AdapterEvent::InputAccepted { event_id } => accepted.push(event_id),
+            AdapterEvent::InputAccepted { event_id, .. } => accepted.push(event_id),
             AdapterEvent::TurnEnded { carried, dropped } => {
                 ended = Some((carried, dropped));
                 break;

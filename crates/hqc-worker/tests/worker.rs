@@ -3969,6 +3969,66 @@ async fn a_send_during_a_persons_turn_joins_it() {
     w.stop().await;
 }
 
+// SPEC 0.251: an input given as a turn of its own while the runtime runs one it started by
+// itself, and taken into that turn, is acked joined, also when it is resent, and so is a `send`;
+// an `hqc_ask` and a run of a schedule taken so cannot join and are acked as turns, as the hub
+// keeps them.
+#[tokio::test]
+async fn an_input_taken_into_the_runtimes_own_turn_is_joined() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let b = Uuid::now_v7();
+
+    adapters.set_own_turn(true);
+    let fb = c.frame("session.input", input(sid, b, "B")).await;
+    adapters
+        .wait_for("B given", has_call(input_call(sid, b)))
+        .await;
+    adapters.accept_input_joined(sid, b).await;
+    assert_eq!(
+        ack_of(&mut c, &fb).await["payload"],
+        json!({"event_id": b, "joined": true})
+    );
+    let fb2 = c.frame("session.input", input(sid, b, "B")).await;
+    assert_eq!(
+        ack_of(&mut c, &fb2).await["payload"],
+        json!({"event_id": b, "joined": true})
+    );
+    adapters.set_own_turn(false);
+    adapters.end_turn(sid).await;
+
+    let (s, p, r) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    let mut scheduled = input(sid, r, "Check the build");
+    scheduled["schedule_id"] = json!(Uuid::now_v7());
+    for (eid, frame, joined) in [
+        (s, send_input(sid, s, "FYI"), true),
+        (p, ask_input(sid, p), false),
+        (r, scheduled, false),
+    ] {
+        adapters.set_own_turn(true);
+        let f = c.frame("session.input", frame).await;
+        adapters
+            .wait_for("given as a turn", has_call(input_call(sid, eid)))
+            .await;
+        adapters.accept_input_joined(sid, eid).await;
+        let want = if joined {
+            json!({"event_id": eid, "joined": true})
+        } else {
+            json!({"event_id": eid})
+        };
+        assert_eq!(ack_of(&mut c, &f).await["payload"], want);
+        adapters.set_own_turn(false);
+        adapters.end_turn(sid).await;
+    }
+    w.stop().await;
+}
+
 // SPEC §17.2: a person's input goes past the waiting inputs in front of it that are no person's
 // and cannot join (an `hqc_ask`, a run of a schedule); they keep their places and run as turns
 // of their own after the turn, in order.

@@ -759,3 +759,60 @@ async fn a_provider_url_is_probed_by_a_worker() {
     assert!(v["worker_id"].is_string());
     hub.finish().await;
 }
+
+#[tokio::test]
+async fn a_refused_registration_says_its_status_and_type() {
+    let hub = TestHub::start().await;
+    let f = AuthFake {
+        base: Arc::default(),
+        seen: Arc::default(),
+    };
+    let app = Router::new()
+        .route("/mcp", post(auth_mcp))
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            axum::routing::get(prm),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            axum::routing::get(as_meta),
+        )
+        .route(
+            "/register",
+            post(|| async {
+                (
+                    StatusCode::FORBIDDEN,
+                    [("content-type", "text/html; charset=utf-8")],
+                    "<html>Forbidden</html>",
+                )
+            }),
+        )
+        .with_state(f.clone());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    *f.base.lock().unwrap() = base.clone();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+
+    let (s, v) = hub
+        .post(
+            "/api/mcp/servers",
+            json!({"name": "figma", "url": format!("{base}/mcp"), "auth": "oauth"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+    let (s, v) = hub
+        .post(&format!("/api/mcp/servers/{id}/sign_in"), json!({}))
+        .await;
+    assert_ne!(s, 200, "{v}");
+    let text = v.to_string();
+    assert!(
+        text.contains("the registration answered 403 (text/html), not JSON"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Forbidden</html>"),
+        "no text of the page: {text}"
+    );
+    hub.finish().await;
+}

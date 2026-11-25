@@ -127,7 +127,9 @@ it('opens the project settings from the column\'s "⋯": appearance, workspaces,
   await until('settings page', () => $('.project-settings'));
   expect($('.project-settings .bar .title')!.textContent).toBe('Project settings');
   expect($('.project-settings .bar .state')!.textContent).toBe('Personal');
-  expect($$('.project-settings h2').map((h) => h.textContent)).toEqual(['Appearance', 'Quick messages', 'Workspaces']);
+  // The mock's MCP servers load after the page: their section comes last, once they do.
+  await until('mcp servers', () => $('.project-settings .mcp-project-servers'));
+  expect($$('.project-settings h2').map((h) => h.textContent)).toEqual(['Appearance', 'Quick messages', 'Workspaces', 'MCP servers']);
   // The personal project gets an appearance, but no rename or delete (SPEC §3).
   expect($('.ps-look .ps-color')!.textContent).toBe('Slate');
   const row = await until('workspace row', () => $('.workspace-row'));

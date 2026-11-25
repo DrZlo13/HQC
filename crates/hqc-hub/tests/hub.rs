@@ -1450,12 +1450,18 @@ async fn boot_id_tells_restart_from_reconnect() {
     hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
         .await;
     let (mut w, _) = FakeWorker::online_boot(&hub, &token, WS_PATH, Uuid::new_v4()).await;
-    // No pending input and no open request left: no session.start, no deny frame.
-    w.expect_silence(Duration::from_millis(300)).await;
-    let v = hub
-        .wait_session(&sid, "idle after restart", |v| v["state"] == "idle")
-        .await;
-    assert_eq!(v["agent"]["process_state"], "stopped");
+    // No open request left, so no deny frame; the cut turn is told to the agent (SPEC 0.256),
+    // which the start delivers.
+    let st = ack_start(&mut w, &sid).await;
+    assert_eq!(st["payload"]["mode"], "resume");
+    let note = w.expect("session.input").await;
+    assert!(
+        note["payload"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("It cut the turn you were in"),
+        "{note}"
+    );
     let events = hub
         .wait_events(&sid, "turn_lost", |es| {
             es.iter()

@@ -92,7 +92,7 @@ describe('what the feed shows of an event, and how', () => {
       questions: [{ id: 'a', text: 'Which flavour?', header: 'Flavour', options: ['vanilla bean', 'dark chocolate'], option_descriptions: ['plain', 'the bitter one'], option_previews: ['', 'a dark mockup'] }],
     });
     const answer = ev(4, 'approval.response', { request_id: 'r', option_id: 'deny', by: 'u', message: '> echo hello world\nnot this way, use the make target' });
-    const side = ev(5, 'side.question', { text: 'what does the stub flash first' });
+    const side = ev(5, 'side.question', { text: '> echo hello world\nwhat does the stub flash first' });
     const all = [report, approval, clarify, answer, side];
     expect(find(all, 'report body of the subagent')).toBe(1);
     // The text answer's own quote of the command is not its source.

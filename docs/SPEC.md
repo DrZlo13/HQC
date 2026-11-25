@@ -3007,9 +3007,10 @@ break apart from it. A click on it
 on it takes the chat to the text it quotes, as Telegram does. The client looks for the quote's
 letters and digits (lowercased, NFKC; in a source the feed renders as Markdown, its marks, link
 targets, ordered-list numbers and fence lines left out) in the session's events before the message,
-newest first: agent messages and reasoning, the user's messages without their own quote lines,
-messages from other sessions, side answers, the feed's notes (a subagent's report, a background
-task's line, a compaction summary), the text of permission and question cards, the arguments and
+newest first: agent messages and reasoning, the user's messages, text answers to a request and side
+questions without their own quote lines, messages from other sessions, side answers, the feed's
+notes (a subagent's report, a background task's line, a compaction summary), the text of permission
+and question cards, the arguments and
 results of calls; the whole quote first, else its first paragraph (a quote taken across messages),
 in the loaded events and then in each older page as it comes in, 1000 events a page, until it is
 found; then in the events after the message (an answer quoted while it was being written is stored
@@ -3095,9 +3096,10 @@ break apart from it. A click on it
 on it takes the chat to the text it quotes, as Telegram does. The client looks for the quote's
 letters and digits (lowercased, NFKC; in a source the feed renders as Markdown, its marks, link
 targets, ordered-list numbers and fence lines left out) in the session's events before the message,
-newest first: agent messages and reasoning, the user's messages without their own quote lines,
-messages from other sessions, side answers, the feed's notes (a subagent's report, a background
-task's line, a compaction summary), the text of permission and question cards, the arguments and
+newest first: agent messages and reasoning, the user's messages, text answers to a request and side
+questions without their own quote lines, messages from other sessions, side answers, the feed's
+notes (a subagent's report, a background task's line, a compaction summary), the text of permission
+and question cards, the arguments and
 results of calls; the whole quote first, else its first paragraph (a quote taken across messages),
 in the loaded events and then in each older page as it comes in, 1000 events a page, until it is
 found; then in the events after the message (an answer quoted while it was being written is stored

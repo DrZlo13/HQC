@@ -82,7 +82,7 @@ export function eventText(e: HqcEvent, t: Pick<Timeline, 'callFor'>): { text: st
     case 'approval.response':
       return plain(ownText(e.payload.message ?? ''));
     case 'side.question':
-      return plain(e.payload.text);
+      return plain(ownText(e.payload.text));
     case 'side.answer':
       return md(e.payload.text ?? '');
     case 'system':

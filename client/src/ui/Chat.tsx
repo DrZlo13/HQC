@@ -39,7 +39,7 @@ import {
   IconSend,
   IconStop,
 } from './icons';
-import { MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatTime, formatTimer, formatTokens, homePath, modeConfirm, modelName, shownModel, spendLabel } from './labels';
+import { AUTO_NEEDS_ANTHROPIC, MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatTime, formatTimer, formatTokens, homePath, modeConfirm, modelName, shownModel, spendLabel } from './labels';
 import { hasOpenTasks, LiveSubagents } from './LiveSubagents';
 import { Loading } from './Loading';
 import { CopyButton } from './Markdown';
@@ -1455,7 +1455,10 @@ function modeFace(info: SessionInfo): { cls: string; title: string; text: Compon
     const text = `${MODE_LABELS[runs]} (${MODE_LABELS[asked]} asked)`;
     return {
       cls: MODE_MARKS[runs].cls,
-      title: `The worker runs this session in ${MODE_LABELS[runs]}: until the agent next runs, or for good if the worker does not allow ${MODE_LABELS[asked]}`,
+      title:
+        asked === 'auto' && info.provider
+          ? AUTO_NEEDS_ANTHROPIC
+          : `The worker runs this session in ${MODE_LABELS[runs]}: until the agent next runs, or for good if the worker does not allow ${MODE_LABELS[asked]}`,
       text,
       label: text,
       known: true,
@@ -1608,7 +1611,8 @@ function ModePill({
                   type="button"
                   class={`btn-mode-${m}`}
                   aria-pressed={m === own}
-                  title={SWITCH_TITLES[m]}
+                  disabled={m === 'auto' && !!info.provider && m !== own}
+                  title={m === 'auto' && info.provider ? AUTO_NEEDS_ANTHROPIC : SWITCH_TITLES[m]}
                   data-focus={m === own ? '' : undefined}
                   onClick={() => {
                     setAt(null);

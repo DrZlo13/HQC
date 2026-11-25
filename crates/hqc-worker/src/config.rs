@@ -909,7 +909,11 @@ impl Config {
             auto_approve: s.auto_approve,
             session_token: Secret::new(s.session_token.clone()),
             ask_timeout_s: s.ask_timeout_s,
-            permission_mode: self.permission_mode(s.session_id, s.permission_mode),
+            permission_mode: auto_off_provider(
+                s.session_id,
+                self.permission_mode(s.session_id, s.permission_mode),
+                provider.is_some(),
+            ),
             // The supervisor gives a session in a workspace the folder's shared list.
             folder_rules: None,
             fork: s.fork.clone(),
@@ -1115,6 +1119,21 @@ fn normalize(p: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// The mode a session on a model provider runs in (#194, SPEC 0.246): `ask` for `auto`. Auto's
+/// safety check runs on Anthropic's servers and does not pass through a provider's endpoint,
+/// so in Auto the CLI refuses every call that needs it; `ask` and `allow_all` are as asked.
+pub fn auto_off_provider(
+    session_id: Uuid,
+    mode: PermissionMode,
+    on_provider: bool,
+) -> PermissionMode {
+    if on_provider && mode == PermissionMode::Auto {
+        tracing::info!(%session_id, "auto on a model provider: running ask, the safety check does not pass through a provider");
+        return PermissionMode::Ask;
+    }
+    mode
 }
 
 #[cfg(test)]

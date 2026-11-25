@@ -17,7 +17,7 @@ import { Composer, SessionsButton, toOutgoing, type SessionsToggle } from './Cha
 import { ContextMenu, type MenuEntry } from './ContextMenu';
 import { useSubscription } from './hooks';
 import { IconBack, IconChevronUp, IconFolder, IconModel, IconPlus, IconRoom, IconShield, IconWorkspace } from './icons';
-import { ROOM_MODE_LABELS, ROOM_MODE_NOTES, homePath, modeConfirm, modelName } from './labels';
+import { AUTO_NEEDS_ANTHROPIC, ROOM_MODE_LABELS, ROOM_MODE_NOTES, homePath, modeConfirm, modelName } from './labels';
 import { workspaceName } from './ProjectSettings';
 
 /** The first message: shown as being sent until the session exists. */
@@ -477,10 +477,14 @@ export function NewSessionChips({
         </ContextMenu>
       );
     } else if (open.chip === 'permissions') {
+      // Auto does not work on a model provider (#194).
+      const noAuto = !!values.provider_id;
       const items: MenuEntry[] = PERMISSIONS.map(([mode, label]) => ({
         label,
         cls: `btn-permissions-${mode ?? 'default'}`,
         checked: values.permission_mode === mode,
+        disabled: noAuto && mode === 'auto',
+        title: noAuto && mode === 'auto' ? AUTO_NEEDS_ANTHROPIC : undefined,
         onSelect: () => {
           // Auto and Allow all after a one-line confirmation of their own; Ask and the default
           // at once.

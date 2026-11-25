@@ -1818,6 +1818,10 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
           </fieldset>
         );
       })}
+      {/* #129: what the server's form gets is not kept in the session's history. */}
+      {p.server !== undefined && p.questions.length > 0 && (
+        <div class="muted small clarify-note">Your answers go to {p.server} only; hqc keeps that you answered, not what.</div>
+      )}
       {open && (
         <div class="actions">
           <button
@@ -1834,7 +1838,9 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
           )}
         </div>
       )}
-      {(fate.response || answeredLater) && <div class="outcome">{declined ? 'Declined' : p.url ? 'Done' : 'Answers sent'}</div>}
+      {(fate.response || answeredLater) && (
+        <div class="outcome">{declined ? 'Declined' : p.url ? 'Done' : p.server !== undefined ? `Answers sent to ${p.server}` : 'Answers sent'}</div>
+      )}
       {fate.cancel && !answeredLater && <div class="outcome">Cancelled: {CANCEL_LABELS[fate.cancel.reason]}</div>}
       {error && <div class="error-text">{error}</div>}
     </form>

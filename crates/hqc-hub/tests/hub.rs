@@ -1105,7 +1105,37 @@ async fn only_the_worker_owner_answers_an_mcp_servers_request() {
         f["payload"],
         json!({"session_id": sid, "request_id": "c-1", "answers": {"1": "Yes"}, "action": "accept"})
     );
+    // #129: a server's form may ask for a token. The history keeps that it was answered, and
+    // the frame kept for the worker forgets the answers once the worker has them.
+    let kept: Value = sqlx::query_scalar(
+        "SELECT payload FROM events WHERE session_id = $1 AND type = 'clarify.response'",
+    )
+    .bind(s.id)
+    .fetch_one(&hub.app.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        kept,
+        json!({"request_id": "c-1", "answers": {}, "action": "accept"})
+    );
     w.reply(&f["id"], "ack", json!({})).await;
+    let mut forgotten = false;
+    for _ in 0..50 {
+        let r: Value = sqlx::query_scalar(
+            "SELECT result FROM pending_requests WHERE session_id = $1 AND request_id = 'c-1'",
+        )
+        .bind(s.id)
+        .fetch_one(&hub.app.db)
+        .await
+        .unwrap();
+        if r["payload"]["answers"] == json!({}) {
+            assert_eq!(r["payload"]["action"], "accept");
+            forgotten = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(forgotten, "the delivered answers are forgotten");
     hub.finish().await;
 }
 

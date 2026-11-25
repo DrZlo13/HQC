@@ -2075,6 +2075,59 @@ async fn allow_auto_false_runs_ask() {
     w.stop().await;
 }
 
+// #194, SPEC 0.246: Auto's safety check does not pass through a model provider, so a session on
+// one runs Ask where Auto is asked, at the start and on a switch; Allow all stays.
+#[tokio::test]
+async fn auto_on_a_provider_runs_ask() {
+    use hqc_proto::frame::PermissionMode::{AllowAll, Ask};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let cfg = hqc_worker::config::Config::parse(&format!(
+        "{}[permissions]\nallow_all = true\n\
+         [providers.qwen]\nbase_url = \"http://192.168.1.229:8082\"\n",
+        env.config_toml(&hub.url())
+    ))
+    .unwrap();
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let mut start = env.start_payload(sid);
+    start["permission_mode"] = json!("auto");
+    start["provider"] =
+        json!({"name": "qwen", "base_url": "http://192.168.1.229:8082", "model": "qwen"});
+    c.frame("session.start", start).await;
+    c.expect("ack").await;
+    state_with_mode(&mut c, sid, "ask").await;
+    assert_eq!(adapters.start_modes(), [(sid, Ask)]);
+    c.frame(
+        "session.permission_mode",
+        json!({"session_id": sid, "permission_mode": "auto"}),
+    )
+    .await;
+    c.expect("ack").await;
+    c.frame(
+        "session.permission_mode",
+        json!({"session_id": sid, "permission_mode": "allow_all"}),
+    )
+    .await;
+    c.expect("ack").await;
+    adapters
+        .wait_for("switch", |c| {
+            c.contains(&FakeCall::PermissionMode(sid, AllowAll))
+        })
+        .await;
+    assert!(
+        !adapters.calls().iter().any(|c| matches!(
+            c,
+            FakeCall::PermissionMode(_, hqc_proto::frame::PermissionMode::Auto)
+        )),
+        "no switch to auto"
+    );
+    w.stop().await;
+}
+
 // SPEC 0.129: Allow all needs `[permissions] allow_all`, off by default: without it a session
 // the hub asks to run in it runs in the highest mode the worker allows — Auto, or Ask with
 // `allow_auto = false` — at the start and on a switch, and reports that mode.

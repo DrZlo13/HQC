@@ -1918,6 +1918,7 @@ impl Session {
     /// Under a cap (T39) the runtime goes no higher than the cap: a lower mode comes at once,
     /// the rest when the capped turn ends.
     async fn switch_mode(&mut self, mode: PermissionMode) {
+        let mode = crate::config::auto_off_provider(self.id, mode, self.spec.provider.is_some());
         if self.spec.permission_mode == mode {
             return;
         }

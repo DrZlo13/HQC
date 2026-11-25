@@ -3539,9 +3539,16 @@ pub async fn undelivered_results(db: &PgPool, worker_id: Uuid) -> sqlx::Result<V
     .await
 }
 
+/// A delivered answer to an MCP server's form keeps no answers (#129): they went to the worker.
+const FORGET_SERVER_ANSWERS: &str =
+    "result = CASE WHEN kind = 'clarify' AND payload->>'server' IS NOT NULL
+             THEN jsonb_set(result, '{payload,answers}', '{}'::jsonb) ELSE result END";
+
 pub async fn result_delivered(db: &PgPool, id: Uuid) -> sqlx::Result<()> {
-    sqlx::query("UPDATE pending_requests SET result_delivered_at = now() WHERE id = $1")
-        .bind(id)
+    sqlx::query(&format!(
+        "UPDATE pending_requests SET result_delivered_at = now(), {FORGET_SERVER_ANSWERS} WHERE id = $1"
+    ))
+    .bind(id)
         .execute(db)
         .await?;
     Ok(())
@@ -3549,11 +3556,11 @@ pub async fn result_delivered(db: &PgPool, id: Uuid) -> sqlx::Result<()> {
 
 /// The worker restarted: answers it never acknowledged went to a process that is gone.
 pub async fn drop_undelivered_results(db: &PgPool, worker_id: Uuid) -> sqlx::Result<u64> {
-    let r = sqlx::query(
-        "UPDATE pending_requests SET result_delivered_at = now()
+    let r = sqlx::query(&format!(
+        "UPDATE pending_requests SET result_delivered_at = now(), {FORGET_SERVER_ANSWERS}
          WHERE result IS NOT NULL AND result_delivered_at IS NULL
-           AND session_id IN (SELECT id FROM sessions WHERE worker_id = $1)",
-    )
+           AND session_id IN (SELECT id FROM sessions WHERE worker_id = $1)"
+    ))
     .bind(worker_id)
     .execute(db)
     .await?;

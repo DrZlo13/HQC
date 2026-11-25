@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.236, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.237, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2375,7 +2375,8 @@ the rest is marked "later"):
   after now); `DELETE /api/schedules/{id}` → `204`. Another user's schedule or session: `404`.
   The schedule object is `{id, owner_id, session_id, cron?, at?, timezone, message, enabled,
   catch_up, next_run?, last_run?, created_at, updated_at}`. The client lists, pauses, resumes
-  and deletes a session's schedules from the session's "More" menu ("Schedules")
+  and deletes a session's schedules in the block above the input (§6), opened by a "Scheduled:"
+  line there or by the session's "More" menu ("Schedules")
 - later: `/api/projects/{id}/template`
 
 Client layout (since 0.51, T49, `docs/design/redesign-2026-11-01`; since 0.114 the new screen):
@@ -3024,10 +3025,16 @@ is not known has none), and the lines of the session's schedules of the latest `
 (§4, §16), after them ("Scheduled: ", the message, `in 12m 34s`), the next one first. A timer's
 dot does not pulse: it waits, it does not run. The wakeups and the cron jobs wait while the agent is
 idle, so the block shows for them with both counts 0, and so for a schedule; a line of a scheduled
-message opens the schedules of the chat ("Schedules" in the menu), and goes when its one-off
-is sent or it is paused or deleted (a recurring one then shows its next run). The same one-line
-ellipsis as the other lines, on a computer and on a
-phone; a dropped socket clears these lines too until the next subscribe.
+message goes when its one-off is sent or it is paused or deleted (a recurring one then shows its
+next run). These lines have the same one-line ellipsis as the other lines, on a computer and on a
+phone; a dropped socket clears them too until the next subscribe. Since 0.237 a line of a scheduled
+message opens and closes, under the last of them, the list of all the session's schedules (`GET
+/api/schedules`, paused and spent ones too), as the task list opens under its row; "Schedules" in
+the "More" menu opens the same list. Each schedule there is a line of when it runs and its next run
+("paused", "sent …"), wrapped, with a small pause or resume button (while it has a next run) and a
+delete button, as a command's stop, and its whole message under it. The list is read again on every
+`schedules.live` and stays in place while the lines above it come and go; while it is open and no
+schedule waits, the block keeps a line "Scheduled: none waiting", which holds it and closes it.
 Since 0.223 the agent's task list (`tasks`, §4, §8.1) is a row of the block, after the goal's
 (below) and ahead of the main agent's, while it has a task that is not completed: "Tasks: 3 of 7
 completed", the completed tasks of all of them, and, when a task is in progress, ` · ` and its
@@ -8053,6 +8060,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.236 → 0.237 (the schedules in the block above the input)
+§6, §16: the session's schedules opened in a panel under the chat's header, with its own heading,
+Close, and Pause and Delete buttons unlike anything in the block above the input, though their
+"Scheduled:" lines stand in that block. The panel is gone: a "Scheduled:" line, as the task list's
+row, opens the list under it in the block, a line per schedule with small pause or resume and
+delete buttons and the whole message under it; the "More" menu's "Schedules" opens the same list.
+It is read again whenever `schedules.live` comes, so a sent one-off shows as sent. Only the client.
 
 ### 0.235 → 0.236 (a provider and an MCP server filled from their URL)
 §5.3 `provider.probe`, §6 `POST /api/providers/probe`, `POST /api/mcp/probe`. Adding a model

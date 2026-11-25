@@ -1934,6 +1934,9 @@ describe('live subagents', () => {
 
   it('shows the block for the session\'s schedules alone: "Scheduled:", the message, the countdown; a click opens the schedules', async () => {
     const { api, app } = setup('idle', { subagents: 0, background_tasks: 0 });
+    (api.schedules as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 'sc1', session_id: 's1', message: 'Check the nightly build', enabled: true, timezone: 'UTC', cron: '0 9 * * *', catch_up: false },
+    ]);
     await mount(app);
     expect($('.live-agents')).toBeNull();
     await act(async () => subscriber!.onEvent(schedulesLive()));
@@ -1944,14 +1947,90 @@ describe('live subagents', () => {
     expect(rows()[0][1]).toMatch(/^in 1[12]m \d+s$/);
     expect(rows()[1][1]).toMatch(/^in 22h \d+m \d+s$/);
     expect($('.live-agents-dot')!.classList.contains('live-agents-dot-still')).toBe(true);
+    expect($('.live-schedules')).toBeNull();
+    const toggles = () => [...root.querySelectorAll<HTMLElement>('.live-agents button.live-agents-opens')];
+    expect(toggles().map((b) => b.getAttribute('aria-expanded'))).toEqual(['false', 'false']);
+    await act(async () => toggles()[0].click());
+    await act(async () => {});
+    // The list opens in the block above the input, under the last schedule row; no panel under the header.
+    expect($('.live-agents .live-schedules')).not.toBeNull();
+    expect($('.live-agents-list > li:last-child .live-schedules')).not.toBeNull();
     expect($('.schedules')).toBeNull();
-    await act(async () => $('.live-agents-open')!.click());
-    expect($('.schedules')).not.toBeNull();
     expect(api.schedules).toHaveBeenCalledWith('s1');
     expect(api.subagentHistory).not.toHaveBeenCalled();
+    expect(toggles().map((b) => b.getAttribute('aria-expanded'))).toEqual(['true', 'true']);
+    await act(async () => toggles()[1].click());
+    expect($('.live-schedules')).toBeNull();
+    expect($('.live-agents')).not.toBeNull();
     // The list emptied: the block goes.
     await act(async () => subscriber!.onEvent(schedulesLive((e) => (e.payload.schedules = []))));
     expect($('.live-agents')).toBeNull();
+  });
+
+  it('opens the list from the menu\'s "Schedules"; an emptied list stays with "none waiting" until its row closes it', async () => {
+    const list = [
+      {
+        id: 'sc1',
+        session_id: 's1',
+        message: 'Check the nightly build',
+        enabled: true,
+        timezone: 'UTC',
+        cron: '0 9 * * *',
+        next_run: new Date(Date.now() + 60_000).toISOString(),
+        catch_up: false,
+      },
+    ];
+    const { api, app } = setup('idle', { subagents: 0, background_tasks: 0 });
+    (api.schedules as ReturnType<typeof vi.fn>).mockResolvedValue(list);
+    await mount(app);
+    await act(async () => subscriber!.onEvent(schedulesLive()));
+    await act(async () => $('.btn-more')!.click());
+    await act(async () => $('.btn-schedules')!.click());
+    await act(async () => {});
+    expect($('.schedules')).toBeNull();
+    expect($('.live-agents .live-schedules .live-schedule-text')!.textContent).toBe('Check the nightly build');
+    // Nothing is scheduled any more: the block stays for its list, on a row of its own.
+    (api.schedules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    await act(async () => subscriber!.onEvent(schedulesLive((e) => (e.payload.schedules = []))));
+    await act(async () => {});
+    expect($('.live-agents')).not.toBeNull();
+    expect($('.live-agents-list > li > .live-agents-row')!.textContent).toContain('Scheduled: none waiting');
+    expect($('.live-agents .live-agents-note')!.textContent).toContain('None.');
+    await act(async () => (root.querySelector('.live-agents button.live-agents-opens') as HTMLElement).click());
+    expect($('.live-agents')).toBeNull();
+  });
+
+  it('keeps the open list in place while the last "Scheduled:" line goes, and reads it again', async () => {
+    const one = (message: string) => ({
+      id: 'sc1',
+      session_id: 's1',
+      message,
+      enabled: true,
+      timezone: 'UTC',
+      cron: '0 9 * * *',
+      next_run: new Date(Date.now() + 60_000).toISOString(),
+      catch_up: false,
+    });
+    const { api, app } = setup('idle', { subagents: 0, background_tasks: 0 });
+    (api.schedules as ReturnType<typeof vi.fn>).mockResolvedValue([one('Check the nightly build')]);
+    await mount(app);
+    await act(async () => subscriber!.onEvent(schedulesLive()));
+    await act(async () => (root.querySelector('.live-agents button.live-agents-opens') as HTMLElement).click());
+    await act(async () => {});
+    const list = $('.live-schedules');
+    expect(list).not.toBeNull();
+    expect(api.schedules).toHaveBeenCalledTimes(1);
+    // The hub's next list, a moment later, without the last line; the list's own read changed too.
+    (api.schedules as ReturnType<typeof vi.fn>).mockResolvedValue([one('Check the nightly build twice')]);
+    await new Promise((r) => setTimeout(r, 5));
+    await act(async () => subscriber!.onEvent(schedulesLive((e) => (e.payload.schedules = e.payload.schedules.slice(0, 1)))));
+    await act(async () => {});
+    const lines = [...root.querySelectorAll('.live-agents-list > li > .live-agents-row .live-agents-what')];
+    expect(lines.map((l) => l.textContent)).toEqual(['Scheduled: Check the nightly build and report failures']);
+    // The same list, not one made anew under the line that is last now, and read again.
+    expect($('.live-schedules')).toBe(list);
+    expect(api.schedules).toHaveBeenCalledTimes(2);
+    expect($('.live-schedule-text')!.textContent).toBe('Check the nightly build twice');
   });
 
   it('counts a timer down from the time its list came, "due" at 0, and the running rows up', async () => {

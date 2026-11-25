@@ -1,4 +1,4 @@
-//! Skills the owner keeps on the hub (SPEC 0.237, iteration 8): the rules the hub checks on
+//! Skills the owner keeps on the hub (SPEC 0.245, iteration 8): the rules the hub checks on
 //! upload and the worker checks again before an agent gets a skill, since the worker does not
 //! trust the hub for what runs outside its `deny` (SPEC §2.1).
 

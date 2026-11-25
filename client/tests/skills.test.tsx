@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// T69 (iteration 8, SPEC 0.237): Settings → Skills (the list, the upload of a folder or a
+// T69 (iteration 8, SPEC 0.245): Settings → Skills (the list, the upload of a folder or a
 // `.zip`, the projects, Delete) and the skills a project's settings list. The chat's `/` menu
 // matching `hqc:<name>` by `<name>`: chat.test.tsx.
 
@@ -11,6 +11,7 @@ import type { AppState } from '../src/app';
 import type { Project, Skill } from '../src/proto';
 import { ProjectSkills, SkillsSection, folderUpload } from '../src/ui/Skills';
 import { Settings } from '../src/ui/Settings';
+import { defaultKey, type KeyAction } from '../src/keys';
 import { WEB_SEARCHES } from '../src/websearch';
 
 let root: HTMLElement;
@@ -115,6 +116,10 @@ it('is a section of Settings, after MCP servers', async () => {
     newSessionProject: () => undefined,
     webSearch: WEB_SEARCHES[0],
     providers: [],
+    deviceUser: () => undefined,
+    forgetDevice: async () => {},
+    keyFor: (a: KeyAction) => defaultKey(a),
+    setKey: () => {},
   } as unknown as AppState;
   await mount(app, <Settings app={app} />);
   const heads = $$('h2').map((h) => h.textContent);

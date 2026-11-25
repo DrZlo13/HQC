@@ -306,7 +306,7 @@ pub struct McpServerList {
     pub servers: Vec<McpServer>,
 }
 
-/// A skill the owner keeps on the hub (SPEC 0.237, iteration 8): `GET /api/skills`. The
+/// A skill the owner keeps on the hub (SPEC 0.245, iteration 8): `GET /api/skills`. The
 /// content is the hub's normalized archive, whose sha256 sessions get in `session.start.skills`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Skill {

@@ -216,7 +216,7 @@ impl Worker {
         let conn_stop = CancellationToken::new();
         let conn_task = tokio::spawn(conn.run(conn_stop.clone()));
 
-        // SPEC 0.237: the hub's skills no session has used for a week.
+        // SPEC 0.245: the hub's skills no session has used for a week.
         hub_skills::sweep(&self.config.skills_root, hub_skills::UNUSED);
         let mut sup = Supervisor::new(
             Arc::new(self.config),

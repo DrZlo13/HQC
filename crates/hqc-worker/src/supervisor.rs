@@ -261,7 +261,7 @@ pub struct Supervisor {
     factory: Arc<dyn AdapterFactory>,
     link: HubLink,
     artifacts: ArtifactClient,
-    /// The hub's skills, fetched and put into plugin folders (SPEC 0.237).
+    /// The hub's skills, fetched and put into plugin folders (SPEC 0.245).
     skills: Arc<crate::hub_skills::HubSkills>,
     sessions: HashMap<Uuid, SessionHandle>,
     shutdown_timeout: Duration,

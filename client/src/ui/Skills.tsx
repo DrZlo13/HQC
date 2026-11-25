@@ -1,4 +1,4 @@
-// "Skills" of Settings (SPEC 0.237, iteration 8 T69): the owner's skills, which the agents of
+// "Skills" of Settings (SPEC 0.245, iteration 8 T69): the owner's skills, which the agents of
 // the projects they are given to get as `hqc:<name>` on workers with `hub_skills = true`. A
 // skill is uploaded as a folder or a `.zip`; one with a name the owner has replaces it.
 

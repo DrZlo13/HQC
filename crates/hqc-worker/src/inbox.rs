@@ -151,7 +151,7 @@ impl ArtifactClient {
         Ok(out)
     }
 
-    /// A skill's archive by its sha256 (`GET /worker/skills/{sha256}`, SPEC 0.237), at most
+    /// A skill's archive by its sha256 (`GET /worker/skills/{sha256}`, SPEC 0.245), at most
     /// `max` bytes; the caller checks the hash.
     pub async fn fetch_skill(&self, sha256: &str, max: u64) -> anyhow::Result<Vec<u8>> {
         let url = format!("{}/worker/skills/{sha256}", self.hub_url);

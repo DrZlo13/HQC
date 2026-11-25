@@ -1703,7 +1703,7 @@ export function parseMcpServer(v: unknown): McpServer {
   };
 }
 
-/** A skill of the owner (SPEC 0.237, iteration 8): `GET /api/skills`. The agents of
+/** A skill of the owner (SPEC 0.245, iteration 8): `GET /api/skills`. The agents of
  *  `all_projects` or of `project_ids` get it as `hqc:<name>` on workers with `hub_skills`. */
 export interface Skill {
   id: Uuid;

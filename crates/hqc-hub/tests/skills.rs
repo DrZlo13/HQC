@@ -1,4 +1,4 @@
-//! SPEC 0.237 (iteration 8, T68): skills the owner keeps on the hub. They are uploaded as a
+//! SPEC 0.245 (iteration 8, T68): skills the owner keeps on the hub. They are uploaded as a
 //! folder or a `.zip`, go to the sessions of their projects as names and hashes in
 //! `session.start.skills`, and a worker of their owner fetches them by hash.
 

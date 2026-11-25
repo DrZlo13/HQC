@@ -13140,7 +13140,7 @@ async fn the_hubs_mcp_servers_are_relays_under_their_own_names() {
     );
 }
 
-/// SPEC 0.237: the hub's skills come as the plugin folder the supervisor built, with a
+/// SPEC 0.245: the hub's skills come as the plugin folder the supervisor built, with a
 /// same-named skill of the machine hidden; without a folder, neither flag.
 #[tokio::test]
 async fn the_hubs_skills_are_a_plugin_dir_and_hide_the_machines_copy() {

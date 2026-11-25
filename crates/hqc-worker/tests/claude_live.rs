@@ -1752,7 +1752,7 @@ async fn live_move_resumes_in_the_new_folder() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// SPEC 0.237 (iteration 8): the hub's skills as the plugin folder the worker builds. The CLI
+/// SPEC 0.245 (iteration 8): the hub's skills as the plugin folder the worker builds. The CLI
 /// lists the skill as `hqc:<name>`, and `/<name>` in the text runs it. One turn, haiku.
 ///
 /// ```

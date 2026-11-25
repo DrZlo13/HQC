@@ -1,4 +1,4 @@
--- SPEC 0.237 (iteration 8): the skills an owner keeps on the hub. A session's agent gets the
+-- SPEC 0.245 (iteration 8): the skills an owner keeps on the hub. A session's agent gets the
 -- skills of its project in a plugin folder its worker builds (`--plugin-dir`); the worker
 -- fetches each archive once per hash (`GET /worker/skills/{sha256}`).
 CREATE TABLE skills (

@@ -1,4 +1,4 @@
-//! Skills the owner keeps on the hub (SPEC 0.237, iteration 8, `docs/ITERATION-8.md`).
+//! Skills the owner keeps on the hub (SPEC 0.245, iteration 8, `docs/ITERATION-8.md`).
 //!
 //! The owner uploads a skill as a folder (multipart `file` parts, the path in each file name)
 //! or a `.zip`; the hub checks it ([`hqc_proto::skills`]: paths inside it, no links, limits, no

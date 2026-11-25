@@ -1,4 +1,4 @@
-// T69: the mock's skills (SPEC 0.237) through the client's Api: the multipart upload of a folder
+// T69: the mock's skills (SPEC 0.245) through the client's Api: the multipart upload of a folder
 // and of a zip, a replacement by name, refusals, the projects and delete.
 
 import { afterAll, beforeAll, expect, it } from 'vitest';

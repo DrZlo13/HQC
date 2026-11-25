@@ -82,7 +82,7 @@ export const MOCK_COMMANDS = [
   'security-review',
   'simplify',
   'usage',
-  // A skill of the hub (SPEC 0.237), as the CLI lists a plugin's skill.
+  // A skill of the hub (SPEC 0.245), as the CLI lists a plugin's skill.
   'hqc:bench',
 ];
 
@@ -776,7 +776,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     mcpServers.set(p.id, next);
     return next;
   });
-  // SPEC 0.237 (iteration 8): the owner's skills. A folder comes as `file` parts (paths in
+  // SPEC 0.245 (iteration 8): the owner's skills. A folder comes as `file` parts (paths in
   // the file names), a `.zip` as one `zip` part; the mock does not open a zip, it takes the
   // `name` part for its name. A `SKILL.md` with `hooks` is refused, as the hub refuses it.
   const skills = new Map();

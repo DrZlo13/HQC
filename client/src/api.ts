@@ -183,7 +183,7 @@ export interface McpHeader {
   value: string;
 }
 
-/** `POST /api/skills` (SPEC 0.237): a `.zip`, or a folder's files, `path` relative to the
+/** `POST /api/skills` (SPEC 0.245): a `.zip`, or a folder's files, `path` relative to the
  *  folder (without the folder's own name). */
 export type SkillUpload = { zip: Blob; name: string } | { files: { file: Blob; path: string }[]; name: string };
 
@@ -875,7 +875,7 @@ export class Api {
     await this.req('DELETE', `/api/mcp/servers/${enc(id)}/sign_in`);
   }
 
-  /** The owner's skills (SPEC 0.237). */
+  /** The owner's skills (SPEC 0.245). */
   async skills(): Promise<Skill[]> {
     const data = (await this.req('GET', '/api/skills')) as { skills?: unknown };
     if (!Array.isArray(data?.skills)) throw new ApiError(500, 'skills: expected a list');

@@ -1,4 +1,4 @@
-//! The skills of the hub (SPEC 0.237, iteration 8): the archives `session.start.skills` names,
+//! The skills of the hub (SPEC 0.245, iteration 8): the archives `session.start.skills` names,
 //! fetched once per hash, and the plugin folders the agents get with `--plugin-dir`.
 //!
 //! `$HQC_HOME/hub-skills/`:

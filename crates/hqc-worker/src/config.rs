@@ -39,7 +39,7 @@
 //! allow_local_mcp = false        # true: the machine's MCP servers too (no --strict-mcp-config)
 //! project_settings = false       # true: the repository's CLAUDE.md and .claude/settings.json too
 //! hub_mcp = false                # true: the remote MCP servers the hub keeps (SPEC 0.235)
-//! hub_skills = false             # true: the skills the hub keeps (SPEC 0.237)
+//! hub_skills = false             # true: the skills the hub keeps (SPEC 0.245)
 //! [environments.infra.permissions]
 //! unblock = ["Bash(ssh:*)"]      # rules of the worker's deny lifted here only
 //! allow = ["Bash(ssh debian@192.168.1.20:*)"]
@@ -242,7 +242,7 @@ pub struct Environment {
     /// stdio relay to the hub (SPEC 0.235); worker-local, not in `hello`.
     pub hub_mcp: bool,
     /// The sessions get the skills the hub keeps for their project, in a plugin folder the
-    /// worker builds (`--plugin-dir`, SPEC 0.237); worker-local, not in `hello`.
+    /// worker builds (`--plugin-dir`, SPEC 0.245); worker-local, not in `hello`.
     pub hub_skills: bool,
     /// `[environments.<name>.permissions]` as written.
     pub rules: EnvPermissions,
@@ -555,7 +555,7 @@ pub struct Config {
     /// Where sessions without a workspace get their empty folder (SPEC §8.4):
     /// `$HQC_HOME/scratch/<session_id>`.
     pub scratch_root: PathBuf,
-    /// The skills of the hub (SPEC 0.237): `$HQC_HOME/hub-skills`, its archives and plugin
+    /// The skills of the hub (SPEC 0.245): `$HQC_HOME/hub-skills`, its archives and plugin
     /// folders ([`crate::hub_skills`]).
     pub skills_root: PathBuf,
     /// The key store `$HQC_HOME/keys` and the agent sockets `$HQC_HOME/agents` (T44).
@@ -630,7 +630,7 @@ pub struct StartSpec {
     /// environment with `hub_mcp`, for an unrestricted Claude Code session of the worker's
     /// owner, and only valid names.
     pub mcp_servers: Vec<String>,
-    /// `session.start.skills` as this worker takes them (SPEC 0.237): only in an environment
+    /// `session.start.skills` as this worker takes them (SPEC 0.245): only in an environment
     /// with `hub_skills`, for an unrestricted Claude Code session of the worker's owner, valid
     /// names and hashes, one per name.
     pub skills: Vec<hqc_proto::skills::SkillRef>,
@@ -866,7 +866,7 @@ impl Config {
             names.dedup();
             names
         };
-        // SPEC 0.237: the hub's skills, only where `worker.toml` takes them.
+        // SPEC 0.245: the hub's skills, only where `worker.toml` takes them.
         let skills = if s.skills.is_empty() {
             vec![]
         } else if !environment.hub_skills
@@ -1864,7 +1864,7 @@ environment = "mcp"
         assert!(start("on", false, false).is_empty(), "not the owner's");
     }
 
-    /// SPEC 0.237: the hub's skills only in an environment with `hub_skills`, for an
+    /// SPEC 0.245: the hub's skills only in an environment with `hub_skills`, for an
     /// unrestricted session of the worker's owner, valid names and hashes, one per name.
     #[cfg(unix)]
     #[test]

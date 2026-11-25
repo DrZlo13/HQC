@@ -1641,7 +1641,7 @@ pub struct SessionStart {
     /// and the token stay on the hub. Absent when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<String>,
-    /// Since SPEC 0.237: the skills the hub keeps for the session's project, by name and the
+    /// Since SPEC 0.245: the skills the hub keeps for the session's project, by name and the
     /// sha256 of their archive. A worker whose environment has `hub_skills = true` fetches each
     /// archive once per hash (`GET /worker/skills/{sha256}`), puts the skills into a plugin
     /// folder of its own and starts the agent with `--plugin-dir`. Absent when none.

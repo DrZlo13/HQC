@@ -21,6 +21,7 @@
 
 import { createServer } from 'node:http';
 import { randomUUID, generateKeyPairSync } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -82,6 +83,8 @@ export const MOCK_COMMANDS = [
   'security-review',
   'simplify',
   'usage',
+  // A skill of the hub (SPEC 0.245), as the CLI lists a plugin's skill.
+  'hqc:bench',
 ];
 
 export function loadExamples(dir = WIRE) {
@@ -774,6 +777,132 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     mcpServers.set(p.id, next);
     return next;
   });
+  // SPEC 0.245 (iteration 8): the owner's skills. A folder comes as `file` parts (paths in
+  // the file names), a `.zip` as one `zip` part; the mock does not open a zip, it takes the
+  // `name` part for its name. A `SKILL.md` with `hooks` is refused, as the hub refuses it.
+  const skills = new Map();
+  const SKILL_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+  {
+    const sample = (name, description, allowed_tools, files, size, all_projects) => {
+      const id = randomUUID();
+      skills.set(id, {
+        id,
+        name,
+        description,
+        allowed_tools,
+        sha256: createHash('sha256').update(name).digest('hex'),
+        size,
+        files,
+        all_projects,
+        project_ids: [],
+        updated_at: now(),
+        file_list: [{ path: 'SKILL.md', size: 1200 }, ...(files > 1 ? [{ path: 'scripts/run.sh', size: size - 1200, executable: true }] : [])],
+      });
+    };
+    sample('bench', 'Runs the benchmarks and compares them with the last run.', ['Bash(cargo bench:*)', 'Read'], 2, 5300, true);
+    sample('release-notes', 'Writes release notes from the merged pull requests.', [], 1, 1900, false);
+  }
+  /** The parts of a multipart body: `{name, filename?, data}`. */
+  const multipartParts = (raw) => {
+    if (!Buffer.isBuffer(raw)) return [];
+    const eol = raw.indexOf('\r\n');
+    if (eol < 0) return [];
+    const delim = raw.subarray(0, eol);
+    const parts = [];
+    let at = eol + 2;
+    for (;;) {
+      const next = raw.indexOf(delim, at);
+      if (next < 0) break;
+      const part = raw.subarray(at, next - 2);
+      const head = part.indexOf('\r\n\r\n');
+      if (head >= 0) {
+        const headers = part.subarray(0, head).toString('utf8');
+        const name = /name="([^"]*)"/.exec(headers)?.[1];
+        const filename = /filename="([^"]*)"/.exec(headers)?.[1];
+        if (name) parts.push({ name, filename, data: part.subarray(head + 4) });
+      }
+      at = next + delim.length + 2;
+      if (raw.subarray(next + delim.length, next + delim.length + 2).toString() === '--') break;
+    }
+    return parts;
+  };
+  /** The frontmatter's `key: value` lines of a SKILL.md. */
+  const frontmatter = (text) => {
+    const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+    const out = {};
+    for (const line of (m?.[1] ?? '').split(/\r?\n/)) {
+      const kv = /^([A-Za-z_-]+):\s*(.*)$/.exec(line);
+      if (kv) out[kv[1]] = kv[2].trim();
+    }
+    return out;
+  };
+  const skillOr404 = (id) => {
+    const s = skills.get(id);
+    if (!s) throw fail(404, 'not_found', 'unknown skill');
+    return s;
+  };
+  const skillView = ({ file_list, ...s }) => s;
+  route('GET', '/api/skills', () => ({ skills: [...skills.values()].sort((a, b) => a.name.localeCompare(b.name)).map(skillView) }));
+  route('POST', '/api/skills', (_, body) => {
+    const parts = multipartParts(body);
+    const zip = parts.find((x) => x.name === 'zip');
+    const files = parts.filter((x) => x.name === 'file');
+    const given = parts.find((x) => x.name === 'name')?.data.toString('utf8');
+    let fm = {};
+    let fileList;
+    if (zip) {
+      if (files.length) throw fail(400, 'bad_request', 'either a zip or files');
+      fileList = [{ path: 'SKILL.md', size: zip.data.length }];
+    } else {
+      if (!files.length) throw fail(400, 'bad_request', 'no files');
+      for (const f of files) {
+        if (!f.filename || f.filename.startsWith('/') || f.filename.split('/').includes('..')) throw fail(400, 'bad_request', `a bad path: ${f.filename}`);
+      }
+      const md = files.find((f) => f.filename === 'SKILL.md');
+      if (!md) throw fail(400, 'bad_request', 'no SKILL.md at the top of the skill');
+      fm = frontmatter(md.data.toString('utf8'));
+      if ('hooks' in fm) throw fail(422, 'skill_hooks', 'SKILL.md has hooks, which would run outside the worker’s deny; remove them');
+      fileList = files.map((f) => ({ path: f.filename, size: f.data.length })).sort((a, b) => (a.path < b.path ? -1 : 1));
+    }
+    const name = fm.name || given || '';
+    if (!SKILL_NAME.test(name)) throw fail(400, 'bad_request', `a bad skill name: "${name}"`);
+    const size = fileList.reduce((n, f) => n + f.size, 0);
+    if (size > 4 << 20) throw fail(413, 'too_large', 'a skill is at most 4 MiB unpacked');
+    const old = [...skills.values()].find((x) => x.name === name);
+    if (!old && skills.size >= 100) throw fail(409, 'too_many_skills', 'at most 100 skills');
+    const s = {
+      id: old?.id ?? randomUUID(),
+      name,
+      description: fm.description || undefined,
+      allowed_tools: (fm['allowed-tools'] ?? '').split(/,\s*/).filter(Boolean),
+      sha256: createHash('sha256').update(body).digest('hex'),
+      size,
+      files: fileList.length,
+      all_projects: old?.all_projects ?? true,
+      project_ids: old?.project_ids ?? [],
+      updated_at: now(),
+      file_list: fileList,
+    };
+    skills.set(s.id, s);
+    return withStatus(old ? 200 : 201, skillView(s));
+  });
+  route('PATCH', '/api/skills/:id', (p, body) => {
+    const s = { ...skillOr404(p.id) };
+    if (body?.all_projects !== undefined) s.all_projects = !!body.all_projects;
+    if (body?.project_ids !== undefined) {
+      if (!Array.isArray(body.project_ids) || body.project_ids.some((id) => !projects.has(id))) throw fail(400, 'bad_request', 'project_ids: not your projects');
+      s.project_ids = [...body.project_ids];
+    }
+    s.updated_at = now();
+    skills.set(s.id, s);
+    return skillView(s);
+  });
+  route('DELETE', '/api/skills/:id', (p) => {
+    skillOr404(p.id);
+    skills.delete(p.id);
+    return withStatus(204, null);
+  });
+  route('GET', '/api/skills/:id/files', (p) => ({ files: skillOr404(p.id).file_list }));
   // SPEC 0.147: a secret or an ssh key for a session's agent, through the worker; the mock
   // keeps no value. The keys a workspace remembers, by workspace id (names and fingerprints).
   const workspaceKeys = new Map();

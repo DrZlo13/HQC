@@ -54,6 +54,7 @@ pub fn summary(cfg: &Config) -> String {
         let _ = writeln!(out, "    allow_local_mcp: {}", e.allow_local_mcp);
         let _ = writeln!(out, "    project_settings: {}", e.project_settings);
         let _ = writeln!(out, "    hub_mcp: {}", e.hub_mcp);
+        let _ = writeln!(out, "    hub_skills: {}", e.hub_skills);
         list(&mut out, "unblock", &e.rules.unblock);
         list(&mut out, "allow", &e.rules.allow);
         list(&mut out, "deny", &e.rules.deny);
@@ -181,6 +182,15 @@ pub fn which(cfg: &Config, path: &Path) -> anyhow::Result<String> {
         "    the hub's MCP servers: {}",
         if e.hub_mcp {
             "taken (hub_mcp), each as a relay to the hub"
+        } else {
+            "off"
+        }
+    );
+    let _ = writeln!(
+        out,
+        "    the hub's skills: {}",
+        if e.hub_skills {
+            "taken (hub_skills), as the plugin hqc (--plugin-dir)"
         } else {
             "off"
         }

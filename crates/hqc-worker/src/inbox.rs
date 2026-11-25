@@ -151,6 +151,34 @@ impl ArtifactClient {
         Ok(out)
     }
 
+    /// A skill's archive by its sha256 (`GET /worker/skills/{sha256}`, SPEC 0.245), at most
+    /// `max` bytes; the caller checks the hash.
+    pub async fn fetch_skill(&self, sha256: &str, max: u64) -> anyhow::Result<Vec<u8>> {
+        let url = format!("{}/worker/skills/{sha256}", self.hub_url);
+        let mut resp = self
+            .http
+            .get(&url)
+            .bearer_auth(self.token.expose())
+            .send()
+            .await
+            .with_context(|| format!("GET /worker/skills/{sha256}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(anyhow!("GET /worker/skills/{sha256}: {status}"));
+        }
+        if resp.content_length().is_some_and(|n| n > max) {
+            return Err(anyhow!("the skill {sha256} is over {max} bytes"));
+        }
+        let mut out = Vec::new();
+        while let Some(chunk) = resp.chunk().await? {
+            if out.len() as u64 + chunk.len() as u64 > max {
+                return Err(anyhow!("the skill {sha256} is over {max} bytes"));
+            }
+            out.extend_from_slice(&chunk);
+        }
+        Ok(out)
+    }
+
     /// Streams the first `size` bytes of `file` to `PUT /worker/artifacts` for `session_id`
     /// (an agent's `hqc_attach`, SPEC §7, §12); the artifact's id.
     pub async fn upload(

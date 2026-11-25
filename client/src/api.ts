@@ -44,6 +44,9 @@ import {
   parseModelProvider,
   type McpServer,
   parseMcpServer,
+  type Skill,
+  type SkillFile,
+  parseSkill,
   type PermissionMode,
   type Project,
   type ProjectSort,
@@ -180,6 +183,10 @@ export interface McpHeader {
   value: string;
 }
 
+/** `POST /api/skills` (SPEC 0.245): a `.zip`, or a folder's files, `path` relative to the
+ *  folder (without the folder's own name). */
+export type SkillUpload = { zip: Blob; name: string } | { files: { file: Blob; path: string }[]; name: string };
+
 /** `POST /api/mcp/servers` and `PATCH /api/mcp/servers/{id}` (SPEC 0.235): in a `PATCH` an
  *  absent field stays as it is, and `headers` replaces all of the server's headers. */
 export interface McpServerFields {
@@ -314,6 +321,11 @@ export class Api {
   /** `body`: JSON, or `FormData` sent as multipart (the browser sets its content type).
    *  `keepalive`: the request outlives the page (sent while it is being left). */
   private async req(method: string, path: string, body?: unknown, keepalive = false): Promise<unknown> {
+    return (await this.send(method, path, body, keepalive)).data;
+  }
+
+  /** `req` with the answer's status. */
+  private async send(method: string, path: string, body?: unknown, keepalive = false): Promise<{ status: number; data: unknown }> {
     const form = typeof FormData !== 'undefined' && body instanceof FormData;
     const res = await this.fetchImpl(this.base + path, {
       method,
@@ -342,7 +354,7 @@ export class Api {
       const code = typeof body.error === 'string' ? body.error : undefined;
       throw new ApiError(res.status, msg || `HTTP ${res.status}`, code, data);
     }
-    return data;
+    return { status: res.status, data };
   }
 
   async me(): Promise<Me> {
@@ -861,6 +873,42 @@ export class Api {
 
   async signOutMcpServer(id: string): Promise<void> {
     await this.req('DELETE', `/api/mcp/servers/${enc(id)}/sign_in`);
+  }
+
+  /** The owner's skills (SPEC 0.245). */
+  async skills(): Promise<Skill[]> {
+    const data = (await this.req('GET', '/api/skills')) as { skills?: unknown };
+    if (!Array.isArray(data?.skills)) throw new ApiError(500, 'skills: expected a list');
+    return data.skills.map(parseSkill);
+  }
+
+  /** Uploads a skill: a `.zip`, or a folder's files with their paths inside it. `name`: the
+   *  folder's or the `.zip`'s, for a `SKILL.md` without one. `replaced`: the hub answered 200,
+   *  the owner's skill of that name has the new content (and keeps its projects). */
+  async uploadSkill(u: SkillUpload): Promise<{ skill: Skill; replaced: boolean }> {
+    const form = new FormData();
+    if ('zip' in u) form.append('zip', u.zip, `${u.name}.zip`);
+    else for (const f of u.files) form.append('file', f.file, f.path);
+    if (u.name) form.append('name', u.name);
+    const r = await this.send('POST', '/api/skills', form);
+    return { skill: parseSkill(r.data), replaced: r.status === 200 };
+  }
+
+  async updateSkill(id: string, f: { all_projects?: boolean; project_ids?: string[] }): Promise<Skill> {
+    return parseSkill(await this.req('PATCH', `/api/skills/${enc(id)}`, f));
+  }
+
+  async deleteSkill(id: string): Promise<void> {
+    await this.req('DELETE', `/api/skills/${enc(id)}`);
+  }
+
+  async skillFiles(id: string): Promise<SkillFile[]> {
+    const data = (await this.req('GET', `/api/skills/${enc(id)}/files`)) as { files?: unknown };
+    if (!Array.isArray(data?.files)) throw new ApiError(500, 'skill files: expected a list');
+    return data.files.map((v) => {
+      const o = (v ?? {}) as Record<string, unknown>;
+      return { path: String(o.path ?? ''), size: Number(o.size ?? 0), ...(o.executable === true ? { executable: true } : {}) };
+    });
   }
 
   /** A secret or an ssh key for the session's running agent (SPEC 0.147); `requestId`

@@ -39,6 +39,7 @@
 //! allow_local_mcp = false        # true: the machine's MCP servers too (no --strict-mcp-config)
 //! project_settings = false       # true: the repository's CLAUDE.md and .claude/settings.json too
 //! hub_mcp = false                # true: the remote MCP servers the hub keeps (SPEC 0.235)
+//! hub_skills = false             # true: the skills the hub keeps (SPEC 0.245)
 //! [environments.infra.permissions]
 //! unblock = ["Bash(ssh:*)"]      # rules of the worker's deny lifted here only
 //! allow = ["Bash(ssh debian@192.168.1.20:*)"]
@@ -177,6 +178,8 @@ struct RawEnvironment {
     #[serde(default)]
     hub_mcp: bool,
     #[serde(default)]
+    hub_skills: bool,
+    #[serde(default)]
     permissions: RawEnvPermissions,
 }
 
@@ -238,6 +241,9 @@ pub struct Environment {
     /// The sessions get the remote MCP servers the hub keeps for their project, each as a
     /// stdio relay to the hub (SPEC 0.235); worker-local, not in `hello`.
     pub hub_mcp: bool,
+    /// The sessions get the skills the hub keeps for their project, in a plugin folder the
+    /// worker builds (`--plugin-dir`, SPEC 0.245); worker-local, not in `hello`.
+    pub hub_skills: bool,
     /// `[environments.<name>.permissions]` as written.
     pub rules: EnvPermissions,
     /// What its sessions run with ([`Permissions::for_environment`]).
@@ -254,6 +260,7 @@ impl Environment {
             allow_local_mcp: false,
             project_settings: false,
             hub_mcp: false,
+            hub_skills: false,
             rules: EnvPermissions::default(),
             permissions: permissions.clone(),
         }
@@ -373,6 +380,7 @@ fn parse_environment(
         allow_local_mcp: raw.allow_local_mcp,
         project_settings: raw.project_settings,
         hub_mcp: raw.hub_mcp,
+        hub_skills: raw.hub_skills,
         permissions: worker.for_environment(&rules)?,
         rules,
     })
@@ -547,6 +555,9 @@ pub struct Config {
     /// Where sessions without a workspace get their empty folder (SPEC §8.4):
     /// `$HQC_HOME/scratch/<session_id>`.
     pub scratch_root: PathBuf,
+    /// The skills of the hub (SPEC 0.245): `$HQC_HOME/hub-skills`, its archives and plugin
+    /// folders ([`crate::hub_skills`]).
+    pub skills_root: PathBuf,
     /// The key store `$HQC_HOME/keys` and the agent sockets `$HQC_HOME/agents` (T44).
     pub ssh: crate::ssh::Store,
     /// `[providers.*]` by name.
@@ -619,6 +630,14 @@ pub struct StartSpec {
     /// environment with `hub_mcp`, for an unrestricted Claude Code session of the worker's
     /// owner, and only valid names.
     pub mcp_servers: Vec<String>,
+    /// `session.start.skills` as this worker takes them (SPEC 0.245): only in an environment
+    /// with `hub_skills`, for an unrestricted Claude Code session of the worker's owner, valid
+    /// names and hashes, one per name.
+    pub skills: Vec<hqc_proto::skills::SkillRef>,
+    /// The plugin folder with [`Self::skills`] the supervisor built before the start
+    /// ([`crate::hub_skills::HubSkills::prepare`]): `--plugin-dir`. `None`: no skill of the
+    /// hub could be had, or none was given.
+    pub skill_dir: Option<PathBuf>,
 }
 
 impl StartSpec {
@@ -749,6 +768,7 @@ impl Config {
             max_sessions: raw.max_sessions,
             clone_timeout: Duration::from_secs(raw.clone_timeout),
             scratch_root: home.join("scratch"),
+            skills_root: home.join("hub-skills"),
             ssh: crate::ssh::Store::in_home(&home),
             secrets: crate::secrets::Stores::in_home(&home),
             providers,
@@ -846,6 +866,35 @@ impl Config {
             names.dedup();
             names
         };
+        // SPEC 0.245: the hub's skills, only where `worker.toml` takes them.
+        let skills = if s.skills.is_empty() {
+            vec![]
+        } else if !environment.hub_skills
+            || !s.owner_is_worker_owner
+            || s.restricted
+            || s.runtime != Runtime::ClaudeCode
+        {
+            tracing::info!(
+                session_id = %s.session_id,
+                skills = ?s.skills.iter().map(|k| &k.name).collect::<Vec<_>>(),
+                "the hub's skills not taken: hub_skills is off here or the session is not \
+                 the owner's unrestricted Claude Code session"
+            );
+            vec![]
+        } else {
+            let mut skills: Vec<hqc_proto::skills::SkillRef> = s
+                .skills
+                .iter()
+                .filter(|k| {
+                    hqc_proto::skills::valid_skill_name(&k.name)
+                        && hqc_proto::skills::valid_sha256(&k.sha256)
+                })
+                .cloned()
+                .collect();
+            skills.sort();
+            skills.dedup_by(|a, b| a.name == b.name);
+            skills
+        };
         Ok(StartSpec {
             session_id: s.session_id,
             runtime: s.runtime,
@@ -871,6 +920,8 @@ impl Config {
             browser,
             browser_refused,
             mcp_servers,
+            skills,
+            skill_dir: None,
         })
     }
 
@@ -1809,6 +1860,54 @@ environment = "mcp"
         };
         assert_eq!(start("on", true, false), ["github", "wiki"]);
         assert!(start("off", true, false).is_empty(), "no hub_mcp");
+        assert!(start("on", true, true).is_empty(), "restricted");
+        assert!(start("on", false, false).is_empty(), "not the owner's");
+    }
+
+    /// SPEC 0.245: the hub's skills only in an environment with `hub_skills`, for an
+    /// unrestricted session of the worker's owner, valid names and hashes, one per name.
+    #[cfg(unix)]
+    #[test]
+    fn the_hubs_skills_only_where_hub_skills_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for d in ["on", "off"] {
+            std::fs::create_dir(root.join(d)).unwrap();
+        }
+        let c = Config::parse(&format!(
+            r#"
+hub_url = "https://h"
+allowed_roots = [{root:?}]
+[environments.sk]
+hub_skills = true
+[[env_bindings]]
+path = {on:?}
+environment = "sk"
+"#,
+            root = root.display().to_string(),
+            on = root.join("on").display().to_string(),
+        ))
+        .unwrap();
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        let start = |ws: &str, owner: bool, restricted: bool| {
+            let s: hqc_proto::frame::SessionStart = serde_json::from_value(serde_json::json!({
+                "session_id": Uuid::now_v7(), "mode": "new", "runtime": "claude_code",
+                "workspace_path": root.join(ws).display().to_string(), "cwd": ".",
+                "disallowed_tools": [], "restricted": restricted, "auto_approve": false,
+                "session_token": "hqcs_x", "owner_is_worker_owner": owner, "ask_timeout_s": 600,
+                "skills": [
+                    {"name": "wiki", "sha256": b}, {"name": "bench", "sha256": a},
+                    {"name": "bench", "sha256": b}, {"name": "Bad", "sha256": a},
+                    {"name": "x", "sha256": "../.."},
+                ],
+            }))
+            .unwrap();
+            c.check_start(&s)
+                .map(|s| s.skills.into_iter().map(|k| k.name).collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        assert_eq!(start("on", true, false), ["bench", "wiki"]);
+        assert!(start("off", true, false).is_empty(), "no hub_skills");
         assert!(start("on", true, true).is_empty(), "restricted");
         assert!(start("on", false, false).is_empty(), "not the owner's");
     }

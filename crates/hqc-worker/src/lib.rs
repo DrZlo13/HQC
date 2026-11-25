@@ -13,6 +13,7 @@ pub mod connection;
 pub mod enroll;
 pub mod env_cmd;
 pub mod fs;
+pub mod hub_skills;
 pub mod inbox;
 pub mod known_paths;
 pub mod link;
@@ -215,6 +216,8 @@ impl Worker {
         let conn_stop = CancellationToken::new();
         let conn_task = tokio::spawn(conn.run(conn_stop.clone()));
 
+        // SPEC 0.245: the hub's skills no session has used for a week.
+        hub_skills::sweep(&self.config.skills_root, hub_skills::UNUSED);
         let mut sup = Supervisor::new(
             Arc::new(self.config),
             self.adapters,

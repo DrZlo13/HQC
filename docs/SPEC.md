@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.244, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.245, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -215,7 +215,7 @@ version, load_session, resume, image, isolation}]` — the result of each agent'
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
 `environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?}}`,
 never the values of `env`; `default` is implied), `env_bindings[]` (`{path, environment}`; the
-Hermes profile in iteration 8),
+Hermes profile in iteration 9),
 `allow_foreign_sessions`, `idle_timeout`, `system_session_id` (§10.2), `machine_hash` (since 0.23:
 the machine fingerprint from enrollment and the last `hello`, §5.1; not part of the API worker object),
 `session_secrets` (since 0.147, hub migration `0044`: its `worker.toml` has `session_secrets = true`,
@@ -1113,6 +1113,18 @@ MCP calls (worker → hub → worker):
   no address and no header, so the CLI names its tools `mcp__<name>__<tool>` as with a direct
   connection and none is allowed outright; a change reaches the agent at its next start; absent —
   none;
+  `skills` (since 0.245) — `[{name, sha256}]`, the owner's skills the session's project gets
+  (§6 `/api/skills`), on the same terms as `mcp_servers` (not for a restricted session, another
+  runtime than Claude Code or a worker that is not the owner's); the worker takes them only in
+  an environment with `hub_skills = true` (§14), for an unrestricted session of its owner, valid
+  names (`[a-z0-9][a-z0-9_-]{0,63}`) and hashes (64 hex digits) only, one per name. Before each
+  start of the agent it fetches an archive it does not have with `GET /worker/skills/{sha256}`
+  and its token (the hub answers only a skill of the worker's owner, else `404`), checks its
+  sha256 and its content as the hub does (§20) and keeps it in `$HQC_HOME/hub-skills/zips/`,
+  then gives the agent the plugin folder of the set (§8.1). A skill it cannot fetch or that fails
+  a check is left out of that start and logged, the others stay; archives and folders unused
+  for 7 days are removed when the worker starts; a change reaches the agent at its next start;
+  absent — none;
   `allow_rules` (since 0.52, T48) — hqc's allow rules of the
   session's workspace (§3 Workspace), absent when none; the worker keeps the latest list per
   canonical workspace, shared by its sessions there, and drops a rule that is not valid hqc
@@ -1975,6 +1987,23 @@ the rest is marked "later"):
   the section "MCP servers" in Settings (the list with status and tools, add and edit with
   headers or OAuth, Test, Sign in, Sign out, Delete) and the servers a project gets in its
   settings (T66).
+  Skills (since 0.245, `docs/ITERATION-8.md`): `GET /api/skills` ({skills: [...]}), `POST
+  /api/skills`, `PATCH/DELETE /api/skills/{id}`, `GET /api/skills/{id}/files` ({files: [{path,
+  size, executable?}]}), the owner's only. A skill: {id, name, description?, allowed_tools[],
+  sha256, size (unpacked bytes), files, all_projects, project_ids[], updated_at}. `POST` is
+  multipart: one `zip` part, or `file` parts whose file names are the paths inside the skill, and
+  an optional `name`; `SKILL.md` at the top or under one top folder; `__MACOSX/`, `.git/` and
+  `.DS_Store` dropped. The name is the frontmatter's `name`, else the top folder's, else `name`;
+  a name the owner has already replaces that skill's content and keeps its projects (`200`), a
+  new one is `201` for all projects. Limits: an upload of 8 MiB, 4 MiB and 500 files unpacked, a
+  path of 200 bytes, 100 skills (`409 too_many_skills`); over the size `413`. A `SKILL.md` with
+  `hooks` is `422 skill_hooks`; a path out of the skill, a link, a bad name or a frontmatter the
+  hub cannot read for sure (§20) `400`. The hub keeps an archive it writes itself (paths sorted,
+  fixed times, mode `0755` for an executable entry of a `.zip`, else `0644`), whose sha256 is the
+  skill's hash: the same files give the same hash. `PATCH` takes {all_projects?, project_ids?}.
+  The client shows the section "Skills" in Settings (upload a folder or a `.zip`, the list with
+  each skill's description, size, files and `allowed-tools`, the projects, delete) and the skills
+  a project gets in its settings.
   `POST /api/sessions/{id}/secrets` (since 0.147, §14) {kind, name, value?, vault?, vault_field?,
   passphrase?, remember?, request_id?} (unknown fields: `422`; one of `value` and `vault` exactly,
   else `400`; `vault` since 0.216 — a Vaultwarden entry the worker reads itself, §5.3, only on a
@@ -3517,7 +3546,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
 - `hqc_attach(path?, content?, name?, kind?, caption?)` — upload a file as an artifact
   to the current session; `path` for runtimes with a file system, `content` for the bare model.
   Since 0.34 (T31) the worker's MCP server lists `hqc_attach(path, name?, kind?, caption?)`;
-  `content` comes with the bare model (iteration 8) and is refused until then
+  `content` comes with the bare model (iteration 9) and is refused until then
   (`invalid_args`). The worker daemon does the file part itself, trusting neither the hub nor
   the agent's path (§2.1): `path` is absolute or relative to the session's working directory;
   its canonical form (symlinks resolved) must lie inside the session's workspace and inside
@@ -3535,7 +3564,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   live_attach.rs`): the event lands between the call's `tool.call` and `tool.result`.
 - `hqc_send(text, session?)` — a message to another session without waiting for a reply;
   without `session`, to the owner's personal assistant session. Since 0.35 (T32): `session`
-  is required until the personal session exists (iteration 8); the result is `{to,
+  is required until the personal session exists (iteration 9); the result is `{to,
   delivery}`, `to` — the target's address, `delivery` — `queued` (the input queue, the
   target wakes on sends; by default since 0.55) or `buffered` (the send buffer, §7.1); since 0.47 (T42) also
   `with_reply`: the send goes back with the reply to the target's open ask (§7.1). Since 0.54
@@ -3589,7 +3618,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   cap of its chain (§7.1), and so does the spawned session's first turn. `project` — a slug or an id
   of the owner's project; `workspace` — an id, a label or a path of a workspace of that
   project (else `not_found`), absent — the project's `default_workspace_id` (none:
-  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 8 (else
+  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 9 (else
   `invalid_args`); `model` absent — the calling session's model (a cheap spawner does not
   start an expensive agent by default), present — checked as in §6. `prompt` (not blank)
   becomes a `peer.message` with `mode: send` from the calling session in the new session's
@@ -3942,7 +3971,7 @@ to it (`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}`
 server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
 Codes added in 0.35: `timeout` (no reply in time), `limit_exceeded` (a chain limit, §7.1),
 `worker_restart` (the asking worker restarted; never seen by the agent, whose call died).
-Until grants (iteration 9) every tool works only on the calling session's owner's own
+Until grants (iteration 10) every tool works only on the calling session's owner's own
 projects and sessions; anything else is `not_found`.
 
 ### 7.1 Semantics of send and ask **[decision]**
@@ -4560,7 +4589,8 @@ worker's responsibility, not the adapter's (§17.2).
 The process `claude -p --output-format stream-json --input-format stream-json
 --include-partial-messages --replay-user-messages --permission-prompts host
 --permission-prompt-tool stdio --thinking-display summarized [--strict-mcp-config] --mcp-config '<json>'
---allowedTools mcp__hqc [--disallowedTools <rules…>] [--settings '<json: the environment's rules, crossSessionInbound?>']
+--allowedTools mcp__hqc [--disallowedTools <rules…>] [--settings '<json: the environment's rules, crossSessionInbound?, skillOverrides?>']
+[--plugin-dir <the hub's skills>]
 (--setting-sources user,local | --setting-sources user,project,local | --restricted)
 --permission-mode <"ask" mode | auto>
 [--append-system-prompt <text>] --session-id <uuid>` for a new session
@@ -4609,7 +4639,19 @@ flag fails every session start. Checked on 2.1.300: `--resume` continues the sam
 jsonl file. `--strict-mcp-config` disables MCP servers from `~/.claude.json`
 and the project's `.mcp.json`; they can be allowed only through the environment (§14,
 `allow_local_mcp`: since 0.56 such a session runs without the flag, the hqc server still comes
-in `--mcp-config`). `--settings` carries the effective rules of the session's environment
+in `--mcp-config`). Since 0.245 the skills of the hub (§5.3 `session.start.skills`, §14
+`hub_skills`) come as a plugin folder the worker builds, `--plugin-dir
+$HQC_HOME/hub-skills/sets/<hash of the set>`: `.claude-plugin/plugin.json` `{"name": "hqc"}`
+written by the worker and `skills/<name>/` unpacked from each archive, nothing of the hub's
+elsewhere in it. The CLI lists such a skill as `hqc:<name>` in `system/init`, and `/<name>` and
+`Skill("<name>")` find it without the prefix when the name is unique (checked on 2.1.312 and
+2.1.328); `--settings` gets `"skillOverrides": {"<name>": "off"}` for each, which hides a
+same-named skill of `~/.claude/skills` (or of the repository with `project_settings`): the hub's
+copy wins, `/<name>` typed in full then answers that the machine's skill is off, and the chat's
+`/` menu offers `hqc:<name>` for `<name>`. Checked on 2.1.328: a skill's `allowed-tools` lets
+its tools run without a card while it is active but not past the worker's `deny`, and a
+`` !`command` `` in `SKILL.md` goes through the same permission check; only a skill's `hooks`
+would run outside them, and such a skill is refused (§20). `--settings` carries the effective rules of the session's environment
 (§14: `[permissions]` merged with the environment's; since 0.84 with `allow_subagent_messages`
 also `crossSessionInbound`, below), and the adapter's own policy (deny
 before asking, `policy_hint`) reads the same merged lists. In the process env: `MCP_TOOL_TIMEOUT` (§7.1): milliseconds, default
@@ -7051,7 +7093,7 @@ from the `fs.list_dirs` tree or its path is typed in, the worker checks it with 
 the hub stores the canonical path. Since 0.64, when the folder is missing (`400
 path_not_found`) the form offers "Create the folder and add" in place of "Add" (until the path
 or the worker changes), which sends `create: true`. Only the worker's owner can add a workspace to a worker (until
-the sharing of iteration 9 a worker has no other users), so there is no confirmation through the
+the sharing of iteration 10 a worker has no other users), so there is no confirmation through the
 service session yet; if the worker is offline, the workspace is not created. Since 0.58 (T45)
 `clone`: the client gives the URL, the parent folder and a name, the hub checks the parent and
 stores the workspace `creating`, the worker checks the new path itself and clones into it in its
@@ -7110,7 +7152,7 @@ The worker's local config is the only source of truth for:
   old file is ignored with a warning in the log at start;
 - `environments{}` — named environments (`[environments.<name>]`, below; since 0.56, T43);
 - `env_bindings[]` — records `{path, environment, hermes_profile?, foreign_profile?}`
-  (`[[env_bindings]]`; the profiles are iteration 8). A binding is looked up **by the workspace
+  (`[[env_bindings]]`; the profiles are iteration 9). A binding is looked up **by the workspace
   path** (not by the session's `cwd`), canonical (symlinks resolved; the binding's own path is
   resolved again at every lookup, so a binding through a symlink names its target); the longest
   binding that equals or contains the path wins, compared by path components (`/a/b` does not
@@ -7199,6 +7241,7 @@ ssh_keys = ["infra_ed25519"]          # keys of the worker's store, $HQC_HOME/ke
 allow_local_mcp = false
 project_settings = false
 hub_mcp = false                       # true: the owner's remote MCP servers from the hub (0.235)
+hub_skills = false                    # true: the owner's skills from the hub (0.245)
 [environments.infra.permissions]
 unblock = ["Bash(ssh:*)"]             # lift worker-wide deny rules here only
 allow = ["Bash(ssh debian@192.168.1.20:*)"]
@@ -7256,6 +7299,12 @@ base_url = "http://192.168.1.229:8082" # must equal the hub's description
   `default` is still read when a session of the bound workspace runs in it. A restricted
   session (§8.4) still gets `--restricted`. Kept on the worker like `ssh_keys`: not in `hello`,
   `hqc-worker env` shows it. **Claude Code only**, ACP agents ignore it; default false;
+- `hub_skills` (since 0.245): the sessions get the skills the hub keeps for their project
+  (§5.3 `session.start.skills`), as the plugin `hqc` (`--plugin-dir`, §8.1), the hub's copy
+  hiding a same-named skill of the machine. Turning it on trusts the hub with instructions and
+  scripts the agent runs, within the worker's `deny` and the session's mode; a skill with
+  `hooks` is never taken (§20). Worker-local like `hub_mcp`, not in `hello`; **Claude Code
+  only**; default false;
 - `launch`: `process` (the only value in the first version; `os-user` and `container`
   are reserved).
 
@@ -7444,7 +7493,7 @@ it finds commands, their output and word forms and puts the best match first:
 - **Configuration `hqc`.** A copy of `russian` whose Latin words go to an English and the rest
   to a Russian Snowball stemmer, both without stop words, so every word stays searchable and
   "переезд" finds "переезда", "deploy" finds "deployed".
-- **Whose.** Until grants (iteration 9): the user's (the calling session's owner's) sessions,
+- **Whose.** Until grants (iteration 10): the user's (the calling session's owner's) sessions,
   archived ones included and marked `archived: true`, the workers' service sessions left out and
   (since 0.172) of a room's agents' sessions their inputs from the room, which the room has
   (§7.1.1); since 0.175, for an agent of a room (`hqc_search_history`, §7) also the room and
@@ -8025,7 +8074,7 @@ is not asked, does not see the question or the answer, and does not work on it.
    a session started in VS Code (live test `live_takeover`; checked by hand through the UI on a phone on 2026-10-25).
    Closed on 2026-10-25.
 3. hqc MCP: attach, send, ask, spawn, list, search, schedule; `mcp.call` frames;
-   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 9).
+   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 10).
    Tasks: `docs/ITERATION-3.md`. Criterion checked by hand on the production hub on 2026-10-31.
    Closed on 2026-10-31.
 4. Workspaces: ~~clone~~ (0.58, T45), ~~worktree~~ (0.60, T46), ~~ephemeral~~ (0.61, T47). Environments and bindings on the worker. Moved
@@ -8046,14 +8095,20 @@ is not asked, does not see the question or the answer, and does not work on it.
    once, for all projects or chosen ones; a session's agent gets it under its own name
    (`mcp__<name>__<tool>`) through a stdio relay of the worker, and the hub makes the calls
    with the token or OAuth sign-in it keeps, so no worker, agent or transcript sees it; only an
-   environment with `hub_mcp = true` takes them (§14). MCP servers that run on the machine and
-   skills from the hub (#62) come after it. Tasks: `docs/ITERATION-7.md`.
-8. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
+   environment with `hub_mcp = true` takes them (§14). MCP servers that run on the machine come
+   after it. Tasks: `docs/ITERATION-7.md`.
+8. Skills from the hub (since 0.245, #62): the owner uploads a skill (a folder or a `.zip`)
+   once, for all projects or chosen ones; the worker fetches it by its hash, puts it into a
+   plugin folder of its own and starts the agent with `--plugin-dir`, so the agent has it as
+   `hqc:<name>` (and `/<name>`) on every worker; the hub's copy wins over a same-named skill of
+   the machine; a skill with `hooks` is refused by the hub and the worker; only an environment
+   with `hub_skills = true` takes them (§14). Tasks: `docs/ITERATION-8.md`.
+9. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
    worker; the bare model; the personal assistant session (moved from 3: its default runtime is
    the bare model, §8.3), until then `hqc_send` needs `session`.
-9. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
+10. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
    (0.38, T35, with `hqc_schedule`).
-10. Tauri, native notifications, several agents in one session.
+11. Tauri, native notifications, several agents in one session.
 
 ## 20. Hosting and security
 
@@ -8087,6 +8142,30 @@ is not asked, does not see the question or the answer, and does not work on it.
   connection goes to that address, and redirects are not followed. A relay request needs the
   session token of a session the sending worker runs; a server answers only sessions of the
   projects its owner gave it to.
+- Skills from the hub (since 0.245): a skill is instructions and scripts the agent follows and
+  runs, so a hub (or whoever uploads to it as the owner) that gives one to a project steers that
+  project's agents on every worker with `hub_skills`, within the worker's `deny`, its
+  `--disallowedTools` and the session's mode, as input can. Its `allowed-tools` lift the card
+  for those tools while it is active, which a hub could do anyway by answering the card (§2.1).
+  Its `hooks` would run shell commands outside all of that, so the hub refuses a skill with a
+  `hooks` key in any of its `SKILL.md` files, and the worker, which does not trust the hub for
+  it, refuses it again. The check finds the frontmatter as the CLI does (2.1.328: one BOM
+  stripped, `^---\s*\n` with JavaScript's `\s`, up to the first `---` anywhere), refuses a first
+  line with anything but spaces after `---`, and takes the frontmatter only when no character in
+  it breaks a line or spaces but `\n`, `\r\n`, a space and a tab (a lone CR, U+0085, U+2028,
+  U+FEFF and the like are refused: YAML and JavaScript take some of them for line breaks or
+  spaces, and a security review made a hook run past a looser check with a lone CR and with
+  `---` followed by U+FEFF), no line of it starts with a tab, each of its top-level lines is a plain `key:` (no quotes, `{`, `?`,
+  `!` tag, `%` directive, `...` or `<<` merge) and none is `hooks`; and no line of the file at its
+  first column is a `hooks:` key. The worker writes the plugin's manifest itself and the skill's
+  files only under `skills/<name>/` of its own folder, so a skill cannot add a plugin's hooks,
+  MCP servers, agents or commands; it unpacks only relative paths without `..`, no links, with
+  the limits of §6, and checks the archive's sha256, also of an archive it kept, on every start.
+  A set's folder name holds the version of the checks, so a stricter check never reuses a folder
+  an older one built. What is accepted: the folders are the worker user's, so an agent of
+  another session on the same worker can change a set its owner's sessions use (add a plugin's
+  hooks to it), as it can change `~/.claude/settings.json`, which the CLI reads too (§14, the
+  boundary between sessions of one worker is soft).
 - `Origin` **[decision]**: a WebSocket upgrade of `/api/ws` without `Origin`, or with an `Origin`
   that does not match the request's `Host`, gets `403`; non-GET `/api/*` requests with a foreign
   `Origin` get `403` (without `Origin` they pass: that is how non-browser clients come). A match
@@ -8244,6 +8323,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.244 → 0.245 (iteration 8: skills from the hub)
+§19: a new iteration 8, skills the owner uploads once on the hub (#62); the generic ACP adapter
+becomes iteration 9, sharing 10, Tauri 11, and the references to them follow. §5.3
+`session.start.skills`, `GET /worker/skills/{sha256}`, §6 `/api/skills`, §8.1 `--plugin-dir`, §14
+`hub_skills`, §20. A skill travels as names and hashes; the worker fetches each archive once per
+hash, builds a plugin folder of its own (`hqc`) and starts the agent with `--plugin-dir`, the
+hub's copy winning over a same-named skill of the machine (`skillOverrides`). A skill with
+`hooks` is refused by the hub and the worker, since hooks run outside the worker's `deny`.
+Migration `0058`.
 
 ### 0.243 → 0.244 (the agent is told of its background work that runs long)
 A background command or subagent of the agent that ran for hours was known only to the rows above

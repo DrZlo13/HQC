@@ -775,6 +775,8 @@ impl ClaudeCodeAdapter {
     ///   `HQC_SECRETS` only as `secrets`, the folder of the process's secrets (SPEC 0.147);
     ///   `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` only with `task_tools` ([`ClaudeOptions::task_tools`],
     ///   SPEC 0.223);
+    /// - the hub's skills ([`StartSpec::skill_dir`], SPEC 0.245) → `--plugin-dir` and
+    ///   `skillOverrides` off for their names in `--settings`;
     /// - `disallowed_tools` → `--disallowedTools`, `system_prompt` →
     ///   `--append-system-prompt`. Nothing of `session.start` is silently dropped.
     pub fn command(
@@ -843,6 +845,19 @@ impl ClaudeCodeAdapter {
         let mut settings = spec.environment.permissions.settings();
         if self.opts.native_messaging == NativeMessaging::Subagents {
             settings["crossSessionInbound"] = "refuse".into();
+        }
+        // SPEC 0.245: the hub's skills as the plugin `hqc` (`hqc:<name>`); a same-named skill
+        // of the machine or the repository is hidden, so `/<name>` finds the hub's copy.
+        if let Some(dir) = &spec.skill_dir {
+            if !spec.skills.is_empty() {
+                settings["skillOverrides"] = spec
+                    .skills
+                    .iter()
+                    .map(|k| (k.name.clone(), serde_json::Value::from("off")))
+                    .collect::<serde_json::Map<_, _>>()
+                    .into();
+                args.extend(["--plugin-dir".into(), dir.display().to_string()]);
+            }
         }
         args.extend(["--settings".into(), settings.to_string()]);
         if spec.restricted {

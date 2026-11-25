@@ -310,6 +310,26 @@ async fn capped_json(mut r: reqwest::Response) -> Option<Value> {
     serde_json::from_slice(&buf).ok()
 }
 
+/// ` (text/html)`: the media type of an answer as hqc repeats it, or nothing.
+fn media_type(r: &reqwest::Response) -> String {
+    let t: String = r
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '+' | '-' | '.'))
+        .take(60)
+        .collect();
+    if t.is_empty() {
+        t
+    } else {
+        format!(" ({t})")
+    }
+}
+
 /// An error code of the authorization server as hqc repeats it: a short word, nothing else.
 fn word(s: &str) -> String {
     let w: String = s
@@ -585,12 +605,37 @@ pub async fn sign_in(
                 .send()
                 .await
                 .map_err(|e| bad(UpErr::Unavailable(super::short(&e)), &r.name))?;
-            let v: Value = capped_json(resp).await.ok_or_else(|| {
-                bad(
-                    UpErr::Unavailable("the registration answered no JSON".into()),
-                    &r.name,
-                )
-            })?;
+            // A service that registers only the clients it knows refuses with a status and often
+            // a page: the owner sees the status, the type and an RFC 7591 error code, no text.
+            let (status, ctype) = (resp.status(), media_type(&resp));
+            let v = capped_json(resp).await;
+            let code = v
+                .as_ref()
+                .and_then(|v| v.get("error"))
+                .and_then(Value::as_str)
+                .map(|e| format!(": {}", word(e)))
+                .unwrap_or_default();
+            let v = match v {
+                Some(v) if status.is_success() => v,
+                Some(_) => {
+                    return Err(bad(
+                        UpErr::Unavailable(format!(
+                            "the registration answered {}{ctype}{code}",
+                            status.as_u16()
+                        )),
+                        &r.name,
+                    ))
+                }
+                None => {
+                    return Err(bad(
+                        UpErr::Unavailable(format!(
+                            "the registration answered {}{ctype}, not JSON",
+                            status.as_u16()
+                        )),
+                        &r.name,
+                    ))
+                }
+            };
             let c = v
                 .get("client_id")
                 .and_then(Value::as_str)

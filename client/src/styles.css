@@ -3141,6 +3141,38 @@ button.btn-mode-pill.perm-allow-all:hover,
   position: relative;
 }
 
+/* A message pulled to the left (swipequote.ts): it follows the finger, goes back by a transition,
+   and the quote mark comes out at its right at the finger's height. */
+.feed-block.feed-swipe {
+  touch-action: pan-y pinch-zoom;
+  transition: transform 0.18s ease-out;
+}
+.feed-block.is-swiping {
+  transition: none;
+}
+.feed-swipe-icon {
+  display: none;
+}
+.is-swiping > .feed-swipe-icon {
+  position: absolute;
+  left: 100%;
+  top: calc(var(--swipe-y) * 1px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: var(--muted);
+  background: var(--surface);
+  transform: translate(calc(var(--swipe-x) * 0.5px - 50%), -50%) scale(var(--swipe));
+  opacity: var(--swipe);
+  pointer-events: none;
+}
+.is-armed > .feed-swipe-icon {
+  color: var(--accent-text);
+}
+
 /* The Compact look (applyLook): the feed and the composer across the chat column. */
 :root.feed-wide .feed,
 :root.feed-wide .composer,

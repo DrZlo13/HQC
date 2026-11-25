@@ -867,3 +867,11 @@ describe('the one-column gutter', () => {
     expect(CSS).toMatch(/:root\.feed-column \.feed-block > details\[open\] ~ \.feed-mark \.icon \{\s*transform: rotate\(90deg\);/);
   });
 });
+
+describe('FeedBlocks without `swipe` (ChatItems, a subagent\'s history)', () => {
+  it('has no swipe to quote, whatever its actions offer', () => {
+    show([user(1, 'Run the tests'), agent(2, 'All tests pass.', 1, true)], { quote: vi.fn() });
+    expect(root.querySelector('.msg-agent')).not.toBeNull();
+    expect(root.querySelector('.feed-swipe, .feed-swipe-icon')).toBeNull();
+  });
+});

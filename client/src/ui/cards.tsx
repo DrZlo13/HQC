@@ -52,6 +52,7 @@ import {
   IconFork,
   IconJoined,
   IconQuestion,
+  IconQuote,
   IconReply,
   IconRestore,
   IconSend,
@@ -80,6 +81,7 @@ import {
 import { activityOf, elapsed, stats, Stats } from './LiveSubagents';
 import { CodeBlock, CopyButton, Markdown, markdownLine, safeHref } from './Markdown';
 import { asker, CallArgs, PermissionBlock } from './permission';
+import { withoutQuoteLines } from './selection';
 import { PeerMessageBlock, ReplyFromBlock, ReplyToBlock, SentBlock } from './relay';
 
 /** The session's model, for the offer under the runtime's reply to a model refusal (SPEC
@@ -183,7 +185,9 @@ export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActi
   return <FeedBlocks blocks={buildFeed(items, actions.timeline)} actions={actions} />;
 }
 
-export function FeedBlocks({ blocks, actions }: { blocks: Block[]; actions: ChatActions }) {
+/** `swipe`: the messages in it are quoted by a swipe to the left (swipequote.ts): the chat's own
+ *  feed, not the history of a subagent. */
+export function FeedBlocks({ blocks, actions, swipe: swipeOn }: { blocks: Block[]; actions: ChatActions; swipe?: boolean }) {
   // `data-seq`: the first event of the block, for the jump to a search hit (Chat).
   return (
     <>
@@ -191,16 +195,39 @@ export function FeedBlocks({ blocks, actions }: { blocks: Block[]; actions: Chat
         // The request on a phone's bottom sheet is not drawn here, nor its mark.
         const g: Gutter =
           b.kind === 'approval' && b.event.payload.request_id === actions.sheetRequest ? {} : gutter(b, actions);
+        const swipe = !!swipeOn && !!actions.quote && swipeable(b);
         return (
-          <div key={b.key} class={g.full ? 'feed-block feed-full' : 'feed-block'} data-seq={blockSeq(b)}>
+          <div key={b.key} class={`feed-block${g.full ? ' feed-full' : ''}${swipe ? ' feed-swipe' : ''}`} data-seq={blockSeq(b)}>
             <BlockView block={b} actions={actions} />
             {/* After the block, so a fold's open state turns its chevron (styles.css). */}
             {g.mark}
+            {/* What comes out at the right of a message pulled to the left (swipequote.ts). */}
+            {swipe && (
+              <span class="feed-swipe-icon" aria-hidden="true">
+                <IconQuote size={18} />
+              </span>
+            )}
           </div>
         );
       })}
     </>
   );
+}
+
+/** Whether a swipe to the left quotes the block (swipequote.ts): the agent's answer, the user's
+ *  own message with words of their own, a message of another session or a post of a room. */
+function swipeable(b: Block): boolean {
+  if (b.kind === 'agent' || b.kind === 'reply-to') return true;
+  if (b.kind !== 'item' || b.item.kind !== 'event') return false;
+  const e = b.item.event;
+  switch (e.type) {
+    case 'user.message':
+      return withoutQuoteLines(e.payload.text).trim() !== '';
+    case 'peer.message':
+      return e.payload.text.trim() !== '';
+    default:
+      return false;
+  }
 }
 
 interface Gutter {

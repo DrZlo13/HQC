@@ -288,3 +288,12 @@ describe('notes and spinners', () => {
     expect([rule('.spinner')['width'], rule('.loading-center .spinner')['width']]).toEqual(['1em', '20px']);
   });
 });
+
+describe('a message swiped to the left', () => {
+  it('keeps the vertical scroll to the browser and the horizontal to the swipe, and goes back by a transition', () => {
+    expect(rule('.feed-block.feed-swipe')['touch-action']).toBe('pan-y pinch-zoom');
+    expect(rule('.feed-block.feed-swipe').transition).toContain('transform');
+    expect(rule('.feed-block.is-swiping').transition).toBe('none');
+    expect(rule('.feed-swipe-icon').display).toBe('none');
+  });
+});

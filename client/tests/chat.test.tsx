@@ -29,6 +29,7 @@ import { limitNotice } from '../src/ui/limits';
 import { Timeline } from '../src/timeline';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
 import { Chat, matchCommands, withQuote } from '../src/ui/Chat';
+import { firstSentences } from '../src/ui/selection';
 import { LiveSubagents } from '../src/ui/LiveSubagents';
 import { WEB_SEARCHES } from '../src/websearch';
 
@@ -4899,6 +4900,121 @@ describe('Quote', () => {
     expect(withQuote('', 'one')).toBe('> one\n\n');
     expect(withQuote('  \n', 'one')).toBe('> one\n\n');
     expect(withQuote('draft\n\n', 'one\n\n  two\r\nthree')).toBe('draft\n\n> one\n>\n>   two\n> three\n\n');
+  });
+});
+
+describe('A swipe to the left quotes a message', () => {
+  const area = () => $('.composer-input') as HTMLTextAreaElement;
+  const touch = (target: Element, type: string, x?: number) => {
+    const fingers = x === undefined ? [] : [{ clientX: x, clientY: 30 }];
+    const lift = type === 'touchend';
+    target.dispatchEvent(Object.assign(new Event(type, { bubbles: true }), { touches: lift ? [] : fingers, changedTouches: fingers }));
+  };
+  /** Pulls `el`'s block 100 px to the left and lifts the finger. */
+  const swipe = (el: Element) =>
+    act(() => {
+      touch(el, 'touchstart', 300);
+      touch(el, 'touchmove', 250);
+      touch(el, 'touchmove', 200);
+      touch(el, 'touchend');
+    });
+  const THREE = 'First one. Second one. Third one.';
+
+  it('puts the first two sentences of an agent\'s answer after the draft and focuses the field', async () => {
+    const { app } = setup('idle', { history: [HISTORY[0], ev('event.agent.message', 2, (e) => (e.payload.text = THREE))] });
+    await mount(app);
+    await act(async () => {
+      area().value = 'Look at this';
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const block = $('.msg-agent')!.closest('.feed-block')!;
+    expect(block.classList.contains('feed-swipe')).toBe(true);
+    expect(block.querySelector('.feed-swipe-icon')).not.toBeNull();
+    await swipe($('.msg-agent')!);
+    expect(area().value).toBe('Look at this\n\n> First one. Second one. …\n\n');
+    expect(document.activeElement).toBe(area());
+  });
+
+  it('quotes a Markdown answer as text', async () => {
+    const { app } = setup('idle', { history: [HISTORY[0], ev('event.agent.message', 2, (e) => (e.payload.text = '# Done\nThe **tests** pass.'))] });
+    await mount(app);
+    await swipe($('.msg-agent')!);
+    expect(area().value).toBe('> Done\n>\n> The tests pass.\n\n');
+  });
+
+  it("quotes the user's message without its quote lines", async () => {
+    const { app } = setup('idle', {
+      history: [ev('event.user.message', 1, (e) => ((e.payload.text = '> earlier quote\nMy words. More words. And more.'), (e.payload.artifact_ids = [])))],
+    });
+    await mount(app);
+    await swipe($('.msg-user')!);
+    expect(area().value).toBe('> My words. More words. …\n\n');
+  });
+
+  it('quotes the intro and the first item of a list, not the list', async () => {
+    const text = 'Done:\n\n- PR merged\n- branch rebased\n- workers updated\n- app rebuilt\n- notes written';
+    const { app } = setup('idle', { history: [HISTORY[0], ev('event.agent.message', 2, (e) => (e.payload.text = text))] });
+    await mount(app);
+    await swipe($('.msg-agent')!);
+    expect(area().value).toBe(withQuote('', 'Done:\n\nPR merged…'));
+  });
+
+  it("quotes the agent's answer to a message of another session", async () => {
+    const q = ev('event.peer.message', 1, (e) => {
+      e.event_id = '0199f3a2-7c10-7000-8000-0000000000a1';
+      e.payload = { ...e.payload, mode: 'ask', text: 'Question?' };
+    });
+    const a = ev('event.agent.message', 2, (e) => (e.payload = { text: THREE, final: true, in_reply_to: q.event_id }));
+    const { app } = setup('idle', { history: [q, a] });
+    await mount(app);
+    const block = $('.feed-block[data-seq="2"]')!;
+    expect(block.classList.contains('feed-swipe')).toBe(true);
+    await swipe(block.firstElementChild!);
+    expect(area().value).toBe('> First one. Second one. …\n\n');
+  });
+
+  it("quotes a message of another session, not an empty one", async () => {
+    const peer = (seq: number, text: string) => ev('event.peer.message', seq, (e) => (e.payload = { ...e.payload, mode: 'send', text }));
+    const { app } = setup('idle', { history: [peer(1, THREE), peer(2, '  ')] });
+    await mount(app);
+    expect($('.feed-block[data-seq="2"]')?.classList.contains('feed-swipe') ?? false).toBe(false);
+    const block = $('.feed-block[data-seq="1"]')!;
+    expect(block.classList.contains('feed-swipe')).toBe(true);
+    await swipe(block.firstElementChild!);
+    expect(area().value).toBe('> First one. Second one. …\n\n');
+  });
+
+  it("is not offered on a user's message of nothing but quote lines", async () => {
+    const { app } = setup('idle', {
+      history: [ev('event.user.message', 1, (e) => ((e.payload.text = '> only a quote\n> more'), (e.payload.artifact_ids = [])))],
+    });
+    await mount(app);
+    expect($('.msg-user')).not.toBeNull();
+    expect($('.feed-swipe')).toBeNull();
+  });
+
+  it('is not offered on an archived session, nor on a tool group', async () => {
+    const { app } = setup('idle');
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true, state: 'archived' });
+    await mount(app);
+    expect($('.feed-swipe')).toBeNull();
+    render(null, root);
+    const open = setup('idle');
+    await mount(open.app);
+    // Only the blocks of a message: the tool call and the permission request of the history are not.
+    const blocks = [...document.querySelectorAll('.feed-block')];
+    expect(blocks.length).toBeGreaterThan(3);
+    for (const b of blocks) expect(b.classList.contains('feed-swipe'), b.className).toBe(!!b.querySelector('.msg-agent, .msg-user'));
+    expect($('.feed-swipe')).not.toBeNull();
+  });
+});
+
+describe('the first sentences', () => {
+  it('are two, with «…» after a space when the head ends in a sentence mark, and a blank line between paragraphs is no sentence', () => {
+    expect(firstSentences('Done.\n\nThe tests pass. Next.')).toBe('Done.\n\nThe tests pass. …');
+    expect(firstSentences('Done.\n\nThe tests pass.')).toBe('Done.\n\nThe tests pass.');
+    expect(firstSentences('One. Two. Three')).toBe('One. Two. …');
+    expect(firstSentences('one\n\ntwo\n\nthree')).toBe('one\n\ntwo…');
   });
 });
 

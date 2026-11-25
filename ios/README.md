@@ -48,6 +48,12 @@ browser and Apple push (SPEC 0.237).
   phone (the worker runs `claude auth login`), revoking, and confirming a new machine's
   enrollment code (also from an `hqc-app://enroll?code=XXXX-XXXX` link). Workspaces: add a folder
   of a worker through a browser of its `allowed_roots`, or remove one.
+- **Voice input (optional, off by default).** On-device hold-to-talk dictation powered by
+  Core ML on the iPhone Neural Engine—choice of **NVIDIA Parakeet TDT v3 / v2** (via
+  `FluidAudio`, ~200 ms latency on ANE) or **OpenAI Whisper Large v3 Turbo / Small** (via
+  `WhisperKit`, 99 languages). Offered during onboarding and managed in Settings → Voice input
+  (enable/disable, download, update/re-download, delete models). Hold the composer's mic button
+  to record with an audio-reactive halo, slide left to cancel, or slide up to lock hands-free.
 - **Notifications.** Sealed end to end (SPEC 0.238): the app makes a key, kept in a keychain
   group it shares with its notification extension (`HQCNotifications`), and the hub seals each
   notice with it, so Apple and the relay see only a generic alert; the extension opens it on the
@@ -106,7 +112,8 @@ sign in again. A hub without auth (dev mode on loopback) needs no sign-in.
 
 ## Build and run
 
-Xcode 26 or newer (the iOS 26 SDK), no dependencies:
+Xcode 26 or newer (the iOS 26 SDK); Swift Package dependencies (`FluidAudio` and `WhisperKit`)
+resolve automatically when opening or building the project:
 
 ```sh
 open ios/HQC.xcodeproj        # then Run on a simulator, or on a device with your team set

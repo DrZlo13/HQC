@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		A1000000000000000000001B /* HQCNotifications.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A10000000000000000000010 /* HQCNotifications.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A10000000000000000000024 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000022 /* FluidAudio */; };
+		A10000000000000000000025 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000023 /* WhisperKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +59,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A10000000000000000000024 /* FluidAudio in Frameworks */,
+				A10000000000000000000025 /* WhisperKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -109,6 +113,10 @@
 				A10000000000000000000002 /* HQC */,
 			);
 			name = HQC;
+			packageProductDependencies = (
+				A10000000000000000000022 /* FluidAudio */,
+				A10000000000000000000023 /* WhisperKit */,
+			);
 			productName = HQC;
 			productReference = A10000000000000000000001 /* HQC.app */;
 			productType = "com.apple.product-type.application";
@@ -160,6 +168,10 @@
 			);
 			mainGroup = A10000000000000000000004;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A10000000000000000000020 /* XCRemoteSwiftPackageReference "FluidAudio" */,
+				A10000000000000000000021 /* XCRemoteSwiftPackageReference "WhisperKit" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000005 /* Products */;
 			projectDirPath = "";
@@ -263,7 +275,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = HQC.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 19;
+				CURRENT_PROJECT_VERSION = 21;
 				DEVELOPMENT_TEAM = AEHMXBQ3VJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -271,6 +283,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = HQC;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Dictate messages to your agents on device.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Attach photos to a message for your agent.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -281,7 +294,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.2.1;
+				MARKETING_VERSION = 0.2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = xyz.drewnja.hqc;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -299,7 +312,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = HQC.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 19;
+				CURRENT_PROJECT_VERSION = 21;
 				DEVELOPMENT_TEAM = AEHMXBQ3VJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -307,6 +320,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = HQC;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Dictate messages to your agents on device.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Attach photos to a message for your agent.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -317,7 +331,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.2.1;
+				MARKETING_VERSION = 0.2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = xyz.drewnja.hqc;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -333,7 +347,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = HQCNotifications.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 19;
+				CURRENT_PROJECT_VERSION = 21;
 				DEVELOPMENT_TEAM = AEHMXBQ3VJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "HQCNotifications-Info.plist";
@@ -344,7 +358,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.2.1;
+				MARKETING_VERSION = 0.2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = xyz.drewnja.hqc.notifications;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -359,7 +373,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = HQCNotifications.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 19;
+				CURRENT_PROJECT_VERSION = 21;
 				DEVELOPMENT_TEAM = AEHMXBQ3VJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "HQCNotifications-Info.plist";
@@ -370,7 +384,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.2.1;
+				MARKETING_VERSION = 0.2.2;
 				PRODUCT_BUNDLE_IDENTIFIER = xyz.drewnja.hqc.notifications;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -411,6 +425,38 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A10000000000000000000020 /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/FluidInference/FluidAudio.git";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.18.4;
+			};
+		};
+		A10000000000000000000021 /* XCRemoteSwiftPackageReference "WhisperKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/argmaxinc/WhisperKit.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.1.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A10000000000000000000022 /* FluidAudio */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000020 /* XCRemoteSwiftPackageReference "FluidAudio" */;
+			productName = FluidAudio;
+		};
+		A10000000000000000000023 /* WhisperKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000021 /* XCRemoteSwiftPackageReference "WhisperKit" */;
+			productName = WhisperKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A1000000000000000000000A /* Project object */;
 }

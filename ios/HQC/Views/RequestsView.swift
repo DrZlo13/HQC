@@ -108,6 +108,7 @@ struct SettingsView: View {
     @AppStorage(Feedback.soundsKey) private var sounds = true
     @AppStorage(WebSearch.key) private var webSearch = WebSearch.google.rawValue
     @AppStorage(ChatViewMode.key) private var chatViewMode = ChatViewMode.regular
+    @State private var voice = VoiceStore.shared
 
     private var notificationState: String {
         if !app.pushEnabledOnHub { return "Off on the hub" }
@@ -168,6 +169,20 @@ struct SettingsView: View {
                 Text("Sound and haptics")
             } footer: {
                 Text("What agents do, felt and heard while a chat is open: tool calls, requests, questions, a finished answer. Sounds follow the ring/silent switch and mix with your music.")
+            }
+            Section {
+                NavigationLink {
+                    VoiceSettingsView()
+                } label: {
+                    LabeledContent {
+                        Text(voice.showsMicButton ? voice.selectedModel.shortName : "Off")
+                            .foregroundStyle(.secondary)
+                    } label: {
+                        Label("Voice input", systemImage: "waveform.and.mic")
+                    }
+                }
+            } footer: {
+                Text("Hold-to-talk dictation using on-device Parakeet (Neural Engine) or Whisper models. Off by default.")
             }
             Section {
                 Picker("Search the web in", selection: $webSearch) {

@@ -16,7 +16,10 @@ struct HQCApp: App {
                 }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active, app.phase == .ready { app.foreground() }
-                    if phase == .background, app.phase == .ready { app.background() }
+                    if phase == .background {
+                        if app.phase == .ready { app.background() }
+                        VoiceStore.shared.unloadFromMemory()
+                    }
                 }
                 .onChange(of: app.phase) { _, phase in
                     // Asked once, in onboarding; after that only registered again.
@@ -29,6 +32,7 @@ struct HQCApp: App {
 
 struct RootView: View {
     @Environment(AppModel.self) private var app
+    @State private var voice = VoiceStore.shared
 
     /// Decided once, before the first frame, from what is saved: a first launch has the
     /// welcome deck draw the launch moment itself (its logo flies up into place); any other
@@ -50,6 +54,11 @@ struct RootView: View {
     private var showsOnboarding: Bool {
         !(app.onboarded && (app.phase == .ready || app.phase == .connecting))
     }
+    /// Full-screen "What's new" announcement shown once to existing beta users upgrading to a
+    /// build with on-device voice transcription.
+    private var showsVoiceIntro: Bool {
+        !showsOnboarding && app.onboarded && app.phase == .ready && !voice.introSeen
+    }
     private var onboardingStart: OnboardingView.Step {
         switch app.phase {
         case .signIn: .signIn
@@ -66,12 +75,20 @@ struct RootView: View {
             if mountsMain {
                 AdaptiveRoot()
                     // The counter-motion to the deck pushing through: the app rises to full size.
-                    .scaleEffect(showsOnboarding ? 0.94 : 1)
+                    .scaleEffect(showsOnboarding || showsVoiceIntro ? 0.94 : 1)
             }
             if showsOnboarding {
                 OnboardingView(start: onboardingStart, revealed: !deckLaunch || launchDone)
                     .transition(.pushThrough)
                     .zIndex(1)
+            } else if showsVoiceIntro {
+                VoiceAnnouncementView {
+                    withAnimation(.spring(response: 0.75, dampingFraction: 0.98)) {
+                        voice.markIntroSeen()
+                    }
+                }
+                .transition(.pushThrough)
+                .zIndex(1)
             }
             if splashUp {
                 SplashView(isFinishing: launchDone) {

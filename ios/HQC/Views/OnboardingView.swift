@@ -9,11 +9,14 @@ struct OnboardingView: View {
     @Environment(\.palette) private var palette
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    enum Step: Int, CaseIterable { case welcome, hub, signIn, notifications }
+    enum Step: Int, CaseIterable { case welcome, hub, signIn, notifications, voice }
 
     @State private var step: Step
     @State private var address = ""
     @State private var busy = false
+    @State private var voice = VoiceStore.shared
+    @State private var pickedVoiceModel: VoiceModel = .parakeetV3
+    @State private var wantsVoice = false
     /// How many of the welcome screen's parts are in: logo, title, three features, button.
     @State private var revealed = 0
     @State private var bell = 0
@@ -59,6 +62,7 @@ struct OnboardingView: View {
                     case .hub: hub
                     case .signIn: signIn
                     case .notifications: notifications
+                    case .voice: voiceStep
                     }
                 }
                 .frame(maxWidth: 460)
@@ -280,12 +284,73 @@ struct OnboardingView: View {
             primary("Turn on notifications") {
                 Task {
                     await AppDelegate.requestPush()
-                    withAnimation(.spring(response: 0.75, dampingFraction: 0.98)) { app.finishOnboarding() }
+                    step = .voice
                 }
             }
-            Button("Not now") { withAnimation(.spring(response: 0.75, dampingFraction: 0.98)) { app.finishOnboarding() } }
+            Button("Not now") { step = .voice }
                 .font(.subheadline)
         }
+    }
+
+    private var voiceStep: some View {
+        VStack(spacing: 20) {
+            header("waveform.and.mic", "On-device voice input",
+                   wantsVoice
+                       ? "Pick a model to download. Everything runs locally on your iPhone's Neural Engine."
+                       : "Hold to dictate messages right into chat—fully offline on the iPhone Neural Engine. Off by default; you can change this anytime in Settings.")
+
+            if wantsVoice {
+                ScrollView(showsIndicators: false) {
+                    VoiceOnboardingPicker(picked: $pickedVoiceModel, voice: voice)
+                        .padding(.vertical, 2)
+                }
+                .frame(maxHeight: 330)
+
+                if let err = voice.lastError {
+                    Text(err)
+                        .font(.footnote)
+                        .foregroundStyle(palette.danger)
+                        .multilineTextAlignment(.center)
+                }
+
+                let downloading = voice.isDownloading(pickedVoiceModel)
+                let ready = voice.isDownloaded(pickedVoiceModel)
+                if ready {
+                    primary("Use \(pickedVoiceModel.shortName) & continue") {
+                        voice.select(pickedVoiceModel)
+                        finishOnboardingAnimated()
+                    }
+                } else if downloading {
+                    primary("Continue while downloading") {
+                        finishOnboardingAnimated()
+                    }
+                } else {
+                    primary("Download \(pickedVoiceModel.shortName) (\(pickedVoiceModel.approxSize))") {
+                        let model = pickedVoiceModel
+                        Task {
+                            let task = voice.download(model, force: false, activateWhenDone: true)
+                            await task.value
+                            if voice.isDownloaded(model), !app.onboarded {
+                                finishOnboardingAnimated()
+                            }
+                        }
+                    }
+                }
+                Button("Skip for now") { finishOnboardingAnimated() }
+                    .font(.subheadline)
+            } else {
+                primary("Set up voice input") {
+                    withAnimation(.snappy(duration: 0.35)) { wantsVoice = true }
+                }
+                Button("Not now") { finishOnboardingAnimated() }
+                    .font(.subheadline)
+            }
+        }
+    }
+
+    private func finishOnboardingAnimated() {
+        voice.markIntroSeen()
+        withAnimation(.spring(response: 0.75, dampingFraction: 0.98)) { app.finishOnboarding() }
     }
 
     // MARK: parts

@@ -490,10 +490,14 @@ struct Composer: View {
     @State private var pickingPhotos = false
     @State private var pickingFiles = false
     @State private var photoItems: [PhotosPickerItem] = []
+    @State private var voice = VoiceStore.shared
+    @State private var voiceSession = VoiceSession()
 
     private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     private var uploading: Bool { attachments.contains { $0.artifact == nil && !$0.failed } }
     private var canSend: Bool { (!empty || attachments.contains { $0.artifact != nil }) && !uploading }
+    /// When voice input is enabled and the field is idle/empty, the mic replaces the disabled Send circle (Telegram style).
+    private var micReplacesSend: Bool { voice.showsMicButton && !busy && empty && attachments.isEmpty }
 
     /// `/` and the start of a command: the runtime's commands that match.
     private var suggestions: [String] {
@@ -524,102 +528,139 @@ struct Composer: View {
                     .padding(.horizontal, 12)
                 }
             }
-            GlassEffectContainer(spacing: 8) {
-                HStack(alignment: .bottom, spacing: 8) {
-                    Menu {
-                        Button("Photos", systemImage: "photo.on.rectangle") { pickingPhotos = true }
-                        Button("Files", systemImage: "folder") { pickingFiles = true }
-                        if let onSecret {
-                            Button("Secret…", systemImage: "key") { onSecret() }
-                        }
-                        if !quickMessages.isEmpty {
-                            Section("Quick messages") {
-                                ForEach(quickMessages, id: \.self) { q in
-                                    Button(q) {
-                                        text = text.isEmpty ? q : "\(text) \(q)"
-                                        focused = true
+            if let notice = voiceSession.error ?? voiceSession.hint {
+                Text(notice)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(voiceSession.error != nil ? palette.danger : palette.text2)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .glassEffect(.regular, in: .capsule)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            ZStack(alignment: .bottom) {
+                GlassEffectContainer(spacing: 8) {
+                    HStack(alignment: .bottom, spacing: 8) {
+                        Menu {
+                            Button("Photos", systemImage: "photo.on.rectangle") { pickingPhotos = true }
+                            Button("Files", systemImage: "folder") { pickingFiles = true }
+                            if let onSecret {
+                                Button("Secret…", systemImage: "key") { onSecret() }
+                            }
+                            if !quickMessages.isEmpty {
+                                Section("Quick messages") {
+                                    ForEach(quickMessages, id: \.self) { q in
+                                        Button(q) {
+                                            text = text.isEmpty ? q : "\(text) \(q)"
+                                            focused = true
+                                        }
                                     }
                                 }
                             }
-                        }
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(palette.text)
-                            .frame(width: Self.control, height: Self.control)
-                            .glassEffect(.regular.interactive(), in: .circle)
-                    }
-                    .glassEffectID("attach", in: glass)
-                    .accessibilityLabel("Attach")
-
-                    // Wide screens (iPhone Duo's inner display, iPad) have no swipe-down
-                    // keyboard and often no hide key: a button puts it away.
-                    if focused && width == .regular {
-                        Button {
-                            focused = false
-                            Feedback.play(.tap)
                         } label: {
-                            Image(systemName: "keyboard.chevron.compact.down")
-                                .font(.system(size: 14, weight: .semibold))
+                            Image(systemName: "plus")
+                                .font(.system(size: 15, weight: .semibold))
                                 .foregroundStyle(palette.text)
                                 .frame(width: Self.control, height: Self.control)
                                 .glassEffect(.regular.interactive(), in: .circle)
                         }
-                        .buttonStyle(.plain)
-                        .glassEffectID("hide", in: glass)
-                        .transition(.scale.combined(with: .opacity))
-                        .keyboardShortcut(.escape, modifiers: [])
-                        .accessibilityLabel("Hide keyboard")
-                    }
+                        .glassEffectID("attach", in: glass)
+                        .accessibilityLabel("Attach")
 
-                    ComposerField(text: $text, focused: $focused, placeholder: "Message",
-                                  textColor: UIColor(palette.text),
-                                  placeholderColor: UIColor(palette.muted)) { items in
-                        for item in items { Task { await addPasted(item) } }
-                        Feedback.play(.tap)
-                    }
-                    .frame(minHeight: Self.control)
-                        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: Self.control / 2))
-                        .glassEffectID("field", in: glass)
+                        // Wide screens (iPhone Duo's inner display, iPad) have no swipe-down
+                        // keyboard and often no hide key: a button puts it away.
+                        if focused && width == .regular {
+                            Button {
+                                focused = false
+                                Feedback.play(.tap)
+                            } label: {
+                                Image(systemName: "keyboard.chevron.compact.down")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(palette.text)
+                                    .frame(width: Self.control, height: Self.control)
+                                    .glassEffect(.regular.interactive(), in: .circle)
+                            }
+                            .buttonStyle(.plain)
+                            .glassEffectID("hide", in: glass)
+                            .transition(.scale.combined(with: .opacity))
+                            .keyboardShortcut(.escape, modifiers: [])
+                            .accessibilityLabel("Hide keyboard")
+                        }
 
-                    if busy && empty && attachments.isEmpty {
-                        Button(action: onStop) {
-                            Image(systemName: "stop.fill")
-                                .font(.system(size: 13, weight: .bold))
+                        ComposerField(text: $text, focused: $focused, placeholder: "Message",
+                                      textColor: UIColor(palette.text),
+                                      placeholderColor: UIColor(palette.muted)) { items in
+                            for item in items { Task { await addPasted(item) } }
+                            Feedback.play(.tap)
+                        }
+                        .frame(minHeight: Self.control)
+                            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: Self.control / 2))
+                            .glassEffectID("field", in: glass)
+
+                        if voice.showsMicButton && !micReplacesSend {
+                            VoiceMicButton(session: voiceSession, prominent: false, onTranscript: insertTranscript)
+                                .glassEffectID("mic", in: glass)
+                        }
+
+                        if micReplacesSend {
+                            VoiceMicButton(session: voiceSession, prominent: true, onTranscript: insertTranscript)
+                                .glassEffectID("action", in: glass)
+                        } else if busy && empty && attachments.isEmpty {
+                            Button(action: onStop) {
+                                Image(systemName: "stop.fill")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: Self.control, height: Self.control)
+                                    .background(Color.red.gradient, in: .circle)
+                            }
+                            .buttonStyle(.plain)
+                            .glassEffectID("action", in: glass)
+                            .accessibilityLabel("Stop the agent")
+                        } else {
+                            Button(action: onSend) {
+                                Group {
+                                    if uploading {
+                                        ProgressView().controlSize(.small).tint(.white)
+                                    } else {
+                                        Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
+                                    }
+                                }
                                 .foregroundStyle(.white)
                                 .frame(width: Self.control, height: Self.control)
-                                .background(Color.red.gradient, in: .circle)
-                        }
-                        .buttonStyle(.plain)
-                        .glassEffectID("action", in: glass)
-                        .accessibilityLabel("Stop the agent")
-                    } else {
-                        Button(action: onSend) {
-                            Group {
-                                if uploading {
-                                    ProgressView().controlSize(.small).tint(.white)
-                                } else {
-                                    Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
-                                }
+                                .background(canSend ? Color.accentColor : palette.muted.opacity(0.35), in: .circle)
                             }
-                            .foregroundStyle(.white)
-                            .frame(width: Self.control, height: Self.control)
-                            .background(canSend ? Color.accentColor : palette.muted.opacity(0.35), in: .circle)
+                            .buttonStyle(.plain)
+                            .disabled(!canSend)
+                            .keyboardShortcut(.return, modifiers: .command)
+                            .glassEffectID("action", in: glass)
+                            .accessibilityLabel("Send")
                         }
-                        .buttonStyle(.plain)
-                        .disabled(!canSend)
-                        .keyboardShortcut(.return, modifiers: .command)
-                        .glassEffectID("action", in: glass)
-                        .accessibilityLabel("Send")
                     }
+                    .animation(.spring(duration: 0.35), value: busy && empty)
+                    .animation(.spring(duration: 0.3), value: focused)
                 }
-                .animation(.spring(duration: 0.35), value: busy && empty)
-                .animation(.spring(duration: 0.3), value: focused)
+                .opacity(voiceSession.isActive ? 0 : 1)
+                // Keep hit testing enabled on the hidden mic button while holding so its DragGesture survives.
+                .allowsHitTesting(!voiceSession.isActive || (voiceSession.isRecording && !voiceSession.isLocked))
+
+                if voiceSession.isActive {
+                    VoiceRecordingPill(session: voiceSession) {
+                        voiceSession.finishRecording(onTranscript: insertTranscript)
+                    }
+                    // While holding unlocked, let touches stay with the underlying VoiceMicButton gesture.
+                    .allowsHitTesting(voiceSession.isLocked || voiceSession.phase == .transcribing)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                }
             }
+            .overlay(alignment: .bottomTrailing) {
+                VoiceFloatingOverlay(session: voiceSession)
+                    .offset(x: 16, y: 18)
+            }
+            .animation(.spring(response: 0.32, dampingFraction: 0.8), value: voiceSession.phase)
             .padding(.horizontal, 12)
         }
         .padding(.bottom, 8)
         .padding(.top, 4)
+        .onDisappear { if voiceSession.isActive { voiceSession.cancelRecording() } }
         .onChange(of: focusTrigger) { _, _ in focused = true }
         .photosPicker(isPresented: $pickingPhotos, selection: $photoItems, maxSelectionCount: 10, matching: .images)
         .onChange(of: photoItems) { _, items in
@@ -630,6 +671,19 @@ struct Composer: View {
             guard case .success(let urls) = r else { return }
             for url in urls { Task { await addFile(url) } }
         }
+    }
+
+    private func insertTranscript(_ spoken: String) {
+        let trimmed = spoken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            text = trimmed
+        } else if text.hasSuffix(" ") || text.hasSuffix("\n") {
+            text += trimmed
+        } else {
+            text += " " + trimmed
+        }
+        focused = true
     }
 
     private func attachmentChip(_ a: PendingAttachment) -> some View {

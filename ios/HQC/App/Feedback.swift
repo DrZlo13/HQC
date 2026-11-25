@@ -42,6 +42,10 @@ nonisolated enum Cue: Hashable, Sendable {
     case reveal(Int)
     /// Signed in, set up.
     case success
+    /// Hold-to-talk voice recording started, locked, or cancelled (haptic only, quiet for the mic).
+    case voiceStart
+    case voiceLock
+    case voiceCancel
 }
 
 /// Plays cues: Core Haptics patterns and soft synthesized tones made from one list of notes, so
@@ -97,6 +101,15 @@ nonisolated final class FeedbackEngine: @unchecked Sendable {
     func play(_ cue: Cue, sound: Bool, haptic: Bool) {
         guard sound || haptic else { return }
         queue.async { self.perform(cue, sound: sound, haptic: haptic) }
+    }
+
+    /// Stops the `.ambient` tone engine before the microphone takes the audio session.
+    func suspendAudio() {
+        queue.sync {
+            audio?.stop()
+            audio = nil
+            players = []
+        }
     }
 
     private func perform(_ cue: Cue, sound: Bool, haptic: Bool) {
@@ -377,6 +390,15 @@ extension Feedback {
                 Note(at: Double(i) * 0.07, freq: f, length: i == 3 ? 0.8 : 0.3, gain: 0.4 + Double(i) * 0.12)
             }
             return CueSpec(notes: notes, volume: 0.75, minInterval: 1)
+        case .voiceStart:
+            return CueSpec(notes: [], extraHaptics: [tick(0, intensity: 0.65, sharpness: 0.6)], minInterval: 0.1)
+        case .voiceLock:
+            return CueSpec(
+                notes: [],
+                extraHaptics: [tick(0, intensity: 0.55, sharpness: 0.8), tick(0.06, intensity: 0.75, sharpness: 0.9)],
+                minInterval: 0.1)
+        case .voiceCancel:
+            return CueSpec(notes: [], extraHaptics: [tick(0, intensity: 0.45, sharpness: 0.25)], minInterval: 0.1)
         }
     }
 }

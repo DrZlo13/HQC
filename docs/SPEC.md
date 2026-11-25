@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.246, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.248, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -4387,8 +4387,8 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   worker (§5.2), writes `system room_stopped` "<agent's title> did not get the message:
   <reason>" in the room, in both modes. Since 0.241 not when the room's message it carries is
   older than the room's last "Stopped" (`POST /stop`): that Stop wrote its line and ended the
-  round already. An input the agent's worker drops at that Stop, its cap below the agent's
-  mode (§17.2), fails so.
+  round already. An input the agent's worker drops at that Stop, its cap below `allow_all`
+  (§17.2), fails so.
 - An input from the room that reaches an agent while its turn runs joins that turn, as a
   person's message does (`joined`, §17.2): the turn's final message answers both and is one
   post.
@@ -7808,18 +7808,19 @@ them now. Each is acked `quiet` when the runtime has taken it, and acked `quiet`
 resends it. A slash command among them fails, not retryable ("cancelled by Stop"): it runs or it
 does not, it is no text for the history (what decides is the text the runtime gets: a message of
 another session whose text starts with a path carries a header first and is no command).
-Since 0.241 so does an input whose cap is below the session's own mode (T39, §7.1:
-a message of another session or a run of an agent's schedule sent with a lower ceiling): it was
-never handled under its cap, and the next turn, in the session's mode, would find it in the
-history unhandled. The worker fails it, not retryable ("dropped at Stop: it may not run in this
-session's permission mode": the feed shows it not delivered with that reason, and an `hqc_ask` it
-carried fails at once, §7.1), and writes in its place, after the quiet inputs, a quiet note of its
-own that names what was dropped and never its text: "[hqc] A message from the session <address>
-was dropped at the owner's Stop because of a permission conflict: it may run only in a lower
-permission mode than this session's. Its text is not shown." ("A scheduled message" for a run of
-a schedule, "A message" otherwise). The note is no input of the hub: the feed does not show it,
-nothing is acked for it, and a `session.kill` or a worker restart before the runtime took it loses
-it. Limitation: an input capped only by the buffered `send` messages it carries in front (T40,
+Since 0.241 so does an input whose cap is below the session's own mode (T39, §7.1: a message of
+another session or a run of an agent's schedule sent with a lower ceiling), and since 0.248 every
+input with a cap below `allow_all`, also one at the session's own mode: it was never handled under
+its cap, and the next turn would find it in the history unhandled in the session's mode then, which
+the owner may raise to `allow_all` meanwhile. The worker fails it, not retryable ("dropped at Stop:
+it may run only in a permission mode below Allow all": the feed shows it not delivered with that
+reason, and an `hqc_ask` it carried fails at once, §7.1), and writes in its place, after the quiet
+inputs, a quiet note of its own that names what was dropped and never its text: "[hqc] A message
+from the session <address> was dropped at the owner's Stop because of a permission conflict: it may
+run only in a permission mode below Allow all. Its text is not shown." ("A scheduled message" for a
+run of a schedule, "A message" otherwise). The note is no input of the hub: the feed does not show
+it, nothing is acked for it, and a `session.kill` or a worker restart before the runtime took it
+loses it. Limitation: an input capped only by the buffered `send` messages it carries in front (T40,
 §7.1), the owner's own message among them, is dropped the same way, and the buffered messages come
 with the next input. Until the
 stopped turn ends nothing new goes into it, and what comes after the Stop is never marked: it waits,
@@ -8348,6 +8349,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.247 → 0.248 (every capped input that waits at the owner's Stop is dropped)
+§17.2: since 0.241 the owner's Stop drops an input of another session or a schedule's run capped
+below the session's mode (T39), but writes one capped at or above that mode into the agent's
+history; when the owner raised the mode to `allow_all` afterwards, the next turn found it there
+unhandled in the higher mode. The worker now drops every input with a cap below `allow_all` at the
+owner's Stop, with the same note to the agent, the owner's own message capped by the buffered
+`send` messages in front of it (T40) included; the reason and the note no longer speak of the
+session's mode. §7.1.1 follows. The protocol, the hub, the client and the macOS app are
+unchanged.
 
 ### 0.245 → 0.246 (Auto on a provider; an MCP server's form answers kept out of the history; `sudo` over ssh)
 #194: a session on a model provider in Auto had every call that needs Auto's safety check

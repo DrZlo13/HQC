@@ -357,7 +357,7 @@ export function Chat({
     // As the composer's list: not in the service session, which has no composer.
     quickMessages: project && !system
       ? {
-          has: (text) => (project.quick_messages ?? []).includes(text),
+          has: (text) => app.quickMessages(project).includes(text),
           add: (text) => app.addQuickMessage(project.id, text).catch((err: Error) => setNotice(`Not added to quick messages: ${err.message}`)),
         }
       : undefined,
@@ -1375,13 +1375,14 @@ export function Chat({
           giveSecret={!system && app.takesSecrets(info?.worker_id) ? (f) => app.api.giveSecret(sessionId, f) : undefined}
           quick={
             project && {
-              messages: project.quick_messages ?? [],
-              refresh: () => void app.refreshProject(project.id).catch(() => {}),
+              messages: app.quickMessages(project),
+              refresh: () => void Promise.all([app.refreshUserQuickMessages(), app.refreshProject(project.id)]).catch(() => {}),
               send: (text) => {
                 stick.current = true;
                 chat.send(text, []);
               },
-              settingsHref: `#/p/${project.id}/settings`,
+              settingsHref: '#/settings',
+              projectSettingsHref: `#/p/${project.id}/settings`,
             }
           }
         />
@@ -2115,10 +2116,17 @@ export function Composer({
   /** "Secret" beside attach (SPEC 0.147): only where the session's worker takes secrets. The
    *  answer's `note` goes into the text; the value goes nowhere else. */
   giveSecret?: (f: SecretFields) => Promise<SecretGiven>;
-  /** The project's quick messages: a button beside the field opens them, one press of a message
-   *  sends it (`send`) and leaves the field's text and files as they are. `settingsHref` is where
-   *  the list is edited. */
-  quick?: { messages: string[]; send: (text: string) => void; refresh: () => void; settingsHref: string };
+  /** The quick messages (the user's own, then the project's): a button beside the field opens
+   *  them, one press of a message sends it (`send`) and leaves the field's text and files as they
+   *  are. `settingsHref` is where the user's own list is edited, `projectSettingsHref` the
+   *  project's. */
+  quick?: {
+    messages: string[];
+    send: (text: string) => void;
+    refresh: () => void;
+    settingsHref: string;
+    projectSettingsHref: string;
+  };
 }) {
   const [text, setText] = useState(initial);
   const typed = useRef(false);
@@ -2406,10 +2414,14 @@ export function Composer({
             <li class="quick-edit">
               {quick.messages.length === 0 ? (
                 <>
-                  No quick messages yet — <a href={quick.settingsHref}>add them in project settings</a>
+                  No quick messages yet — add them in <a href={quick.settingsHref}>Settings</a> or in{' '}
+                  <a href={quick.projectSettingsHref}>project settings</a>
                 </>
               ) : (
-                <a href={quick.settingsHref}>Edit quick messages</a>
+                <>
+                  Edit quick messages: <a href={quick.settingsHref}>all projects</a> ·{' '}
+                  <a href={quick.projectSettingsHref}>this project</a>
+                </>
               )}
             </li>
           </ul>

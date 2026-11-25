@@ -6212,6 +6212,15 @@ button.ps-look {
   font-size: 15px;
 }
 
+/* The user's quick messages in Settings: the page's body lines its parts up at their own width,
+   so the list is stretched across it as the project settings' section is. */
+.settings-quick {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-self: stretch;
+}
+
 /* A quick message on a phone: its text across the card, Edit and Delete side by side under it. */
 .is-phone .quick-row {
   flex-direction: column;

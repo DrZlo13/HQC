@@ -92,14 +92,17 @@ pub async fn me(State(app): State<AppState>, user: CurrentUser) -> Json<api::Me>
         look: user.look,
         project_sort: user.project_sort,
         new_session_project_id: user.new_session_project_id,
+        quick_messages: user.quick_messages,
         limit_notice_percent: app.config.limits.limit_notice_percent,
     })
 }
 
-/// `PATCH /api/me` {timezone?, theme?, look?, project_sort?, new_session_project_id?}: an IANA
-/// name, the default zone of new schedules (SPEC §16); the app's base palette (T49); the client's
-/// look and the project bar's order; the user's own project a new session is quick-started in,
-/// another user's or a missing one `404` (SPEC §3 User).
+/// `PATCH /api/me` {timezone?, theme?, look?, project_sort?, new_session_project_id?,
+/// quick_messages?}: an IANA name, the default zone of new schedules (SPEC §16); the app's base
+/// palette (T49); the client's look and the project bar's order; the user's own project a new
+/// session is quick-started in, another user's or a missing one `404`; the user's own quick
+/// messages, the whole list replacing the stored one, refused as a project's list is (`400`)
+/// (SPEC §3 User).
 pub async fn patch_me(
     State(app): State<AppState>,
     mut user: CurrentUser,
@@ -108,6 +111,10 @@ pub async fn patch_me(
     // Checked before anything is stored: a refused project leaves the other fields as they were.
     let new_session_project = match b.new_session_project_id {
         Some(id) => Some(project_for(&app, &user, id).await?.id),
+        None => None,
+    };
+    let quick = match &b.quick_messages {
+        Some(list) => Some(quick_messages(list)?),
         None => None,
     };
     if let Some(tz) = b.timezone {
@@ -152,6 +159,14 @@ pub async fn patch_me(
         .execute(&app.db)
         .await?;
         user.new_session_project_id = Some(id);
+    }
+    if let Some(list) = quick {
+        sqlx::query("UPDATE users SET quick_messages = $2, updated_at = now() WHERE id = $1")
+            .bind(user.id)
+            .bind(&list)
+            .execute(&app.db)
+            .await?;
+        user.quick_messages = list;
     }
     Ok(me(State(app), user).await)
 }

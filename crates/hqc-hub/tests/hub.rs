@@ -1065,6 +1065,7 @@ async fn only_the_worker_owner_answers_an_mcp_servers_request() {
         look: Default::default(),
         project_sort: Default::default(),
         new_session_project_id: None,
+        quick_messages: Vec::new(),
     };
     let s = hqc_hub::db::session(&hub.app.db, sid.parse().unwrap())
         .await

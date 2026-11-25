@@ -1571,6 +1571,33 @@ export class AppState {
     this.changed();
   }
 
+  /** The user's own quick messages as the hub has them now: what another device changed since
+   *  `/api/me` was read. The other fields of `me` stay as this page has them, so an answer that
+   *  comes after a save of the theme, the look or the project order does not undo it. Returns
+   *  the hub's list itself: a page that does not know the user (its first `/api/me` failed)
+   *  still edits the list the hub has, not an empty one. */
+  async refreshUserQuickMessages(): Promise<string[]> {
+    const fresh = await this.api.me();
+    if (this.me && fresh.id === this.me.id) {
+      this.me = { ...this.me, quick_messages: fresh.quick_messages };
+      this.changed();
+    }
+    return fresh.quick_messages;
+  }
+
+  /** The user's own quick messages: the whole list replaces the stored one. */
+  async setUserQuickMessages(quick_messages: string[]): Promise<void> {
+    this.me = await this.api.setUserQuickMessages(quick_messages);
+    this.changed();
+  }
+
+  /** The quick messages a project's composer offers (SPEC §6): the user's own first, then the
+   *  project's, a text in both once, at its place in the user's list. */
+  quickMessages(project: Project): string[] {
+    const own = this.me?.quick_messages ?? [];
+    return [...own, ...(project.quick_messages ?? []).filter((m) => !own.includes(m))];
+  }
+
   /** Opens the new-session window of `newSessionProject()`; when the hub has not answered yet
    *  (a shortcut pressed while the page loads), as soon as it has. */
   openNewSessionInProject(): void {

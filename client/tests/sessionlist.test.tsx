@@ -227,7 +227,7 @@ function hubApi(order: { mode: ListMode; session_ids: string[] } = { mode: 'stat
 function makeApp(list = LIST, api = hubApi()) {
   const socket = { onState: () => () => {} } as unknown as HubSocket;
   const app = new AppState(api as unknown as Api, socket);
-  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null };
+  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null, quick_messages: [] };
   app.projects.set('p0', { id: 'p0', name: 'Personal', slug: 'personal', description: '', is_personal: true, color: 'slate', quick_messages: [], created_at: at(100) });
   app.projects.set('p1', { id: 'p1', name: 'physics-mp', slug: 'physics-mp', description: '', is_personal: false, color: 'blue', quick_messages: [], icon: { kind: 'emoji', value: '⚛️' }, created_at: at(90) });
   app.currentProjectId = 'p1';
@@ -1915,7 +1915,7 @@ describe('the project bar: search, menu, archive', () => {
     };
     const socket = { onState: () => () => {} } as unknown as HubSocket;
     const app = new AppState(api as unknown as Api, socket);
-    app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null };
+    app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null, quick_messages: [] };
     // The lists bring it, the search never opened.
     await act(async () => app.refreshSessions());
     expect(api.archivedProjects).toHaveBeenCalledTimes(1);
@@ -2593,7 +2593,7 @@ describe('favorites', () => {
 });
 
 describe('the list on a reload', () => {
-  const ME = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm' as const, look: 'spacious' as const, project_sort: 'custom' as const, new_session_project_id: null };
+  const ME = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm' as const, look: 'spacious' as const, project_sort: 'custom' as const, new_session_project_id: null, quick_messages: [] };
   /** A hub that has not answered yet. */
   const pending = () => new Promise<never>(() => {});
   /** A socket that has not connected; `state` plays its connect. */

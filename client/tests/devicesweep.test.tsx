@@ -20,7 +20,7 @@ import type { HubSocket, SessionSubscriber } from '../src/ws';
 
 const DAY = 24 * 3_600_000;
 let uid = 0;
-const meOf = (id: string): Me => ({ id, email: 'me@example.com', personal_project_id: 'p', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null });
+const meOf = (id: string): Me => ({ id, email: 'me@example.com', personal_project_id: 'p', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null, quick_messages: [] });
 const socket = { onState: () => {}, onRequests: () => {}, onSummary: () => {}, start: () => {}, subscribe: (_id: string, _s: SessionSubscriber) => () => {} } as unknown as HubSocket;
 const wire = (sid: string, seq: number) => ({
   session_id: sid,

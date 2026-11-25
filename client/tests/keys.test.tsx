@@ -109,7 +109,7 @@ const socket = { onState: () => () => {} } as unknown as HubSocket;
 function newApp(): AppState {
   const api = { workers: async () => [], pushKey: async () => null } as unknown as Api;
   const app = new AppState(api, socket);
-  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null };
+  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null, quick_messages: [] };
   return app;
 }
 

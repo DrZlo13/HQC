@@ -163,6 +163,78 @@ async fn the_project_sort_round_trips_on_the_user() {
     hub.finish().await;
 }
 
+/// The user's own quick messages (SPEC §3 User): kept on the user, the whole list replacing the
+/// stored one, refused as a project's list is, and a refused list stores nothing of its request.
+#[tokio::test]
+async fn the_quick_messages_round_trip_on_the_user() {
+    let hub = TestHub::start().await;
+    let (s, me) = hub.get("/api/me").await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["quick_messages"], json!([]), "the default");
+
+    let (s, me) = hub
+        .patch(
+            "/api/me",
+            json!({"quick_messages": ["What is going on?", "Merge"]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["quick_messages"], json!(["What is going on?", "Merge"]));
+    let (_, me) = hub.get("/api/me").await;
+    assert_eq!(
+        me["quick_messages"],
+        json!(["What is going on?", "Merge"]),
+        "stored, the same on every device"
+    );
+
+    // The whole list replaces the stored one; the other fields leave it alone.
+    let (s, me) = hub.patch("/api/me", json!({"look": "compact"})).await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["quick_messages"], json!(["What is going on?", "Merge"]));
+    let (s, me) = hub
+        .patch("/api/me", json!({"quick_messages": ["Merge"]}))
+        .await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["quick_messages"], json!(["Merge"]));
+
+    // A refused list is `400`, and stores nothing, nor anything else of its request.
+    let too_many: Vec<String> = (0..101).map(|i| format!("m{i}")).collect();
+    for bad in [
+        json!(["ok", "  "]),
+        json!(too_many),
+        json!(["x".repeat(10_001)]),
+    ] {
+        let (s, _) = hub
+            .patch(
+                "/api/me",
+                json!({"look": "spacious", "quick_messages": bad}),
+            )
+            .await;
+        assert_eq!(s, 400, "refused list of {} bytes", bad.to_string().len());
+    }
+    let (_, me) = hub.get("/api/me").await;
+    assert_eq!(me["quick_messages"], json!(["Merge"]));
+    assert_eq!(
+        me["look"], "compact",
+        "the look of a refused request is not stored"
+    );
+
+    // The limits themselves are allowed, and an empty list clears.
+    let at_limit: Vec<String> = (0..100).map(|i| format!("m{i}")).collect();
+    let (s, me) = hub
+        .patch("/api/me", json!({"quick_messages": at_limit}))
+        .await;
+    assert_eq!(s, 200, "{me}");
+    let (s, me) = hub
+        .patch("/api/me", json!({"quick_messages": ["x".repeat(10_000)]}))
+        .await;
+    assert_eq!(s, 200, "{me}");
+    let (s, me) = hub.patch("/api/me", json!({"quick_messages": []})).await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["quick_messages"], json!([]));
+    hub.finish().await;
+}
+
 /// The project a phone's floating button opens a new session in (SPEC §3 User): kept on the
 /// user, one of their own projects only, null again when that project is deleted.
 #[tokio::test]

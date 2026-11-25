@@ -373,6 +373,9 @@ describe('examples/wire', () => {
     expect(parseMe(load('api.me.json')).new_session_project_id).toBe('0199f3a2-7c10-7000-8000-0000000000d1');
     expect(parseMe({ ...(load('api.me.json') as object), new_session_project_id: undefined }).new_session_project_id).toBeNull();
     expect(parseMe({ ...(load('api.me.json') as object), new_session_project_id: null }).new_session_project_id).toBeNull();
+    // The user's own quick messages: none from a hub before them.
+    expect(parseMe(load('api.me.json')).quick_messages).toEqual(['What is going on?', 'Merge']);
+    expect(parseMe({ ...(load('api.me.json') as object), quick_messages: undefined }).quick_messages).toEqual([]);
     const w = parseWorkspace(load('api.workspace.json'));
     expect(p.default_workspace_id).toBe(w.id);
     expect(w).toMatchObject({ project_id: p.id, kind: 'dir', label: 'home-mac' });

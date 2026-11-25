@@ -9,6 +9,7 @@ import { pushStatus, subscribePush, type PushStatus } from '../push';
 import { BASES, LOOKS, THEMES } from '../theme';
 import { WEB_SEARCHES } from '../websearch';
 import { projectName } from './Appearance';
+import { QuickMessagesEditor } from './QuickMessagesEditor';
 import { ProvidersSection } from './Providers';
 import { McpServersSection } from './McpServers';
 import { SkillsSection } from './Skills';
@@ -112,7 +113,7 @@ function KeyRow({
 }
 
 /** `back`: where the arrow goes, the address before Settings (the list when there was none). */
-export function Settings({ app, back = '#/' }: { app: AppState; back?: string }) {
+export function Settings({ app, back = '#/', phone }: { app: AppState; back?: string; phone?: boolean }) {
   const [push, setPush] = useState<PushStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -290,6 +291,20 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
           session in this project. The same on every device.
         </p>
         {newSessionError && <div class="error-text">{newSessionError}</div>}
+
+        <h2>Quick messages</h2>
+        <p class="muted">
+          Texts sent to the agent with one press from the button beside the message field, in every
+          project, before the project's own. The same on every device.
+        </p>
+        <div class={`settings-quick ${phone ? 'is-phone' : ''}`}>
+          <QuickMessagesEditor
+            id="user"
+            list={app.me?.quick_messages ?? []}
+            read={async () => app.refreshUserQuickMessages()}
+            store={(list) => app.setUserQuickMessages(list)}
+          />
+        </div>
 
         <h2>Web search</h2>
         <div class="seg-group settings-web-search" role="group" aria-label="Web search">

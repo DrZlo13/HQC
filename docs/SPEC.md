@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.244, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.245, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -215,7 +215,7 @@ version, load_session, resume, image, isolation}]` — the result of each agent'
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
 `environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?}}`,
 never the values of `env`; `default` is implied), `env_bindings[]` (`{path, environment}`; the
-Hermes profile in iteration 8),
+Hermes profile in iteration 9),
 `allow_foreign_sessions`, `idle_timeout`, `system_session_id` (§10.2), `machine_hash` (since 0.23:
 the machine fingerprint from enrollment and the last `hello`, §5.1; not part of the API worker object),
 `session_secrets` (since 0.147, hub migration `0044`: its `worker.toml` has `session_secrets = true`,
@@ -3517,7 +3517,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
 - `hqc_attach(path?, content?, name?, kind?, caption?)` — upload a file as an artifact
   to the current session; `path` for runtimes with a file system, `content` for the bare model.
   Since 0.34 (T31) the worker's MCP server lists `hqc_attach(path, name?, kind?, caption?)`;
-  `content` comes with the bare model (iteration 8) and is refused until then
+  `content` comes with the bare model (iteration 9) and is refused until then
   (`invalid_args`). The worker daemon does the file part itself, trusting neither the hub nor
   the agent's path (§2.1): `path` is absolute or relative to the session's working directory;
   its canonical form (symlinks resolved) must lie inside the session's workspace and inside
@@ -3535,7 +3535,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   live_attach.rs`): the event lands between the call's `tool.call` and `tool.result`.
 - `hqc_send(text, session?)` — a message to another session without waiting for a reply;
   without `session`, to the owner's personal assistant session. Since 0.35 (T32): `session`
-  is required until the personal session exists (iteration 8); the result is `{to,
+  is required until the personal session exists (iteration 9); the result is `{to,
   delivery}`, `to` — the target's address, `delivery` — `queued` (the input queue, the
   target wakes on sends; by default since 0.55) or `buffered` (the send buffer, §7.1); since 0.47 (T42) also
   `with_reply`: the send goes back with the reply to the target's open ask (§7.1). Since 0.54
@@ -3589,7 +3589,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   cap of its chain (§7.1), and so does the spawned session's first turn. `project` — a slug or an id
   of the owner's project; `workspace` — an id, a label or a path of a workspace of that
   project (else `not_found`), absent — the project's `default_workspace_id` (none:
-  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 8 (else
+  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 9 (else
   `invalid_args`); `model` absent — the calling session's model (a cheap spawner does not
   start an expensive agent by default), present — checked as in §6. `prompt` (not blank)
   becomes a `peer.message` with `mode: send` from the calling session in the new session's
@@ -3942,7 +3942,7 @@ to it (`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}`
 server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
 Codes added in 0.35: `timeout` (no reply in time), `limit_exceeded` (a chain limit, §7.1),
 `worker_restart` (the asking worker restarted; never seen by the agent, whose call died).
-Until grants (iteration 9) every tool works only on the calling session's owner's own
+Until grants (iteration 10) every tool works only on the calling session's owner's own
 projects and sessions; anything else is `not_found`.
 
 ### 7.1 Semantics of send and ask **[decision]**
@@ -7051,7 +7051,7 @@ from the `fs.list_dirs` tree or its path is typed in, the worker checks it with 
 the hub stores the canonical path. Since 0.64, when the folder is missing (`400
 path_not_found`) the form offers "Create the folder and add" in place of "Add" (until the path
 or the worker changes), which sends `create: true`. Only the worker's owner can add a workspace to a worker (until
-the sharing of iteration 9 a worker has no other users), so there is no confirmation through the
+the sharing of iteration 10 a worker has no other users), so there is no confirmation through the
 service session yet; if the worker is offline, the workspace is not created. Since 0.58 (T45)
 `clone`: the client gives the URL, the parent folder and a name, the hub checks the parent and
 stores the workspace `creating`, the worker checks the new path itself and clones into it in its
@@ -7110,7 +7110,7 @@ The worker's local config is the only source of truth for:
   old file is ignored with a warning in the log at start;
 - `environments{}` — named environments (`[environments.<name>]`, below; since 0.56, T43);
 - `env_bindings[]` — records `{path, environment, hermes_profile?, foreign_profile?}`
-  (`[[env_bindings]]`; the profiles are iteration 8). A binding is looked up **by the workspace
+  (`[[env_bindings]]`; the profiles are iteration 9). A binding is looked up **by the workspace
   path** (not by the session's `cwd`), canonical (symlinks resolved; the binding's own path is
   resolved again at every lookup, so a binding through a symlink names its target); the longest
   binding that equals or contains the path wins, compared by path components (`/a/b` does not
@@ -7444,7 +7444,7 @@ it finds commands, their output and word forms and puts the best match first:
 - **Configuration `hqc`.** A copy of `russian` whose Latin words go to an English and the rest
   to a Russian Snowball stemmer, both without stop words, so every word stays searchable and
   "переезд" finds "переезда", "deploy" finds "deployed".
-- **Whose.** Until grants (iteration 9): the user's (the calling session's owner's) sessions,
+- **Whose.** Until grants (iteration 10): the user's (the calling session's owner's) sessions,
   archived ones included and marked `archived: true`, the workers' service sessions left out and
   (since 0.172) of a room's agents' sessions their inputs from the room, which the room has
   (§7.1.1); since 0.175, for an agent of a room (`hqc_search_history`, §7) also the room and
@@ -8025,7 +8025,7 @@ is not asked, does not see the question or the answer, and does not work on it.
    a session started in VS Code (live test `live_takeover`; checked by hand through the UI on a phone on 2026-10-25).
    Closed on 2026-10-25.
 3. hqc MCP: attach, send, ask, spawn, list, search, schedule; `mcp.call` frames;
-   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 9).
+   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 10).
    Tasks: `docs/ITERATION-3.md`. Criterion checked by hand on the production hub on 2026-10-31.
    Closed on 2026-10-31.
 4. Workspaces: ~~clone~~ (0.58, T45), ~~worktree~~ (0.60, T46), ~~ephemeral~~ (0.61, T47). Environments and bindings on the worker. Moved
@@ -8046,14 +8046,20 @@ is not asked, does not see the question or the answer, and does not work on it.
    once, for all projects or chosen ones; a session's agent gets it under its own name
    (`mcp__<name>__<tool>`) through a stdio relay of the worker, and the hub makes the calls
    with the token or OAuth sign-in it keeps, so no worker, agent or transcript sees it; only an
-   environment with `hub_mcp = true` takes them (§14). MCP servers that run on the machine and
-   skills from the hub (#62) come after it. Tasks: `docs/ITERATION-7.md`.
-8. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
+   environment with `hub_mcp = true` takes them (§14). MCP servers that run on the machine come
+   after it. Tasks: `docs/ITERATION-7.md`.
+8. Skills from the hub (since 0.245, #62): the owner uploads a skill (a folder or a `.zip`)
+   once, for all projects or chosen ones; the worker fetches it by its hash, puts it into a
+   plugin folder of its own and starts the agent with `--plugin-dir`, so the agent has it as
+   `hqc:<name>` (and `/<name>`) on every worker; the hub's copy wins over a same-named skill of
+   the machine; a skill with `hooks` is refused by the hub and the worker; only an environment
+   with `hub_skills = true` takes them (§14). Tasks: `docs/ITERATION-8.md`.
+9. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
    worker; the bare model; the personal assistant session (moved from 3: its default runtime is
    the bare model, §8.3), until then `hqc_send` needs `session`.
-9. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
+10. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
    (0.38, T35, with `hqc_schedule`).
-10. Tauri, native notifications, several agents in one session.
+11. Tauri, native notifications, several agents in one session.
 
 ## 20. Hosting and security
 
@@ -8244,6 +8250,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.244 → 0.245 (iteration 8: skills from the hub)
+§19: a new iteration 8, skills the owner uploads once on the hub (#62); the generic ACP adapter
+becomes iteration 9, sharing 10, Tauri 11, and the references to them follow. §5.3
+`session.start.skills`, `GET /worker/skills/{sha256}`, §6 `/api/skills`, §8.1 `--plugin-dir`, §14
+`hub_skills`, §20. A skill travels as names and hashes; the worker fetches each archive once per
+hash, builds a plugin folder of its own (`hqc`) and starts the agent with `--plugin-dir`, the
+hub's copy winning over a same-named skill of the machine (`skillOverrides`). A skill with
+`hooks` is refused by the hub and the worker, since hooks run outside the worker's `deny`.
+Migration `0058`.
 
 ### 0.243 → 0.244 (the agent is told of its background work that runs long)
 A background command or subagent of the agent that ran for hours was known only to the rows above

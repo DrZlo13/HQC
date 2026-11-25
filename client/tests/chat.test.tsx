@@ -3411,6 +3411,80 @@ describe('history', () => {
     expect(scroller.scrollTop).toBe(3000);
   });
 
+  it('shows the button to the bottom while scrolled up past two screens; its press goes to the bottom and follows it again', async () => {
+    const watched = new Map<Element, () => void>();
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        cb: () => void;
+        constructor(cb: () => void) {
+          this.cb = cb;
+        }
+        observe(el: Element) {
+          watched.set(el, this.cb);
+        }
+        disconnect() {}
+      },
+    );
+    let height = 5000;
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? height : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? 600 : 0;
+    });
+    const { app } = setup('idle', { history: long });
+    await mount(app);
+    const scroller = root.querySelector<HTMLElement>('.timeline')!;
+    const button = () => root.querySelector<HTMLButtonElement>('.btn-to-bottom');
+    expect(scroller.scrollTop).toBe(5000);
+    expect(button()).toBeNull();
+    // Up by less than 80 px the feed still follows its bottom: no button.
+    for (const top of [4400, 4350]) {
+      await act(async () => {
+        scroller.scrollTop = top;
+        scroller.dispatchEvent(new Event('scroll'));
+      });
+    }
+    expect(button()).toBeNull();
+    // Let go of the bottom, but less than two screens (1200 px) above it: still no button.
+    await act(async () => {
+      scroller.scrollTop = 4000;
+      scroller.dispatchEvent(new Event('scroll'));
+    });
+    expect(button()).toBeNull();
+    // The feed grows under the reader with no scroll (an answer is written): its bottom is now
+    // more than two screens down.
+    height = 6000;
+    await act(async () => watched.get(scroller)?.());
+    expect(scroller.scrollTop).toBe(4000);
+    expect(button()).not.toBeNull();
+    // A press does not take the focus from the input.
+    const down = new Event('pointerdown', { bubbles: true, cancelable: true });
+    button()!.dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(true);
+    await act(async () => button()!.click());
+    expect(scroller.scrollTop).toBe(6000);
+    expect(button()).toBeNull();
+    // The feed grows again: the chat follows its bottom.
+    height = 6600;
+    await act(async () => watched.get(scroller)?.());
+    expect(scroller.scrollTop).toBe(6600);
+    // Scrolled up past two screens and back down by hand, the button comes and goes.
+    for (const top of [6000, 3000]) {
+      await act(async () => {
+        scroller.scrollTop = top;
+        scroller.dispatchEvent(new Event('scroll'));
+      });
+    }
+    expect(button()).not.toBeNull();
+    await act(async () => {
+      scroller.scrollTop = 5990;
+      scroller.dispatchEvent(new Event('scroll'));
+    });
+    expect(button()).toBeNull();
+  });
+
   it('shows the newest page at once and loads the older history behind it', async () => {
     tall();
     const { api, app } = setup('idle', { history: long });
@@ -3831,6 +3905,63 @@ describe('history', () => {
         await tick(450);
         expect(blocks().length).toBe(120);
         expect(scroller.scrollTop).toBe(6020);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('in WebKit the button to the bottom pressed in a fling is not undone by the rest of it; the feed goes down as it settles', async () => {
+      const scroller = await feedOf(() => 5000);
+      await scrollTo(scroller, 4400);
+      const button = () => root.querySelector<HTMLButtonElement>('.btn-to-bottom');
+      clock();
+      try {
+        await on(scroller, touch('touchstart', 100));
+        await on(scroller, touch('touchmove', 400));
+        await scrollTo(scroller, 3000);
+        await on(scroller, touch('touchend'));
+        await scrollTo(scroller, 2000);
+        expect(button()).not.toBeNull();
+        await act(async () => button()!.click());
+        expect(button()).toBeNull();
+        expect(scroller.scrollTop).toBe(2000);
+        // The fling coasts on up under the button: WebKit would drop a position set now.
+        await tick(50);
+        await scrollTo(scroller, 1500);
+        await tick(50);
+        await scrollTo(scroller, 1200);
+        expect(button()).toBeNull();
+        expect(scroller.scrollTop).toBe(1200);
+        await tick(450);
+        expect(scroller.scrollTop).toBe(5000);
+        expect(button()).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a wheel up right after the button to the bottom is a scroll of its own, not taken back to the bottom as it settles', async () => {
+      vi.spyOn(Object.getPrototypeOf(navigator), 'userAgent', 'get').mockReturnValue(CHROMIUM);
+      const scroller = await feedOf(() => 5000);
+      await scrollTo(scroller, 4400);
+      const button = () => root.querySelector<HTMLButtonElement>('.btn-to-bottom');
+      clock();
+      try {
+        await on(scroller, new WheelEvent('wheel', { deltaY: -100 }));
+        await scrollTo(scroller, 2000);
+        await act(async () => button()!.click());
+        expect(scroller.scrollTop).toBe(5000);
+        // The browser's scroll event for the press, then a new wheel up before the first scroll
+        // settled.
+        await scrollTo(scroller, 5000);
+        await tick(100);
+        await on(scroller, new WheelEvent('wheel', { deltaY: -100 }));
+        await scrollTo(scroller, 3500);
+        await tick(100);
+        await scrollTo(scroller, 2500);
+        await tick(450);
+        expect(scroller.scrollTop).toBe(2500);
+        expect(button()).not.toBeNull();
       } finally {
         vi.useRealTimers();
       }

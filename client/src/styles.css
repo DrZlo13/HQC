@@ -3053,6 +3053,37 @@ button.btn-mode-pill.perm-allow-all:hover,
   padding: 28px 28px 32px;
 }
 
+/* The timeline, and the button to the bottom in the middle of its bottom edge while the feed does
+   not follow its bottom (Chat.tsx): the send button's corners, wider than it is high. Under the
+   menus of the header and the composer's popups. */
+.timeline-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.btn-to-bottom {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  z-index: 5;
+  transform: translateX(-50%);
+  width: 56px;
+  height: 28px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text2);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--shade) 35%, transparent);
+}
+:root.feed-column .chat:not(.chat-phone) .btn-to-bottom {
+  width: 48px;
+  height: 24px;
+}
+.chat-phone .btn-to-bottom {
+  bottom: 12px;
+}
+
 .feed {
   width: 100%;
   max-width: 780px;

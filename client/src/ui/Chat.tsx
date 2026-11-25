@@ -432,6 +432,14 @@ export function Chat({
     );
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // The button to the bottom: shown while the feed does not follow its bottom (a scroll up or a
+  // jump to an event let go of it) and the bottom is more than two screens down; a press goes to
+  // the bottom and follows it again.
+  const [away, setAway] = useState(false);
+  const awayNow = () => {
+    const el = scroller.current;
+    return !!el && !stick.current && el.scrollHeight - el.scrollTop - el.clientHeight > 2 * el.clientHeight;
+  };
   // The last scroll position: only a move up lets go of the bottom. A scroll event can come
   // after the feed grew (an image loaded) and before it is followed: far from the bottom then,
   // but the user did not leave it.
@@ -473,6 +481,9 @@ export function Chat({
   /** `goesUp`: the input's direction; a scroll event without an input keeps the last one. */
   const userScrolled = (goesUp?: boolean) => {
     if (goesUp !== undefined) upward.current = goesUp;
+    // An input up is a scroll of its own, not the rest of the one the button to the bottom was
+    // pressed in (a touch that only stops a fling gives no direction).
+    if (goesUp) goingDown.current = false;
     userAt.current = performance.now();
     clearTimeout(settle.current);
     // The timer is the end of the scroll (a later input or scroll event would have reset it),
@@ -483,12 +494,28 @@ export function Chat({
       userAt.current = -Infinity;
       // The next scroll gives its own direction with its first input.
       upward.current = false;
+      goingDown.current = false;
       // A render with nothing held would pull a feed scrolled a little up, still counted at
       // its bottom, back down.
       if (!heldBack.current && !more.current) return;
       heldBack.current = false;
       grow((n) => n + 1);
     }, SCROLL_SETTLE_MS);
+  };
+  // The button to the bottom pressed while the user's scroll still goes on (a fling coasting
+  // under it): the rest of that scroll does not let go of the bottom, and the feed goes there
+  // once it settles. In WebKit, where a position set in the scroll is dropped, only then.
+  const goingDown = useRef(false);
+  const toBottom = () => {
+    const el = scroller.current;
+    if (!el) return;
+    stick.current = true;
+    setAway(false);
+    if (userScrolling()) {
+      goingDown.current = true;
+      heldBack.current = true;
+    }
+    if (!holding()) el.scrollTop = el.scrollHeight;
   };
   // Blocks added above keep what is on screen in place: the distance to the bottom stays.
   const keep = useRef<number | undefined>(undefined);
@@ -629,6 +656,8 @@ export function Chat({
     const el = scroller.current;
     if (!el || !feed.current || typeof ResizeObserver === 'undefined') return;
     const o = new ResizeObserver(() => {
+      // Grown while scrolled up, the feed may put its bottom past two screens: the button shows.
+      setAway(awayNow());
       if (!stick.current) return;
       if (userScrolling()) heldBack.current = true;
       else el.scrollTop = el.scrollHeight;
@@ -1184,54 +1213,72 @@ export function Chat({
           <MoveSession app={app} session={info} onDone={() => setMoving(false)} />
         </div>
       )}
-      <div
-        class="timeline"
-        ref={scroller}
-        onScroll={(e) => {
-          const el = e.currentTarget as HTMLDivElement;
-          // A scroll event while the user's scroll goes on is its momentum or its bounce.
-          const user = userScrolling();
-          if (user) userScrolled();
-          const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-          const range = el.scrollHeight - el.clientHeight;
-          if (near || (el.scrollTop < lastTop.current && ((user && upward.current) || range === lastRange.current))) stick.current = near;
-          lastTop.current = el.scrollTop;
-          lastRange.current = range;
-          if (el.scrollTop < 400 && start > 0) {
-            if (holding()) more.current = true;
-            else showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
-          } else if (loaded && el.scrollTop < 400 && t.olderFrom > 0) {
-            asked.current = true;
-            void chat.loadOlder();
-          }
-        }}
-      >
+      {/* The button to the bottom stands in the middle of the feed's bottom edge, outside its scroll. */}
+      <div class="timeline-wrap">
         <div
-          class="feed"
-          ref={feed}
-          onClick={(e) => {
-            const quote = quoteClick(e, e.currentTarget);
-            if (quote) void followQuote(quote);
+          class="timeline"
+          ref={scroller}
+          onScroll={(e) => {
+            const el = e.currentTarget as HTMLDivElement;
+            // A scroll event while the user's scroll goes on is its momentum or its bounce.
+            const user = userScrolling();
+            if (user) userScrolled();
+            const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+            const range = el.scrollHeight - el.clientHeight;
+            if (!goingDown.current && (near || (el.scrollTop < lastTop.current && ((user && upward.current) || range === lastRange.current))))
+              stick.current = near;
+            setAway(awayNow());
+            lastTop.current = el.scrollTop;
+            lastRange.current = range;
+            if (el.scrollTop < 400 && start > 0) {
+              if (holding()) more.current = true;
+              else showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
+            } else if (loaded && el.scrollTop < 400 && t.olderFrom > 0) {
+              asked.current = true;
+              void chat.loadOlder();
+            }
           }}
         >
-          {/* The empty feed's note in its middle: the first page on its way, or no requests
-              once it is in (before, the feed has no items either). */}
-          {!loaded && (
-            <div class="feed-note">
-              <Loading center />
-            </div>
-          )}
-          {chat.loadingOlder && start === 0 && (
-            <div class="feed-older">
-              <Loading />
-            </div>
-          )}
-          <FeedBlocks blocks={start ? blocks.slice(start) : blocks} actions={actions} swipe />
-          {requestsOnly && loaded && items.length === 0 && <div class="feed-note">No requests</div>}
-          {t.streaming && <StreamingMessage text={t.streaming} />}
-          <FeedBlocks blocks={under} actions={actions} swipe />
-          {!system && <WaitedRequests app={app} sessionId={sessionId} />}
+          <div
+            class="feed"
+            ref={feed}
+            onClick={(e) => {
+              const quote = quoteClick(e, e.currentTarget);
+              if (quote) void followQuote(quote);
+            }}
+          >
+            {/* The empty feed's note in its middle: the first page on its way, or no requests
+                once it is in (before, the feed has no items either). */}
+            {!loaded && (
+              <div class="feed-note">
+                <Loading center />
+              </div>
+            )}
+            {chat.loadingOlder && start === 0 && (
+              <div class="feed-older">
+                <Loading />
+              </div>
+            )}
+            <FeedBlocks blocks={start ? blocks.slice(start) : blocks} actions={actions} swipe />
+            {requestsOnly && loaded && items.length === 0 && <div class="feed-note">No requests</div>}
+            {t.streaming && <StreamingMessage text={t.streaming} />}
+            <FeedBlocks blocks={under} actions={actions} swipe />
+            {!system && <WaitedRequests app={app} sessionId={sessionId} />}
+          </div>
         </div>
+        {away && (
+          <button
+            type="button"
+            class="icon-btn btn-to-bottom"
+            aria-label="To the bottom of the chat"
+            title="To the bottom"
+            // A press does not take the focus from the input (on a phone, the keyboard stays).
+            onPointerDown={(e) => e.preventDefault()}
+            onClick={toBottom}
+          >
+            <IconChevronDown size={16} />
+          </button>
+        )}
       </div>
       {notice && (
         <div class="notice" role="alert" onClick={() => setNotice(null)}>

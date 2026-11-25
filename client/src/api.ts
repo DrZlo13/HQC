@@ -319,21 +319,43 @@ export class Api {
   ) {}
 
   /** `body`: JSON, or `FormData` sent as multipart (the browser sets its content type).
-   *  `keepalive`: the request outlives the page (sent while it is being left). */
-  private async req(method: string, path: string, body?: unknown, keepalive = false): Promise<unknown> {
-    return (await this.send(method, path, body, keepalive)).data;
+   *  `keepalive`: the request outlives the page (sent while it is being left). `redirect`:
+   *  `manual` for `/api/me`, see `send`. */
+  private async req(
+    method: string,
+    path: string,
+    body?: unknown,
+    keepalive = false,
+    redirect?: RequestRedirect,
+  ): Promise<unknown> {
+    return (await this.send(method, path, body, keepalive, redirect)).data;
   }
 
-  /** `req` with the answer's status. */
-  private async send(method: string, path: string, body?: unknown, keepalive = false): Promise<{ status: number; data: unknown }> {
+  /** `req` with the answer's status. A redirect comes back only with `redirect: 'manual'`, and
+   *  then it is a sign-in proxy's answer to a signed-out user (Cloudflare Access, oauth2-proxy),
+   *  not the hub's: it fails as `401`, as the hub's own answer would (SPEC §6). Followed, it
+   *  would lead to a sign-in page on another origin, which `fetch` cannot read, and fail as
+   *  offline. */
+  private async send(
+    method: string,
+    path: string,
+    body?: unknown,
+    keepalive = false,
+    redirect?: RequestRedirect,
+  ): Promise<{ status: number; data: unknown }> {
     const form = typeof FormData !== 'undefined' && body instanceof FormData;
     const res = await this.fetchImpl(this.base + path, {
       method,
       credentials: 'include',
       ...(keepalive ? { keepalive } : {}),
+      ...(redirect ? { redirect } : {}),
       headers: body === undefined || form ? undefined : { 'content-type': 'application/json' },
       body: body === undefined ? undefined : form ? (body as FormData) : JSON.stringify(body),
     });
+    // A browser gives an opaque answer with status 0; a fetch outside one, the 3xx itself.
+    if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+      throw new ApiError(401, 'Signed out: reload the page to sign in');
+    }
     const text = await res.text();
     let data: unknown = undefined;
     if (text) {
@@ -358,7 +380,7 @@ export class Api {
   }
 
   async me(): Promise<Me> {
-    return parseMe(await this.req('GET', '/api/me'));
+    return parseMe(await this.req('GET', '/api/me', undefined, false, 'manual'));
   }
 
   /** The default zone of new schedules (SPEC §16). */

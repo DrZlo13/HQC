@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.250, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.251, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -7774,10 +7774,10 @@ started by a `send` or capped to `ask` or `auto` takes what may join (a capped t
 lower mode, which only makes it safer). The agent must also have no open `approval` or
 `clarify`. A person's input that carries buffered sends of other sessions (`peer_prefix`, §7.1)
 may join: the cap of §7.1 caps it whenever one of them comes from a session in `ask` or (since
-0.129) `auto`, and a capped person's input never joins. The hub honours `joined` only for a
-`user.message` without `schedule_id`, a room's input to its agent (since 0.172), which the
-worker gets without `peer` (§7.1.1), and (since 0.174) a `peer.message` of mode `send` without
-`schedule_id`; a `joined` on any other input is the worker's mistake, logged, not kept, and the
+0.129) `auto`, and the worker never writes a capped person's input into a running turn. The hub
+honours `joined` only for a `user.message` without `schedule_id`, a room's input to its agent
+(since 0.172), which the worker gets without `peer` (§7.1.1), and (since 0.174) a `peer.message`
+of mode `send` without `schedule_id`; a `joined` on any other input is the worker's mistake, logged, not kept, and the
 input's turn opens (since 0.71). Since 0.112 the hub keeps an honoured one on the message,
 `payload.joined: true` (§4) and, since 0.221, `payload.joined_after`, where the agent took it
 (§4, §6), and sends them with the `delivery` frame (§6); the client marks the first line of a person's message with an icon before the time, "Joined the turn" its tooltip (since 0.178; the words in the line before; a send's bubble has no such note).
@@ -7802,7 +7802,16 @@ after the owner raised the mode during the turn before, it lowers the runtime to
 The same holds for an input sent during a turn the CLI began by itself after a background task
 (since 0.161 it leaves that turn's last text held for its `result`, §8.1); since 0.71
 `session.stop` interrupts such
-a turn too (the adapter knows it from the CLI's `system/init` with no input of hqc's). An input
+a turn too (the adapter knows it from the CLI's `system/init` with no input of hqc's). With no turn
+of hqc's running, the worker gives such an input as a turn of its own; when the CLI takes it into
+the turn it began (the echo comes before that turn's `result`), since 0.251 the worker acks it
+`joined: true` when the hub honours `joined` on it (no `schedule_id`; no `peer`, or a `send`; a
+slash command or a capped input too: the worker gave it as a turn of its own, in its cap's mode,
+and the CLI took it into its turn), so the hub keeps its `joined_after` and the feed stands it
+where the agent took it; an `hqc_ask` or a run of a schedule taken so gets a plain `ack`. The
+CLI's `result` still ends that turn, and an input the CLI runs after it gets a plain `ack`. Before
+0.251 both got a plain `ack`, and the message stood at its own `seq`, above the steps the agent
+made before it took it. An input
 the CLI cancels after a `session.stop` (a carried input on a second Stop) fails, not retryable,
 instead of going back to the queue: the person cancelled it. Since 0.231 the owner's own Stop of a
 turn that runs (`session.stop {quiet: true}`: the stop button, a room's Stop; a pause's stop is none
@@ -8356,6 +8365,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.250 → 0.251 (a message taken into a turn the runtime began by itself joined it)
+§17.2: while Claude Code ran a turn it began by itself (after a background task's notice), the
+worker gave the owner's message as a turn of its own; the CLI took it into its running turn, and
+the worker sent a plain `ack`. The hub kept no `joined_after`, and the feed showed the message where
+it was sent, above the steps the agent made before it took it. The adapter now says whether it took
+an input into a turn already running (`AdapterEvent::InputAccepted.joined`: the echo came during the
+CLI's own turn), and the worker acks such an input `joined: true` when the hub honours `joined` on
+it (a person's, a room's, a `send`, none a schedule's run); an `hqc_ask` or a schedule's run taken
+so keeps its plain `ack`. The protocol, the
+hub and the client are unchanged.
 
 ### 0.249 → 0.250 (a message taken into a turn that was lost is not left waiting at the bottom)
 The runtime ran a turn by itself, took the owner's message into it (the worker had written it as

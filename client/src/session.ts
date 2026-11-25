@@ -171,6 +171,7 @@ export class ChatSession {
     const run = ++this.run;
     this.isOpen = true;
     this.olderFailed = false;
+    void this.cache.touch(this.id);
     const kept = this.loaded;
     try {
       await this.load();
@@ -259,6 +260,15 @@ export class ChatSession {
   private store(raws: unknown[], resent = false): void {
     if (this.forgotten) return;
     void (resent ? this.cache.update(this.id, raws) : this.cache.put(this.id, raws));
+  }
+
+  /** The device's copies were deleted: what the subscription brought and is not written yet
+   *  stays out of the new ones. The chat goes on keeping what comes after. */
+  dropUnwritten(): void {
+    clearTimeout(this.keepTimer);
+    this.keepTimer = undefined;
+    this.unkept = [];
+    this.resent = [];
   }
 
   /** The session was deleted: nothing of it reaches the device from now on, including what

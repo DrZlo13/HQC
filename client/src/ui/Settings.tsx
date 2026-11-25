@@ -47,11 +47,18 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
   const [newSessionError, setNewSessionError] = useState<string | null>(null);
   const [lookError, setLookError] = useState<string | null>(null);
   const [workers, setWorkers] = useState<WorkerInfo[] | null>(null);
+  const [forgetting, setForgetting] = useState<'idle' | 'busy' | 'done'>('idle');
 
   useEffect(() => {
     pushStatus().then(setPush, () => setPush('unsupported'));
     app.api.workers({ includeRevoked: true }).then(setWorkers, () => setWorkers(null));
   }, [app]);
+
+  const forgetDevice = async () => {
+    setForgetting('busy');
+    await app.forgetDevice();
+    setForgetting('done');
+  };
 
   const revoke = async (w: WorkerInfo) => {
     if (!confirm(`Revoke the token of worker “${w.name}”? The machine will have to be enrolled again.`)) return;
@@ -240,6 +247,12 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
           </button>
         )}
         {error && <div class="error-text">{error}</div>}
+
+        <h2>This device</h2>
+        <p class="muted">The copies of chats and attachments this device keeps, so that chats open without downloading them again.</p>
+        <button type="button" class="btn" disabled={forgetting !== 'idle' || !app.deviceUser()} onClick={forgetDevice}>
+          {forgetting === 'done' ? 'Forgotten' : 'Forget this device'}
+        </button>
 
         <h2>Workers</h2>
         {workers && workers.length > 0 && (

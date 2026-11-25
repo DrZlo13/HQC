@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.239, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.240, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2442,7 +2442,10 @@ its alias and whose submenu holds its versions, the versions since 0.168; "Anoth
 providers its worker allows; picking one in a chat asks once ("The agent restarts on …"), and a
 Claude model picked there leaves the provider in the same `PATCH`; a provider session's chat
 header names the provider instead of the model and shows no cost, which the CLI computes at a
-made-up rate for a model it does not know; and
+made-up rate for a model it does not know; "This device" (since 0.240) has "Forget this device",
+which deletes the copies of chats and attachments this device keeps for the user (§6) and then
+reads "Forgotten"; it is off while no user is known (before `/api/me` answers, with none stored on
+the device); and
 "Workers" lists a line per worker: its online dot, name, system (macOS, Linux, Windows), status
 and "Revoke", or "Delete" for a revoked one. The project settings (`#/p/<id>/settings`, "Project
 settings…" in the project's menu, below) have Appearance (the "Project appearance" dialog: the
@@ -3267,7 +3270,22 @@ drops the copy, and the chat shows the hub's page. The copy is the user's: a cha
 `/api/me` answers waits for it. A session the hub answers `404` for is forgotten; one deleted from
 this client, a room's agents with their room and the sessions of a deleted project are forgotten
 with the attachments their copies refer to (`artifact_ids`, `artifact_id`, as the hub's cleanup
-counts them, §12). A failure of the browser's storage leaves the chat as it is without the copy. An
+counts them, §12). Since 0.240 the copies leave the device on their own too. When `/api/me`
+answers `401` or `403` (signed out) the client deletes both databases of the user who signed in
+last on this device (whose id it keeps in `localStorage` `hqc-device-user`), and when another user
+signs in, the previous user's; offline or a hub error keeps them. "Forget this device" in Settings
+deletes the user's two databases; a chat held in memory keeps writing what comes after, not what it
+had not written yet. At most once an hour, after the lists are loaded, the client deletes the copies
+of the sessions the hub no longer lists (their chats forget, with the attachments their copies
+refer to), then the copy of a session and the bytes of an attachment not used for 30 days (a
+session is used when its chat opens, an attachment when it is shown, noted at most once an hour),
+then the least recently used while all copies take more than 200 MB (a session's events counted as
+their JSON, an attachment's bytes as stored). The copy of a chat that is open stays, and counts. A
+copy made before 0.240 has no note of its use and goes at the first clean-up. Another tab that
+deletes a database or opens it at a newer version switches the cache of this tab off until it
+reloads, so a tab of the previous user does not write the copies again; while a deletion of this
+tab's waits behind another tab the cache is off, and the deletion is not waited for. A failure of
+the browser's storage leaves the chat as it is without the copy. An
 older page the copy holds with an input still `pending` in it is taken from the hub: the input may
 have been delivered or taken back (§17.2) since, and the subscribe does not send it again. A
 take-back waits for the hub's newest page of a chat shown from its copy, and writes `withdrawn`
@@ -6841,7 +6859,8 @@ artifact's bytes never change (the hub keeps one row per owner, sha256 and name)
 downloaded again, whatever link the next view gets; its record may take another kind (§3), and an
 event naming another kind makes the client ask the hub again, as before. A file's "Download" and a
 text opened in a new tab are not kept; a failure of the browser's storage leaves the client
-downloading as before. In a chat a click on an image and
+downloading as before. They leave the device as the copies of the history do (§6, since 0.240). In
+a chat a click on an image and
 "Open" of a Markdown text (a text named `.md` or `.markdown`, or typed `text/markdown`) show it
 in a viewer over the chat: the image fitted to the window, the Markdown rendered as the agent's
 messages; the viewer has "Download" and closes on its cross, Escape or a click outside it, and
@@ -8073,6 +8092,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.239 → 0.240 (the device's copies are cleaned up)
+§6, §12, the Settings page: the copies of the history and of attachments that the client keeps on
+the device since 0.220 only grew, and stayed after the user signed out. Now both databases of a user
+are deleted when the hub answers `/api/me` with `401` or `403`, when another user signs in on the
+device, and by "Forget this device" in Settings; at most once an hour the client deletes the copies
+of sessions the hub no longer lists, those not used for 30 days, and the least recently used beyond
+200 MB. The artifacts database is at version 2, with a store `used` (the last use and size of each
+blob); a history range carries `used_at` and `bytes`. Client only.
 
 ### 0.238 → 0.239 (a call whose request id is taken ends at once; a `joined_after` that is no integer)
 §3 PendingRequest: since 0.225 the hub opens no request whose `request_id` an open request of

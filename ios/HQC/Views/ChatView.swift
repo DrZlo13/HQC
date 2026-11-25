@@ -492,6 +492,7 @@ struct Composer: View {
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var voice = VoiceStore.shared
     @State private var voiceSession = VoiceSession()
+    @State private var micCenter: CGPoint = .zero
 
     private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     private var uploading: Bool { attachments.contains { $0.artifact == nil && !$0.failed } }
@@ -599,11 +600,19 @@ struct Composer: View {
                         if voice.showsMicButton && !micReplacesSend {
                             VoiceMicButton(session: voiceSession, prominent: false, onTranscript: insertTranscript)
                                 .glassEffectID("mic", in: glass)
+                                .onGeometryChange(for: CGPoint.self) { proxy in
+                                    let f = proxy.frame(in: .named("composer"))
+                                    return CGPoint(x: f.midX, y: f.midY)
+                                } action: { micCenter = $0 }
                         }
 
                         if micReplacesSend {
                             VoiceMicButton(session: voiceSession, prominent: true, onTranscript: insertTranscript)
                                 .glassEffectID("action", in: glass)
+                                .onGeometryChange(for: CGPoint.self) { proxy in
+                                    let f = proxy.frame(in: .named("composer"))
+                                    return CGPoint(x: f.midX, y: f.midY)
+                                } action: { micCenter = $0 }
                         } else if busy && empty && attachments.isEmpty {
                             Button(action: onStop) {
                                 Image(systemName: "stop.fill")
@@ -648,14 +657,14 @@ struct Composer: View {
                     }
                     // While holding unlocked, let touches stay with the underlying VoiceMicButton gesture.
                     .allowsHitTesting(voiceSession.isLocked || voiceSession.phase == .transcribing)
-                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
                 }
             }
-            .overlay(alignment: .bottomTrailing) {
-                VoiceFloatingOverlay(session: voiceSession)
-                    .offset(x: 16, y: 18)
+            .coordinateSpace(name: "composer")
+            .overlay {
+                VoiceFloatingOverlay(session: voiceSession, micCenter: micCenter)
             }
-            .animation(.spring(response: 0.32, dampingFraction: 0.8), value: voiceSession.phase)
+            .animation(.spring(response: 0.25, dampingFraction: 0.80), value: voiceSession.phase)
             .padding(.horizontal, 12)
         }
         .padding(.bottom, 8)

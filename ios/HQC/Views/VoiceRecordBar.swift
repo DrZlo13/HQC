@@ -18,32 +18,35 @@ final class VoiceSession {
 
     let recorder = VoiceRecorder()
     private var transcribeTask: Task<Void, Never>?
+    private var warmUpTask: Task<Void, Never>?
     private var hintTask: Task<Void, Never>?
     private var startAttemptID = UUID()
 
-    static let cancelThreshold: CGFloat = -105
-    static let lockThreshold: CGFloat = -66
+    static let cancelThreshold: CGFloat = -100
+    static let lockThreshold: CGFloat = -64
+    private static let dragDeadzone: CGFloat = 6
 
     var isActive: Bool { phase != .idle }
     var isRecording: Bool {
         if case .recording = phase { return true }
         return false
     }
+    var isHolding: Bool { phase == .recording(locked: false) }
     var isLocked: Bool { phase == .recording(locked: true) }
 
     /// 0…1 progress toward the left cancel gesture.
     var cancelProgress: CGFloat {
-        guard case .recording(locked: false) = phase else { return 0 }
+        guard isHolding else { return 0 }
         return min(1, max(0, -dragOffset.width / abs(Self.cancelThreshold)))
     }
 
     /// 0…1 progress toward the upward lock gesture.
     var lockProgress: CGFloat {
-        guard case .recording(locked: false) = phase else { return 0 }
+        guard isHolding else { return 0 }
         return min(1, max(0, -dragOffset.height / abs(Self.lockThreshold)))
     }
 
-    /// Begins hold-to-talk recording when the user presses down on the mic button.
+    /// Begins hold-to-talk recording immediately on frame 0 when the user presses down.
     func pressDown(onTranscript: @escaping (String) -> Void) {
         guard phase == .idle else { return }
         error = nil
@@ -72,25 +75,45 @@ final class VoiceSession {
     }
 
     private func beginRecording(onTranscript: @escaping (String) -> Void) {
-        do {
-            try recorder.start { [weak self] in
+        // Flip UI & haptic synchronously on frame 0 (0 ms lag); AVAudioSession/AVAudioEngine boot off-main.
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.72)) {
+            phase = .recording(locked: false)
+        }
+        Feedback.play(.voiceStart)
+
+        recorder.start(
+            onError: { [weak self] err in
+                guard let self else { return }
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.82)) {
+                    self.phase = .idle
+                    self.dragOffset = .zero
+                }
+                self.showError(err.localizedDescription)
+                Feedback.play(.error)
+            },
+            onAutoStop: { [weak self] in
                 self?.finishRecording(onTranscript: onTranscript)
             }
-            phase = .recording(locked: false)
-            Feedback.play(.voiceStart)
-            // Warm up the Core ML model on the ANE while the user is speaking.
+        )
+
+        // Defer Core ML warm-up slightly so the touch-down spring animation stays 120 Hz.
+        warmUpTask?.cancel()
+        warmUpTask = Task {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
             VoiceStore.shared.warmUpIfReady()
-        } catch {
-            showError(error.localizedDescription)
-            Feedback.play(.error)
         }
     }
 
     func dragChanged(_ translation: CGSize) {
-        guard case .recording(locked: false) = phase else { return }
-        // Lock the dominant axis (either sliding left to cancel OR sliding up to lock), like Telegram.
+        guard isHolding else { return }
+        if hypot(translation.width, translation.height) < Self.dragDeadzone {
+            dragOffset = .zero
+            return
+        }
+        // Lock to the dominant axis (slide left to cancel OR slide up to lock), like Telegram.
         if abs(translation.height) > abs(translation.width) && translation.height < 0 {
-            dragOffset = CGSize(width: 0, height: max(translation.height, Self.lockThreshold - 24))
+            dragOffset = CGSize(width: 0, height: max(translation.height, Self.lockThreshold - 22))
             if translation.height <= Self.lockThreshold {
                 withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
                     phase = .recording(locked: true)
@@ -99,7 +122,7 @@ final class VoiceSession {
                 Feedback.play(.voiceLock)
             }
         } else if translation.width < 0 {
-            dragOffset = CGSize(width: max(translation.width, Self.cancelThreshold - 20), height: 0)
+            dragOffset = CGSize(width: max(translation.width, Self.cancelThreshold - 18), height: 0)
             if translation.width <= Self.cancelThreshold {
                 cancelRecording()
             }
@@ -109,9 +132,8 @@ final class VoiceSession {
     }
 
     func dragEnded(onTranscript: @escaping (String) -> Void) {
-        // Invalidate any pending async permission check if finger lifted.
         startAttemptID = UUID()
-        guard case .recording(locked: false) = phase else { return }
+        guard isHolding else { return }
         if dragOffset.width <= Self.cancelThreshold {
             cancelRecording()
         } else {
@@ -121,10 +143,12 @@ final class VoiceSession {
 
     func cancelRecording() {
         startAttemptID = UUID()
+        warmUpTask?.cancel()
+        warmUpTask = nil
         transcribeTask?.cancel()
         transcribeTask = nil
         recorder.cancel()
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
             phase = .idle
             dragOffset = .zero
         }
@@ -132,10 +156,13 @@ final class VoiceSession {
     }
 
     func finishRecording(onTranscript: @escaping (String) -> Void) {
-        guard case .recording = phase else { return }
-        let (samples, elapsed) = recorder.finish()
-        if elapsed < VoiceRecorder.minDuration || samples.count < 3200 {
-            withAnimation(.spring(response: 0.26, dampingFraction: 0.82)) {
+        guard isRecording else { return }
+        warmUpTask?.cancel()
+        warmUpTask = nil
+
+        if recorder.currentElapsed < VoiceRecorder.minDuration {
+            recorder.cancel()
+            withAnimation(.spring(response: 0.24, dampingFraction: 0.82)) {
                 phase = .idle
                 dragOffset = .zero
             }
@@ -144,7 +171,7 @@ final class VoiceSession {
             return
         }
 
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
             phase = .transcribing
             dragOffset = .zero
         }
@@ -153,10 +180,19 @@ final class VoiceSession {
         transcribeTask?.cancel()
         transcribeTask = Task { [weak self] in
             guard let self else { return }
+            let (samples, elapsed) = await self.recorder.finish()
+            guard !Task.isCancelled else { return }
+            if elapsed < VoiceRecorder.minDuration || samples.count < 1600 {
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                    self.phase = .idle
+                }
+                self.showHint("Hold to record")
+                return
+            }
             do {
                 let text = try await VoiceStore.shared.transcribe(samples: samples)
                 guard !Task.isCancelled else { return }
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
                     self.phase = .idle
                 }
                 if text.isEmpty {
@@ -166,9 +202,9 @@ final class VoiceSession {
                     Feedback.play(.answered)
                 }
             } catch is CancellationError {
-                withAnimation(.spring(response: 0.25)) { self.phase = .idle }
+                withAnimation(.spring(response: 0.24)) { self.phase = .idle }
             } catch {
-                withAnimation(.spring(response: 0.25)) { self.phase = .idle }
+                withAnimation(.spring(response: 0.24)) { self.phase = .idle }
                 self.showError(error.localizedDescription)
                 Feedback.play(.error)
             }
@@ -217,6 +253,7 @@ struct VoiceRecordingPill: View {
                     Text(VoiceRecorder.formatDuration(session.recorder.duration))
                         .font(.system(.subheadline, design: .rounded).monospacedDigit().weight(.medium))
                         .foregroundStyle(palette.text)
+                        .contentTransition(.identity)
                 }
                 .onAppear { dotPulse = true }
                 .onDisappear { dotPulse = false }
@@ -230,7 +267,7 @@ struct VoiceRecordingPill: View {
                         Text("Cancel")
                             .font(.subheadline.weight(.medium))
                             .foregroundStyle(.red)
-                            .padding(.horizontal, 8)
+                            .padding(.horizontal, 10)
                             .padding(.vertical, 4)
                     }
                     .buttonStyle(.plain)
@@ -260,9 +297,9 @@ struct VoiceRecordingPill: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Finish and transcribe")
-                    .transition(.scale.combined(with: .opacity))
+                    .transition(.scale(scale: 0.7).combined(with: .opacity))
                 } else {
-                    // Reserve space on the right for the expanding Telegram mic orb overlay.
+                    // Leave breathing room on the right for the expanding mic orb centered on the mic button.
                     Color.clear
                         .frame(width: Composer.control + 16, height: Composer.control)
                 }
@@ -297,18 +334,25 @@ struct VoiceRecordingPill: View {
     }
 }
 
-/// Floating Telegram-style lock capsule (`lock.open` + `chevron.up`) and audio-reactive blue mic orb
-/// rendered over the bottom-right corner of the composer while holding to record.
+/// Telegram-style floating lock capsule (`lock.open` + `chevron.up`) and audio-reactive mic orb,
+/// anchored pixel-for-pixel on the `VoiceMicButton`'s exact center so the orb blooms smoothly
+/// directly out of the mic button on touch-down without jumping.
 struct VoiceFloatingOverlay: View {
     @Environment(\.palette) private var palette
     let session: VoiceSession
+    /// Exact center of `VoiceMicButton` in the composer's coordinate space.
+    let micCenter: CGPoint
 
+    private var active: Bool { session.isHolding }
     private var level: CGFloat { CGFloat(session.recorder.level) }
 
+    private static let orbSize: CGFloat = 82
+    private static let collapsedScale: CGFloat = Composer.control / orbSize
+
     var body: some View {
-        if case .recording(locked: false) = session.phase {
-            VStack(spacing: 14) {
-                // Floating lock capsule above the mic orb (matches Telegram's Liquid Glass padlock pill).
+        if micCenter != .zero {
+            ZStack {
+                // Floating Liquid Glass lock capsule directly above the mic button center.
                 VStack(spacing: 6) {
                     Image(systemName: session.lockProgress > 0.72 ? "lock.fill" : "lock.open")
                         .font(.system(size: 17, weight: .medium))
@@ -317,42 +361,69 @@ struct VoiceFloatingOverlay: View {
                     Image(systemName: "chevron.up")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(palette.text2)
-                        .opacity(Double(max(0, 1 - session.lockProgress * 1.3)))
+                        .opacity(Double(max(0, 1 - session.lockProgress * 1.35)))
                 }
-                .frame(width: 44, height: 68)
+                .frame(width: 44, height: 70)
                 .glassEffect(.regular, in: .capsule)
-                .offset(y: session.dragOffset.height * 0.45)
-                .scaleEffect(1.0 - session.cancelProgress * 0.25)
-                .opacity(Double(max(0, 1 - session.cancelProgress * 1.4)))
-                .transition(.move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.75)))
+                .scaleEffect(active ? (1.0 - session.cancelProgress * 0.25) : 0.4)
+                .opacity(active ? Double(max(0, 1 - session.cancelProgress * 1.45)) : 0)
+                .position(x: micCenter.x, y: micCenter.y - (active ? 104 : 24))
+                .offset(y: active ? session.dragOffset.height * 0.45 : 0)
+                .animation(.spring(response: 0.28, dampingFraction: 0.72), value: active)
 
-                // Audio-reactive expanding mic orb.
-                ZStack {
-                    Circle()
-                        .fill(Color.accentColor.opacity(0.18))
-                        .frame(width: 112, height: 112)
-                        .scaleEffect(0.86 + level * 0.52)
-                    Circle()
-                        .fill(Color.accentColor.opacity(0.32))
-                        .frame(width: 96, height: 96)
-                        .scaleEffect(0.90 + level * 0.34)
-                    Circle()
-                        .fill(Color.accentColor.gradient)
-                        .frame(width: 78, height: 78)
-                        .shadow(color: Color.accentColor.opacity(0.45), radius: 14, y: 4)
-                    Image(systemName: "mic.fill")
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(.white)
+                // Expanding mic orb + sensitive organic audio-reactive rings, centered on micCenter.
+                TimelineView(.animation(paused: !active)) { timeline in
+                    let t = timeline.date.timeIntervalSinceReferenceDate
+                    let wobbleA = active ? (0.04 + level * 0.05) * sin(t * 5.2) : 0
+                    let wobbleB = active ? (0.04 + level * 0.05) * cos(t * 4.3 + 1.1) : 0
+                    let outerScale = 0.94 + level * 0.96
+                    let innerScale = 0.96 + level * 0.58
+
+                    ZStack {
+                        // Outer soft reactive wave halo (expands up to ~175pt on speech).
+                        Circle()
+                            .fill(Color.accentColor.opacity(active ? (0.16 + Double(level) * 0.16) : 0))
+                            .frame(width: 92, height: 92)
+                            .scaleEffect(
+                                x: active ? outerScale * (1 + wobbleA) : Self.collapsedScale,
+                                y: active ? outerScale * (1 - wobbleA) : Self.collapsedScale
+                            )
+
+                        // Inner reactive halo (expands up to ~135pt on speech).
+                        Circle()
+                            .fill(Color.accentColor.opacity(active ? (0.28 + Double(level) * 0.20) : 0))
+                            .frame(width: 86, height: 86)
+                            .scaleEffect(
+                                x: active ? innerScale * (1 - wobbleB) : Self.collapsedScale,
+                                y: active ? innerScale * (1 + wobbleB) : Self.collapsedScale
+                            )
+
+                        // Solid accent mic orb blooming directly from the 36pt mic button.
+                        Circle()
+                            .fill(Color.accentColor.gradient)
+                            .frame(width: Self.orbSize, height: Self.orbSize)
+                            .shadow(color: Color.accentColor.opacity(active ? 0.42 : 0), radius: 14, y: 4)
+                            .scaleEffect(active ? (1.0 + level * 0.08) : Self.collapsedScale)
+
+                        Image(systemName: "mic.fill")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .scaleEffect(active ? 1.0 : 0.55)
+                    }
+                    .animation(.interactiveSpring(response: 0.12, dampingFraction: 0.72), value: session.recorder.level)
                 }
-                .animation(.easeOut(duration: 0.08), value: session.recorder.level)
+                .scaleEffect(active ? (1.0 - session.cancelProgress * 0.25) : 1.0)
+                .position(x: micCenter.x, y: micCenter.y)
                 .offset(
-                    x: session.dragOffset.width * 0.35,
-                    y: session.dragOffset.height * 0.35
+                    x: active ? session.dragOffset.width * 0.50 : 0,
+                    y: active ? session.dragOffset.height * 0.42 : 0
                 )
-                .scaleEffect(1.0 - session.cancelProgress * 0.22)
-                .transition(.scale(scale: 0.45).combined(with: .opacity))
+                .animation(.spring(response: 0.24, dampingFraction: 0.66), value: active)
+                .opacity(active ? 1 : 0)
+                .animation(.easeOut(duration: active ? 0.06 : 0.16), value: active)
             }
             .allowsHitTesting(false)
+            .accessibilityHidden(true)
         }
     }
 }
@@ -373,7 +444,7 @@ struct VoiceMicButton: View {
             .foregroundStyle(prominent ? Color.accentColor : palette.text)
             .frame(width: Composer.control, height: Composer.control)
             .glassEffect(.regular.interactive(), in: .circle)
-            .opacity(session.isRecording && !session.isLocked ? 0.01 : 1)
+            .opacity(session.isActive ? 0.001 : 1)
             .contentShape(.circle)
             .highPriorityGesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)

@@ -1512,6 +1512,15 @@ pub async fn patch_session(
                 m.as_str()
             )));
         }
+        // Auto's safety check runs on Anthropic's servers and does not pass through a provider:
+        // the worker would run Ask (#194, SPEC 0.246).
+        let provider = b.provider_id.unwrap_or(s.provider_id);
+        if m == PermissionMode::Auto && provider.is_some() {
+            return Err(ApiError::Unprocessable(
+                "auto_needs_anthropic",
+                "Auto mode does not work on a model provider: its safety check runs on Anthropic's servers. Use Ask or Allow all, or a Claude model".into(),
+            ));
+        }
         db::set_permission_mode(&app.db, id, m).await?;
         // A stopped agent starts in it; an offline worker gets it with `session.start`.
         send_to_worker(

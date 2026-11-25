@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.245, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.246, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -213,7 +213,7 @@ and the two differ.
 `protocol_version`, `boot_id` (from the last `hello`, §5.2), `capabilities` (`claude_code: {version, sessions_registry?, moves?, login?}`, `acp_agents[{name,
 version, load_session, resume, image, isolation}]` — the result of each agent's `initialize`
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
-`environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?}}`,
+`environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?, remote_unblock? (0.246)}}`,
 never the values of `env`; `default` is implied), `env_bindings[]` (`{path, environment}`; the
 Hermes profile in iteration 9),
 `allow_foreign_sessions`, `idle_timeout`, `system_session_id` (§10.2), `machine_hash` (since 0.23:
@@ -628,7 +628,7 @@ the client renders only them. The "source" column is the component that produces
 | `approval.response` | `request_id`, `option_id`, `by` (user id or `auto`), `message?` (the user's text instead of the call, only with a `deny`/`deny_always` option, §10.1) | client, or the hub with `auto_approve` |
 | `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived, since 0.180 withdrawn — the runtime withdrew its request, §8.1; the client says "withdrawn") | adapter, worker or hub. An answer from another device is not a cancellation: the first answer closes the request, the second gets `409 request_closed` (§10.1) |
 | `clarify.request` | `request_id`, `questions[{id, text, header?, options?: [string], option_descriptions?: [string], option_previews?: [string], multi?: bool, required?: bool, input?: "integer" \| "number"}]`, `subagent?{task_id, description}` (since 0.181, as on `approval.request`) | Claude Code adapter: the `AskUserQuestion` tool arrives as `can_use_tool`, the answer goes into `updatedInput.answers` (verified on 2.1.307 with `--permission-prompt-tool stdio`, §8.1). Since 0.69 `header` is the question's short label and `option_descriptions` what each option means, in the order and number of `options`, `""` for an option without one; each is absent when empty. Since 0.199 `option_previews` is each option's mockup (an ASCII sketch, code, a config) by the same rule, cut by the worker to 8 KiB with `\n… (truncated)` after it. The client shows `header` above the question, each description under its option, and an "Other" field: its text is the answer (with `multi`, an item of the array beside the checked labels); "Other" chosen with nothing typed is sent as `"Other"`, as the VS Code tab does. As in the tab, "Answer" stays disabled until every question has an answer: an option picked, a text typed (not only spaces) or "Other" chosen. A question with a preview shows it as plain text in `<pre>`, never rendered as markdown or HTML, not wrapped and scrolling sideways: on a desktop in a column beside the options, the preview of the option last under the pointer while the pointer is over the question (the "Other" row lets it go) or of the option with the keyboard focus (kept while the focus is in the preview), else of the first chosen one, else the first one that has a preview, the column as tall as the tallest preview of the question; on a phone under each chosen option that has one. ACP agents have no source for it. Since 0.180 also an MCP server's request for input (Claude Code: `elicitation`, §8.1), with `server?` — the server that asks, `message?` — its text, `url?` — the page it sends the person to, then with no `questions`; a question of its form carries `required: true` for a field the server requires and `input` (`integer`, `number`) for a free-text field whose answer must read as one, both absent otherwise and in the agent's questions; the client heads the card "<server> asks", shows the text above the questions, "required" beside a required question's header, the link (only an http, https or mailto one as a link, labelled with the address it opens, a host in its punycode form), no "Other", the submit button ("Done" for a link, the card then saying "Done"; unlike the agent's questions it waits only for what the form's schema says, which a server on the MCP SDK checks the answer against, refusing one that does not match (§8.1): every `required` question answered, an `integer` answer an optional minus and digits, at most 2^53 − 1 in size, a `number` one written in decimal (an optional minus, digits with an optional point, an optional exponent) that JavaScript's `Number()` reads as a finite number; a field neither required nor answered may stay empty) and "Decline" |
-| `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`), `action?` (since 0.180, only for a request with `server`: `accept` — the answers, also none, are the input; `decline` — the person declined, `answers` empty; the client shows "Declined") | client |
+| `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`), `action?` (since 0.180, only for a request with `server`: `accept` — the answers, also none, are the input; `decline` — the person declined, `answers` empty; the client shows "Declined"). Since 0.246 the event of an answer to a request with `server` keeps `answers: {}`: a server's form may ask for a token, so its answers go to the worker in the frame only, and the hub's copy of the frame forgets them once the worker acknowledges it; the card says that the answers go to the server only, and "Answers sent to <server>" | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; since 0.181 also the worker after a background task's end, the task's output file (§8.1), with the same `author`, `kind: text`; since 0.209 also a publication the owner allowed (`hqc_publish`, §7), with `kind: site` (`event.attachment.site.json`); the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `joined_after?` (since 0.221, with `joined` or (since 0.231) `quiet`: as on a `user.message`), `quiet?` (since 0.231: as on a `user.message`), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
@@ -1131,7 +1131,10 @@ MCP calls (worker → hub → worker):
   syntax; `permission_mode` (since 0.42, T38) — `ask` | `auto` | `allow_all` (since 0.129),
   the session's `permission_mode` (§3); absent — the worker's `[permissions] mode`; the worker
   runs `auto` only with `allow_auto` and `allow_all` only with `allow_all` (§14), otherwise the
-  highest mode it allows, and reports the mode it runs in `session.state`;
+  highest mode it allows, and reports the mode it runs in `session.state`; a session with
+  `provider` runs `ask` where `auto` is asked (since 0.246): Auto's safety check runs on
+  Anthropic's servers and does not pass through a provider's endpoint, so the CLI would refuse
+  every call that needs it;
   `requested_by_owner` (sent only as `true`) — the worker
   owner added the session's workspace: no confirmation of a new folder is needed (§10.2); the worker calls the adapter's `start` or `resume` (§8);
   on `new` the Claude Code adapter still checks for a jsonl with this uuid and, if there is one,
@@ -1291,7 +1294,7 @@ MCP calls (worker → hub → worker):
 - `session.kill` {session_id} — terminate the agent process.
 - `session.permission_mode` {session_id, permission_mode} → `ack` (since 0.42, T38) — the user
   switched the session's mode (§6). The worker decides as for `session.start` (`auto` only
-  with `allow_auto`, `allow_all` only with `allow_all`); a running agent switches at once,
+  with `allow_auto`, `allow_all` only with `allow_all`, no `auto` on a provider); a running agent switches at once,
   also mid-turn (Claude Code: §8.1), a stopped one starts in the mode; a session the worker
   has not started is only acked (the next `session.start` carries the mode). The hub sends it
   when the worker is connected and
@@ -1542,7 +1545,7 @@ MCP calls (worker → hub → worker):
   (`secret.put.vault_field`): an older worker ignores the field and would give the password, so
   the hub offers the field, and `reads_vault` on a card, only to a worker that sends it.
   `environments` (since 0.56, T43) — the environments of the local config (§14) as `{name,
-  allow_local_mcp?, permissions {unblock?, allow?, deny?}}`, without `default` and never with the
+  allow_local_mcp?, permissions {unblock?, allow?, deny?, remote_unblock?}}`, without `default` and never with the
   values (or the names) of `env`; a plain string, as workers before 0.56 send, reads as an
   environment without rules. `env_bindings` — `{path, environment}`, the path canonical when it
   existed at the worker's start (`worker.hello.json`). The hub keeps both on the worker and sets
@@ -1929,8 +1932,10 @@ the rest is marked "later"):
   `400` (not the owner's) or `422 provider_not_allowed`, both on creation too; a change restarts a
   running agent (`session.kill`, then `session.start` with the new description, the transcript
   resumed), a stopped one starts on it; a session on a provider keeps the provider's model,
-  `session.model` does not reach its runtime. The session object's `agent.provider` is {id,
-  label}. `GET/POST /api/providers` ({providers: [...]} and `201`), `PATCH/DELETE
+  `session.model` does not reach its runtime; `permission_mode: auto` for a session with a
+  provider (the one it has or the one the same request gives) is `422 auto_needs_anthropic`
+  (since 0.246, §5.3), and the client offers no Auto there. The session object's
+  `agent.provider` is {id, label}. `GET/POST /api/providers` ({providers: [...]} and `201`), `PATCH/DELETE
   /api/providers/{id}` (§3 Provider; `PATCH` replaces every field; `409 provider_exists` for a
   name the owner has, `409 provider_in_use` on deleting one sessions run on): {name, label,
   base_url, model, context_tokens?} (`context_tokens` 1000 to 10 000 000); a provider object has
@@ -7246,6 +7251,7 @@ hub_skills = false                    # true: the owner's skills from the hub (0
 unblock = ["Bash(ssh:*)"]             # lift worker-wide deny rules here only
 allow = ["Bash(ssh debian@192.168.1.20:*)"]
 deny = ["Bash(git push:*)"]           # added to the worker's deny
+remote_unblock = { "pi@bench.local" = ["Bash(sudo:*)"] }  # since 0.246: lifted only inside `ssh` to that host
 
 [[env_bindings]]
 path = "/Users/drzlo/work/lab/infra"
@@ -7278,7 +7284,26 @@ base_url = "http://192.168.1.229:8082" # must equal the hub's description
   rules of a session: the worker's `deny` minus `unblock`, plus the environment's `deny`; then
   the worker's `allow` and the environment's `allow`; then hqc's folder rules (applied in
   `can_use_tool` below every deny, §3 Workspace); then the session's mode. They go to
-  `--settings` and to the adapter's policy (§8.1); the three levels below stay. **Claude Code
+  `--settings` and to the adapter's policy (§8.1); the three levels below stay.
+  `remote_unblock` (since 0.246, #162): per ssh destination as written (`[user@]host`, matched
+  without DNS; an alias of `~/.ssh/config` only by the alias), Bash rules of the environment's
+  effective `deny` that the adapter's own check does not apply to the command `ssh` sends there,
+  so a session setting up a remote machine gets its `sudo` asked about instead of refused. Only
+  a simple part `ssh [options] <destination> <command>` counts, with options that run nothing
+  locally and keep the listed user (`-4 -6 -A -a -C -q -T -t -v -x`, `-i` with a value, `-p` with
+  digits, `-o Key=Value` with `BatchMode`, `ConnectTimeout`, `IdentitiesOnly`, `IdentityFile`,
+  `LogLevel`, `Port`, `ServerAliveCountMax`, `ServerAliveInterval`, `StrictHostKeyChecking`,
+  `UserKnownHostsFile`), a command whose first word does not start with `-` (OpenSSH reads
+  options after the destination too), and nothing up to that word the shell expands into other
+  words (braces, glob characters), and no `$` anywhere in the part, the remote command
+  included (`${a[${x:='y[$(cmd)]'}]}` runs `cmd` here); a command the matcher does not understand (a `$( )` or a
+  backtick, also in double quotes, which the local shell would run), another host, any other
+  option (`-F`, `-J`, `-l`, `ProxyCommand`, `LocalCommand`, `HostName`, `User`), the rest of the
+  command line and every other rule keep the deny. The rules stay in the CLI's `--settings` `deny`, which does not look into the
+  arguments of `ssh` (checked on 2.1.328), so in `auto` and `allow_all`, where the adapter's
+  check does not run, nothing changes; a rule not in the environment's `deny` or not a Bash
+  rule, and a destination that is not `[user@]host`, are config errors. `hqc-worker env` and
+  `permissions.inspect` show and apply it; **Claude Code
   only**, ACP agents have no equivalent, so for them the `default` environment is weaker: the
   only boundary is the absence of keys;
 - `allow_local_mcp`: allow MCP servers from the machine (Claude Code: without
@@ -8323,6 +8348,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.245 → 0.246 (Auto on a provider; an MCP server's form answers kept out of the history; `sudo` over ssh)
+#194: a session on a model provider in Auto had every call that needs Auto's safety check
+refused by the CLI, since the check runs on Anthropic's servers and does not pass through a
+provider; the agent spent its turns probing what still ran. §5.3: the worker runs such a session
+in `ask` where `auto` is asked; §6: `PATCH /api/sessions/{id}` with `permission_mode: auto` for a
+session with a provider is `422 auto_needs_anthropic`; the client offers no Auto there and says
+why. #129: §4 `clarify.response` of an MCP server's request is stored with `answers: {}`, and
+the frame kept for the worker forgets the answers once acknowledged. #162: §14
+`[environments.<name>.permissions] remote_unblock`, deny rules lifted only in the adapter's own
+check and only for the command `ssh` sends to a named host, with options that run nothing locally.
 
 ### 0.244 → 0.245 (iteration 8: skills from the hub)
 §19: a new iteration 8, skills the owner uploads once on the hub (#62); the generic ACP adapter

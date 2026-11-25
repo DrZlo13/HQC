@@ -877,6 +877,8 @@ project_settings = false              # true: the repository's CLAUDE.md, .claud
 unblock = ["Bash(ssh:*)"]             # deny rules of [permissions] lifted here only
 allow = ["Bash(ssh debian@192.168.1.20:*)"]
 deny = ["Bash(git push:*)"]           # added to the deny of [permissions]
+# lifted only for the command `ssh` sends to this host (SPEC 0.246): a card instead of a refusal
+remote_unblock = { "pi@bench.local" = ["Bash(sudo:*)"] }
 
 [[env_bindings]]
 path = "/Users/me/work/lab/infra"
@@ -894,6 +896,12 @@ environment = "infra"
   `[permissions]` exactly (with the default deny: as listed above), otherwise the worker does not
   start. The rules screen lists the environment's rules with the source
   `worker.toml [environments.infra]`.
+- `remote_unblock` lifts a deny rule only inside `ssh <host> <command>` to that host as written,
+  and only in Ask mode, where the worker checks commands itself: the agent's
+  `ssh pi@bench.local "apt update && sudo apt upgrade"` then gets a permission card instead of a
+  refusal, while a local `sudo`, another host or user, `$( )` or backticks, braces or globs
+  before the command, and options such as `-F`, `-J`, `-l` or `ProxyCommand` (also after the
+  host) stay denied.
 - `env` values never leave the machine: not in the hub, the logs or `hqc-worker env`. `HQC_*`
   names are refused. A changed `worker.toml` takes effect after a restart of the worker.
 - `hqc-worker env` lists the environments (keys by name) and bindings; `hqc-worker env which

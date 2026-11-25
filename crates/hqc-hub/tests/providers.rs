@@ -167,6 +167,28 @@ async fn a_session_runs_on_a_provider_its_worker_allows() {
     assert_eq!(v["agent"]["provider"]["label"], "Qwen 3.8 (local)");
     w.expect_silence(std::time::Duration::from_millis(300))
         .await;
+    // #194: Auto's safety check does not pass through a provider.
+    let (s, v) = hub
+        .patch(
+            &format!("/api/sessions/{sid}"),
+            json!({"permission_mode": "auto"}),
+        )
+        .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (422, Some("auto_needs_anthropic"))
+    );
+    let (s, v) = hub
+        .patch(
+            &format!("/api/sessions/{sid}"),
+            json!({"permission_mode": "auto", "provider_id": null}),
+        )
+        .await;
+    assert_eq!(s, 200, "a Claude model again: {v}");
+    let (s, v) = hub
+        .patch(&format!("/api/sessions/{sid}"), json!({"provider_id": pid}))
+        .await;
+    assert_eq!(s, 200, "{v}");
     let (s, v) = hub
         .patch(
             &format!("/api/sessions/{sid}"),

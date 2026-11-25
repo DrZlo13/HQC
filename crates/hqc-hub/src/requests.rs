@@ -299,7 +299,14 @@ pub async fn answer(
             hqc_proto::replace_nul_json(&mut answers);
             let mut frame =
                 json!({"session_id": s.id, "request_id": request_id, "answers": answers});
-            let mut event = json!({"request_id": request_id, "answers": answers});
+            // An MCP server's form may ask for a token: its answers go to the worker only, the
+            // history keeps that it was answered (#129, SPEC 0.246).
+            let kept = if from_server {
+                json!({})
+            } else {
+                answers.clone()
+            };
+            let mut event = json!({"request_id": request_id, "answers": kept});
             if let Some(a) = action {
                 frame["action"] = json!(a);
                 event["action"] = json!(a);

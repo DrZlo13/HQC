@@ -1976,6 +1976,8 @@ describe("requests of the CLI (SPEC 0.180)", () => {
       "Where should the release go?",
     );
     expect(card.querySelector('input[aria-label="Other answer"]')).toBeNull();
+    // #129: the answers are not kept in the history.
+    expect(card.querySelector(".clarify-note")!.textContent).toContain("go to deploy only");
     const qs = card.querySelectorAll("fieldset");
     expect(qs[2].querySelectorAll("input[type=radio]").length).toBe(2);
     await act(async () => buttonByText("Decline")!.click());

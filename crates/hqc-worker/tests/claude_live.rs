@@ -1176,6 +1176,7 @@ async fn live_permission_policy() {
             allow_all: false,
             allow: vec!["Bash(touch hqc-allowed:*)".into()],
             deny,
+            remote_unblock: Default::default(),
         })),
         runtime_session_id: Some(Uuid::new_v4().to_string()),
         system_prompt: None,

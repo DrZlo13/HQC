@@ -318,3 +318,7 @@ export function shortPath(p: string): string {
 export function homePath(p: string): string {
   return p.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, '~');
 }
+
+/** Why Auto is off on a session on a model provider (#194): the worker would run Ask. */
+export const AUTO_NEEDS_ANTHROPIC =
+  "Auto does not work on a model provider: its safety check runs on Anthropic's servers. Use Ask or Allow all, or a Claude model";

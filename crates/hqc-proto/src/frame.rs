@@ -1409,6 +1409,10 @@ pub struct EnvPermissions {
     /// Added to the worker's `deny`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
+    /// Deny rules lifted only for the command sent by `ssh` to a host, as written (#162, SPEC
+    /// 0.246): `{"pi@bench.local": ["Bash(sudo:*)"]}`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub remote_unblock: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Deserialize)]

@@ -261,6 +261,23 @@ describe('permission mode', () => {
     expect(mark()).toEqual({ auto: undefined, ask: undefined });
   });
 
+  it('offers no Auto on a session on a model provider, and says why it runs Ask (#194)', async () => {
+    const provider = { id: 'p1', label: 'Qwen (local)' };
+    const { app, api } = setup('idle', { permission_mode: 'auto', effective_permission_mode: 'ask', provider });
+    await mount(app);
+    expect(mark().ask).toBe('Ask (Auto asked)');
+    expect($('.perm-ask')!.getAttribute('title')).toContain('safety check runs on Anthropic');
+    render(null, root);
+    const s = setup('idle', { effective_permission_mode: 'ask', provider });
+    await mount(s.app);
+    const items = await menu();
+    const auto = items.find((b) => b.textContent === 'Auto')!;
+    expect(auto.disabled).toBe(true);
+    expect(auto.title).toContain('does not work on a model provider');
+    expect(items.find((b) => b.textContent === 'Allow all')!.disabled).toBe(false);
+    expect(api.patchSession).not.toHaveBeenCalled();
+  });
+
   it('switches to Auto after a one-line confirmation and back to Ask without one', async () => {
     const { app, api } = setup('idle', { effective_permission_mode: 'ask' });
     await mount(app);

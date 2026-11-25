@@ -1703,6 +1703,47 @@ export function parseMcpServer(v: unknown): McpServer {
   };
 }
 
+/** A skill of the owner (SPEC 0.237, iteration 8): `GET /api/skills`. The agents of
+ *  `all_projects` or of `project_ids` get it as `hqc:<name>` on workers with `hub_skills`. */
+export interface Skill {
+  id: Uuid;
+  name: string;
+  description?: string;
+  /** `allowed-tools` of its `SKILL.md`: these run without a permission card while it is active. */
+  allowed_tools: string[];
+  sha256: string;
+  /** Bytes, unpacked. */
+  size: number;
+  /** How many files it has. */
+  files: number;
+  all_projects: boolean;
+  project_ids: Uuid[];
+  updated_at: string;
+}
+
+export function parseSkill(v: unknown): Skill {
+  const o = obj(v, 'skill');
+  return {
+    id: str(o, 'id'),
+    name: str(o, 'name'),
+    description: optStr(o, 'description'),
+    allowed_tools: optStrArr(o, 'allowed_tools') ?? [],
+    sha256: str(o, 'sha256'),
+    size: optNum(o, 'size') ?? 0,
+    files: optNum(o, 'files') ?? 0,
+    all_projects: optBool(o, 'all_projects') ?? false,
+    project_ids: optStrArr(o, 'project_ids') ?? [],
+    updated_at: str(o, 'updated_at'),
+  };
+}
+
+/** A file of a skill: `GET /api/skills/{id}/files`. */
+export interface SkillFile {
+  path: string;
+  size: number;
+  executable?: boolean;
+}
+
 /** A slash command of the runtime (`command_info`, SPEC 0.162). */
 export interface SlashCommand {
   name: string;

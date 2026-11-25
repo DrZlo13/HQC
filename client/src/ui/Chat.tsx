@@ -1849,12 +1849,17 @@ export function commandQuery(text: string): string | undefined {
 }
 
 /** The commands the popup offers for `text`: those starting with what is typed (ignoring
- *  case), in the runtime's order; none when the only one is typed in full already. */
+ *  case), or whose part after the first `:` does (`/bench` offers `hqc:bench`, a skill of the
+ *  hub), in the runtime's order; none when the only one is typed in full already. */
 export function matchCommands(commands: string[] | undefined, text: string): string[] {
   const q = commandQuery(text);
   if (q === undefined || !commands?.length) return [];
   const lq = q.toLowerCase();
-  const out = commands.filter((c) => c.toLowerCase().startsWith(lq));
+  const out = commands.filter((c) => {
+    const lc = c.toLowerCase();
+    const colon = lc.indexOf(':');
+    return lc.startsWith(lq) || (colon >= 0 && lc.slice(colon + 1).startsWith(lq));
+  });
   return out.length === 1 && out[0] === q ? [] : out;
 }
 

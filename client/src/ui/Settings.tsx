@@ -11,6 +11,7 @@ import { WEB_SEARCHES } from '../websearch';
 import { projectName } from './Appearance';
 import { ProvidersSection } from './Providers';
 import { McpServersSection } from './McpServers';
+import { SkillsSection } from './Skills';
 import { ClaudeSignIn, signsIn } from './ClaudeSignIn';
 
 const THEME_GROUPS = [
@@ -331,6 +332,8 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
         <ProvidersSection app={app} />
 
         <McpServersSection app={app} />
+
+        <SkillsSection app={app} />
 
         <h2>Notifications</h2>
         <p class="muted">{push ? PUSH_TEXT[push] : '…'}</p>

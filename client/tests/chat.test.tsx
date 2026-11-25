@@ -28,7 +28,7 @@ import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, formatCost, formatTokens, modelName, s
 import { limitNotice } from '../src/ui/limits';
 import { Timeline } from '../src/timeline';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
-import { Chat, withQuote } from '../src/ui/Chat';
+import { Chat, matchCommands, withQuote } from '../src/ui/Chat';
 import { LiveSubagents } from '../src/ui/LiveSubagents';
 import { WEB_SEARCHES } from '../src/websearch';
 
@@ -3259,6 +3259,26 @@ describe('slash command completion (T27)', () => {
     expect(items[2].textContent, 'nothing said of it').toBe('/code-review');
     await press('Enter');
     expect(area().value, 'only the name goes in').toBe('/compact ');
+  });
+
+  it('matches a namespaced command by the part after «:» (a skill of the hub, hqc:<name>)', async () => {
+    const cmds = ['compact', 'hqc:bench', 'benchmark', 'anthropic-skills:pdf', 'hqc:compare'];
+    expect(matchCommands(cmds, '/bench'), 'runtime order').toEqual(['hqc:bench', 'benchmark']);
+    expect(matchCommands(cmds, '/BE')).toEqual(['hqc:bench', 'benchmark']);
+    expect(matchCommands(cmds, '/comp')).toEqual(['compact', 'hqc:compare']);
+    expect(matchCommands(cmds, '/pd')).toEqual(['anthropic-skills:pdf']);
+    expect(matchCommands(cmds, '/hqc:b')).toEqual(['hqc:bench']);
+    expect(matchCommands(['hqc:bench'], '/bench'), 'the name typed in full still offers hqc:<name>').toEqual(['hqc:bench']);
+    expect(matchCommands(cmds, '/hqc:bench'), 'typed in full').toEqual([]);
+    expect(matchCommands(cmds, '/ench'), 'not in the middle').toEqual([]);
+    expect(matchCommands(cmds, '/skills')).toEqual([]);
+
+    const { app } = setup('idle', { commands: cmds });
+    await mount(app);
+    await type('/bench');
+    expect(options()).toEqual(['/hqc:bench', '/benchmark']);
+    await press('Enter');
+    expect(area().value).toBe('/hqc:bench ');
   });
 
   it('no list, no popup; an idle session without a list fetches the session again', async () => {

@@ -413,11 +413,15 @@ async fn ask_owner(
                 "a move already waits for the user's answer",
             ));
         }
-        if !db::open_request(&app.db, KIND, s.id, request_id, &stored, None, s.worker_id)
+        match db::open_request_as(&app.db, KIND, s.id, request_id, &stored, None, s.worker_id)
             .await
             .map_err(internal)?
         {
-            return Ok(());
+            db::Opened::New => {}
+            db::Opened::Repeat => return Ok(()),
+            db::Opened::Taken => {
+                return Err(McpError::new(error_code::UNAVAILABLE, db::REQUEST_ID_TAKEN))
+            }
         }
     }
     tracing::info!(session_id = %s.id, %request_id, %path, "hqc_move asks the owner");

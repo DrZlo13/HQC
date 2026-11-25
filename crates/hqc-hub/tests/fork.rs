@@ -1251,3 +1251,49 @@ async fn a_fork_of_a_copy_leaves_out_a_quiet_message_by_the_copys_own_place() {
     );
     hub.finish().await;
 }
+
+/// SPEC 0.221: a `joined_after` a worker stored as sent (a string, a fraction, a number past a
+/// bigint) is read as absent: forks of the session cut and copy as without it, not fail.
+#[tokio::test]
+async fn a_joined_after_that_is_no_integer_is_absent_for_a_fork() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    let mut inputs = Vec::new();
+    for (i, text) in ["one", "two", "three", "four"].into_iter().enumerate() {
+        inputs.push(input(&hub, &mut w, &sid, text).await);
+        reply(&mut w, &sid, &format!("answer {i}")).await;
+    }
+    for (m, bad) in inputs.iter().zip([json!("x"), json!(1.5), json!(1e30)]) {
+        sqlx::query(
+            "UPDATE events SET payload = jsonb_set(payload, '{joined_after}', $2) WHERE event_id = $1",
+        )
+        .bind(m["event_id"].as_str().unwrap().parse::<uuid::Uuid>().unwrap())
+        .bind(bad)
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    }
+
+    // Before them, between them and after them.
+    for at in [&inputs[0], &inputs[1], &inputs[3]] {
+        let f = fork(&hub, &sid, at).await;
+        ack_start(&mut w, &f).await;
+        for e in hub.events(&f).await {
+            assert!(
+                e["payload"].get("joined_after").is_none(),
+                "the copy carries joined_after: {e}"
+            );
+        }
+    }
+    let f = fork(&hub, &sid, &inputs[3]).await;
+    ack_start(&mut w, &f).await;
+    assert_eq!(
+        user_texts(hub.events(&f).await),
+        ["one", "two", "three"],
+        "the inputs with a bad joined_after are copied"
+    );
+    hub.finish().await;
+}

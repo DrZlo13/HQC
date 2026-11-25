@@ -411,3 +411,44 @@ async fn migration_gives_old_workers_a_service_session() {
     assert_eq!(workers["workers"][0]["system_session_id"], sys["id"]);
     hub.finish().await;
 }
+
+/// SPEC §10.1: a worker's request whose id an open request of another kind holds in the service
+/// session is refused, and opens no second request.
+#[tokio::test]
+async fn a_worker_request_whose_id_another_open_request_holds_is_refused() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, ack) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = ack["payload"]["system_session_id"].as_str().unwrap();
+    assert!(hqc_hub::db::open_request(
+        &hub.app.db,
+        "approval",
+        sid.parse().unwrap(),
+        "wa-x",
+        &json!({}),
+        None,
+        None,
+    )
+    .await
+    .unwrap());
+    let id = w
+        .send(
+            "worker.approval.request",
+            request("wa-x", Utc::now() + chrono::TimeDelta::minutes(10)),
+        )
+        .await;
+    let reply = w.recv().await;
+    assert_eq!(reply["id"], id.as_str(), "{reply}");
+    assert_eq!(reply["type"], "error", "{reply}");
+    assert_eq!(reply["payload"]["code"], "invalid_frame", "{reply}");
+    assert_eq!(reply["payload"]["message"], hqc_hub::db::REQUEST_ID_TAKEN);
+    let kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT kind FROM pending_requests WHERE session_id = $1 AND request_id = 'wa-x'",
+    )
+    .bind(sid.parse::<Uuid>().unwrap())
+    .fetch_all(&hub.app.db)
+    .await
+    .unwrap();
+    assert_eq!(kinds, ["approval"]);
+    hub.finish().await;
+}

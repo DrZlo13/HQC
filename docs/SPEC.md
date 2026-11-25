@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.238, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.239, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -523,10 +523,13 @@ kind of the session has. An answer (`POST /api/sessions/{id}/requests/{request_i
 its request by the id alone, so a worker's card under the id of a publication or a move the
 owner is asked about would have the owner's Allow land on that one. A worker's `approval.request`
 or `clarify.request` opens its row before the event is stored; one refused this way is not
-stored (`ack` without `seq`, §5.2) and shows no card. A request of the hub's own refused this
-way (a publication, a move, a secret, a follow) shows no card either, and its call waits as for a
-repeat; an `ask` refused this way gets no reply. A repeat of a request of the same kind is as
-before.
+stored (`ack` without `seq`, §5.2) and shows no card. Since 0.239 an agent's call whose
+request the hub would open this way (`hqc_publish`, `hqc_move`, `hqc_secret`, `hqc_ask`) is
+answered at once with `unavailable` ("the request id of this call is held by another open request
+of this session") instead of waiting as for a repeat; an `hqc_ask` is checked before its message is
+stored, so the target gets nothing. A worker's own request (§10.2) refused this way is refused to
+the worker. A follow, whose `request_id` the hub derives itself, shows no card. A repeat of a
+request of the same kind is as before.
 
 An `ask` (since 0.35, T32) is a row of the **asking** session: `session_id` — the asking
 session, `request_id` — the `mcp.call`'s, `worker_id` — the asking session's worker,
@@ -2191,7 +2194,9 @@ the rest is marked "later"):
   thinking above is not. A fork's copy of a message keeps `joined_after` in the copy's own `seq`:
   the last copied event that is no input and stood at or before it, none when that is not past
   the message (a fork leaves out `usage`, `status` and requests, so its `seq` are not the
-  source's).
+  source's). Since 0.239 a `joined_after` that is not a non-negative JSON integer of at most 18
+  digits (every `seq` is one; a worker's event is stored as sent) counts as none: the fork does
+  not fail on it, and the copy has none.
   Since 0.161 a fork before a message the client shows after the
   turns it waited through (the same paragraph; one with `during_text` too) cuts after them: the
   newest cut is the last `agent.message` before the place the client shows the message at, and
@@ -8068,6 +8073,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.238 → 0.239 (a call whose request id is taken ends at once; a `joined_after` that is no integer)
+§3 PendingRequest: since 0.225 the hub opens no request whose `request_id` an open request of
+another kind of the session holds, but `hqc_publish`, `hqc_move` and `hqc_secret` took the refusal
+for a repeat and their call got no result until its timeout, and `hqc_ask` stored and delivered its
+message and then opened no request, so no reply could reach it. Such a call is now answered at once
+with `unavailable`, the ask before its message is stored; a worker's own request refused this way
+is refused to the worker. §6 fork: the fork read `payload.joined_after` of every event with a
+bigint cast, and a worker's event payload is stored as sent, so a string or a fraction there made
+every fork of the session fail; a value that is not a non-negative JSON integer of at most 18
+digits (every `seq` is one) now counts as none. The clients, the worker and the macOS app are unchanged.
 
 ### 0.237 → 0.238 (keys for Quote and Search of selected text)
 §6: Quote and "Search in …" of text selected in the feed had no keys, only the button over the

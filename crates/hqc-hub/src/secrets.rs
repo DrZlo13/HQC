@@ -412,7 +412,7 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
             {"id": hqc_proto::frame::worker_approval::DENY, "label": "Decline", "canonical": "deny"},
         ],
     });
-    if !db::open_request(
+    match db::open_request_as(
         &app.db,
         KIND,
         caller.id,
@@ -424,7 +424,11 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
     .await
     .map_err(internal)?
     {
-        return Ok(Answer::Later);
+        db::Opened::New => {}
+        db::Opened::Repeat => return Ok(Answer::Later),
+        db::Opened::Taken => {
+            return Err(McpError::new(error_code::UNAVAILABLE, db::REQUEST_ID_TAKEN))
+        }
     }
     tracing::info!(session_id = %caller.id, request_id = %c.request_id, name = %a.name, "hqc_secret asks the owner");
     events::store_hub_event(

@@ -619,7 +619,7 @@ pub async fn worker_approval(
     });
     let mut stored = payload.clone();
     hqc_proto::replace_nul_json(&mut stored);
-    if !db::open_request(
+    match db::open_request_as(
         &app.db,
         "worker_approval",
         s.id,
@@ -630,7 +630,9 @@ pub async fn worker_approval(
     )
     .await?
     {
-        return Ok(WorkerApproval::Stored);
+        db::Opened::New => {}
+        db::Opened::Repeat => return Ok(WorkerApproval::Stored),
+        db::Opened::Taken => return Ok(WorkerApproval::Refused(db::REQUEST_ID_TAKEN.to_string())),
     }
     tracing::info!(%worker_id, request_id = %r.request_id, kind = %r.kind, "worker asks its owner");
     events::store_hub_event(

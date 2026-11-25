@@ -157,6 +157,23 @@ export interface ProviderFields {
   context_tokens?: number;
 }
 
+/** `POST /api/providers/probe` (SPEC 0.236): the models the endpoint lists, as one of the
+ *  owner's online workers read them; `error` when none did. */
+export interface ProviderProbe {
+  models: { id: string; context_tokens?: number }[];
+  error?: string;
+  worker_id?: string;
+}
+
+/** `POST /api/mcp/probe` (SPEC 0.236): what a server says before any sign-in. `token`: it
+ *  refuses without credentials and names no authorization server. */
+export interface McpProbe {
+  name?: string;
+  server_name?: string;
+  auth: 'none' | 'oauth' | 'token' | 'unknown';
+  error?: string;
+}
+
 /** One header of a remote MCP server as the owner gives it; the value is write-only. */
 export interface McpHeader {
   name: string;
@@ -778,6 +795,35 @@ export class Api {
 
   async deleteProvider(id: string): Promise<void> {
     await this.req('DELETE', `/api/providers/${enc(id)}`);
+  }
+
+  /** The models at `base_url`; `409 worker_offline` when no worker of the owner is online. */
+  async probeProvider(base_url: string, name?: string): Promise<ProviderProbe> {
+    const v = (await this.req('POST', '/api/providers/probe', name ? { base_url, name } : { base_url })) as Record<string, unknown>;
+    const models = Array.isArray(v?.models)
+      ? v.models.flatMap((m: unknown) => {
+          const o = m as { id?: unknown; context_tokens?: unknown };
+          if (typeof o?.id !== 'string' || !o.id) return [];
+          return [typeof o.context_tokens === 'number' ? { id: o.id, context_tokens: o.context_tokens } : { id: o.id }];
+        })
+      : [];
+    return {
+      models,
+      ...(typeof v?.error === 'string' ? { error: v.error } : {}),
+      ...(typeof v?.worker_id === 'string' ? { worker_id: v.worker_id } : {}),
+    };
+  }
+
+  /** How the MCP server at `url` signs in, and a name for it; `400` for a URL the hub refuses. */
+  async probeMcp(url: string): Promise<McpProbe> {
+    const v = (await this.req('POST', '/api/mcp/probe', { url })) as Record<string, unknown>;
+    const auth = ['none', 'oauth', 'token'].includes(v?.auth as string) ? (v.auth as McpProbe['auth']) : 'unknown';
+    return {
+      auth,
+      ...(typeof v?.name === 'string' && v.name ? { name: v.name } : {}),
+      ...(typeof v?.server_name === 'string' && v.server_name ? { server_name: v.server_name } : {}),
+      ...(typeof v?.error === 'string' ? { error: v.error } : {}),
+    };
   }
 
   /** The owner's remote MCP servers (SPEC 0.235). */

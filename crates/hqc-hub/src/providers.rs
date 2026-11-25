@@ -174,6 +174,89 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The body of `POST /api/providers/probe` (SPEC 0.236).
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeBody {
+    base_url: String,
+    /// The provider's name as typed: a worker that allows it is asked first.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// `POST /api/providers/probe {base_url, name?}` (SPEC 0.236): the models the endpoint lists,
+/// as one of the owner's online workers reads them (the endpoint is usually in the owner's own
+/// network, which the hub does not reach). A worker that allows `name` is asked first, then the
+/// others, until one answers with models. `{models[{id, context_tokens?}], error?, worker_id?}`.
+pub async fn probe(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Json(b): Json<ProbeBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    use hqc_proto::frame::{HubFrame, ProviderProbeRequest, ResultBody};
+    let base_url = b.base_url.trim().trim_end_matches('/').to_string();
+    if !(base_url.starts_with("http://") || base_url.starts_with("https://"))
+        || base_url.chars().count() > MAX_URL
+        || base_url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(bad("base_url must be an http:// or https:// URL"));
+    }
+    let mut workers: Vec<WorkerRow> = db::workers_of(&app.db, user.id)
+        .await?
+        .into_iter()
+        .filter(|w| w.revoked_at.is_none() && app.workers.get(w.id).is_some())
+        .collect();
+    if workers.is_empty() {
+        return Err(ApiError::Conflict(
+            "worker_offline",
+            "no worker of yours is online to read the endpoint".into(),
+        ));
+    }
+    let name = b.name.as_deref().unwrap_or_default();
+    workers.sort_by_key(|w| !w.allows_provider(name));
+    let mut last = json_error("no worker answered");
+    for w in workers.iter().take(3) {
+        let Some(conn) = app.workers.get(w.id) else {
+            continue;
+        };
+        let url = base_url.clone();
+        let answer = conn
+            .request(
+                |request_id| {
+                    HubFrame::ProviderProbe(ProviderProbeRequest {
+                        request_id,
+                        base_url: url,
+                    })
+                },
+                std::time::Duration::from_secs(30),
+            )
+            .await;
+        match answer {
+            Ok(ResultBody::ProviderProbe(r)) if !r.provider_probe.models.is_empty() => {
+                let mut v = serde_json::to_value(&r.provider_probe).unwrap_or_default();
+                v["worker_id"] = serde_json::json!(w.id);
+                return Ok(Json(v));
+            }
+            Ok(ResultBody::ProviderProbe(r)) => {
+                last = json_error(&format!(
+                    "{}: {}",
+                    w.name,
+                    r.provider_probe.error.as_deref().unwrap_or("no models")
+                ));
+            }
+            // An older worker does not know the frame.
+            _ => last = json_error(&format!("{} cannot read endpoints: update it", w.name)),
+        }
+    }
+    Ok(Json(last))
+}
+
+fn json_error(m: &str) -> serde_json::Value {
+    serde_json::json!({"models": [], "error": m})
+}
+
 /// Provider `id` may run sessions of `owner` on `worker`: it is the owner's, and the worker's
 /// last `hello` allowed it (SPEC §14). The worker checks its `base_url` itself at the start.
 pub async fn check(app: &AppState, owner: Uuid, worker: &WorkerRow, id: Uuid) -> ApiResult<()> {

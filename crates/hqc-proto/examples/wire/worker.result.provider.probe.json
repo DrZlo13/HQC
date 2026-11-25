@@ -1,0 +1,8 @@
+{
+  "id": "h-51",
+  "type": "result",
+  "payload": {
+    "request_id": "h-51",
+    "provider_probe": { "models": [ { "id": "qwen3.8-27b", "context_tokens": 131072 }, { "id": "qwen3.8-flash-next" } ] }
+  }
+}

@@ -727,6 +727,10 @@ pub enum HubFrame {
     /// Give up the sign-in `login_id`.
     #[serde(rename = "claude.login_cancel")]
     ClaudeLoginCancel(ClaudeLoginCancel),
+    /// The models an Anthropic- or OpenAI-compatible endpoint lists, read by the worker, which
+    /// reaches the owner's network (since SPEC 0.236): Settings fills a provider from its URL.
+    #[serde(rename = "provider.probe")]
+    ProviderProbe(ProviderProbeRequest),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -988,6 +992,35 @@ pub enum ResultBody {
     ClaudeAuth(ClaudeAuthResult),
     ClaudeLogin(ClaudeLoginResult),
     ClaudeLoginDone(ClaudeLoginDoneResult),
+    ProviderProbe(ProviderProbeResult),
+}
+
+/// `provider.probe {request_id, base_url}` -> `result {provider_probe}` (since SPEC 0.236).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderProbeRequest {
+    pub request_id: String,
+    pub base_url: String,
+}
+
+/// What the endpoint said of itself; `error` when it could not be read.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProviderProbe {
+    pub models: Vec<ProbedModel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A model the endpoint lists, with its context window when the endpoint gives one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbedModel {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderProbeResult {
+    pub provider_probe: ProviderProbe,
 }
 
 /// `session.input_now {request_id, session_id, event_id}` and `session.withdraw {…}` (since SPEC
@@ -1898,6 +1931,7 @@ mod tests {
         "claude.login",
         "claude.login_code",
         "claude.login_cancel",
+        "provider.probe",
         "ack",
         "error",
     ];
@@ -2129,6 +2163,10 @@ mod tests {
             "claude.login_cancel",
             include_str!("../examples/wire/hub.claude.login_cancel.json"),
         ),
+        (
+            "provider.probe",
+            include_str!("../examples/wire/hub.provider.probe.json"),
+        ),
         ("ack", include_str!("../examples/wire/hub.ack.json")),
         (
             "ack",
@@ -2206,6 +2244,10 @@ mod tests {
         (
             "result",
             include_str!("../examples/wire/worker.result.claude.auth.json"),
+        ),
+        (
+            "result",
+            include_str!("../examples/wire/worker.result.provider.probe.json"),
         ),
         (
             "result",
@@ -2317,6 +2359,7 @@ mod tests {
             HubFrame::ClaudeLogin(_) => "claude.login",
             HubFrame::ClaudeLoginCode(_) => "claude.login_code",
             HubFrame::ClaudeLoginCancel(_) => "claude.login_cancel",
+            HubFrame::ProviderProbe(_) => "provider.probe",
             HubFrame::Ack(_) => "ack",
             HubFrame::Error(_) => "error",
         }
@@ -2677,6 +2720,10 @@ mod tests {
                 include_str!("../examples/wire/worker.result.claude.auth.json"),
             ),
             (
+                include_str!("../examples/wire/hub.provider.probe.json"),
+                include_str!("../examples/wire/worker.result.provider.probe.json"),
+            ),
+            (
                 include_str!("../examples/wire/hub.claude.login.json"),
                 include_str!("../examples/wire/worker.result.claude.login.json"),
             ),
@@ -2761,6 +2808,7 @@ mod tests {
                 HubFrame::ClaudeLoginCode(r) => (&r.request_id, 13),
                 HubFrame::SessionInputNow(r) => (&r.request_id, 14),
                 HubFrame::SessionWithdraw(r) => (&r.request_id, 15),
+                HubFrame::ProviderProbe(r) => (&r.request_id, 16),
                 other => panic!("not a request: {other:?}"),
             };
             assert_eq!(&req.id, request_id, "request_id is the frame id");
@@ -2785,6 +2833,7 @@ mod tests {
                 ResultBody::ClaudeLoginDone(_) => 13,
                 ResultBody::InputNow(_) => 14,
                 ResultBody::InputWithdrawn(_) => 15,
+                ResultBody::ProviderProbe(_) => 16,
             };
             assert_eq!(got, kind);
         }

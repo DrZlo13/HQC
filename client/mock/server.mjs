@@ -605,6 +605,14 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     providers.set(p.id, next);
     return providerView(next);
   });
+  // SPEC 0.236: the models at a base URL, as the mock's one worker reads them.
+  route('POST', '/api/providers/probe', (_, body) => {
+    const base = String(body?.base_url ?? '').trim();
+    if (!/^https?:\/\/\S+$/.test(base)) throw fail(400, 'bad_request', 'base_url must be an http:// or https:// URL');
+    const online = allWorkers().find((w) => w.status === 'online');
+    if (!online) throw fail(409, 'worker_offline', 'no worker of yours is online to read the endpoint');
+    return { models: [{ id: 'qwen3.8-27b', context_tokens: 131072 }, { id: 'qwen3.8-flash-next' }], worker_id: online.id };
+  });
   route('DELETE', '/api/providers/:id', (p) => {
     if (!providers.delete(p.id)) throw fail(404, 'not_found', 'unknown provider');
     return withStatus(204, null);
@@ -703,6 +711,22 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     }
     return into;
   };
+  // SPEC 0.236: how a server signs in, guessed from its host (the mock reaches no server).
+  route('POST', '/api/mcp/probe', (_, body) => {
+    let u;
+    try {
+      u = new URL(String(body?.url ?? ''));
+    } catch {
+      throw fail(400, 'bad_request', 'url: not a URL');
+    }
+    const loopback = /^(localhost|127(\.\d+){3}|\[::1\])$/.test(u.hostname);
+    if (!(u.protocol === 'https:' || (u.protocol === 'http:' && loopback)) || u.username || u.password) throw fail(400, 'bad_request', 'url: https only, without a user or password');
+    const labels = u.hostname.split('.');
+    const label = labels.slice(0, Math.max(1, labels.length - 1)).find((l) => !['mcp', 'api', 'www', 'server'].includes(l));
+    const n = (label ?? '').toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^[-_]+|[-_]+$/g, '').slice(0, 32);
+    const auth = /linear|notion/.test(u.hostname) ? 'oauth' : /githubcopilot/.test(u.hostname) ? 'token' : 'none';
+    return { name: MCP_NAME(n) ? n : null, server_name: null, auth };
+  });
   const mcpOr404 = (id) => {
     const s = mcpServers.get(id);
     if (!s) throw fail(404, 'not_found', 'unknown server');

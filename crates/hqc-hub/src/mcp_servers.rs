@@ -1525,6 +1525,159 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The body of `POST /api/mcp/probe` (SPEC 0.236).
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeBody {
+    url: String,
+}
+
+/// A name for a server from what it calls itself (`github-mcp-server` -> `github`), else from
+/// its host (`mcp.linear.app` -> `linear`); `None` if neither makes a valid one.
+fn suggested_name(server_name: Option<&str>, url: &reqwest::Url) -> Option<String> {
+    let clean = |s: &str| -> String {
+        let mut n: String = s
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        for suffix in ["-mcp-server", "_mcp_server", "-server", "-mcp", "_mcp"] {
+            if let Some(x) = n.strip_suffix(suffix) {
+                n = x.to_string();
+            }
+        }
+        for prefix in ["mcp-server-", "mcp-", "mcp_"] {
+            if let Some(x) = n.strip_prefix(prefix) {
+                n = x.to_string();
+            }
+        }
+        while n.contains("--") {
+            n = n.replace("--", "-");
+        }
+        n.trim_matches(['-', '_'])
+            .chars()
+            .take(32)
+            .collect::<String>()
+    };
+    if let Some(n) = server_name.map(clean).filter(|n| valid_server_name(n)) {
+        return Some(n);
+    }
+    let host = url.host_str()?;
+    let labels: Vec<&str> = host.split('.').collect();
+    let n = labels
+        .iter()
+        .take(labels.len().saturating_sub(1).max(1))
+        .find(|l| !matches!(**l, "mcp" | "api" | "www" | "server"))
+        .map(|l| clean(l))?;
+    valid_server_name(&n).then_some(n)
+}
+
+/// `POST /api/mcp/probe {url}` (SPEC 0.236): what the server at `url` says before any sign-in,
+/// for the form to fill: `{name?, server_name?, auth: none | oauth | token, error?}`. `none`: it
+/// answers without credentials; `oauth`: it names an authorization server; `token`: it refuses
+/// without one and names none, so a header carries a token.
+pub async fn probe(
+    State(app): State<AppState>,
+    _user: CurrentUser,
+    Json(b): Json<ProbeBody>,
+) -> ApiResult<Json<Value>> {
+    let url = check_url(&b.url).map_err(bad)?;
+    let fallback = suggested_name(None, &url);
+    let http = match client_for(&app, url.as_str(), Duration::from_secs(20)).await {
+        Ok(h) => h,
+        Err(e) => {
+            return Ok(Json(
+                json!({"name": fallback, "auth": "unknown", "error": e.to_mcp("it").message}),
+            ))
+        }
+    };
+    let id = app.mcp_upstream.id();
+    let msg = json!({"jsonrpc": "2.0", "id": id, "method": "initialize", "params": {
+        "protocolVersion": PROTOCOL, "capabilities": {},
+        "clientInfo": {"name": "hqc", "version": env!("CARGO_PKG_VERSION")}}});
+    let resp = match http
+        .post(url.as_str())
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .json(&msg)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(Json(
+                json!({"name": fallback, "auth": "unknown", "error": short(&e)}),
+            ))
+        }
+    };
+    let status = resp.status().as_u16();
+    if matches!(status, 401 | 403) {
+        let www = resp
+            .headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let auth = if oauth::offers_oauth(&app, url.as_str(), www.as_deref()).await {
+            "oauth"
+        } else {
+            "token"
+        };
+        return Ok(Json(json!({"name": fallback, "auth": auth})));
+    }
+    let session = resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let sse = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| t.starts_with("text/event-stream"));
+    if !(200..300).contains(&status) {
+        return Ok(Json(json!({"name": fallback, "auth": "unknown",
+                              "error": format!("the server answered {status}")})));
+    }
+    // Its own name, from a small answer only.
+    let mut buf = Vec::new();
+    let mut resp = resp;
+    while let Ok(Some(c)) = resp.chunk().await {
+        buf.extend_from_slice(&c);
+        if buf.len() > 256 * 1024 || (sse && buf.windows(2).any(|w| w == b"\n\n")) {
+            break;
+        }
+    }
+    let answer = if sse {
+        sse_answer(&mut buf, Some(id), &mut 0)
+    } else {
+        serde_json::from_slice::<Value>(&buf).ok()
+    };
+    let server_name = answer
+        .as_ref()
+        .and_then(|v| v.pointer("/result/serverInfo/name"))
+        .and_then(Value::as_str)
+        .map(String::from);
+    // It opened a session for this: closed again.
+    if let Some(sid) = session {
+        let _ = http
+            .delete(url.as_str())
+            .header("mcp-session-id", sid)
+            .send()
+            .await;
+    }
+    Ok(Json(json!({
+        "name": suggested_name(server_name.as_deref(), &url),
+        "server_name": server_name,
+        "auth": "none",
+    })))
+}
+
 /// `POST /api/mcp/servers/{id}/test`: `initialize` and `tools/list` now, in an MCP session of
 /// its own that is closed after; the server as it is then.
 pub async fn test(
@@ -1601,6 +1754,35 @@ mod tests {
         for p in ["8.8.8.8", "140.82.112.3", "2606:4700::1111"] {
             assert!(!is_private(p.parse().unwrap()), "{p}");
         }
+    }
+
+    #[test]
+    fn suggested_names() {
+        let u = |s: &str| reqwest::Url::parse(s).unwrap();
+        assert_eq!(
+            suggested_name(
+                Some("github-mcp-server"),
+                &u("https://api.githubcopilot.com/mcp/")
+            )
+            .as_deref(),
+            Some("github")
+        );
+        assert_eq!(
+            suggested_name(None, &u("https://mcp.linear.app/mcp")).as_deref(),
+            Some("linear")
+        );
+        assert_eq!(
+            suggested_name(None, &u("https://mcp.notion.com/mcp")).as_deref(),
+            Some("notion")
+        );
+        assert_eq!(
+            suggested_name(Some("Context7"), &u("https://mcp.context7.com/mcp")).as_deref(),
+            Some("context7")
+        );
+        assert_eq!(
+            suggested_name(Some("hqc"), &u("https://wiki.example.com/mcp")).as_deref(),
+            Some("wiki")
+        );
     }
 
     #[test]

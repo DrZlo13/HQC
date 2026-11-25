@@ -718,6 +718,7 @@ fn frame_type(f: &HubFrame) -> &'static str {
         HubFrame::ClaudeLogin(_) => "claude.login",
         HubFrame::ClaudeLoginCode(_) => "claude.login_code",
         HubFrame::ClaudeLoginCancel(_) => "claude.login_cancel",
+        HubFrame::ProviderProbe(_) => "provider.probe",
         HubFrame::Ack(_) => "ack",
         HubFrame::Error(_) => "error",
     }

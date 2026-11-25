@@ -3,10 +3,11 @@
 // descriptions; a worker runs one only if its worker.toml allows the name with the same
 // base_url, and keeps the key, so each row says which workers allow it and what to add.
 
-import { useState } from 'preact/hooks';
-import type { ProviderFields } from '../api';
+import { useMemo, useRef, useState } from 'preact/hooks';
+import { ApiError, type ProviderFields, type ProviderProbe } from '../api';
 import type { AppState } from '../app';
 import type { ModelProvider } from '../proto';
+import { useUrlProbe } from './urlprobe';
 
 const EMPTY: ProviderFields = { name: '', label: '', base_url: '', model: '' };
 
@@ -39,6 +40,7 @@ export function ProvidersSection({ app }: { app: AppState }) {
             editing === p.id ? (
               <li key={p.id}>
                 <ProviderForm
+                  app={app}
                   initial={p}
                   onCancel={() => setEditing(null)}
                   onSave={(f) => act(async () => {
@@ -78,6 +80,7 @@ export function ProvidersSection({ app }: { app: AppState }) {
       )}
       {editing === 'new' ? (
         <ProviderForm
+          app={app}
           initial={EMPTY}
           onCancel={() => setEditing(null)}
           onSave={(f) => act(async () => {
@@ -95,29 +98,101 @@ export function ProvidersSection({ app }: { app: AppState }) {
   );
 }
 
+type Key = 'name' | 'label' | 'base_url' | 'model' | 'context_tokens';
+
+/** A provider name from a model id: `Qwen3.8 27B` -> `qwen3-8-27b`. */
+export function providerNameOf(model: string): string {
+  return model
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+    .replace(/-+$/, '');
+}
+
+type Probe = { state: 'busy' } | { state: 'done'; text: string; error?: boolean };
+
+/** The probe's answer for the line under the base URL. */
+function probeText(r: ProviderProbe): Probe {
+  if (r.models.length) return { state: 'done', text: r.models.length === 1 ? '1 model' : `${r.models.length} models` };
+  return { state: 'done', text: r.error ?? 'No models listed', error: true };
+}
+
 function ProviderForm({
+  app,
   initial,
   onSave,
   onCancel,
 }: {
+  app: AppState;
   initial: ProviderFields;
   onSave: (f: ProviderFields) => void;
   onCancel: () => void;
 }) {
   const [f, setF] = useState<ProviderFields>(initial);
-  const field = (key: 'name' | 'label' | 'base_url' | 'model', label: string, placeholder: string) => (
+  const [models, setModels] = useState<ProviderProbe['models']>([]);
+  const [probe, setProbe] = useState<Probe | null>(null);
+  // The fields the owner typed in: a probe fills only the others. An edit starts with all.
+  const touched = useRef(new Set<Key>(initial === EMPTY ? [] : ['name', 'label', 'base_url', 'model', 'context_tokens']));
+  const listId = useMemo(() => `provider-models-${Math.random().toString(36).slice(2)}`, []);
+
+  /** The fields that follow a model, those not typed in. */
+  const follow = (cur: ProviderFields, model: string, list: ProviderProbe['models']): ProviderFields => {
+    const next = { ...cur };
+    const t = touched.current;
+    const m = list.find((x) => x.id === model);
+    if (!t.has('context_tokens')) next.context_tokens = m?.context_tokens;
+    if (!t.has('name')) next.name = providerNameOf(model);
+    if (!t.has('label')) next.label = model;
+    return next;
+  };
+
+  const urlProbe = useUrlProbe(f.base_url, (url, current) => {
+    setProbe({ state: 'busy' });
+    const name = f.name.trim() || undefined;
+    // Through a promise: an api without the call (a stub) is a failed check, not a throw.
+    Promise.resolve(url).then((x) => app.api.probeProvider(x, name)).then(
+      (r) => {
+        if (!current()) return;
+        setModels(r.models);
+        setProbe(probeText(r));
+        if (!touched.current.has('model') && r.models.length) {
+          const model = r.models[0].id;
+          setF((cur) => follow({ ...cur, model }, model, r.models));
+        }
+      },
+      (e) => {
+        if (!current()) return;
+        setModels([]);
+        setProbe({
+          state: 'done',
+          error: true,
+          text: e instanceof ApiError && e.code === 'worker_offline' ? 'No worker is online to read it' : (e as Error).message,
+        });
+      },
+    );
+  });
+
+  const set = (key: Key, v: string) => {
+    touched.current.add(key);
+    // From the state at the time: browser autofill sets several fields before a render.
+    if (key === 'context_tokens') setF((cur) => ({ ...cur, context_tokens: v.trim() ? Number(v.trim()) : undefined }));
+    else if (key === 'model') setF((cur) => follow({ ...cur, model: v }, v.trim(), models));
+    else setF((cur) => ({ ...cur, [key]: v }));
+  };
+
+  const field = (key: 'name' | 'label' | 'base_url' | 'model', label: string, placeholder: string, extra = {}) => (
     <label class="field">
       <span class="field-label">{label}</span>
       <input
         class={`input ${key === 'label' ? '' : 'mono'}`}
         name={`provider_${key}`}
         placeholder={placeholder}
+        autocomplete="off"
         value={f[key]}
-        onInput={(e) => {
-          const v = (e.currentTarget as HTMLInputElement).value;
-          // From the state at the time: browser autofill sets several fields before a render.
-          setF((cur) => ({ ...cur, [key]: v }));
-        }}
+        onInput={(e) => set(key, (e.currentTarget as HTMLInputElement).value)}
+        {...extra}
       />
     </label>
   );
@@ -129,10 +204,18 @@ function ProviderForm({
         onSave(f);
       }}
     >
-      {field('label', 'Label', 'Qwen 3.8 (local)')}
-      {field('name', 'Name, as in [providers.<name>]', 'qwen-local')}
-      {field('base_url', 'Base URL', 'http://192.168.1.229:8082')}
-      {field('model', 'Model', 'qwen3.8-27b')}
+      {field('base_url', 'Base URL', 'http://192.168.1.229:8082', urlProbe)}
+      {probe && (
+        <span class={`small provider-probe ${probe.state === 'done' && probe.error ? 'error-text' : 'muted'}`} role="status">
+          {probe.state === 'busy' ? 'Checking…' : probe.text}
+        </span>
+      )}
+      {field('model', 'Model', 'qwen3.8-27b', { list: listId })}
+      <datalist id={listId}>
+        {models.map((m) => (
+          <option key={m.id} value={m.id} />
+        ))}
+      </datalist>
       <label class="field">
         <span class="field-label">Context window, tokens (optional)</span>
         <input
@@ -141,12 +224,11 @@ function ProviderForm({
           inputMode="numeric"
           placeholder="200000"
           value={f.context_tokens ?? ''}
-          onInput={(e) => {
-            const v = (e.currentTarget as HTMLInputElement).value.trim();
-            setF((cur) => ({ ...cur, context_tokens: v ? Number(v) : undefined }));
-          }}
+          onInput={(e) => set('context_tokens', (e.currentTarget as HTMLInputElement).value)}
         />
       </label>
+      {field('name', 'Name, as in [providers.<name>]', 'qwen-local')}
+      {field('label', 'Label', 'Qwen 3.8 (local)')}
       <div class="actions">
         <button type="submit" class="btn btn-primary btn-save-provider">
           Save

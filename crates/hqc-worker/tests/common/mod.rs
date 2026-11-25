@@ -482,6 +482,8 @@ pub fn fast_conn() -> ConnOptions {
 
 pub struct RunningWorker {
     pub shutdown: CancellationToken,
+    /// `SIGUSR1` of the daemon (#220).
+    pub drain: CancellationToken,
     pub status: watch::Receiver<Status>,
     pub task: JoinHandle<anyhow::Result<()>>,
 }
@@ -565,6 +567,7 @@ fn start_worker_opts(
     logs: Option<hqc_worker::worker_log::LogReceiver>,
     conn: ConnOptions,
 ) -> RunningWorker {
+    let drain = CancellationToken::new();
     let w = Worker {
         config,
         token: Secret::new(TOKEN),
@@ -578,6 +581,7 @@ fn start_worker_opts(
         shutdown_timeout: Duration::from_secs(5),
         machine_id: None,
         mcp_socket: Some(env.mcp_socket()),
+        drain: Some(drain.clone()),
         mirror: env
             .mirror
             .clone()
@@ -596,6 +600,7 @@ fn start_worker_opts(
     let task = tokio::spawn(w.run(shutdown.clone(), tx));
     RunningWorker {
         shutdown,
+        drain,
         status,
         task,
     }

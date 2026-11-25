@@ -757,6 +757,8 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
             }
             // Its `hqc_ask` calls died with it (SPEC §7.1).
             crate::peers::worker_restarted(app, conn.worker_id).await?;
+            // What the restart took from each agent, read before it is forgotten (#220).
+            let lost = crate::leftovers::lost_on_restart(app, conn.worker_id).await?;
             db::worker_restarted(&app.db, conn.worker_id).await?;
             for sid in db::sessions_of_worker(&app.db, conn.worker_id).await? {
                 // Their subagents and foreground calls too; the new process has no list to send
@@ -766,6 +768,8 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
                 events::turn_lost(app, sid).await?;
                 app.session_changed(sid);
             }
+            // The agents are told with an input of their own, which the starts below deliver.
+            crate::leftovers::tell_restart(app, &lost, chrono::Utc::now()).await?;
         }
         // A pause's kill lost with the previous connection, or never sent while the worker was
         // away or the hub down, is sent now (SPEC §17.3).

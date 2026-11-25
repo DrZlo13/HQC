@@ -135,6 +135,7 @@ async fn live_b_answers_with_a_send_and_a_gets_its_file() {
         machine_id: None,
         known_paths_file: run.join("home/known_workspaces.json"),
         mcp_socket: Some(socket),
+        drain: None,
         logs: None,
         mirror: None,
     };

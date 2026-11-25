@@ -201,6 +201,7 @@ async fn live_list_sessions_sees_its_own_session() {
         machine_id: None,
         known_paths_file: run.join("home/known_workspaces.json"),
         mcp_socket: Some(socket),
+        drain: None,
         logs: None,
         mirror: None,
     };

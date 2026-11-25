@@ -577,6 +577,135 @@ async fn a_quiet_ack_fails_the_ask_it_carried() {
     hub.finish().await;
 }
 
+/// SPEC §5.2: an `hqc_ask` whose input the worker refuses for good (a capped one dropped at the
+/// owner's Stop) gets no turn and so no answer: the ask fails at once with the reason, not at its
+/// timeout.
+#[tokio::test]
+async fn a_refused_input_fails_the_ask_it_carried() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (_, ta) = started(&hub, &mut w, "Asker", None).await;
+    let (_b, _) = started(&hub, &mut w, "Helper", None).await;
+
+    let (rid, input) = ask_same_worker(
+        &mut w,
+        &ta,
+        json!({"text": "deploy?", "session": "personal/helper"}),
+    )
+    .await;
+    w.reply(
+        &input["id"],
+        "error",
+        json!({"code": "internal", "message": "dropped at Stop: no", "retryable": false}),
+    )
+    .await;
+    let r = loop {
+        let f = w.recv().await;
+        if f["type"] == "mcp.result" {
+            break f;
+        }
+    };
+    assert_eq!(r["payload"]["request_id"], rid.as_str());
+    assert_eq!(r["payload"]["error"]["code"], "unavailable", "{r}");
+    assert_eq!(
+        r["payload"]["error"]["message"],
+        "personal/helper did not take the question: dropped at Stop: no"
+    );
+    hub.finish().await;
+}
+
+/// An ask of `Asker` to `Helper` whose question the worker holds unacknowledged (its input is
+/// pending on the hub): `(request_id, the target's session id, the worker, the input frame)`.
+async fn pending_ask(hub: &TestHub) -> (String, String, FakeWorker, Value) {
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(hub, &t, WS_PATH).await;
+    let (_, ta) = started(hub, &mut w, "Asker", None).await;
+    let (b, _) = started(hub, &mut w, "Helper", None).await;
+    let (rid, input) = ask_same_worker(
+        &mut w,
+        &ta,
+        json!({"text": "deploy?", "session": "personal/helper"}),
+    )
+    .await;
+    (rid, b, w, input)
+}
+
+/// The `unavailable` result of ask `rid`, with its message.
+async fn failed_ask(w: &mut FakeWorker, rid: &str) -> String {
+    let r = loop {
+        let f = w.recv().await;
+        if f["type"] == "mcp.result" {
+            break f;
+        }
+    };
+    assert_eq!(r["payload"]["request_id"], rid);
+    assert_eq!(r["payload"]["error"]["code"], "unavailable", "{r}");
+    r["payload"]["error"]["message"].as_str().unwrap().into()
+}
+
+/// SPEC §5.2: the agent of the ask's target failing to start for good fails every pending
+/// input, and the ask one of them carried fails with them at once, not at its timeout.
+#[tokio::test]
+async fn an_ask_fails_with_the_input_a_failed_start_gave_up() {
+    let hub = TestHub::start().await;
+    let (rid, _, mut w, input) = pending_ask(&hub).await;
+    // The worker's answer to the input is a start failure that will not be retried.
+    w.reply(
+        &input["id"],
+        "error",
+        json!({"code": "agent_start_failed", "message": "claude: not installed", "retryable": false}),
+    )
+    .await;
+    assert_eq!(
+        failed_ask(&mut w, &rid).await,
+        "personal/helper did not take the question: claude: not installed"
+    );
+    hub.finish().await;
+}
+
+/// SPEC §17.4: archiving the ask's target fails its pending input, and the ask it carried fails
+/// at once.
+#[tokio::test]
+async fn archiving_the_target_fails_the_ask_it_carried() {
+    let hub = TestHub::start().await;
+    let (rid, b, mut w, _) = pending_ask(&hub).await;
+    let (s, v) = hub
+        .post(&format!("/api/sessions/{b}/archive"), json!({}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        failed_ask(&mut w, &rid).await,
+        "personal/helper did not take the question: the session was archived"
+    );
+    hub.finish().await;
+}
+
+/// SPEC §9.3: the ask's target continuing in VS Code fails its pending input, and the ask it
+/// carried fails at once.
+#[tokio::test]
+async fn a_release_to_vscode_fails_the_ask_it_carried() {
+    let hub = TestHub::start().await;
+    let (rid, b, mut w, _) = pending_ask(&hub).await;
+    // The hub's own process runs the session (`locked_by` hqc); VS Code then writes to it.
+    sqlx::query("UPDATE sessions SET locked_by = 'hqc' WHERE id = $1")
+        .bind(b.parse::<Uuid>().unwrap())
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    w.send(
+        "session.state",
+        json!({"session_id": b, "process_state": "stopped",
+               "runtime_session_id": Uuid::now_v7().to_string(), "locked_by": "vscode"}),
+    )
+    .await;
+    assert_eq!(
+        failed_ask(&mut w, &rid).await,
+        "personal/helper did not take the question: the session continues in VS Code"
+    );
+    hub.finish().await;
+}
+
 #[tokio::test]
 async fn sends_wait_in_the_buffer_for_the_next_input() {
     let hub = TestHub::start().await;

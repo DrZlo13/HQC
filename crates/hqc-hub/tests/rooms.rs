@@ -5026,6 +5026,36 @@ async fn the_runtimes_own_reply_tells_the_creator() {
     hub.finish().await;
 }
 
+/// SPEC §7.1.1: the owner's Stop of a room wrote its "Stopped" line and ended the round; an
+/// agent's input from before it, which the worker then fails (a capped one it dropped), adds no
+/// second line and tells the creator nothing more.
+#[tokio::test]
+async fn an_input_the_stop_made_fail_adds_no_line_and_no_notice() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (me, room, _, inputs) = room_by_a_caller(&hub, &mut w, "conversation", &["A", "B"]).await;
+    let (s, v) = hub
+        .post(&format!("/api/sessions/{}/stop", id(&room)), json!({}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let n = notice_of(&mut w, Vec::new(), &me).await;
+    assert!(
+        n["payload"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("the discussion ended: stopped by the owner"),
+        "{n}"
+    );
+    let fail = json!({"code": "internal", "message": "dropped at Stop", "retryable": false});
+    w.reply(&inputs[0]["id"], "error", fail).await;
+    w.within(Duration::from_millis(500)).await;
+    let events = hub.events(id(&room)).await;
+    assert_eq!(lines(&events, "room_stopped").len(), 1, "{events:?}");
+    assert_eq!(notices_in(&hub, &me, &room).await.len(), 1);
+    hub.finish().await;
+}
+
 /// SPEC §5.2, §7.1.1: an input from the room that fails ends a conversation's round with the
 /// failure as the reason, and a council's, whose only agent has then no turn, as answered.
 #[tokio::test]

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.240, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.241, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -4011,6 +4011,10 @@ The reply to an ask:
   whose turn on the question is lost (`system turn_lost`: its process stopped, its worker
   restarted, the watchdog) gives no reply; since 0.39 (T36) the ask then fails at once with
   `unavailable` instead of waiting for its timeout (the question is not delivered again).
+  Since 0.241 so does an ask whose input fails for good: the worker refuses it (§5.2; among
+  others an input dropped at the owner's Stop, §17.2), the agent does not start, the session
+  continues in VS Code (§9.3) or is archived: `unavailable`, "<session> did not take the
+  question: <reason>"; before, it waited for its timeout.
   Since 0.69 a turn on the question that ends with `status idle` and no final message (the
   user's "No" to a permission request ends it so, §8.1, as `POST /stop` does; or the turn
   ended by itself without text) fails the ask at once too: `unavailable`, "the turn of
@@ -4290,7 +4294,10 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   take turns, each seeing what the one before stored.
 - An input from the room that fails delivery, with its agent's failed start or rejected by the
   worker (§5.2), writes `system room_stopped` "<agent's title> did not get the message:
-  <reason>" in the room, in both modes.
+  <reason>" in the room, in both modes. Since 0.241 not when the room's message it carries is
+  older than the room's last "Stopped" (`POST /stop`): that Stop wrote its line and ended the
+  round already. An input the agent's worker drops at that Stop, its cap below the agent's
+  mode (§17.2), fails so.
 - An input from the room that reaches an agent while its turn runs joins that turn, as a
   person's message does (`joined`, §17.2): the turn's final message answers both and is one
   post.
@@ -7595,7 +7602,21 @@ in `event_id` order, the hub's creation order. The agent knows them next time an
 them now. Each is acked `quiet` when the runtime has taken it, and acked `quiet` again when the hub
 resends it. A slash command among them fails, not retryable ("cancelled by Stop"): it runs or it
 does not, it is no text for the history (what decides is the text the runtime gets: a message of
-another session whose text starts with a path carries a header first and is no command). Until the
+another session whose text starts with a path carries a header first and is no command).
+Since 0.241 so does an input whose cap is below the session's own mode (T39, §7.1:
+a message of another session or a run of an agent's schedule sent with a lower ceiling): it was
+never handled under its cap, and the next turn, in the session's mode, would find it in the
+history unhandled. The worker fails it, not retryable ("dropped at Stop: it may not run in this
+session's permission mode": the feed shows it not delivered with that reason, and an `hqc_ask` it
+carried fails at once, §7.1), and writes in its place, after the quiet inputs, a quiet note of its
+own that names what was dropped and never its text: "[hqc] A message from the session <address>
+was dropped at the owner's Stop because of a permission conflict: it may run only in a lower
+permission mode than this session's. Its text is not shown." ("A scheduled message" for a run of
+a schedule, "A message" otherwise). The note is no input of the hub: the feed does not show it,
+nothing is acked for it, and a `session.kill` or a worker restart before the runtime took it loses
+it. Limitation: an input capped only by the buffered `send` messages it carries in front (T40,
+§7.1), the owner's own message among them, is dropped the same way, and the buffered messages come
+with the next input. Until the
 stopped turn ends nothing new goes into it, and what comes after the Stop is never marked: it waits,
 and goes as an ordinary input once the quiet lines are taken (the CLI runs a "next" line before a
 "later" one, and the agent must see the stopped text first). So a message typed after the Stop runs,
@@ -8092,6 +8113,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.240 → 0.241 (a capped input that waits at the owner's Stop is dropped, and the agent told so)
+§17.2: since 0.231 the owner's Stop writes what waited into the agent's history without a turn,
+an input of another session or a schedule's run capped below the session's mode (T39) included;
+the next turn, in the full mode, found it there unhandled. The worker now fails such an input, not
+retryable, and writes in its place a quiet note that names what was dropped (the sending session,
+a scheduled message, a message), not its text. §7.1: an ask whose input fails for good (the worker
+refuses it, the agent does not start, the session continues in VS Code or is archived) fails at
+once with the reason instead of at its timeout. §7.1.1: such a failure of a room's input whose
+message is older than the room's last Stop adds no line and ends no round. The protocol, the
+client and the macOS app are unchanged.
 
 ### 0.239 → 0.240 (the device's copies are cleaned up)
 §6, §12, the Settings page: the copies of the history and of attachments that the client keeps on

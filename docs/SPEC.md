@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.237, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.238, 2026-11-24. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2890,6 +2890,10 @@ browser answers it by selecting the word under the pointer), elsewhere in the ch
 gives the browser's own menu; one inside a selection that the browser cleared on the press (WebKit
 off a Mac) selects it again. Firefox, which does not tell the text under the pointer, gives the
 client's menu while the selection stays as it was and the browser's when the press cleared it.
+Keys for the same (since 0.238), with ⌘ on a Mac and Ctrl elsewhere: ⌘' quotes the selection as
+the button does (where there is an input), ⌘E searches it as "Search in …" does, in a new tab;
+they take a selection that starts in the feed or in a subagent's history; without one the key is
+the browser's. The button's tooltip and the menu's Quote and Search name them.
 The input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
 computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input
 takes the caret when the chat opens, once its newest page is in, unless a request waits for an
@@ -2940,10 +2944,14 @@ an input, "Copy" and "Search in …"; it takes the text as Quote does, cut at th
 browser answers it by selecting the word under the pointer), elsewhere in the chat and on a phone
 gives the browser's own menu; one inside a selection that the browser cleared on the press (WebKit
 off a Mac) selects it again. Firefox, which does not tell the text under the pointer, gives the
-client's menu while the selection stays as it was and the browser's when the press cleared it. The
-input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
-computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the
-input takes the caret when the chat opens, once its newest page is in, unless a request waits
+client's menu while the selection stays as it was and the browser's when the press cleared it.
+Keys for the same (since 0.238), with ⌘ on a Mac and Ctrl elsewhere: ⌘' quotes the selection as
+the button does (where there is an input), ⌘E searches it as "Search in …" does, in a new tab;
+they take a selection that starts in the feed or in a subagent's history; without one the key is
+the browser's. The button's tooltip and the menu's Quote and Search name them. The input is one
+row: the paperclip, the field growing with its lines up to 200 px, send; on a computer its
+placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input takes the
+caret when the chat opens, once its newest page is in, unless a request waits
 for an answer (an open approval in the feed, or the session `waiting`), another field has the
 focus, or a menu or the slid-out column is open; on a phone only when the chat replaces a new
 session's window. An open chat stays at its bottom while its images load: only a scroll up lets
@@ -8060,6 +8068,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.237 → 0.238 (keys for Quote and Search of selected text)
+§6: Quote and "Search in …" of text selected in the feed had no keys, only the button over the
+input and the menu of a right click. ⌘' (Ctrl+' off a Mac) quotes the selection as the button
+does, where there is an input; ⌘E (Ctrl+E) searches it in a new tab. They are taken only while
+the chat holds a selection that starts in the feed or in a subagent's history; without one, with
+Shift or Alt held, or Ctrl on a Mac, the key stays the browser's. The keys go by the key's place,
+not its letter, so they work in any layout. The Quote button's tooltip and the menu's Quote and
+Search name them.
 
 ### 0.236 → 0.237 (the schedules in the block above the input)
 §6, §16: the session's schedules opened in a panel under the chat's header, with its own heading,

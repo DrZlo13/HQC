@@ -44,6 +44,9 @@ import {
   parseModelProvider,
   type McpServer,
   parseMcpServer,
+  type Skill,
+  type SkillFile,
+  parseSkill,
   type PermissionMode,
   type Project,
   type ProjectSort,
@@ -157,11 +160,32 @@ export interface ProviderFields {
   context_tokens?: number;
 }
 
+/** `POST /api/providers/probe` (SPEC 0.236): the models the endpoint lists, as one of the
+ *  owner's online workers read them; `error` when none did. */
+export interface ProviderProbe {
+  models: { id: string; context_tokens?: number }[];
+  error?: string;
+  worker_id?: string;
+}
+
+/** `POST /api/mcp/probe` (SPEC 0.236): what a server says before any sign-in. `token`: it
+ *  refuses without credentials and names no authorization server. */
+export interface McpProbe {
+  name?: string;
+  server_name?: string;
+  auth: 'none' | 'oauth' | 'token' | 'unknown';
+  error?: string;
+}
+
 /** One header of a remote MCP server as the owner gives it; the value is write-only. */
 export interface McpHeader {
   name: string;
   value: string;
 }
+
+/** `POST /api/skills` (SPEC 0.245): a `.zip`, or a folder's files, `path` relative to the
+ *  folder (without the folder's own name). */
+export type SkillUpload = { zip: Blob; name: string } | { files: { file: Blob; path: string }[]; name: string };
 
 /** `POST /api/mcp/servers` and `PATCH /api/mcp/servers/{id}` (SPEC 0.235): in a `PATCH` an
  *  absent field stays as it is, and `headers` replaces all of the server's headers. */
@@ -248,6 +272,8 @@ export interface SecretFields {
   value?: string;
   /** the Vaultwarden entry the worker reads it from itself (exactly one of the two). */
   vault?: string;
+  /** The field of that entry to read instead of its password (only with `vault`). */
+  vault_field?: string;
   passphrase?: string;
   remember?: boolean;
 }
@@ -295,6 +321,11 @@ export class Api {
   /** `body`: JSON, or `FormData` sent as multipart (the browser sets its content type).
    *  `keepalive`: the request outlives the page (sent while it is being left). */
   private async req(method: string, path: string, body?: unknown, keepalive = false): Promise<unknown> {
+    return (await this.send(method, path, body, keepalive)).data;
+  }
+
+  /** `req` with the answer's status. */
+  private async send(method: string, path: string, body?: unknown, keepalive = false): Promise<{ status: number; data: unknown }> {
     const form = typeof FormData !== 'undefined' && body instanceof FormData;
     const res = await this.fetchImpl(this.base + path, {
       method,
@@ -323,7 +354,7 @@ export class Api {
       const code = typeof body.error === 'string' ? body.error : undefined;
       throw new ApiError(res.status, msg || `HTTP ${res.status}`, code, data);
     }
-    return data;
+    return { status: res.status, data };
   }
 
   async me(): Promise<Me> {
@@ -780,6 +811,35 @@ export class Api {
     await this.req('DELETE', `/api/providers/${enc(id)}`);
   }
 
+  /** The models at `base_url`; `409 worker_offline` when no worker of the owner is online. */
+  async probeProvider(base_url: string, name?: string): Promise<ProviderProbe> {
+    const v = (await this.req('POST', '/api/providers/probe', name ? { base_url, name } : { base_url })) as Record<string, unknown>;
+    const models = Array.isArray(v?.models)
+      ? v.models.flatMap((m: unknown) => {
+          const o = m as { id?: unknown; context_tokens?: unknown };
+          if (typeof o?.id !== 'string' || !o.id) return [];
+          return [typeof o.context_tokens === 'number' ? { id: o.id, context_tokens: o.context_tokens } : { id: o.id }];
+        })
+      : [];
+    return {
+      models,
+      ...(typeof v?.error === 'string' ? { error: v.error } : {}),
+      ...(typeof v?.worker_id === 'string' ? { worker_id: v.worker_id } : {}),
+    };
+  }
+
+  /** How the MCP server at `url` signs in, and a name for it; `400` for a URL the hub refuses. */
+  async probeMcp(url: string): Promise<McpProbe> {
+    const v = (await this.req('POST', '/api/mcp/probe', { url })) as Record<string, unknown>;
+    const auth = ['none', 'oauth', 'token'].includes(v?.auth as string) ? (v.auth as McpProbe['auth']) : 'unknown';
+    return {
+      auth,
+      ...(typeof v?.name === 'string' && v.name ? { name: v.name } : {}),
+      ...(typeof v?.server_name === 'string' && v.server_name ? { server_name: v.server_name } : {}),
+      ...(typeof v?.error === 'string' ? { error: v.error } : {}),
+    };
+  }
+
   /** The owner's remote MCP servers (SPEC 0.235). */
   async mcpServers(): Promise<McpServer[]> {
     const data = (await this.req('GET', '/api/mcp/servers')) as { servers?: unknown };
@@ -815,12 +875,49 @@ export class Api {
     await this.req('DELETE', `/api/mcp/servers/${enc(id)}/sign_in`);
   }
 
+  /** The owner's skills (SPEC 0.245). */
+  async skills(): Promise<Skill[]> {
+    const data = (await this.req('GET', '/api/skills')) as { skills?: unknown };
+    if (!Array.isArray(data?.skills)) throw new ApiError(500, 'skills: expected a list');
+    return data.skills.map(parseSkill);
+  }
+
+  /** Uploads a skill: a `.zip`, or a folder's files with their paths inside it. `name`: the
+   *  folder's or the `.zip`'s, for a `SKILL.md` without one. `replaced`: the hub answered 200,
+   *  the owner's skill of that name has the new content (and keeps its projects). */
+  async uploadSkill(u: SkillUpload): Promise<{ skill: Skill; replaced: boolean }> {
+    const form = new FormData();
+    if ('zip' in u) form.append('zip', u.zip, `${u.name}.zip`);
+    else for (const f of u.files) form.append('file', f.file, f.path);
+    if (u.name) form.append('name', u.name);
+    const r = await this.send('POST', '/api/skills', form);
+    return { skill: parseSkill(r.data), replaced: r.status === 200 };
+  }
+
+  async updateSkill(id: string, f: { all_projects?: boolean; project_ids?: string[] }): Promise<Skill> {
+    return parseSkill(await this.req('PATCH', `/api/skills/${enc(id)}`, f));
+  }
+
+  async deleteSkill(id: string): Promise<void> {
+    await this.req('DELETE', `/api/skills/${enc(id)}`);
+  }
+
+  async skillFiles(id: string): Promise<SkillFile[]> {
+    const data = (await this.req('GET', `/api/skills/${enc(id)}/files`)) as { files?: unknown };
+    if (!Array.isArray(data?.files)) throw new ApiError(500, 'skill files: expected a list');
+    return data.files.map((v) => {
+      const o = (v ?? {}) as Record<string, unknown>;
+      return { path: String(o.path ?? ''), size: Number(o.size ?? 0), ...(o.executable === true ? { executable: true } : {}) };
+    });
+  }
+
   /** A secret or an ssh key for the session's running agent (SPEC 0.147); `requestId`
    *  answers the agent's `hqc_secret`. Only the fields go: the hub refuses others. */
   async giveSecret(sessionId: string, f: SecretFields, requestId?: string): Promise<SecretGiven> {
     const body: Record<string, unknown> = { kind: f.kind, name: f.name };
     if (f.value !== undefined) body.value = f.value;
     if (f.vault !== undefined) body.vault = f.vault;
+    if (f.vault_field !== undefined) body.vault_field = f.vault_field;
     if (f.kind === 'ssh_key') {
       if (f.passphrase) body.passphrase = f.passphrase;
       if (f.remember) body.remember = true;

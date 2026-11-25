@@ -16,6 +16,7 @@ import { Timeline } from '../src/timeline';
 import { ChatItems, type ChatActions } from '../src/ui/cards';
 import { claudeLine, signInHref } from '../src/ui/ClaudeSignIn';
 import { Settings } from '../src/ui/Settings';
+import { defaultKey } from '../src/keys';
 import { WEB_SEARCHES } from '../src/websearch';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
@@ -64,8 +65,11 @@ function settingsApp(api: Partial<Api>) {
     newSessionProject: () => undefined,
     sortedProjects: () => [],
     webSearch: WEB_SEARCHES[0],
+    keyFor: defaultKey,
+    setKey: vi.fn(),
     providers: [],
     reloadSessions: vi.fn(async () => {}),
+    deviceUser: () => undefined,
   } as unknown as AppState;
 }
 

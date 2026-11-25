@@ -23,6 +23,8 @@
 //! # browser = false                # a session the owner gives it to drives Chrome here
 //! # task_tools = false             # true: give the agent Claude Code's task tools
 //!                                  # (TaskCreate, TaskUpdate, TaskList, TaskGet)
+//! # long_run_note = 3300           # seconds: tell the agent every so long that a background
+//!                                  # command or subagent of its own still runs; 0 = never
 //!
 //! [permissions]                  # optional, see crate::permissions
 //! mode = "ask"                   # "ask" | "auto" | "allow_all": sessions that ask for none
@@ -37,6 +39,7 @@
 //! allow_local_mcp = false        # true: the machine's MCP servers too (no --strict-mcp-config)
 //! project_settings = false       # true: the repository's CLAUDE.md and .claude/settings.json too
 //! hub_mcp = false                # true: the remote MCP servers the hub keeps (SPEC 0.235)
+//! hub_skills = false             # true: the skills the hub keeps (SPEC 0.245)
 //! [environments.infra.permissions]
 //! unblock = ["Bash(ssh:*)"]      # rules of the worker's deny lifted here only
 //! allow = ["Bash(ssh debian@192.168.1.20:*)"]
@@ -49,6 +52,7 @@
 //! [providers.qwen-local]         # SPEC 0.144: a model provider of the hub this worker runs
 //! base_url = "http://192.168.1.229:8082"   # must equal the hub's description
 //! # api_key = "..."              # for an endpoint that needs one; never in `hello` or logs
+//! # api_key = { vault = "zai key", field = "password" }   # or read from Vaultwarden (rbw) at every agent start; `field` optional
 //! ```
 
 use std::collections::BTreeMap;
@@ -120,6 +124,8 @@ struct RawConfig {
     browser: bool,
     #[serde(default)]
     task_tools: bool,
+    #[serde(default = "default_long_run_note")]
+    long_run_note: u64,
     #[serde(default)]
     permissions: Option<RawPermissions>,
     #[serde(default)]
@@ -135,7 +141,27 @@ struct RawConfig {
 struct RawProvider {
     base_url: String,
     #[serde(default)]
-    api_key: Option<String>,
+    api_key: Option<RawProviderKey>,
+}
+
+/// A provider's `api_key`: the key itself, or the Vaultwarden entry (and its field) the worker
+/// reads it from with `rbw` whenever it starts the agent.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(
+    untagged,
+    expecting = "a key, or a table { vault = \"<entry>\", field = \"<field>\" }"
+)]
+enum RawProviderKey {
+    Value(String),
+    Vault(RawVaultKey),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawVaultKey {
+    vault: String,
+    #[serde(default)]
+    field: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -152,6 +178,8 @@ struct RawEnvironment {
     #[serde(default)]
     hub_mcp: bool,
     #[serde(default)]
+    hub_skills: bool,
+    #[serde(default)]
     permissions: RawEnvPermissions,
 }
 
@@ -164,6 +192,8 @@ struct RawEnvPermissions {
     allow: Vec<String>,
     #[serde(default)]
     deny: Vec<String>,
+    #[serde(default)]
+    remote_unblock: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -213,6 +243,9 @@ pub struct Environment {
     /// The sessions get the remote MCP servers the hub keeps for their project, each as a
     /// stdio relay to the hub (SPEC 0.235); worker-local, not in `hello`.
     pub hub_mcp: bool,
+    /// The sessions get the skills the hub keeps for their project, in a plugin folder the
+    /// worker builds (`--plugin-dir`, SPEC 0.245); worker-local, not in `hello`.
+    pub hub_skills: bool,
     /// `[environments.<name>.permissions]` as written.
     pub rules: EnvPermissions,
     /// What its sessions run with ([`Permissions::for_environment`]).
@@ -229,6 +262,7 @@ impl Environment {
             allow_local_mcp: false,
             project_settings: false,
             hub_mcp: false,
+            hub_skills: false,
             rules: EnvPermissions::default(),
             permissions: permissions.clone(),
         }
@@ -273,10 +307,28 @@ fn parse_provider(name: &str, raw: RawProvider) -> anyhow::Result<AllowedProvide
     {
         bail!("base_url must be an http:// or https:// URL");
     }
+    let (api_key, api_key_vault) = match raw.api_key {
+        Some(RawProviderKey::Value(k)) if !k.is_empty() => (Some(Secret::new(k)), None),
+        Some(RawProviderKey::Vault(v)) => {
+            hqc_proto::frame::check_vault_entry(&v.vault).map_err(anyhow::Error::msg)?;
+            if let Some(f) = &v.field {
+                hqc_proto::frame::check_vault_field(f).map_err(anyhow::Error::msg)?;
+            }
+            (
+                None,
+                Some(VaultRef {
+                    entry: v.vault,
+                    field: v.field,
+                }),
+            )
+        }
+        _ => (None, None),
+    };
     Ok(AllowedProvider {
         name: name.to_string(),
         base_url,
-        api_key: raw.api_key.filter(|k| !k.is_empty()).map(Secret::new),
+        api_key,
+        api_key_vault,
     })
 }
 
@@ -322,6 +374,7 @@ fn parse_environment(
         unblock: raw.permissions.unblock,
         allow: raw.permissions.allow,
         deny: raw.permissions.deny,
+        remote_unblock: raw.permissions.remote_unblock,
     };
     Ok(Environment {
         name: name.into(),
@@ -330,6 +383,7 @@ fn parse_environment(
         allow_local_mcp: raw.allow_local_mcp,
         project_settings: raw.project_settings,
         hub_mcp: raw.hub_mcp,
+        hub_skills: raw.hub_skills,
         permissions: worker.for_environment(&rules)?,
         rules,
     })
@@ -347,8 +401,21 @@ fn default_clone_timeout() -> u64 {
     DEFAULT_CLONE_TIMEOUT.as_secs()
 }
 
+fn default_long_run_note() -> u64 {
+    DEFAULT_LONG_RUN_NOTE.as_secs()
+}
+
 /// How long `git clone` of a new workspace may take, unless `clone_timeout` says otherwise.
 pub const DEFAULT_CLONE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How often the agent is told of a background command or subagent of its own that still runs,
+/// unless `long_run_note` says otherwise (SPEC §14, §8.1). With the 1-hour prompt cache
+/// (`cache_ttl_s` 3600 in `usage`) it is below the hour the cache lives after the agent's last
+/// request, which is never before a watched task started (for one a subagent left: before that
+/// subagent's report started a turn of the agent): the turn of the first note reads the cache,
+/// and each note's turn is a request that renews it for the next. A value of an hour or more
+/// misses it; with the 5-minute cache or on a provider the note's turn misses it at any value.
+pub const DEFAULT_LONG_RUN_NOTE: Duration = Duration::from_secs(55 * 60);
 
 /// Agent processes running at once, unless `max_sessions` says otherwise.
 pub const DEFAULT_MAX_SESSIONS: usize = 8;
@@ -392,6 +459,25 @@ pub struct AllowedProvider {
     pub base_url: String,
     /// `ANTHROPIC_AUTH_TOKEN` for an endpoint that needs one; never in `hello` or logs.
     pub api_key: Option<Secret>,
+    /// Instead of `api_key`: the Vaultwarden entry the worker reads it from at every start of
+    /// the agent.
+    pub api_key_vault: Option<VaultRef>,
+}
+
+/// A Vaultwarden entry and, when it is not the password, the field of it (as
+/// [`crate::vault::read_for`] takes them): neither is secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultRef {
+    pub entry: String,
+    pub field: Option<String>,
+}
+
+/// A [`VaultRef`] with the `rbw` that reads it ([`Config::rbw_bin`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultKey {
+    pub entry: String,
+    pub field: Option<String>,
+    pub rbw: PathBuf,
 }
 
 /// A provider a session runs on: the hub's description, checked against the worker's
@@ -403,6 +489,9 @@ pub struct SessionProvider {
     pub model: String,
     pub context_tokens: Option<u32>,
     pub api_key: Option<Secret>,
+    /// The key is in Vaultwarden: the supervisor reads it into a copy of the spec at every
+    /// start of the agent, so `api_key` is empty here.
+    pub api_key_vault: Option<VaultKey>,
 }
 
 /// Validated config. Paths are absolute and normalized (canonical when they exist).
@@ -453,6 +542,10 @@ pub struct Config {
     /// 2.1.312 gives the 5.x models none, and the chat has no task list to show (SPEC §14, §8.1,
     /// since 0.223). Off by default.
     pub task_tools: bool,
+    /// How often the agent is told that a background command or subagent of its own still runs,
+    /// from the task's start (SPEC §14, §8.1, since 0.244); `None` (`long_run_note = 0`): never.
+    /// [`DEFAULT_LONG_RUN_NOTE`] unless written.
+    pub long_run_note: Option<Duration>,
     /// `[permissions]`: the worker's allow/deny rules and the ask/auto mode (SPEC §14). A
     /// session runs with its environment's [`Environment::permissions`], built on these.
     pub permissions: Permissions,
@@ -465,6 +558,9 @@ pub struct Config {
     /// Where sessions without a workspace get their empty folder (SPEC §8.4):
     /// `$HQC_HOME/scratch/<session_id>`.
     pub scratch_root: PathBuf,
+    /// The skills of the hub (SPEC 0.245): `$HQC_HOME/hub-skills`, its archives and plugin
+    /// folders ([`crate::hub_skills`]).
+    pub skills_root: PathBuf,
     /// The key store `$HQC_HOME/keys` and the agent sockets `$HQC_HOME/agents` (T44).
     pub ssh: crate::ssh::Store,
     /// `[providers.*]` by name.
@@ -537,6 +633,14 @@ pub struct StartSpec {
     /// environment with `hub_mcp`, for an unrestricted Claude Code session of the worker's
     /// owner, and only valid names.
     pub mcp_servers: Vec<String>,
+    /// `session.start.skills` as this worker takes them (SPEC 0.245): only in an environment
+    /// with `hub_skills`, for an unrestricted Claude Code session of the worker's owner, valid
+    /// names and hashes, one per name.
+    pub skills: Vec<hqc_proto::skills::SkillRef>,
+    /// The plugin folder with [`Self::skills`] the supervisor built before the start
+    /// ([`crate::hub_skills::HubSkills::prepare`]): `--plugin-dir`. `None`: no skill of the
+    /// hub could be had, or none was given.
+    pub skill_dir: Option<PathBuf>,
 }
 
 impl StartSpec {
@@ -659,6 +763,7 @@ impl Config {
             rbw_bin: PathBuf::from("rbw"),
             browser: raw.browser,
             task_tools: raw.task_tools,
+            long_run_note: (raw.long_run_note > 0).then(|| Duration::from_secs(raw.long_run_note)),
             default_environment: Arc::new(Environment::default_of(&permissions)),
             permissions,
             environments,
@@ -666,6 +771,7 @@ impl Config {
             max_sessions: raw.max_sessions,
             clone_timeout: Duration::from_secs(raw.clone_timeout),
             scratch_root: home.join("scratch"),
+            skills_root: home.join("hub-skills"),
             ssh: crate::ssh::Store::in_home(&home),
             secrets: crate::secrets::Stores::in_home(&home),
             providers,
@@ -763,6 +869,35 @@ impl Config {
             names.dedup();
             names
         };
+        // SPEC 0.245: the hub's skills, only where `worker.toml` takes them.
+        let skills = if s.skills.is_empty() {
+            vec![]
+        } else if !environment.hub_skills
+            || !s.owner_is_worker_owner
+            || s.restricted
+            || s.runtime != Runtime::ClaudeCode
+        {
+            tracing::info!(
+                session_id = %s.session_id,
+                skills = ?s.skills.iter().map(|k| &k.name).collect::<Vec<_>>(),
+                "the hub's skills not taken: hub_skills is off here or the session is not \
+                 the owner's unrestricted Claude Code session"
+            );
+            vec![]
+        } else {
+            let mut skills: Vec<hqc_proto::skills::SkillRef> = s
+                .skills
+                .iter()
+                .filter(|k| {
+                    hqc_proto::skills::valid_skill_name(&k.name)
+                        && hqc_proto::skills::valid_sha256(&k.sha256)
+                })
+                .cloned()
+                .collect();
+            skills.sort();
+            skills.dedup_by(|a, b| a.name == b.name);
+            skills
+        };
         Ok(StartSpec {
             session_id: s.session_id,
             runtime: s.runtime,
@@ -777,7 +912,11 @@ impl Config {
             auto_approve: s.auto_approve,
             session_token: Secret::new(s.session_token.clone()),
             ask_timeout_s: s.ask_timeout_s,
-            permission_mode: self.permission_mode(s.session_id, s.permission_mode),
+            permission_mode: auto_off_provider(
+                s.session_id,
+                self.permission_mode(s.session_id, s.permission_mode),
+                provider.is_some(),
+            ),
             // The supervisor gives a session in a workspace the folder's shared list.
             folder_rules: None,
             fork: s.fork.clone(),
@@ -788,6 +927,8 @@ impl Config {
             browser,
             browser_refused,
             mcp_servers,
+            skills,
+            skill_dir: None,
         })
     }
 
@@ -816,6 +957,11 @@ impl Config {
             model: p.model.clone(),
             context_tokens: p.context_tokens,
             api_key: allowed.api_key.clone(),
+            api_key_vault: allowed.api_key_vault.as_ref().map(|v| VaultKey {
+                entry: v.entry.clone(),
+                field: v.field.clone(),
+                rbw: self.rbw_bin.clone(),
+            }),
         })
     }
 
@@ -978,6 +1124,21 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
+/// The mode a session on a model provider runs in (#194, SPEC 0.246): `ask` for `auto`. Auto's
+/// safety check runs on Anthropic's servers and does not pass through a provider's endpoint,
+/// so in Auto the CLI refuses every call that needs it; `ask` and `allow_all` are as asked.
+pub fn auto_off_provider(
+    session_id: Uuid,
+    mode: PermissionMode,
+    on_provider: bool,
+) -> PermissionMode {
+    if on_provider && mode == PermissionMode::Auto {
+        tracing::info!(%session_id, "auto on a model provider: running ask, the safety check does not pass through a provider");
+        return PermissionMode::Ask;
+    }
+    mode
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1060,6 +1221,25 @@ mod tests {
         );
     }
 
+    /// SPEC 0.244: `long_run_note` is 3300 s unless written, `0` turns the notes off.
+    #[test]
+    fn the_long_run_note_has_a_default_and_can_be_turned_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = |extra: &str| {
+            format!(
+                "hub_url = \"http://127.0.0.1:1/\"\nallowed_roots = [{:?}]\n{extra}",
+                dir.path().display().to_string(),
+            )
+        };
+        let note = |extra: &str| Config::parse(&toml(extra)).unwrap().long_run_note;
+        assert_eq!(note(""), Some(Duration::from_secs(3300)));
+        assert_eq!(note("long_run_note = 0\n"), None);
+        assert_eq!(
+            note("long_run_note = 1200\n"),
+            Some(Duration::from_secs(1200))
+        );
+    }
+
     /// SPEC 0.148: the browser only with `browser = true`, for the owner's unrestricted
     /// session; otherwise the session starts without it and says why.
     #[test]
@@ -1093,6 +1273,82 @@ mod tests {
         let mut restricted = s.clone();
         restricted.restricted = true;
         assert!(!on.check_start(&restricted).unwrap().browser);
+    }
+
+    /// SPEC 0.243: a provider's `api_key` is the key, or a Vaultwarden entry (and field) the
+    /// session's provider carries with the worker's `rbw`.
+    #[test]
+    fn a_providers_key_is_a_value_or_a_vault_entry() {
+        let toml = |key: &str| {
+            format!(
+                "hub_url = \"http://127.0.0.1:1/\"\nallowed_roots = [\"/a\"]\n\
+                 [providers.zai]\nbase_url = \"https://api.z.ai/api/anthropic\"\n{key}\n"
+            )
+        };
+        let key = |k: &str| Config::parse(&toml(k)).map(|c| c.providers[0].clone());
+        // A string, as before.
+        let p = key("api_key = \"sk-zai\"").unwrap();
+        assert_eq!(p.api_key.unwrap().expose(), "sk-zai");
+        assert!(p.api_key_vault.is_none());
+        // A table: the entry, and the field when there is one; no key of its own.
+        let p = key("api_key = { vault = \"zai key\" }").unwrap();
+        assert!(p.api_key.is_none());
+        assert_eq!(
+            p.api_key_vault,
+            Some(VaultRef {
+                entry: "zai key".into(),
+                field: None
+            })
+        );
+        let p = key("api_key = { vault = \"zai\", field = \"token\" }").unwrap();
+        assert_eq!(
+            p.api_key_vault,
+            Some(VaultRef {
+                entry: "zai".into(),
+                field: Some("token".into())
+            })
+        );
+        // Neither a stray key in the table, nor a table without an entry, nor a bad entry or
+        // field.
+        for bad in [
+            "api_key = { vault = \"zai\", feild = \"x\" }",
+            "api_key = { field = \"x\" }",
+            "api_key = { vault = \"\" }",
+            "api_key = { vault = \"a\\nb\" }",
+            "api_key = { vault = \"zai\", field = \"\" }",
+            "api_key = { vault = \"zai\", field = \"a\\nb\" }",
+        ] {
+            assert!(key(bad).is_err(), "{bad}");
+        }
+        // A table that is not a vault reference says what is expected.
+        let e = format!(
+            "{:#}",
+            key("api_key = { vault = \"zai\", feild = \"x\" }").unwrap_err()
+        );
+        assert!(
+            e.contains("a key, or a table { vault = \"<entry>\", field = \"<field>\" }"),
+            "{e}"
+        );
+        // The session's provider carries the entry with the worker's `rbw`.
+        let mut c = Config::parse(&toml("api_key = { vault = \"zai\" }")).unwrap();
+        c.rbw_bin = PathBuf::from("/opt/rbw");
+        let p = c
+            .provider(&hqc_proto::frame::Provider {
+                name: "zai".into(),
+                base_url: "https://api.z.ai/api/anthropic".into(),
+                model: "glm-5".into(),
+                context_tokens: None,
+            })
+            .unwrap();
+        assert!(p.api_key.is_none());
+        assert_eq!(
+            p.api_key_vault,
+            Some(VaultKey {
+                entry: "zai".into(),
+                field: None,
+                rbw: PathBuf::from("/opt/rbw")
+            })
+        );
     }
 
     /// SPEC 0.144: a provider runs only by its name in `[providers.*]` with the same
@@ -1136,6 +1392,7 @@ mod tests {
         s.provider = Some(described("zai", "https://api.z.ai/api/anthropic"));
         let p = c.check_start(&s).unwrap().provider.unwrap();
         assert_eq!(p.api_key.unwrap().expose(), "sk-zai-secret");
+        assert!(p.api_key_vault.is_none());
 
         for (name, url, why) in [
             ("other", "http://192.168.1.229:8082", "does not allow"),
@@ -1588,6 +1845,29 @@ environment = "lab"
         assert!(!c.default_environment.project_settings);
     }
 
+    /// #162: `remote_unblock` is read per host and reaches the environment's permissions; a
+    /// rule that is not one of its deny rules is an error at load.
+    #[test]
+    fn remote_unblock_in_worker_toml() {
+        let toml = |rule: &str| {
+            format!(
+                "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n\
+                 [environments.bench.permissions]\nunblock = [\"Bash(ssh:*)\"]\n\
+                 remote_unblock = {{ \"pi@bench.local\" = [\"{rule}\"] }}\n\
+                 [[env_bindings]]\npath = \"/a/bench\"\nenvironment = \"bench\"\n"
+            )
+        };
+        let c = Config::parse(&toml("Bash(sudo:*)")).unwrap();
+        let e = c.environments.iter().find(|e| e.name == "bench").unwrap();
+        assert_eq!(
+            e.permissions.remote_unblock["pi@bench.local"],
+            ["Bash(sudo:*)"]
+        );
+        assert_eq!(e.rules.remote_unblock["pi@bench.local"], ["Bash(sudo:*)"]);
+        let err = Config::parse(&toml("Bash(curl:*)")).unwrap_err();
+        assert!(format!("{err:#}").contains("remote_unblock"), "{err:#}");
+    }
+
     /// SPEC 0.235: the hub's MCP servers only in an environment with `hub_mcp`, for an
     /// unrestricted session of the worker's owner, and only valid names.
     #[cfg(unix)]
@@ -1625,6 +1905,54 @@ environment = "mcp"
         };
         assert_eq!(start("on", true, false), ["github", "wiki"]);
         assert!(start("off", true, false).is_empty(), "no hub_mcp");
+        assert!(start("on", true, true).is_empty(), "restricted");
+        assert!(start("on", false, false).is_empty(), "not the owner's");
+    }
+
+    /// SPEC 0.245: the hub's skills only in an environment with `hub_skills`, for an
+    /// unrestricted session of the worker's owner, valid names and hashes, one per name.
+    #[cfg(unix)]
+    #[test]
+    fn the_hubs_skills_only_where_hub_skills_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for d in ["on", "off"] {
+            std::fs::create_dir(root.join(d)).unwrap();
+        }
+        let c = Config::parse(&format!(
+            r#"
+hub_url = "https://h"
+allowed_roots = [{root:?}]
+[environments.sk]
+hub_skills = true
+[[env_bindings]]
+path = {on:?}
+environment = "sk"
+"#,
+            root = root.display().to_string(),
+            on = root.join("on").display().to_string(),
+        ))
+        .unwrap();
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        let start = |ws: &str, owner: bool, restricted: bool| {
+            let s: hqc_proto::frame::SessionStart = serde_json::from_value(serde_json::json!({
+                "session_id": Uuid::now_v7(), "mode": "new", "runtime": "claude_code",
+                "workspace_path": root.join(ws).display().to_string(), "cwd": ".",
+                "disallowed_tools": [], "restricted": restricted, "auto_approve": false,
+                "session_token": "hqcs_x", "owner_is_worker_owner": owner, "ask_timeout_s": 600,
+                "skills": [
+                    {"name": "wiki", "sha256": b}, {"name": "bench", "sha256": a},
+                    {"name": "bench", "sha256": b}, {"name": "Bad", "sha256": a},
+                    {"name": "x", "sha256": "../.."},
+                ],
+            }))
+            .unwrap();
+            c.check_start(&s)
+                .map(|s| s.skills.into_iter().map(|k| k.name).collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        assert_eq!(start("on", true, false), ["bench", "wiki"]);
+        assert!(start("off", true, false).is_empty(), "no hub_skills");
         assert!(start("on", true, true).is_empty(), "restricted");
         assert!(start("on", false, false).is_empty(), "not the owner's");
     }

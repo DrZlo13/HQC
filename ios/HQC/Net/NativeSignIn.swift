@@ -19,7 +19,7 @@ enum NativeSignIn {
             switch self {
             case .cancelled: "Sign-in was cancelled."
             case .badCallback: "The hub's answer to the sign-in did not match. Try again."
-            case .hubTooOld: "This hub is older than the app: update it to sign in (SPEC 0.237)."
+            case .hubTooOld: "This hub is older than the app: update it to sign in (SPEC 0.248)."
             }
         }
     }

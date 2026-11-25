@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::event::{ClarifyAction, ClarifyAnswer, Event};
+use crate::event::{ClarifyAction, ClarifyAnswer, Event, LiveKind};
 
 /// `{id, type, payload}`; `body` supplies `type` and `payload`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -231,6 +231,10 @@ pub enum WorkerFrame {
     /// reported (since SPEC 0.203, §5.4, §8.1); answered with `ack {}`.
     #[serde(rename = "session.subagent_leftovers")]
     SubagentLeftovers(SubagentLeftovers),
+    /// Background commands or subagents of the session's agent that have run for a long time
+    /// (since SPEC 0.244, §5.4, §8.1); answered with `ack {}`.
+    #[serde(rename = "session.long_runs")]
+    LongRuns(LongRuns),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -259,6 +263,28 @@ pub struct LeftoverCommand {
     /// The command's `description` in the runtime's list.
     pub description: String,
     /// Seconds since the command started.
+    pub running_s: u64,
+}
+
+/// `session.long_runs {session_id, tasks}` (since SPEC 0.244, §5.4): the background commands and
+/// subagents of the session's agent that have just run through another `long_run_note` of the
+/// worker (55 minutes unless written). The hub tells the agent with a note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LongRuns {
+    pub session_id: Uuid,
+    pub tasks: Vec<LongRun>,
+}
+
+/// One task of [`LongRuns`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LongRun {
+    /// The runtime's id of the task, which its own tool for stopping a task takes.
+    pub task_id: String,
+    /// [`LiveKind::Agent`] (a subagent) or [`LiveKind::Command`]; no other is sent.
+    pub kind: LiveKind,
+    /// The task's description in the runtime's list.
+    pub description: String,
+    /// Seconds since the task started.
     pub running_s: u64,
 }
 
@@ -727,6 +753,10 @@ pub enum HubFrame {
     /// Give up the sign-in `login_id`.
     #[serde(rename = "claude.login_cancel")]
     ClaudeLoginCancel(ClaudeLoginCancel),
+    /// The models an Anthropic- or OpenAI-compatible endpoint lists, read by the worker, which
+    /// reaches the owner's network (since SPEC 0.236): Settings fills a provider from its URL.
+    #[serde(rename = "provider.probe")]
+    ProviderProbe(ProviderProbeRequest),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -988,6 +1018,35 @@ pub enum ResultBody {
     ClaudeAuth(ClaudeAuthResult),
     ClaudeLogin(ClaudeLoginResult),
     ClaudeLoginDone(ClaudeLoginDoneResult),
+    ProviderProbe(ProviderProbeResult),
+}
+
+/// `provider.probe {request_id, base_url}` -> `result {provider_probe}` (since SPEC 0.236).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderProbeRequest {
+    pub request_id: String,
+    pub base_url: String,
+}
+
+/// What the endpoint said of itself; `error` when it could not be read.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProviderProbe {
+    pub models: Vec<ProbedModel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A model the endpoint lists, with its context window when the endpoint gives one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbedModel {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderProbeResult {
+    pub provider_probe: ProviderProbe,
 }
 
 /// `session.input_now {request_id, session_id, event_id}` and `session.withdraw {…}` (since SPEC
@@ -1137,22 +1196,35 @@ pub const MAX_VAULT_ENTRY: usize = 200;
 
 /// Check the `vault` of `secret.put`: one shown line of 1 to [`MAX_VAULT_ENTRY`] characters.
 pub fn check_vault_entry(entry: &str) -> Result<(), String> {
-    if (1..=MAX_VAULT_ENTRY).contains(&entry.chars().count()) && shown_line(entry) {
+    check_vault_line("vault", entry)
+}
+
+/// Check the `vault_field` of `secret.put`: the same shape as the entry's name, so a field of a
+/// custom name is as long as an entry's.
+pub fn check_vault_field(field: &str) -> Result<(), String> {
+    check_vault_line("vault_field", field)
+}
+
+fn check_vault_line(what: &str, s: &str) -> Result<(), String> {
+    if (1..=MAX_VAULT_ENTRY).contains(&s.chars().count()) && shown_line(s) {
         Ok(())
     } else {
         Err(format!(
-            "vault is one line of 1 to {MAX_VAULT_ENTRY} characters, without control characters"
+            "{what} is one line of 1 to {MAX_VAULT_ENTRY} characters, without control characters"
         ))
     }
 }
 
-/// `secret.put {request_id, session_id, kind, name, value?, vault?, passphrase?, remember?,
-/// comment?}` -> `result` [`SecretPutResult`] or `error` (since SPEC 0.147, §5.3). `request_id` equals the
+/// `secret.put {request_id, session_id, kind, name, value?, vault?, vault_field?, passphrase?,
+/// remember?, comment?}` -> `result` [`SecretPutResult`] or `error` (since SPEC 0.147, §5.3). `request_id` equals the
 /// frame `id`. The worker takes it only with `session_secrets`, for a session of its owner
 /// that is not restricted and whose agent runs now; `value` is the secret (`secret`) or the
 /// private key (`ssh_key`), absent for `ssh_keygen`; instead of `value`, `vault` names the
 /// Vaultwarden (Bitwarden) entry that holds it, which the worker reads itself with `rbw` (only
 /// with `vault` on in its `worker.toml`): exactly one of the two for `secret` and `ssh_key`;
+/// `vault_field`, only with `vault`, names the field of that entry to give instead of its
+/// password (`username`, `notes`, `totp`, a card's or an identity's field, an ssh key's
+/// `public_key`, or a custom field's exact name);
 /// `passphrase` decrypts a key and is not kept; `remember` keeps an `ssh_key` for the session's
 /// workspace (`ssh_keygen` always does); `comment` is the comment of a made key. Never logged, never in the outbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1165,6 +1237,8 @@ pub struct SecretPut {
     pub value: Option<SecretValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_field: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passphrase: Option<SecretValue>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1335,6 +1409,10 @@ pub struct EnvPermissions {
     /// Added to the worker's `deny`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
+    /// Deny rules lifted only for the command sent by `ssh` to a host, as written (#162, SPEC
+    /// 0.246): `{"pi@bench.local": ["Bash(sudo:*)"]}`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub remote_unblock: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -1567,6 +1645,12 @@ pub struct SessionStart {
     /// and the token stay on the hub. Absent when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<String>,
+    /// Since SPEC 0.245: the skills the hub keeps for the session's project, by name and the
+    /// sha256 of their archive. A worker whose environment has `hub_skills = true` fetches each
+    /// archive once per hash (`GET /worker/skills/{sha256}`), puts the skills into a plugin
+    /// folder of its own and starts the agent with `--plugin-dir`. Absent when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<crate::skills::SkillRef>,
 }
 
 /// A model provider (SPEC §3 Provider, since 0.144): an Anthropic-compatible endpoint with one
@@ -1898,6 +1982,7 @@ mod tests {
         "claude.login",
         "claude.login_code",
         "claude.login_cancel",
+        "provider.probe",
         "ack",
         "error",
     ];
@@ -1914,6 +1999,7 @@ mod tests {
         "workspace.created",
         "worker.limits",
         "session.subagent_leftovers",
+        "session.long_runs",
         "ack",
         "error",
     ];
@@ -2129,6 +2215,10 @@ mod tests {
             "claude.login_cancel",
             include_str!("../examples/wire/hub.claude.login_cancel.json"),
         ),
+        (
+            "provider.probe",
+            include_str!("../examples/wire/hub.provider.probe.json"),
+        ),
         ("ack", include_str!("../examples/wire/hub.ack.json")),
         (
             "ack",
@@ -2209,6 +2299,10 @@ mod tests {
         ),
         (
             "result",
+            include_str!("../examples/wire/worker.result.provider.probe.json"),
+        ),
+        (
+            "result",
             include_str!("../examples/wire/worker.result.claude.login.json"),
         ),
         (
@@ -2267,6 +2361,10 @@ mod tests {
             "session.subagent_leftovers",
             include_str!("../examples/wire/worker.session.subagent_leftovers.json"),
         ),
+        (
+            "session.long_runs",
+            include_str!("../examples/wire/worker.session.long_runs.json"),
+        ),
         ("ack", include_str!("../examples/wire/worker.ack.json")),
         (
             "ack",
@@ -2317,6 +2415,7 @@ mod tests {
             HubFrame::ClaudeLogin(_) => "claude.login",
             HubFrame::ClaudeLoginCode(_) => "claude.login_code",
             HubFrame::ClaudeLoginCancel(_) => "claude.login_cancel",
+            HubFrame::ProviderProbe(_) => "provider.probe",
             HubFrame::Ack(_) => "ack",
             HubFrame::Error(_) => "error",
         }
@@ -2336,6 +2435,7 @@ mod tests {
             WorkerFrame::WorkspaceCreated(_) => "workspace.created",
             WorkerFrame::WorkerLimits(_) => "worker.limits",
             WorkerFrame::SubagentLeftovers(_) => "session.subagent_leftovers",
+            WorkerFrame::LongRuns(_) => "session.long_runs",
             WorkerFrame::Ack(_) => "ack",
             WorkerFrame::Error(_) => "error",
         }
@@ -2677,6 +2777,10 @@ mod tests {
                 include_str!("../examples/wire/worker.result.claude.auth.json"),
             ),
             (
+                include_str!("../examples/wire/hub.provider.probe.json"),
+                include_str!("../examples/wire/worker.result.provider.probe.json"),
+            ),
+            (
                 include_str!("../examples/wire/hub.claude.login.json"),
                 include_str!("../examples/wire/worker.result.claude.login.json"),
             ),
@@ -2761,6 +2865,7 @@ mod tests {
                 HubFrame::ClaudeLoginCode(r) => (&r.request_id, 13),
                 HubFrame::SessionInputNow(r) => (&r.request_id, 14),
                 HubFrame::SessionWithdraw(r) => (&r.request_id, 15),
+                HubFrame::ProviderProbe(r) => (&r.request_id, 16),
                 other => panic!("not a request: {other:?}"),
             };
             assert_eq!(&req.id, request_id, "request_id is the frame id");
@@ -2785,6 +2890,7 @@ mod tests {
                 ResultBody::ClaudeLoginDone(_) => 13,
                 ResultBody::InputNow(_) => 14,
                 ResultBody::InputWithdrawn(_) => 15,
+                ResultBody::ProviderProbe(_) => 16,
             };
             assert_eq!(got, kind);
         }

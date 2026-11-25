@@ -1512,6 +1512,15 @@ pub async fn patch_session(
                 m.as_str()
             )));
         }
+        // Auto's safety check runs on Anthropic's servers and does not pass through a provider:
+        // the worker would run Ask (#194, SPEC 0.246).
+        let provider = b.provider_id.unwrap_or(s.provider_id);
+        if m == PermissionMode::Auto && provider.is_some() {
+            return Err(ApiError::Unprocessable(
+                "auto_needs_anthropic",
+                "Auto mode does not work on a model provider: its safety check runs on Anthropic's servers. Use Ask or Allow all, or a Claude model".into(),
+            ));
+        }
         db::set_permission_mode(&app.db, id, m).await?;
         // A stopped agent starts in it; an offline worker gets it with `session.start`.
         send_to_worker(
@@ -2256,8 +2265,9 @@ pub(crate) async fn stop_session(app: &AppState, s: &SessionRow, quiet: bool) ->
 /// the senders' notice ([`crate::rooms::round_ended`]); `true` when a frame went out.
 async fn stop_room(app: &AppState, room: &SessionRow) -> ApiResult<bool> {
     let _room = crate::rooms::lock(app, room.id).await;
-    // The agents' inputs are not failed: the worker of an agent whose turn runs at the stop
-    // writes what waited into its history without a turn and acks each `quiet` (SPEC 0.231).
+    // The worker of an agent whose turn runs at the stop writes what waited into its history
+    // without a turn and acks each `quiet` (SPEC 0.231); an input it drops instead (a capped one)
+    // fails, and `rooms::input_failed` adds no line and ends no round for it: this Stop did both.
     // A final message on an input whose message is from before this line, the part of the
     // turn the stop cut included, posts nothing and wakes nobody (`rooms::on_final`).
     events::system(app, room, crate::rooms::ROOM_STOPPED, crate::rooms::STOPPED).await?;
@@ -2455,6 +2465,8 @@ async fn archive_session(app: &AppState, s: &SessionRow) -> ApiResult<()> {
     requests::cancel_open_of_session(app, id, CancelReason::Archived).await?;
     for row in db::move_inputs(&app.db, id, "pending", "failed").await? {
         delivery::notify_delivery(app, &row);
+        // An ask it carried is answered at once, not at its timeout.
+        crate::peers::input_failed(app, s, &row, "the session was archived").await?;
     }
     app.session_changed(id);
     Ok(())
@@ -3008,7 +3020,7 @@ pub struct ApnsDevice {
     pub token: String,
     #[serde(default)]
     pub sandbox: bool,
-    /// The device's 32-byte key for its notices, in base64 (SPEC 0.238).
+    /// The device's 32-byte key for its notices, in base64 (SPEC 0.249).
     #[serde(default)]
     pub key: Option<String>,
 }

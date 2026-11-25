@@ -70,7 +70,7 @@ use uuid::Uuid;
 use self::engine::{resurrected_cron_jobs, resurrected_tasks, Action, Core, CronJob};
 use self::process::{CommandSpec, ExitInfo, OsSpawner, Sig, SignalFn, Spawner};
 use super::{Adapter, AdapterEvent, AdapterFactory, EventSink};
-use crate::config::{Config, StartSpec};
+use crate::config::{Config, StartSpec, DEFAULT_LONG_RUN_NOTE};
 use crate::inbox::InboxFile;
 use crate::mirror::OwnRecords;
 use crate::permissions::{PermissionMode, Policy};
@@ -260,6 +260,9 @@ pub struct ClaudeOptions {
     /// Claude Code's task list tools for the agent (`task_tools` in the worker config): the child
     /// gets `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`.
     pub task_tools: bool,
+    /// How often the agent is told that a background command or subagent of its own still runs
+    /// (`long_run_note` in the worker config, SPEC §8.1); `None`: never.
+    pub long_run_note: Option<Duration>,
     /// Claude Code's own cross-session messaging, on top of `session.start.disallowed_tools`
     /// (`allow_native_messaging` and `allow_subagent_messages` in the worker config).
     pub native_messaging: NativeMessaging,
@@ -291,6 +294,7 @@ impl Default for ClaudeOptions {
             extra_args: vec![],
             ask_mode: "default".into(),
             task_tools: false,
+            long_run_note: Some(DEFAULT_LONG_RUN_NOTE),
             native_messaging: NativeMessaging::Off,
             stop_grace: Duration::from_secs(10),
             interrupt_answer: Duration::from_secs(2),
@@ -394,6 +398,7 @@ impl ClaudeCodeAdapters {
                 ask_mode,
                 ssh: cfg.ssh.clone(),
                 task_tools: cfg.task_tools,
+                long_run_note: cfg.long_run_note,
                 native_messaging: NativeMessaging::from_config(cfg),
                 ..ClaudeOptions::default()
             },
@@ -770,6 +775,8 @@ impl ClaudeCodeAdapter {
     ///   `HQC_SECRETS` only as `secrets`, the folder of the process's secrets (SPEC 0.147);
     ///   `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` only with `task_tools` ([`ClaudeOptions::task_tools`],
     ///   SPEC 0.223);
+    /// - the hub's skills ([`StartSpec::skill_dir`], SPEC 0.245) → `--plugin-dir` and
+    ///   `skillOverrides` off for their names in `--settings`;
     /// - `disallowed_tools` → `--disallowedTools`, `system_prompt` →
     ///   `--append-system-prompt`. Nothing of `session.start` is silently dropped.
     pub fn command(
@@ -838,6 +845,19 @@ impl ClaudeCodeAdapter {
         let mut settings = spec.environment.permissions.settings();
         if self.opts.native_messaging == NativeMessaging::Subagents {
             settings["crossSessionInbound"] = "refuse".into();
+        }
+        // SPEC 0.245: the hub's skills as the plugin `hqc` (`hqc:<name>`); a same-named skill
+        // of the machine or the repository is hidden, so `/<name>` finds the hub's copy.
+        if let Some(dir) = &spec.skill_dir {
+            if !spec.skills.is_empty() {
+                settings["skillOverrides"] = spec
+                    .skills
+                    .iter()
+                    .map(|k| (k.name.clone(), serde_json::Value::from("off")))
+                    .collect::<serde_json::Map<_, _>>()
+                    .into();
+                args.extend(["--plugin-dir".into(), dir.display().to_string()]);
+            }
         }
         args.extend(["--settings".into(), settings.to_string()]);
         if spec.restricted {
@@ -1207,7 +1227,8 @@ impl ClaudeCodeAdapter {
             .with_cost_baseline(cost_baseline)
             .with_new_conversation(launch.new_conversation())
             .with_resumed_cron(cron_jobs)
-            .with_resumed_tasks(tasks);
+            .with_resumed_tasks(tasks)
+            .with_long_run_note(self.opts.long_run_note);
         if let Some(rules) = &spec.folder_rules {
             core = core.with_folder(rules.clone(), spec.workspace.clone());
         }

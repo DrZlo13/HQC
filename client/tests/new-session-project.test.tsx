@@ -68,7 +68,7 @@ it('Settings: the select lists the projects, shows the effective one and a pick 
     me = { ...me, ...body };
     return new Response(JSON.stringify(me), { status: 200, headers: { 'content-type': 'application/json' } });
   };
-  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => [] }), socket);
+  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => [], skills: async () => [] }), socket);
   app.me = ME;
   projects(app);
   root = document.createElement('div');

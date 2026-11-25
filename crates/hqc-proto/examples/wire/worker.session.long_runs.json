@@ -1,0 +1,21 @@
+{
+  "id": "w-42",
+  "type": "session.long_runs",
+  "payload": {
+    "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+    "tasks": [
+      {
+        "task_id": "b3k9wq2lz",
+        "kind": "command",
+        "description": "Run the full build on cirunner",
+        "running_s": 3300
+      },
+      {
+        "task_id": "a6996d99c74dd1835",
+        "kind": "agent",
+        "description": "Heightmap: 25 frames, summed match",
+        "running_s": 3302
+      }
+    ]
+  }
+}

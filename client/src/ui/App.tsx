@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
+import { keyMatches } from '../keys';
 import { replaceHash } from '../nav';
 import { applyLook, applyTheme } from '../theme';
 import { Chat, SessionsButton, type SessionsToggle } from './Chat';
@@ -8,7 +9,7 @@ import { useIsNarrow, useIsPhone, useSubscription } from './hooks';
 import { NewRoom } from './NewRoom';
 import { NewSessionChat } from './NewSession';
 import { PhoneHome } from './PhoneHome';
-import { ProjectRail, onMac } from './ProjectRail';
+import { ProjectRail } from './ProjectRail';
 import { ProjectSettings } from './ProjectSettings';
 import { RequestsScreen } from './requests';
 import { RulesScreen } from './Rules';
@@ -136,9 +137,9 @@ export function App({ app }: { app: AppState }) {
   useLayoutEffect(() => applyLook(document.documentElement, look, app.device), [look, app.device]);
 
   // A window 900–1079 px wide: the session column is out of the layout; "Sessions" in the
-  // header, or ⌘\ (Ctrl+\ off a Mac), slides it out over the chat. Any route change (a session
-  // picked, a new one, a project, a page), Esc, a click beside it or leaving that width puts it
-  // away.
+  // header, or its key (⌘\ on a Mac, Ctrl+\ elsewhere, until another is picked), slides it out over
+  // the chat. Any route change (a session picked, a new one, a project, a page), Esc, a click
+  // beside it or leaving that width puts it away.
   const [slid, setSlid] = useState(false);
   useLayoutEffect(() => setSlid(false), [route, narrow]);
   useEffect(() => {
@@ -146,8 +147,7 @@ export function App({ app }: { app: AppState }) {
     // On the window, after the document's handlers: an Esc a menu of the list has taken
     // (prevented, or stopped on its way) closes that menu only.
     const key = (e: KeyboardEvent) => {
-      const mod = onMac() ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-      if (mod && !e.altKey && !e.shiftKey && (e.key === '\\' || e.code === 'Backslash')) {
+      if (keyMatches(app.keyFor('sessions'), e)) {
         e.preventDefault();
         setSlid((s) => !s);
       } else if (e.key === 'Escape' && !e.defaultPrevented && document.querySelector('.sidebar-slide')) {
@@ -158,7 +158,28 @@ export function App({ app }: { app: AppState }) {
     };
     addEventListener('keydown', key);
     return () => removeEventListener('keydown', key);
-  }, [narrow]);
+  }, [app, narrow]);
+  // The keys of New session, Back and Forward act wherever the focus is, the message field too;
+  // a key a field or a menu has taken is theirs. Archive session and the two steps (sessions,
+  // projects) are the list's and the bar's own.
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.isComposing || e.defaultPrevented) return;
+      if (keyMatches(app.keyFor('newSession'), e)) {
+        e.preventDefault();
+        const pid = app.currentProject()?.id;
+        if (pid && app.me) location.hash = `#/p/${pid}/new`;
+      } else if (keyMatches(app.keyFor('back'), e)) {
+        e.preventDefault();
+        history.back();
+      } else if (keyMatches(app.keyFor('forward'), e)) {
+        e.preventDefault();
+        history.forward();
+      }
+    };
+    addEventListener('keydown', key);
+    return () => removeEventListener('keydown', key);
+  }, [app]);
   const sessions: SessionsToggle | undefined = narrow
     ? {
         open: slid,

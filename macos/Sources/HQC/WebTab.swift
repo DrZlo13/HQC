@@ -32,9 +32,9 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
     // Guards against reloading the server URL on every tab switch.
     private var hasLoaded = false
 
-    // A shortcut action asked for while the page was still loading; its script then runs
-    // once the load finishes.
-    private var pendingAction: ShortcutAction?
+    // An action (a menu item's, the global shortcut's) asked for while the page was still
+    // loading; its script then runs once the load finishes.
+    private var pendingAction: MenuAction?
 
     // A page address, as the parts of its `#/` route, that a notification click (a session)
     // asked for while the page was still loading; it is opened once the load finishes, in the
@@ -129,9 +129,9 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
         webView.pageZoom = factor
     }
 
-    // Runs a shortcut action's script in the page; while the page is still loading, once
+    // Runs an action's script in the page; while the page is still loading, once
     // after the load finishes.
-    func perform(_ action: ShortcutAction) {
+    func perform(_ action: MenuAction) {
         if webView.isLoading {
             pendingAction = action
         } else {
@@ -139,7 +139,7 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
         }
     }
 
-    private func run(_ action: ShortcutAction) {
+    private func run(_ action: MenuAction) {
         guard let script = action.script else { return }
         webView.callAsyncJavaScript(script, arguments: [:], in: nil, in: .page,
                                     completionHandler: nil)

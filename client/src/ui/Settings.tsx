@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { IconBack } from './icons';
+import { KEY_ACTIONS, defaultKey, keyFromEvent, keyLabel, sameKey, type KeyAction } from '../keys';
 import { onBack } from '../nav';
 import type { AppState } from '../app';
 import { ApiError, type WorkerInfo } from '../api';
@@ -10,6 +11,7 @@ import { WEB_SEARCHES } from '../websearch';
 import { projectName } from './Appearance';
 import { ProvidersSection } from './Providers';
 import { McpServersSection } from './McpServers';
+import { SkillsSection } from './Skills';
 import { ClaudeSignIn, signsIn } from './ClaudeSignIn';
 
 const THEME_GROUPS = [
@@ -38,6 +40,77 @@ const PUSH_TEXT: Record<PushStatus, string> = {
 /** The system as people write it; anything else as the worker reports it. */
 const OS_LABELS: Record<string, string> = { macos: 'macOS', linux: 'Linux', windows: 'Windows' };
 
+/** An action's key and the button that records another: while it waits ("Press keys…") the window
+ *  takes every key before the actions do. Esc cancels, Delete or Backspace leaves the action
+ *  without a key, a key with ⌘, Ctrl or Alt is the new one; a bare key or a modifier alone keeps
+ *  waiting. A press anywhere but on the button cancels (a click does not focus a button in WebKit,
+ *  so its blur is no sign), and so does its blur where it had the focus. One row records at a time:
+ *  `recording` is the section's. */
+function KeyRow({
+  app,
+  action,
+  label,
+  recording,
+  onRecording,
+}: {
+  app: AppState;
+  action: KeyAction;
+  label: string;
+  recording: boolean;
+  onRecording: (on: boolean) => void;
+}) {
+  const key = app.keyFor(action);
+  const button = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!recording) return;
+    const record = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const bare = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
+      if (bare && e.code === 'Escape') onRecording(false);
+      else if (bare && (e.code === 'Backspace' || e.code === 'Delete')) {
+        onRecording(false);
+        app.setKey(action, null);
+      } else {
+        const picked = keyFromEvent(e);
+        if (!picked) return;
+        onRecording(false);
+        app.setKey(action, picked);
+      }
+    };
+    const away = (e: PointerEvent) => {
+      if (!button.current?.contains(e.target as Node)) onRecording(false);
+    };
+    addEventListener('keydown', record, true);
+    addEventListener('pointerdown', away, true);
+    return () => {
+      removeEventListener('keydown', record, true);
+      removeEventListener('pointerdown', away, true);
+    };
+  }, [app, action, recording, onRecording]);
+  const shown = recording ? 'Press keys…' : key ? keyLabel(key) : 'None';
+  return (
+    <div class="ap-row key-row">
+      <span class="ap-label">{label}</span>
+      {!sameKey(key, defaultKey(action)) && (
+        <button type="button" class="btn btn-small btn-key-default" onClick={() => app.setKey(action, undefined)}>
+          Default
+        </button>
+      )}
+      <button
+        ref={button}
+        type="button"
+        class={`btn btn-small btn-key ${recording ? 'is-recording' : ''}`}
+        aria-label={`Key of «${label}»: ${shown}`}
+        onClick={() => onRecording(true)}
+        onBlur={() => onRecording(false)}
+      >
+        {shown}
+      </button>
+    </div>
+  );
+}
+
 /** `back`: where the arrow goes, the address before Settings (the list when there was none). */
 export function Settings({ app, back = '#/' }: { app: AppState; back?: string }) {
   const [push, setPush] = useState<PushStatus | null>(null);
@@ -47,11 +120,20 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
   const [newSessionError, setNewSessionError] = useState<string | null>(null);
   const [lookError, setLookError] = useState<string | null>(null);
   const [workers, setWorkers] = useState<WorkerInfo[] | null>(null);
+  const [forgetting, setForgetting] = useState<'idle' | 'busy' | 'done'>('idle');
+  // The action whose key is being recorded: one at a time.
+  const [recordingKey, setRecordingKey] = useState<KeyAction | null>(null);
 
   useEffect(() => {
     pushStatus().then(setPush, () => setPush('unsupported'));
     app.api.workers({ includeRevoked: true }).then(setWorkers, () => setWorkers(null));
   }, [app]);
+
+  const forgetDevice = async () => {
+    setForgetting('busy');
+    await app.forgetDevice();
+    setForgetting('done');
+  };
 
   const revoke = async (w: WorkerInfo) => {
     if (!confirm(`Revoke the token of worker “${w.name}”? The machine will have to be enrolled again.`)) return;
@@ -224,13 +306,34 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
           ))}
         </div>
         <p class="muted">
-          Where the "Search in …" button of a message searches the text selected in it, in a new tab.
-          On this device.
+          Where "Search in …" of the menu on a right click, and its key, search the text selected in the
+          feed, in a new tab. On this device.
+        </p>
+
+        <h2>Keys</h2>
+        <div class="settings-keys">
+          {KEY_ACTIONS.map((a) => (
+            <KeyRow
+              key={a.id}
+              app={app}
+              action={a.id}
+              label={a.label}
+              recording={recordingKey === a.id}
+              onRecording={(on) => setRecordingKey(on ? a.id : (now) => (now === a.id ? null : now))}
+            />
+          ))}
+        </div>
+        <p class="muted">
+          Click a key and press the new one with ⌘, ⌃ or ⌥ (Ctrl or Alt off a Mac); Esc cancels,
+          Delete leaves the action without a key. A key given to another action leaves that one
+          without. On this device.
         </p>
 
         <ProvidersSection app={app} />
 
         <McpServersSection app={app} />
+
+        <SkillsSection app={app} />
 
         <h2>Notifications</h2>
         <p class="muted">{push ? PUSH_TEXT[push] : '…'}</p>
@@ -240,6 +343,12 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
           </button>
         )}
         {error && <div class="error-text">{error}</div>}
+
+        <h2>This device</h2>
+        <p class="muted">The copies of chats and attachments this device keeps, so that chats open without downloading them again.</p>
+        <button type="button" class="btn" disabled={forgetting !== 'idle' || !app.deviceUser()} onClick={forgetDevice}>
+          {forgetting === 'done' ? 'Forgotten' : 'Forget this device'}
+        </button>
 
         <h2>Workers</h2>
         {workers && workers.length > 0 && (

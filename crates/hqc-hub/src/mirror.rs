@@ -583,6 +583,8 @@ pub async fn released(app: &AppState, session_id: uuid::Uuid, reason: &str) -> a
     tracing::info!(%session_id, reason, "session continued in VS Code");
     for row in db::move_inputs(&app.db, session_id, "pending", "failed").await? {
         delivery::notify_delivery(app, &row);
+        // An ask it carried is answered at once, not at its timeout.
+        crate::peers::input_failed(app, &s, &row, "the session continues in VS Code").await?;
     }
     let text = if reason == VSCODE_OPEN {
         RELEASED_OPEN_TEXT

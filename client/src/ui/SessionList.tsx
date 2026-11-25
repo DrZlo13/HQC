@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
+import { keyMatches } from '../keys';
 import { goUp, onBack } from '../nav';
 import type { ListMode, Project, SessionInfo } from '../proto';
 import { colorHex } from '../theme';
@@ -232,6 +233,45 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     const list = app.sortedSessions().filter((s) => !s.favorite_at && s.id !== draft?.started);
     groups = groupSessions(list, mode, now, (pid && app.orders.get(pid)?.session_ids) || []);
   }
+  // The keys of the previous and the next session open the row above or below the current one, in
+  // the order the list shows them: the draft, the favorites, the groups. With no current row, the
+  // last or the first; past either end, and in Reorder, nothing. The key of Archive session
+  // archives the open session when it has a row here, as the row's menu does, with the Undo of
+  // this list; where the list is not shown it does nothing. The press reads the rows of the
+  // latest render; a key a field or a menu has taken is theirs.
+  const stepRows = useRef<{ links: string[]; at: number }>({ links: [], at: -1 });
+  {
+    const links = reorder
+      ? []
+      : [
+          ...(draft ? [`#/p/${draft.projectId}/new`] : []),
+          ...favorites.map((s) => `#/s/${s.id}`),
+          ...groups.flatMap((g) => g.items.map((s) => `#/s/${s.id}`)),
+        ];
+    // The draft row is the current one while the open session is not in the rows.
+    let at = current ? links.indexOf(`#/s/${current}`) : -1;
+    if (at < 0 && draft) at = 0;
+    stepRows.current = { links, at: at < 0 ? -1 : at };
+  }
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.isComposing || e.defaultPrevented) return;
+      const { links, at } = stepRows.current;
+      if (keyMatches(app.keyFor('archiveSession'), e)) {
+        e.preventDefault();
+        const s = at >= 0 && links[at].startsWith('#/s/') ? app.sessions.get(links[at].slice('#/s/'.length)) : undefined;
+        if (s) app.archiveLater(s);
+        return;
+      }
+      const step = keyMatches(app.keyFor('previousSession'), e) ? -1 : keyMatches(app.keyFor('nextSession'), e) ? 1 : 0;
+      if (!step) return;
+      e.preventDefault();
+      const to = links[at < 0 ? (step < 0 ? links.length - 1 : 0) : at + step];
+      if (to) location.hash = to;
+    };
+    addEventListener('keydown', key);
+    return () => removeEventListener('keydown', key);
+  }, [app]);
   // The phone's head says "offline" (a desktop's workers line does); not before the first list
   // and the socket's first connect.
   const conn = app.offline ? 'offline' : '';

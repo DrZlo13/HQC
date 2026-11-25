@@ -23,13 +23,14 @@ import type {
   Workspace,
 } from './proto';
 import { PROJECT_SORT_NAMES } from './proto';
-import { deviceArtifactCache, laterArtifactCache, noArtifactCache, type ArtifactCache } from './artifactcache';
-import { deviceHistoryCache, laterHistoryCache, noHistoryCache, type HistoryCache } from './historycache';
+import { deleteDeviceArtifacts, deviceArtifactCache, laterArtifactCache, noArtifactCache, type ArtifactCache } from './artifactcache';
+import { deleteDeviceHistory, deviceHistoryCache, laterHistoryCache, noHistoryCache, type HistoryCache } from './historycache';
 import { ChatSession, type OutgoingFile } from './session';
 import { storedLook, storedTheme, type DeviceLayout } from './theme';
 import { projectName } from './ui/Appearance';
 import { arrange, bucketOf } from './ui/sessions';
 import { HubSocket, hubSocketUrl, type ConnState } from './ws';
+import { KEY_ACTIONS, defaultKey, keepKeys, sameKey, storedKeys, type Key, type KeyAction } from './keys';
 import { keepWebSearch, storedWebSearch, type WebSearch } from './websearch';
 
 /** How long "Archived «…» · Undo" stays before the archive goes to the hub (T50). */
@@ -55,6 +56,38 @@ export type PhoneView = 'projects' | 'sessions';
 
 /** Chats kept in memory, the most recently used: one of them opens again at once (SPEC §6). */
 const CHATS = 12;
+
+/** The device drops its copies of a session or an attachment not used for this long. */
+const DEVICE_COPY_MAX_AGE_MS = 30 * 24 * 3_600_000;
+/** The device keeps no more than this many bytes of copies; the least recently used go first. */
+const DEVICE_COPY_MAX_BYTES = 200_000_000;
+/** The clean-up of the device's copies runs at most this often. */
+const DEVICE_SWEEP_EVERY_MS = 3_600_000;
+/** The id of the user whose copies this device keeps (`hqc-history-<id>`, `hqc-artifacts-<id>`). */
+const DEVICE_USER_KEY = 'hqc-device-user';
+
+/** Deletes both databases of the user's copies from this device. */
+async function wipeDeviceCopies(userId: string): Promise<void> {
+  await Promise.all([deleteDeviceHistory(userId), deleteDeviceArtifacts(userId)]);
+}
+
+/** Keeps the copies of one user on the device: those of the user stored last go when `userId`
+ *  is another, or, with none (`/api/me` refused), whatever the device keeps. */
+async function settleDeviceUser(userId: string | null): Promise<void> {
+  let stored: string | null = null;
+  try {
+    stored = localStorage.getItem(DEVICE_USER_KEY);
+  } catch {
+    // No storage: nothing is known of whose copies the device keeps.
+  }
+  if (stored && stored !== userId) await wipeDeviceCopies(stored);
+  try {
+    if (userId) localStorage.setItem(DEVICE_USER_KEY, userId);
+    else localStorage.removeItem(DEVICE_USER_KEY);
+  } catch {
+    // Asked again at the next page load.
+  }
+}
 
 /** Unsent messages by session id, on this device: a convenience, so storage that fails or is
  *  empty only loses them on a reload. */
@@ -228,6 +261,8 @@ export class AppState {
   private readonly chats = new Map<string, ChatSession>();
   /** Resolves once `init` has asked the hub who the user is, whatever the answer. */
   private readonly userKnown = deferred();
+  /** When the device's copies were last cleaned up (`sweepDeviceCopies`). */
+  private lastSweep = 0;
   /** The device's copies of the history and of attachments are the user's own, and a chat opens
    *  from the list the page kept before the user is known: their calls wait for it then. */
   private readonly deviceHistory: HistoryCache =
@@ -347,7 +382,14 @@ export class AppState {
 
   async init(): Promise<void> {
     try {
-      this.me = await this.api.me();
+      try {
+        this.me = await this.api.me();
+      } catch (e) {
+        // Signed out: the copies of the history leave the device. Offline or a hub error keeps them.
+        if (e instanceof ApiError && (e.status === 401 || e.status === 403)) await settleDeviceUser(null);
+        throw e;
+      }
+      await settleDeviceUser(this.me.id);
       this.userKnown.resolve();
       this.keepProjectSort(this.me.project_sort);
       this.currentProjectId ??= this.me.personal_project_id;
@@ -451,8 +493,70 @@ export class AppState {
       for (const id of this.pushedWhileRefreshing) void this.refreshSession(id);
       this.rememberList();
       this.changed();
+      void this.sweepDeviceCopies();
     })().finally(() => (this.refreshing = null));
     return this.refreshing;
+  }
+
+  /** Cleans up the device's copies, once an hour at most after a refresh of the lists: those of
+   *  sessions the hub no longer lists (deleted: their chats forget), then of what was not used for
+   *  `DEVICE_COPY_MAX_AGE_MS`, then the least recently used while the copies take more than
+   *  `DEVICE_COPY_MAX_BYTES`. The copy of a chat that is open stays. */
+  private async sweepDeviceCopies(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastSweep < DEVICE_SWEEP_EVERY_MS) return;
+    this.lastSweep = now;
+    try {
+      const [stored, blobs] = await Promise.all([this.historyCache().sessions(), this.artifactCache.entries()]);
+      const items = [
+        ...stored.filter((s) => !this.chats.get(s.id)?.isOpen).map((s) => ({ ...s, blob: false })),
+        ...blobs.map((b) => ({ ...b, blob: true })),
+      ];
+      const doomed = new Set<(typeof items)[number]>();
+      for (const it of items) {
+        if (it.used_at < now - DEVICE_COPY_MAX_AGE_MS || (!it.blob && !this.sessions.has(it.id))) doomed.add(it);
+      }
+      // The copies of an open chat count in the total, though they are not taken.
+      let total = stored.reduce((n, s) => n + s.bytes, 0) + blobs.reduce((n, b) => n + b.bytes, 0);
+      for (const it of doomed) total -= it.bytes;
+      for (const it of items.filter((i) => !doomed.has(i)).sort((a, b) => a.used_at - b.used_at)) {
+        if (total <= DEVICE_COPY_MAX_BYTES) break;
+        doomed.add(it);
+        total -= it.bytes;
+      }
+      const taken = [...doomed];
+      const sessions = taken.filter((i) => !i.blob).map((i) => i.id);
+      // A session the hub does not list is deleted: its chat forgets, if it is not open.
+      for (const id of sessions) if (!this.sessions.has(id) && !this.chats.get(id)?.isOpen) this.chats.get(id)?.forget();
+      await this.dropCopies(sessions, true);
+      await this.artifactCache.forget(taken.filter((i) => i.blob).map((i) => i.id));
+    } catch {
+      // The next refresh tries again, in an hour.
+    }
+  }
+
+  /** The id the device's copies are kept for: the user's, or while `/api/me` has not answered
+   *  (offline, a hub error) the one stored at the last sign-in. */
+  deviceUser(): string | undefined {
+    if (this.me) return this.me.id;
+    try {
+      return localStorage.getItem(DEVICE_USER_KEY) ?? undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** "Forget this device" in Settings: the copies of history and attachments of the user leave
+   *  the device, and new ones are made from here on. A chat held keeps writing: what it had not
+   *  written yet is dropped, and one that is not open is let go. */
+  async forgetDevice(): Promise<void> {
+    const id = this.deviceUser();
+    if (!id) return;
+    for (const [sid, c] of [...this.chats]) {
+      c.dropUnwritten();
+      if (!c.isOpen) this.chats.delete(sid);
+    }
+    await wipeDeviceCopies(id);
   }
 
   /** `refreshSessions` after the user changed on the hub what only the lists bring back (a
@@ -648,6 +752,30 @@ export class AppState {
   setWebSearch(s: WebSearch): void {
     this.webSearch = s;
     keepWebSearch(s);
+    this.changed();
+  }
+
+  /** The keys of the client's actions picked on this device (`keys.ts`). */
+  private pickedKeys = storedKeys();
+  /** The key of `action`: the picked one, null where it was cleared, else the default. */
+  keyFor(action: KeyAction): Key | null {
+    const picked = this.pickedKeys[action];
+    return picked === undefined ? defaultKey(action) : picked;
+  }
+  /** Picks `key` for `action`, null for none, undefined for the default again. An action that
+   *  had the same key is left without one: both would fire on it. */
+  setKey(action: KeyAction, key: Key | null | undefined): void {
+    const next = { ...this.pickedKeys };
+    const effective = key === undefined ? defaultKey(action) : key;
+    if (effective) {
+      for (const { id } of KEY_ACTIONS) {
+        if (id !== action && sameKey(this.keyFor(id), effective)) next[id] = null;
+      }
+    }
+    if (key === undefined) delete next[action];
+    else next[action] = key;
+    this.pickedKeys = next;
+    keepKeys(next);
     this.changed();
   }
 
@@ -1021,11 +1149,19 @@ export class AppState {
    *  is done before the first wait, the rest goes on behind the deletion. */
   private async forgetCopies(ids: string[]): Promise<void> {
     for (const id of ids) this.chats.get(id)?.forget();
+    await this.dropCopies(ids, false);
+  }
+
+  /** Deletes the copies of the sessions `ids` and the attachments their events name. `skipOpen`:
+   *  a session whose chat is open when its copy is to go is left (checked right before the
+   *  history is dropped, the chat may open meanwhile). */
+  private async dropCopies(ids: string[], skipOpen: boolean): Promise<void> {
     const history = this.historyCache();
     const artifacts = new Set<string>();
     for (const id of ids) {
       const r = await history.range(id);
       const raws = r ? await history.read(id, r.from, r.to) : undefined;
+      if (skipOpen && this.chats.get(id)?.isOpen) continue;
       for (const raw of raws ?? []) {
         const payload = (raw as { payload?: Record<string, unknown> | null }).payload;
         const many = payload?.artifact_ids;

@@ -310,6 +310,26 @@ async fn capped_json(mut r: reqwest::Response) -> Option<Value> {
     serde_json::from_slice(&buf).ok()
 }
 
+/// ` (text/html)`: the media type of an answer as hqc repeats it, or nothing.
+fn media_type(r: &reqwest::Response) -> String {
+    let t: String = r
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '+' | '-' | '.'))
+        .take(60)
+        .collect();
+    if t.is_empty() {
+        t
+    } else {
+        format!(" ({t})")
+    }
+}
+
 /// An error code of the authorization server as hqc repeats it: a short word, nothing else.
 fn word(s: &str) -> String {
     let w: String = s
@@ -446,6 +466,41 @@ async fn discover(app: &AppState, r: &Row) -> Result<Meta, UpErr> {
     })
 }
 
+/// A server that answered `401`: it signs in with OAuth when it names protected-resource
+/// metadata (in `WWW-Authenticate` or at the well-known path) that names an authorization server.
+pub(super) async fn offers_oauth(
+    app: &AppState,
+    url: &str,
+    www_authenticate: Option<&str>,
+) -> bool {
+    let Some((origin, path)) = split(url) else {
+        return false;
+    };
+    let mut candidates: Vec<String> = www_authenticate
+        .and_then(|h| param(h, "resource_metadata"))
+        .into_iter()
+        .collect();
+    candidates.push(format!(
+        "{origin}/.well-known/oauth-protected-resource{path}"
+    ));
+    candidates.push(format!("{origin}/.well-known/oauth-protected-resource"));
+    for c in candidates {
+        if let Some(v) = get_json(app, &c).await {
+            return v
+                .get("authorization_servers")
+                .and_then(Value::as_array)
+                .is_some_and(|a| !a.is_empty());
+        }
+    }
+    // An older server: its own authorization-server metadata at its origin.
+    get_json(
+        app,
+        &format!("{origin}/.well-known/oauth-authorization-server"),
+    )
+    .await
+    .is_some()
+}
+
 /// `name="value"` or `name=value` of a `WWW-Authenticate` header.
 fn param(header: &str, name: &str) -> Option<String> {
     let i = header.find(&format!("{name}="))?;
@@ -550,12 +605,37 @@ pub async fn sign_in(
                 .send()
                 .await
                 .map_err(|e| bad(UpErr::Unavailable(super::short(&e)), &r.name))?;
-            let v: Value = capped_json(resp).await.ok_or_else(|| {
-                bad(
-                    UpErr::Unavailable("the registration answered no JSON".into()),
-                    &r.name,
-                )
-            })?;
+            // A service that registers only the clients it knows refuses with a status and often
+            // a page: the owner sees the status, the type and an RFC 7591 error code, no text.
+            let (status, ctype) = (resp.status(), media_type(&resp));
+            let v = capped_json(resp).await;
+            let code = v
+                .as_ref()
+                .and_then(|v| v.get("error"))
+                .and_then(Value::as_str)
+                .map(|e| format!(": {}", word(e)))
+                .unwrap_or_default();
+            let v = match v {
+                Some(v) if status.is_success() => v,
+                Some(_) => {
+                    return Err(bad(
+                        UpErr::Unavailable(format!(
+                            "the registration answered {}{ctype}{code}",
+                            status.as_u16()
+                        )),
+                        &r.name,
+                    ))
+                }
+                None => {
+                    return Err(bad(
+                        UpErr::Unavailable(format!(
+                            "the registration answered {}{ctype}, not JSON",
+                            status.as_u16()
+                        )),
+                        &r.name,
+                    ))
+                }
+            };
             let c = v
                 .get("client_id")
                 .and_then(Value::as_str)

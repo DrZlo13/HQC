@@ -690,6 +690,20 @@ async fn answered_before(
     .await?)
 }
 
+/// The `seq` of the room's last "Stopped" line (`POST /stop`), 0 when there is none.
+async fn last_stop(app: &AppState, room: Uuid) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT COALESCE(max(seq), 0) FROM events
+         WHERE session_id = $1 AND type = 'system'
+           AND payload ->> 'code' = $2 AND payload ->> 'text' = $3",
+    )
+    .bind(room)
+    .bind(ROOM_STOPPED)
+    .bind(STOPPED)
+    .fetch_one(&app.db)
+    .await?)
+}
+
 /// Whether the turn of agent `s` that `opening` opened and its final message `row` ends took an
 /// input from room `room` whose message is from after the room's last "Stopped": `opening`
 /// itself, or one acknowledged as `joined` (SPEC §17.2) and stored between `opening` and `row`.
@@ -707,18 +721,14 @@ async fn took_room_input(
                AND i.payload -> 'room' ->> 'session_id' = $2::text
                AND (i.event_id = $3
                     OR (i.payload ->> 'joined' = 'true' AND i.seq > $4 AND i.seq < $5))
-               AND (i.payload -> 'room' ->> 'seq')::bigint >
-                   COALESCE((SELECT max(seq) FROM events
-                             WHERE session_id = $2 AND type = 'system'
-                               AND payload ->> 'code' = $6 AND payload ->> 'text' = $7), 0))",
+               AND (i.payload -> 'room' ->> 'seq')::bigint > $6)",
     )
     .bind(s.id)
     .bind(room.id)
     .bind(opening.event_id)
     .bind(opening.seq)
     .bind(row.seq)
-    .bind(ROOM_STOPPED)
-    .bind(STOPPED)
+    .bind(last_stop(app, room.id).await?)
     .fetch_one(&app.db)
     .await?)
 }
@@ -1100,6 +1110,13 @@ pub async fn input_failed(
     let Some(room) = db::session(&app.db, room_id).await? else {
         return Ok(());
     };
+    // A message from before the room's last Stop: the Stop wrote its line and ended the round,
+    // and the agent's input the Stop made fail (a capped one the worker dropped) adds neither
+    // ([`on_final`] ignores such a message the same way).
+    let message = row.payload["room"]["seq"].as_i64().unwrap_or(i64::MAX);
+    if message <= last_stop(app, room.id).await? {
+        return Ok(());
+    }
     let line = format!("{} did not get the message: {reason}", s.title);
     events::system(app, &room, ROOM_STOPPED, &line).await?;
     if is_conversation(&room) {

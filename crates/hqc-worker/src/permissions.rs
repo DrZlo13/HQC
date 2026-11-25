@@ -28,6 +28,8 @@
 //! and gives up on anything it does not understand, and a command is allowed only when
 //! every part is covered by an allow rule.
 
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
@@ -98,6 +100,10 @@ pub struct Permissions {
     pub allow_all: bool,
     pub allow: Vec<String>,
     pub deny: Vec<String>,
+    /// Deny rules lifted only for the command `ssh` sends to a host (#162): only the adapter's
+    /// own check ([`Policy::denied_by`]) knows them; the CLI's `deny` does not look into an
+    /// `ssh` command's arguments.
+    pub remote_unblock: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Permissions {
@@ -108,6 +114,7 @@ impl Default for Permissions {
             allow_all: false,
             allow: vec![],
             deny: DEFAULT_DENY.iter().map(|r| r.to_string()).collect(),
+            remote_unblock: BTreeMap::new(),
         }
     }
 }
@@ -132,6 +139,7 @@ impl Permissions {
             allow_all: raw.allow_all,
             allow: raw.allow,
             deny: raw.deny.unwrap_or_else(|| Self::default().deny),
+            remote_unblock: BTreeMap::new(),
         };
         for (list, rules) in [("allow", &p.allow), ("deny", &p.deny)] {
             for r in rules {
@@ -167,9 +175,25 @@ impl Permissions {
                 }
             }
         }
+        for (host, rules) in &env.remote_unblock {
+            if !valid_ssh_host(host) {
+                bail!(
+                    "permissions.remote_unblock: {host:?} is not an ssh destination ([user@]host)"
+                );
+            }
+            if let Some(r) = rules
+                .iter()
+                .find(|r| !deny.contains(r) || !r.starts_with("Bash("))
+            {
+                bail!(
+                    "permissions.remote_unblock: {r:?} is not a Bash deny rule of this environment"
+                );
+            }
+        }
         Ok(Self {
             allow,
             deny,
+            remote_unblock: env.remote_unblock.clone(),
             ..self.clone()
         })
     }
@@ -564,10 +588,15 @@ impl RuleSet {
     }
 
     /// The first rule that denies the call, as [`Policy::denied_by`] reads a deny rule.
-    pub fn denies(&self, tool: &str, command: Option<&str>) -> Option<(&str, &str)> {
+    pub fn denies(
+        &self,
+        tool: &str,
+        command: Option<&str>,
+        remote: &BTreeMap<String, Vec<String>>,
+    ) -> Option<(&str, &str)> {
         self.0
             .iter()
-            .find(|(_, _, r)| deny_hit(r, tool, command))
+            .find(|(_, t, r)| deny_hit_remote(r, t, tool, command, remote))
             .map(|(s, t, _)| (s.as_str(), t.as_str()))
     }
 
@@ -619,6 +648,144 @@ fn part_matches(r: &Rule, p: &Part) -> bool {
             _ => glob(g, &p.text),
         },
         Rule::Opaque => false,
+    }
+}
+
+/// [`deny_hit`] of the rule written `text`, which `remote` may lift for the command `ssh` sends
+/// to a host ([`for_rule`]).
+fn deny_hit_remote(
+    r: &Rule,
+    text: &str,
+    tool: &str,
+    command: Option<&str>,
+    remote: &BTreeMap<String, Vec<String>>,
+) -> bool {
+    match command {
+        Some(c) if tool == "Bash" => deny_hit(r, tool, Some(&for_rule(text, c, remote))),
+        _ => deny_hit(r, tool, command),
+    }
+}
+
+/// `ssh` options that run nothing on this machine, allowed before the destination of a part
+/// whose remote command a host's `remote_unblock` lifts (#162): flags, flags with a value, and
+/// `-o Key=Value` keys. `ProxyCommand`, `LocalCommand`, `-F` (a config file that may hold them)
+/// and anything else are not: the part keeps every deny rule.
+const SSH_FLAGS: &[&str] = &["-4", "-6", "-A", "-a", "-C", "-q", "-T", "-t", "-v", "-x"];
+const SSH_VALUE_FLAGS: &[&str] = &["-i", "-p"];
+const SSH_OPTION_KEYS: &[&str] = &[
+    "batchmode",
+    "connecttimeout",
+    "identitiesonly",
+    "identityfile",
+    "loglevel",
+    "port",
+    "serveralivecountmax",
+    "serveraliveinterval",
+    "stricthostkeychecking",
+    "userknownhostsfile",
+];
+
+/// `[user@]host` as `remote_unblock` names it: letters, digits, `.`, `-`, `_`, one `@` at most,
+/// not starting with `-`.
+fn valid_ssh_host(h: &str) -> bool {
+    !h.is_empty()
+        && !h.starts_with('-')
+        && h.matches('@').count() <= 1
+        && !h.starts_with('@')
+        && !h.ends_with('@')
+        && h.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@'))
+}
+
+/// Characters the local shell expands into other words or file names: in a word before the
+/// remote command they could make another option (`-p {22,-oProxyCommand=…}`), so such a word
+/// keeps the deny. The words are unquoted, so a quoted one is refused too.
+const SHELL_EXPANDS: &[char] = &['$', '{', '}', '*', '?', '[', ']'];
+
+/// The destination of `ssh [options] <destination> <command…>` as written: only options of
+/// [`SSH_FLAGS`], [`SSH_VALUE_FLAGS`] (`-p` digits only) and `-o Key=Value` with a key of
+/// [`SSH_OPTION_KEYS`] and no space, and a command after it (`ssh host` alone is a login) whose
+/// first word does not start with `-`, since OpenSSH reads options after the destination too;
+/// nothing up to that word that the shell expands ([`SHELL_EXPANDS`]); `None` otherwise.
+fn ssh_destination(words: &[String]) -> Option<&str> {
+    if words.first()? != "ssh" {
+        return None;
+    }
+    let mut i = 1;
+    loop {
+        let w = words.get(i)?.as_str();
+        if !w.starts_with('-') {
+            break;
+        }
+        if SSH_FLAGS.contains(&w) {
+            i += 1;
+        } else if SSH_VALUE_FLAGS.contains(&w) {
+            let v = words.get(i + 1)?;
+            if w == "-p" && !(!v.is_empty() && v.chars().all(|c| c.is_ascii_digit())) {
+                return None;
+            }
+            i += 2;
+        } else if w == "-o" {
+            let o = words.get(i + 1)?;
+            let (key, value) = o.split_once('=')?;
+            if value.is_empty()
+                || o.contains(char::is_whitespace)
+                || !SSH_OPTION_KEYS.contains(&key.to_ascii_lowercase().as_str())
+            {
+                return None;
+            }
+            i += 2;
+        } else {
+            return None;
+        }
+    }
+    let dest = words.get(i)?;
+    let first = words.get(i + 1)?;
+    if first.starts_with('-') || words[..=i + 1].iter().any(|w| w.contains(SHELL_EXPANDS)) {
+        return None;
+    }
+    Some(dest)
+}
+
+/// `command` as the deny rule written `rule` sees it (#162): a simple part that is `ssh` to a
+/// host whose `remote_unblock` lifts the rule ([`ssh_destination`]) reads as `ssh`, its remote
+/// command left out; every other part as written. The command as written when no host lifts the
+/// rule, no part is such, or [`split_command`] does not understand the command (a `$( )` or a
+/// backtick, also in double quotes, which the local shell would run).
+fn for_rule<'a>(
+    rule: &str,
+    command: &'a str,
+    remote: &BTreeMap<String, Vec<String>>,
+) -> Cow<'a, str> {
+    let hosts: Vec<&str> = remote
+        .iter()
+        .filter(|(_, rules)| rules.iter().any(|r| r == rule))
+        .map(|(h, _)| h.as_str())
+        .collect();
+    if hosts.is_empty() {
+        return Cow::Borrowed(command);
+    }
+    // Redirections write nothing that runs; any path is taken for the split.
+    let Some(parts) = split_command(command, Path::new("/")) else {
+        return Cow::Borrowed(command);
+    };
+    let mut lifted = false;
+    let shown: Vec<&str> = parts
+        .iter()
+        .map(|p| match ssh_destination(&p.words) {
+            // Any `$` in the part, also in the remote command: `${a[${x:='y[$(cmd)]'}]}` runs
+            // `cmd` here while bash expands it (an array index is arithmetic).
+            Some(d) if hosts.contains(&d) && !p.text.contains(['$', '`']) => {
+                lifted = true;
+                "ssh"
+            }
+            _ => p.text.as_str(),
+        })
+        .collect();
+    if lifted {
+        Cow::Owned(shown.join(" ; "))
+    } else {
+        Cow::Borrowed(command)
     }
 }
 
@@ -776,7 +943,7 @@ pub fn inspect(
             .as_ref()
             .map_or(0, |c| c.iter().filter(|(_, by)| by.is_none()).count())
             as u32;
-        if let Some((source, rule)) = deny.denies(tool, command) {
+        if let Some((source, rule)) = deny.denies(tool, command, &env.remote_unblock) {
             return CheckResult {
                 verdict: Verdict::Deny,
                 rule: Some(rule.into()),
@@ -871,6 +1038,7 @@ impl FolderRules {
 pub struct Policy {
     allow: Vec<(String, Rule)>,
     deny: Vec<(String, Rule)>,
+    remote: BTreeMap<String, Vec<String>>,
 }
 
 impl Policy {
@@ -879,16 +1047,18 @@ impl Policy {
         Self {
             allow: rules(&p.allow),
             deny: rules(&p.deny),
+            remote: p.remote_unblock.clone(),
         }
     }
 
     /// The deny rule that matches the call: the whole command, or any part of it between
-    /// shell operators (`cd x && sudo y` is caught by `Bash(sudo:*)`).
+    /// shell operators (`cd x && sudo y` is caught by `Bash(sudo:*)`); a rule the environment's
+    /// `remote_unblock` lifts for a host does not see the command `ssh` sends there (#162).
     pub fn denied_by(&self, tool: &str, input: &Value) -> Option<&str> {
         let command = input["command"].as_str();
         self.deny
             .iter()
-            .find(|(_, r)| deny_hit(r, tool, command))
+            .find(|(t, r)| deny_hit_remote(r, t, tool, command, &self.remote))
             .map(|(s, _)| s.as_str())
     }
 
@@ -1090,6 +1260,7 @@ mod tests {
                 "mcp__hqc".into(),
             ],
             deny: vec!["Bash(git push:*)".into(), "WebFetch".into()],
+            remote_unblock: BTreeMap::new(),
         });
         assert_eq!(
             p.hint("Bash", &bash("cargo test -p x")),
@@ -1362,6 +1533,107 @@ mod tests {
         );
     }
 
+    /// #162: `remote_unblock` lifts a deny rule only for the command `ssh` sends to a listed
+    /// host as written, with options that run nothing locally; anything the local shell would
+    /// run, another host, an unknown option and every other rule keep the deny.
+    #[test]
+    fn remote_unblock_lifts_a_rule_only_inside_ssh_to_a_host() {
+        let worker = Permissions::default();
+        let env = EnvPermissions {
+            unblock: vec!["Bash(ssh:*)".into()],
+            remote_unblock: [(
+                "pi@bench.local".to_string(),
+                vec!["Bash(sudo:*)".to_string()],
+            )]
+            .into(),
+            ..EnvPermissions::default()
+        };
+        let p = worker.for_environment(&env).unwrap();
+        assert!(
+            p.deny.contains(&"Bash(sudo:*)".to_string()),
+            "still in the CLI's deny"
+        );
+        let policy = Policy::new(&p);
+        let denied = |c: &str| policy.denied_by("Bash", &bash(c));
+        for c in [
+            "ssh pi@bench.local \"apt update && sudo apt upgrade -y\"",
+            "ssh pi@bench.local sudo reboot",
+            "ssh -p 22 -i ~/.ssh/bench -o ConnectTimeout=5 -o BatchMode=yes pi@bench.local 'sudo systemctl restart udev'",
+            "cd /tmp && ssh -t pi@bench.local 'sudo usermod -aG dialout pi' && echo done",
+            "for h in a; do ssh pi@bench.local 'sudo true'; done",
+        ] {
+            assert_eq!(denied(c), None, "{c}");
+        }
+        for c in [
+            "sudo ls",
+            "ssh pi@bench.local 'ls' && sudo ls",
+            "ssh pi@bench.local 'ls'; sudo -s",
+            // Another host (today's check catches sudo after an operator inside quotes).
+            "ssh other.local 'cd /tmp && sudo ls'",
+            "ssh bench.local 'cd /tmp && sudo ls'",
+            // The local shell runs these before ssh does.
+            "ssh pi@bench.local \"echo $(sudo id)\"",
+            "ssh pi@bench.local \"echo `sudo id`\"",
+            "ssh pi@bench.local $(sudo id)",
+            // Options that run a command here, or read a config that may.
+            "ssh -o 'ProxyCommand=sudo nc %h %p' pi@bench.local 'cd / && sudo ls'",
+            "ssh -o ProxyCommand=x pi@bench.local 'cd / && sudo ls'",
+            "ssh -o LocalCommand=x pi@bench.local 'cd / && sudo ls'",
+            "ssh -F cfg pi@bench.local 'cd / && sudo ls'",
+            "ssh -J jump pi@bench.local 'cd / && sudo ls'",
+            "sudo ssh pi@bench.local ls",
+            // OpenSSH reads options after the destination too.
+            "ssh pi@bench.local -o 'ProxyCommand=$(sudo id)' true",
+            "ssh pi@bench.local -o 'ProxyCommand=true; sudo id' true",
+            "ssh pi@bench.local -o HostName=evil.example 'cd / && sudo id'",
+            // Brace expansion makes another option.
+            "ssh -p {22,'-oProxyCommand=$(sudo id)'} pi@bench.local true",
+            "ssh -i {k,'-oProxyCommand=true; sudo id'} pi@bench.local true",
+            "ssh pi@bench.local {'-oProxyCommand=true; sudo id',true}",
+            "ssh -p x22 pi@bench.local 'cd / && sudo id'",
+            // Another user than the one listed.
+            "ssh -l root pi@bench.local 'cd / && sudo id'",
+            "ssh -o User=root pi@bench.local 'cd / && sudo id'",
+            // A parameter expansion in the remote command runs `$( )` here.
+            "ssh pi@bench.local echo ${a[${x:='y[$(sudo id)]'}]}",
+            "ssh pi@bench.local echo ${a:${x:='y[$(sudo id)]'}}",
+            "ssh pi@bench.local 'cd / && sudo ls $HOME'",
+        ] {
+            assert_eq!(denied(c), Some("Bash(sudo:*)"), "{c}");
+        }
+        // Other rules still see the remote command.
+        assert_eq!(
+            denied("ssh pi@bench.local 'sudo true && dd if=/dev/zero of=/dev/sda'"),
+            Some("Bash(dd:*)")
+        );
+        // `hqc-worker env which` and permissions.inspect check as the adapter does.
+        let r = inspect(
+            &worker,
+            "bench",
+            &env,
+            false,
+            None,
+            Path::new("/w"),
+            vec![],
+            Some("ssh pi@bench.local 'sudo apt upgrade'"),
+            None,
+        );
+        assert_eq!(r.check.unwrap().verdict, Verdict::Ask);
+        // Only a Bash deny rule of the environment, only an ssh destination.
+        for (host, rule) in [
+            ("pi@bench.local", "Bash(curl:*)"),
+            ("pi@bench.local", "Read"),
+            ("-oProxyCommand=x", "Bash(sudo:*)"),
+            ("pi@bench local", "Bash(sudo:*)"),
+        ] {
+            let e = worker.for_environment(&EnvPermissions {
+                remote_unblock: [(host.to_string(), vec![rule.to_string()])].into(),
+                ..EnvPermissions::default()
+            });
+            assert!(e.is_err(), "{host} {rule}");
+        }
+    }
+
     /// T43: deny minus unblock plus the environment's deny, allow plus its allow; `unblock` of
     /// a rule not in `deny` is an error.
     #[test]
@@ -1375,6 +1647,7 @@ mod tests {
             unblock: vec!["Bash(ssh:*)".into()],
             allow: vec!["Bash(ssh debian@192.168.1.20:*)".into(), "Read".into()],
             deny: vec!["Bash(git push:*)".into()],
+            ..EnvPermissions::default()
         };
         let p = worker.for_environment(&env).unwrap();
         assert!(!p.deny.contains(&"Bash(ssh:*)".to_string()));
@@ -1419,6 +1692,7 @@ mod tests {
             unblock: vec!["Bash(ssh:*)".into()],
             allow: vec!["Bash(ssh debian@192.168.1.20:*)".into()],
             deny: vec!["Bash(git push:*)".into()],
+            ..EnvPermissions::default()
         };
         let r = |command: &str| {
             inspect(
@@ -1608,6 +1882,7 @@ mod tests {
             allow_all: false,
             allow: vec![],
             deny: vec![],
+            remote_unblock: BTreeMap::new(),
         };
         // Empty lists still carry voiceEnabled: false.
         assert_eq!(none.settings(), json!({"voiceEnabled": false}));

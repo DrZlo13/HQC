@@ -127,7 +127,10 @@ it('opens the project settings from the column\'s "⋯": appearance, workspaces,
   await until('settings page', () => $('.project-settings'));
   expect($('.project-settings .bar .title')!.textContent).toBe('Project settings');
   expect($('.project-settings .bar .state')!.textContent).toBe('Personal');
-  expect($$('.project-settings h2').map((h) => h.textContent)).toEqual(['Appearance', 'Quick messages', 'Workspaces']);
+  // The mock's MCP servers and skills load after the page: their sections come last, once they do.
+  await until('mcp servers', () => $('.project-settings .mcp-project-servers'));
+  await until('skills', () => $('.project-settings .skill-project-skills'));
+  expect($$('.project-settings h2').map((h) => h.textContent)).toEqual(['Appearance', 'Quick messages', 'Workspaces', 'MCP servers', 'Skills']);
   // The personal project gets an appearance, but no rename or delete (SPEC §3).
   expect($('.ps-look .ps-color')!.textContent).toBe('Slate');
   const row = await until('workspace row', () => $('.workspace-row'));
@@ -372,7 +375,7 @@ it('saves letters in upper case and uploads an image; a wrong file never leaves 
 it('picks the app theme on the Settings page: a light tile applies at once and goes to the hub', async () => {
   location.hash = '#/settings';
   await until('theme tiles', () => $$('.theme-group .base-pick').length === 6);
-  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Look', 'New session', 'Web search', 'Models', 'MCP servers', 'Notifications', 'Workers']);
+  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Look', 'New session', 'Web search', 'Keys', 'Models', 'MCP servers', 'Skills', 'Notifications', 'This device', 'Workers']);
   expect($$('.theme-group-label').map((l) => l.textContent)).toEqual(['Dark', 'Light']);
   expect($('.base-pick[aria-pressed=true]')!.textContent).toBe('Warm');
   button('Graphite', '[aria-label="Light themes"]')!.click();

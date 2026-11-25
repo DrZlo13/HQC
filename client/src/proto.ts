@@ -302,6 +302,13 @@ export interface SecretAsked {
   /** The Vaultwarden entry the agent proposes; only where the worker reads Vaultwarden. The
    *  owner confirms or changes it on the card. */
   vault?: string;
+  /** The field of that entry the agent proposes, when it is not the password; only where the
+   *  worker also reads fields. */
+  vault_field?: string;
+  /** The worker reads Vaultwarden and fields of an entry: the card offers the vault also without
+   *  a proposed entry, and the "Field" box is shown only with it (an older worker would ignore
+   *  a field and give the password). */
+  reads_vault?: boolean;
 }
 /** The subagent that asks: its `task_id`, as `subagents.live` names it, and its task. */
 export interface RequestSubagent {
@@ -1060,6 +1067,17 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
       num(o, 'running_s');
     }
   },
+  // SPEC 0.244: background commands and subagents that have run for another `long_run_note`.
+  'session.long_runs': (p) => {
+    str(p, 'session_id');
+    for (const t of arr(p, 'tasks')) {
+      const o = obj(t, 'task');
+      str(o, 'task_id');
+      str(o, 'kind');
+      str(o, 'description');
+      num(o, 'running_s');
+    }
+  },
   'workspace.inspect': (p) => {
     str(p, 'request_id');
     str(p, 'path');
@@ -1076,11 +1094,16 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     const kind = strictEnum(p, 'kind', SECRET_PUT_KINDS);
     str(p, 'name');
     if (kind === 'ssh_keygen') {
-      if (present(p, 'value') || present(p, 'vault')) throw new ProtoError('secret.put: ssh_keygen takes no value');
+      if (present(p, 'value') || present(p, 'vault') || present(p, 'vault_field'))
+        throw new ProtoError('secret.put: ssh_keygen takes no value');
     } else if (present(p, 'vault')) {
       if (present(p, 'value')) throw new ProtoError('secret.put: a value or a vault entry, not both');
       str(p, 'vault');
-    } else str(p, 'value');
+      optStr(p, 'vault_field');
+    } else {
+      if (present(p, 'vault_field')) throw new ProtoError('secret.put: vault_field needs a vault entry');
+      str(p, 'value');
+    }
     optStr(p, 'passphrase');
     optBool(p, 'remember');
     optStr(p, 'comment');
@@ -1112,6 +1135,11 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'server');
     str(p, 'method');
     if (p.params !== undefined) obj(p.params, 'params');
+  },
+  // SPEC 0.236: the hub asks a worker for the models a provider endpoint lists.
+  'provider.probe': (p) => {
+    str(p, 'request_id');
+    str(p, 'base_url');
   },
   'mcp.result': (p) => {
     str(p, 'request_id');
@@ -1675,6 +1703,47 @@ export function parseMcpServer(v: unknown): McpServer {
   };
 }
 
+/** A skill of the owner (SPEC 0.245, iteration 8): `GET /api/skills`. The agents of
+ *  `all_projects` or of `project_ids` get it as `hqc:<name>` on workers with `hub_skills`. */
+export interface Skill {
+  id: Uuid;
+  name: string;
+  description?: string;
+  /** `allowed-tools` of its `SKILL.md`: these run without a permission card while it is active. */
+  allowed_tools: string[];
+  sha256: string;
+  /** Bytes, unpacked. */
+  size: number;
+  /** How many files it has. */
+  files: number;
+  all_projects: boolean;
+  project_ids: Uuid[];
+  updated_at: string;
+}
+
+export function parseSkill(v: unknown): Skill {
+  const o = obj(v, 'skill');
+  return {
+    id: str(o, 'id'),
+    name: str(o, 'name'),
+    description: optStr(o, 'description'),
+    allowed_tools: optStrArr(o, 'allowed_tools') ?? [],
+    sha256: str(o, 'sha256'),
+    size: optNum(o, 'size') ?? 0,
+    files: optNum(o, 'files') ?? 0,
+    all_projects: optBool(o, 'all_projects') ?? false,
+    project_ids: optStrArr(o, 'project_ids') ?? [],
+    updated_at: str(o, 'updated_at'),
+  };
+}
+
+/** A file of a skill: `GET /api/skills/{id}/files`. */
+export interface SkillFile {
+  path: string;
+  size: number;
+  executable?: boolean;
+}
+
 /** A slash command of the runtime (`command_info`, SPEC 0.162). */
 export interface SlashCommand {
   name: string;
@@ -2002,7 +2071,13 @@ export function parseWorkspaceRuleList(v: unknown): WorkspaceRule[] {
 }
 
 function parseSecretAsked(o: Obj): SecretAsked {
-  return { name: str(o, 'name'), kind: strictEnum(o, 'kind', ['secret', 'ssh_key'] as const), vault: optStr(o, 'vault') };
+  return {
+    name: str(o, 'name'),
+    kind: strictEnum(o, 'kind', ['secret', 'ssh_key'] as const),
+    vault: optStr(o, 'vault'),
+    vault_field: optStr(o, 'vault_field'),
+    reads_vault: optBool(o, 'reads_vault'),
+  };
 }
 
 function parseSuggestions(o: Obj, key: string): RuleSuggestion[] {

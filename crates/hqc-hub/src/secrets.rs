@@ -8,15 +8,17 @@
 //!   own or as the answer to the agent's `hqc_secret` (`request_id`). The answer is what the
 //!   worker told the agent's side (the path, the fingerprint), which the client puts into the
 //!   message being written; the feed gets `system secret_given` with the name only.
-//! - `hqc_secret(name, purpose, kind?, vault?)` ([`tool`]): a PendingRequest of kind [`KIND`]
-//!   with an `approval.request` card (`tool: hqc_secret`, `secret {name, kind, vault?}`, the
-//!   option `deny`);
+//! - `hqc_secret(name, purpose, kind?, vault?, vault_field?)` ([`tool`]): a PendingRequest of
+//!   kind [`KIND`] with an `approval.request` card (`tool: hqc_secret`, `secret {name, kind,
+//!   vault?, vault_field?, reads_vault?}`, the option `deny`);
 //!   the owner's [`give`] closes it with the call's result and `approval.response {option_id:
 //!   give}`, "Decline" with an error. Deferred as `hqc_move` is.
 //! - The vault: where the worker reads Vaultwarden (`capabilities.vault` of its `hello`), the
-//!   agent may name the entry that holds the secret (`vault`, shown on the card) and the owner
-//!   gives that entry in place of a value; the worker reads it with `rbw` and the value does
-//!   not pass through the hub. Elsewhere the agent's `vault` is dropped.
+//!   agent may name the entry that holds the secret (`vault`); where it also reads a field of
+//!   an entry (`capabilities.vault_fields`), the card offers that (`reads_vault`) and the agent
+//!   may name the field (`vault_field`, the password when absent). The owner gives the entry
+//!   in place of a value; the worker reads it with `rbw` and the value does not pass through
+//!   the hub. Elsewhere the agent's `vault` and `vault_field` are dropped.
 //! - `hqc_ssh_keygen(name, comment?)` ([`keygen`]): the worker makes an ed25519 key for the
 //!   session's workspace and loads it; the agent gets the public half. No card: the agent gets
 //!   nothing it could not make with `ssh-keygen`, and the private half stays out of the
@@ -34,8 +36,8 @@ use axum::{
 use hqc_proto::{
     api::{SecretGiven, SecretRequest, WorkspaceKeyList},
     frame::{
-        check_vault_entry, shown_line, HubFrame, McpCall, McpError, McpResult, ResultBody,
-        SecretKind, SecretOutcome, SecretPut, SecretValue, WorkspaceKeyDelete,
+        check_vault_entry, check_vault_field, shown_line, HubFrame, McpCall, McpError, McpResult,
+        ResultBody, SecretKind, SecretOutcome, SecretPut, SecretValue, WorkspaceKeyDelete,
         WorkspaceKeysRequest, MAX_SECRET,
     },
     mcp::error_code,
@@ -103,6 +105,12 @@ fn reads_vault(w: &WorkerRow) -> bool {
     w.capabilities["vault"] == true
 }
 
+/// The worker also reads a field of an entry (`vault_fields` of its `hello`); one that does not
+/// would ignore `vault_field` and give the password.
+fn reads_vault_fields(w: &WorkerRow) -> bool {
+    w.capabilities["vault_fields"] == true
+}
+
 /// `secret.put` on the worker; the worker's refusal is `Err(Some(message))`, offline
 /// `Err(None)`.
 async fn put(
@@ -164,10 +172,18 @@ impl From<PutError> for McpError {
 }
 
 /// What the feed says, without the value.
-fn given_text(kind: SecretKind, name: &str, vault: Option<&str>, o: &SecretOutcome) -> String {
+fn given_text(
+    kind: SecretKind,
+    name: &str,
+    vault: Option<(&str, Option<&str>)>,
+    o: &SecretOutcome,
+) -> String {
     let fp = o.fingerprint.as_deref().unwrap_or("");
     let from = vault
-        .map(|e| format!(" from Vaultwarden entry {e}"))
+        .map(|(entry, field)| match field {
+            Some(f) => format!(" from Vaultwarden entry {entry}, field {f}"),
+            None => format!(" from Vaultwarden entry {entry}"),
+        })
         .unwrap_or_default();
     match kind {
         SecretKind::Secret => format!("Secret {name} given{from}"),
@@ -181,7 +197,8 @@ fn given_text(kind: SecretKind, name: &str, vault: Option<&str>, o: &SecretOutco
 
 /// `POST /api/sessions/{id}/secrets` (SPEC §6): the session owner's, on a worker of theirs that
 /// takes secrets; exactly one of `value` and `vault` (a Vaultwarden entry the worker reads
-/// itself, only on a worker that reads Vaultwarden, else `409 unavailable`); `request_id`
+/// itself, only on a worker that reads Vaultwarden, else `409 unavailable`; `vault_field` only
+/// with it); `request_id`
 /// answers that session's open `hqc_secret` with the same name and kind. `200` with what the worker told the agent's side; `409 worker_offline`, `422
 /// secret_refused` with the worker's reason (no running agent, a bad key, a wrong
 /// passphrase), `504 worker_timeout`. A refused or failed give leaves the request open.
@@ -209,6 +226,12 @@ pub async fn give(
             "name is 1 to 64 letters, digits, '_', '-' and '.', not starting with '.' or '-'"
                 .into(),
         ));
+    }
+    if b.vault_field.is_some() && b.vault.is_none() {
+        return Err(ApiError::BadRequest("vault_field needs vault".into()));
+    }
+    if let Some(f) = &b.vault_field {
+        check_vault_field(f).map_err(ApiError::BadRequest)?;
     }
     match (&b.value, &b.vault) {
         (Some(_), Some(_)) | (None, None) => {
@@ -242,6 +265,15 @@ pub async fn give(
             ),
         ));
     }
+    if b.vault_field.is_some() && !reads_vault_fields(&worker) {
+        return Err(ApiError::Conflict(
+            "unavailable",
+            format!(
+                "worker {} reads no field of a Vaultwarden entry: update it",
+                worker.name
+            ),
+        ));
+    }
     let request = match &b.request_id {
         None => None,
         Some(rid) => {
@@ -268,6 +300,7 @@ pub async fn give(
         name,
         value,
         vault,
+        vault_field,
         passphrase,
         remember,
         ..
@@ -279,17 +312,23 @@ pub async fn give(
         name: name.clone(),
         value,
         vault: vault.clone(),
+        vault_field: vault_field.clone(),
         passphrase,
         remember,
         comment: None,
     })
     .await?;
-    tracing::info!(session_id = %s.id, ?kind, %name, ?vault, remembered = outcome.remembered, "secret given");
+    tracing::info!(session_id = %s.id, ?kind, %name, ?vault, ?vault_field, remembered = outcome.remembered, "secret given");
     events::system(
         &app,
         &s,
         GIVEN,
-        &given_text(kind, &name, vault.as_deref(), &outcome),
+        &given_text(
+            kind,
+            &name,
+            vault.as_deref().map(|e| (e, vault_field.as_deref())),
+            &outcome,
+        ),
     )
     .await?;
     if let Some(p) = request {
@@ -348,13 +387,17 @@ struct SecretArgs {
     kind: Option<SecretKind>,
     #[serde(default)]
     vault: Option<String>,
+    #[serde(default)]
+    vault_field: Option<String>,
 }
 
-/// `hqc_secret(name, purpose, kind?, vault?)` (SPEC §7): the owner is asked with a card in the
-/// session's feed; the call is answered when they give it ([`give`]) or decline. Once per
-/// `request_id`: a repeat finds its request, waiting or answered. `vault`, the entry the agent
-/// proposes, goes on the card only where the worker reads Vaultwarden, and is dropped
-/// elsewhere.
+/// `hqc_secret(name, purpose, kind?, vault?, vault_field?)` (SPEC §7): the owner is asked with a
+/// card in the session's feed; the call is answered when they give it ([`give`]) or decline.
+/// Once per `request_id`: a repeat finds its request, waiting or answered. `vault`, the entry
+/// the agent proposes, goes on the card only where the worker reads Vaultwarden; `vault_field`
+/// and `reads_vault` (whether the agent named an entry or not) only where it also reads fields
+/// ([`reads_vault_fields`]), since an older worker would ignore a field and give the password.
+/// Elsewhere they are dropped.
 pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Answer, McpError> {
     let a: SecretArgs = args(c.args.clone())?;
     let kind = a.kind.unwrap_or(SecretKind::Secret);
@@ -370,8 +413,17 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
             "name is 1 to 64 letters, digits, '_', '-' and '.', not starting with '.' or '-'",
         ));
     }
+    if a.vault_field.is_some() && a.vault.is_none() {
+        return Err(McpError::new(
+            error_code::INVALID_ARGS,
+            "vault_field needs vault",
+        ));
+    }
     if let Some(e) = &a.vault {
         check_vault_entry(e).map_err(|m| McpError::new(error_code::INVALID_ARGS, m))?;
+    }
+    if let Some(f) = &a.vault_field {
+        check_vault_field(f).map_err(|m| McpError::new(error_code::INVALID_ARGS, m))?;
     }
     let purpose = a.purpose.trim();
     if purpose.is_empty() || purpose.chars().count() > MAX_PURPOSE || !shown_line(purpose) {
@@ -400,8 +452,17 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
         .await
         .map_err(|m| McpError::new(error_code::UNAVAILABLE, m))?;
     let mut secret = json!({"name": a.name, "kind": kind});
-    if let Some(e) = a.vault.filter(|_| reads_vault(&worker)) {
-        secret["vault"] = json!(e);
+    if reads_vault(&worker) {
+        let fields = reads_vault_fields(&worker);
+        if fields {
+            secret["reads_vault"] = json!(true);
+        }
+        if let Some(e) = a.vault {
+            secret["vault"] = json!(e);
+            if let (true, Some(f)) = (fields, a.vault_field) {
+                secret["vault_field"] = json!(f);
+            }
+        }
     }
     let payload = json!({
         "request_id": c.request_id,
@@ -412,7 +473,7 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
             {"id": hqc_proto::frame::worker_approval::DENY, "label": "Decline", "canonical": "deny"},
         ],
     });
-    if !db::open_request(
+    match db::open_request_as(
         &app.db,
         KIND,
         caller.id,
@@ -424,7 +485,11 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
     .await
     .map_err(internal)?
     {
-        return Ok(Answer::Later);
+        db::Opened::New => {}
+        db::Opened::Repeat => return Ok(Answer::Later),
+        db::Opened::Taken => {
+            return Err(McpError::new(error_code::UNAVAILABLE, db::REQUEST_ID_TAKEN))
+        }
     }
     tracing::info!(session_id = %caller.id, request_id = %c.request_id, name = %a.name, "hqc_secret asks the owner");
     events::store_hub_event(
@@ -508,6 +573,7 @@ pub async fn keygen(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<
             name: a.name,
             value: None::<SecretValue>,
             vault: None,
+            vault_field: None,
             passphrase: None,
             remember: true,
             comment: a.comment,

@@ -3,6 +3,7 @@ import { createApp } from './app';
 import { watchTabIcon } from './favicon';
 import { trackHistory } from './nav';
 import { listenForNavigation, registerServiceWorker } from './push';
+import { listenForTaps } from './taps';
 import { applyTheme, storedTheme } from './theme';
 import { App } from './ui/App';
 import './styles.css';
@@ -25,6 +26,9 @@ window.hqc = { newSessionInProject: () => app.openNewSessionInProject() };
 void app.init();
 // Before the app listens to the address: its entries are stamped first.
 trackHistory();
+// Every touch reaches the page: on an iPhone a tap on a project after a scroll elsewhere only
+// hovered it (taps.ts).
+listenForTaps();
 render(<App app={app} />, document.getElementById('app')!);
 watchTabIcon(app);
 void registerServiceWorker();

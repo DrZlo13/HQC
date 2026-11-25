@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.240, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.251, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -50,7 +50,7 @@ outbound only, over WebSocket. Inside: a native Claude Code adapter, a generic A
 for Hermes and any agent from the ACP registry, the hqc MCP server, the VS Code session mirror,
 workspace operations, a local config with restrictions and environments.
 
-**Client** — a web app; a native iOS app (`ios/`, since 0.236) over the same API; later Tauri.
+**Client** — a web app; a native iOS app (`ios/`, since 0.247) over the same API; later Tauri.
 Talks only to the hub.
 
 Deployment: the hub sits in the home DMZ behind Cloudflare Tunnel. People sign in through
@@ -214,9 +214,9 @@ and the two differ.
 `protocol_version`, `boot_id` (from the last `hello`, §5.2), `capabilities` (`claude_code: {version, sessions_registry?, moves?, login?}`, `acp_agents[{name,
 version, load_session, resume, image, isolation}]` — the result of each agent's `initialize`
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
-`environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?}}`,
+`environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?, remote_unblock? (0.246)}}`,
 never the values of `env`; `default` is implied), `env_bindings[]` (`{path, environment}`; the
-Hermes profile in iteration 8),
+Hermes profile in iteration 9),
 `allow_foreign_sessions`, `idle_timeout`, `system_session_id` (§10.2), `machine_hash` (since 0.23:
 the machine fingerprint from enrollment and the last `hello`, §5.1; not part of the API worker object),
 `session_secrets` (since 0.147, hub migration `0044`: its `worker.toml` has `session_secrets = true`,
@@ -524,10 +524,13 @@ kind of the session has. An answer (`POST /api/sessions/{id}/requests/{request_i
 its request by the id alone, so a worker's card under the id of a publication or a move the
 owner is asked about would have the owner's Allow land on that one. A worker's `approval.request`
 or `clarify.request` opens its row before the event is stored; one refused this way is not
-stored (`ack` without `seq`, §5.2) and shows no card. A request of the hub's own refused this
-way (a publication, a move, a secret, a follow) shows no card either, and its call waits as for a
-repeat; an `ask` refused this way gets no reply. A repeat of a request of the same kind is as
-before.
+stored (`ack` without `seq`, §5.2) and shows no card. Since 0.239 an agent's call whose
+request the hub would open this way (`hqc_publish`, `hqc_move`, `hqc_secret`, `hqc_ask`) is
+answered at once with `unavailable` ("the request id of this call is held by another open request
+of this session") instead of waiting as for a repeat; an `hqc_ask` is checked before its message is
+stored, so the target gets nothing. A worker's own request (§10.2) refused this way is refused to
+the worker. A follow, whose `request_id` the hub derives itself, shows no card. A repeat of a
+request of the same kind is as before.
 
 An `ask` (since 0.35, T32) is a row of the **asking** session: `session_id` — the asking
 session, `request_id` — the `mcp.call`'s, `worker_id` — the asking session's worker,
@@ -569,8 +572,11 @@ closed row means records ask nothing more about that move.
 A `secret` (since 0.147) is a row of the session whose agent's `hqc_secret` waits for the owner
 (§7, §10.1): `request_id` — the `mcp.call`'s, `worker_id` — the session's worker, `payload` —
 the hub's `approval.request` in the session's feed (`tool: hqc_secret`, `description` — the
-agent's purpose, `secret: {name, kind, vault?}` — `vault` (since 0.216) the Vaultwarden entry the
-agent named, kept only when the session's worker reads Vaultwarden (§14) — the one option
+agent's purpose, `secret: {name, kind, vault?, vault_field?, reads_vault?}` — `vault` (since
+0.216) the Vaultwarden entry the agent named, kept only when the session's worker reads
+Vaultwarden (§14); `vault_field` (since 0.243) the field of it the agent named and `reads_vault:
+true` (since 0.243), with an entry or without, only when that worker also reads fields
+(`vault_fields`, §5.4) — the one option
 `deny`), no `expires_at` (the call ends
 at the runtime's tool timeout, as a move's), `result` — the `mcp.result` frame once the owner
 gave it (`POST /api/sessions/{id}/secrets` with `request_id`, §6: the worker's note, the path or
@@ -589,11 +595,11 @@ when it is connected, or after its `hello`. A publication done before the stop a
 `attachment` with the link the artifact has then.
 
 ### ApnsDevice
-Since 0.237 (§16): a user's iOS device that takes notices over APNs: `id`, `user_id`,
+Since 0.248 (§16): a user's iOS device that takes notices over APNs: `id`, `user_id`,
 `token` (the APNs device token in hex, unique), `sandbox` (a development build), `created_at`,
 `updated_at`. Written by `POST /api/push/apns`, deleted by `DELETE` or when APNs says the
-token is gone (hub migration `0058`). Since 0.238 also `notice_key`, the 32-byte AES key the
-device made for its notices (absent for an app that registered before; migration `0059`).
+token is gone (hub migration `0059`). Since 0.249 also `notice_key`, the 32-byte AES key the
+device made for its notices (absent for an app that registered before; migration `0060`).
 
 ### ScheduledMessage
 `owner_id`, `session_id` or (`project_id`, `workspace_id`, template), `cron` or `at`,
@@ -617,7 +623,7 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `quiet?` (since 0.231: `true` once the worker wrote the message into the agent's history without a turn at the owner's Stop, set by the hub on `ack {quiet: true}`, §5.2, §17.2; absent when false; the feed stands it behind its `joined_after`, where Claude Code recorded it, §6), `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `joined_after?` (since 0.221, with `joined` or (since 0.231) `quiet`, set by the hub in the same write: the `seq` of the last event of the session that is no `user.message` or `peer.message`, stored before the hub took the ack, when it is past the message's own; absent when there is none and on a message joined before 0.221; §6), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise), `human?` (since 0.219: `true` on a message the owner typed in `POST /api/sessions/{id}/input` (§6), written there and nowhere else, so it is absent on a hub's own note (a resume, `hqc_move`, subagent leftovers), a run of a schedule, a room's post to its agent and a message from the Claude Code transcript; it is what Take back and Send now require (§6, §17.2) and what the worker writes Claude Code's `origin: human` for (§5.3, §8.1)) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.203: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
+| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `quiet?` (since 0.231: `true` once the worker wrote the message into the agent's history without a turn at the owner's Stop, set by the hub on `ack {quiet: true}`, §5.2, §17.2; absent when false; the feed stands it behind its `joined_after`, where Claude Code recorded it, §6), `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `joined_after?` (since 0.221, with `joined` or (since 0.231) `quiet`, set by the hub in the same write: the `seq` of the last event of the session that is no `user.message` or `peer.message`, stored before the hub took the ack, when it is past the message's own; absent when there is none and on a message joined before 0.221; §6), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise), `human?` (since 0.219: `true` on a message the owner typed in `POST /api/sessions/{id}/input` (§6), written there and nowhere else, so it is absent on a hub's own note (a resume, `hqc_move`, subagent leftovers, long runs), a run of a schedule, a room's post to its agent and a message from the Claude Code transcript; it is what Take back and Send now require (§6, §17.2) and what the worker writes Claude Code's `origin: human` for (§5.3, §8.1)) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.203: authored by the session's owner, no chain); hub on `session.long_runs` (§8.1, since 0.244: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text`, `reset?` (since 0.161: `true` when the runtime abandoned the attempt that wrote the text so far, which the hub and the client drop, and (since 0.208) the thinking being written with it, §6, §8.1; `text` is then empty; absent when false), `thinking?` (since 0.208: `true` for a piece of the agent's thinking being written, not of its answer; absent when false; §6, §8.1) | adapter; transport only, not written to the database |
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?, due_in_ms?, retry?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands and (since 0.169) Monitor watchers, in the order they became rows, then (since 0.169) the wakeup the agent armed and its cron jobs, empty when none (§8.1); since 0.181 a task the CLI marks `ambient` is no row, and the commands and subagents it starts are rows as the agent's own (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.161; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row, a command's and (since 0.169) a Monitor's say, `retry` (since 0.179) `{attempt, max_retries, retry_delay_ms, error_status?}` while its request to the model API failed and waits to be retried (`error_status` absent: the attempt got no response; §8.1), `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row, `command` for a command's and, since 0.169, `monitor` for a Monitor's, `wakeup` for the agent's wakeup and `cron` for one of its cron jobs; a command's or a Monitor's row carries only `task_id`, `description` (its Bash call's description, or the command; the Monitor's description), `duration_ms`, `call_id?`, `kind` and `stoppable`; a wakeup's and a job's row also `due_in_ms` (since 0.169), the milliseconds until it fires when the list was sent, by the worker's clock, 0 once due, absent on a job whose next fire is not known |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops, and (since 0.179) again, unchanged, at each heartbeat of a long call of the main agent (§8.1, §17.3) |
@@ -626,11 +632,11 @@ the client renders only them. The "source" column is the component that produces
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (short error text; since 0.194 an opened call row in the client shows it only when it is not the start of `result_preview`, which the Claude Code adapter cuts from the same text), `duration_ms?`, `artifact_id?` (a diff or a large result, §12; since 0.180 the Claude Code adapter's whole text of a result longer than `result_preview`, its first 2 MiB, kind `text`, §8.1), `artifact_ids[]?` (since 0.180: the result's images, kind `image`, in order; absent when none, §8.1) | adapter |
-| `approval.request` | `request_id`, `tool`, `description`, `args_preview?`, `options[{id, label, canonical, grant?}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind, vault?}`, `subagent?{task_id, description}` (since 0.181: the subagent that asks, §10.1; absent for the agent itself and a subagent the adapter does not know) | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons (since 0.213 also the option ids `server_session` and `server_always`, canonical `session` and `always`, on an MCP tool's card, §10.1); `args_preview` (since 0.207) — the call's arguments as `tool.call.args_preview` carries them (the same limit and form), so a card that does not stand right after its call (a subagent's, another session's, one in the Requests list) shows the whole command and every argument; absent from an older worker; `grant` of an option (since 0.207) — what choosing it grants besides this call: `{place, rules?[], exact?}`, `place` ∈ `session` (the worker's session rules, until the process ends) / `local_settings` (Claude Code writes the rules to `.claude/settings.local.json` at the root of the git repository containing the session's cwd, §8.1), `rules` — as Claude Code writes a rule, `toolName` or `toolName(ruleContent)`, at most 10, each at most 256 bytes (a rule cut there ends with `…`; past 10 the tenth item is `… N more`, the count of the rules not listed, which the option grants as well), `exact` — the exact call is allowed too; no field — the option grants nothing more (`once`, `deny`) or the worker does not say; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; since 0.180 `reason?` — why the runtime asks (Claude Code: `decision_reason`, at most 1024 bytes; since 0.217, for a call an ask rule caught, the rule's tool and settings file, §8.1), `display_name?` — the runtime's name of the tool (at most 256 bytes), both absent when blank, and `human_only?` — `true` when only a person may answer it (§8.1): its `options` are `once` and `deny`, it has no `rule_suggestions`, and the hub's `auto_approve` leaves it to the owner (§10.1); absent when false. The client shows `reason` under the card's title and names the tool by `display_name` when there is one, an MCP server's tool as `<tool> (<server>)` (the runtime's `display_name` of one drops the server); `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for and, since 0.216, the Vaultwarden entry the agent named (§7); the hub drops it from a worker's event |
+| `approval.request` | `request_id`, `tool`, `description`, `args_preview?`, `options[{id, label, canonical, grant?}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind, vault?, vault_field?, reads_vault?}`, `subagent?{task_id, description}` (since 0.181: the subagent that asks, §10.1; absent for the agent itself and a subagent the adapter does not know) | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons (since 0.213 also the option ids `server_session` and `server_always`, canonical `session` and `always`, on an MCP tool's card, §10.1); `args_preview` (since 0.207) — the call's arguments as `tool.call.args_preview` carries them (the same limit and form), so a card that does not stand right after its call (a subagent's, another session's, one in the Requests list) shows the whole command and every argument; absent from an older worker; `grant` of an option (since 0.207) — what choosing it grants besides this call: `{place, rules?[], exact?}`, `place` ∈ `session` (the worker's session rules, until the process ends) / `local_settings` (Claude Code writes the rules to `.claude/settings.local.json` at the root of the git repository containing the session's cwd, §8.1), `rules` — as Claude Code writes a rule, `toolName` or `toolName(ruleContent)`, at most 10, each at most 256 bytes (a rule cut there ends with `…`; past 10 the tenth item is `… N more`, the count of the rules not listed, which the option grants as well), `exact` — the exact call is allowed too; no field — the option grants nothing more (`once`, `deny`) or the worker does not say; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; since 0.180 `reason?` — why the runtime asks (Claude Code: `decision_reason`, at most 1024 bytes; since 0.217, for a call an ask rule caught, the rule's tool and settings file, §8.1), `display_name?` — the runtime's name of the tool (at most 256 bytes), both absent when blank, and `human_only?` — `true` when only a person may answer it (§8.1): its `options` are `once` and `deny`, it has no `rule_suggestions`, and the hub's `auto_approve` leaves it to the owner (§10.1); absent when false. The client shows `reason` under the card's title and names the tool by `display_name` when there is one, an MCP server's tool as `<tool> (<server>)` (the runtime's `display_name` of one drops the server); `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for and, since 0.216, the Vaultwarden entry the agent named and, since 0.243, the field of it the agent named (`vault_field`) and `reads_vault` (§7); the hub drops it from a worker's event |
 | `approval.response` | `request_id`, `option_id`, `by` (user id or `auto`), `message?` (the user's text instead of the call, only with a `deny`/`deny_always` option, §10.1) | client, or the hub with `auto_approve` |
 | `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived, since 0.180 withdrawn — the runtime withdrew its request, §8.1; the client says "withdrawn") | adapter, worker or hub. An answer from another device is not a cancellation: the first answer closes the request, the second gets `409 request_closed` (§10.1) |
 | `clarify.request` | `request_id`, `questions[{id, text, header?, options?: [string], option_descriptions?: [string], option_previews?: [string], multi?: bool, required?: bool, input?: "integer" \| "number"}]`, `subagent?{task_id, description}` (since 0.181, as on `approval.request`) | Claude Code adapter: the `AskUserQuestion` tool arrives as `can_use_tool`, the answer goes into `updatedInput.answers` (verified on 2.1.307 with `--permission-prompt-tool stdio`, §8.1). Since 0.69 `header` is the question's short label and `option_descriptions` what each option means, in the order and number of `options`, `""` for an option without one; each is absent when empty. Since 0.199 `option_previews` is each option's mockup (an ASCII sketch, code, a config) by the same rule, cut by the worker to 8 KiB with `\n… (truncated)` after it. The client shows `header` above the question, each description under its option, and an "Other" field: its text is the answer (with `multi`, an item of the array beside the checked labels); "Other" chosen with nothing typed is sent as `"Other"`, as the VS Code tab does. As in the tab, "Answer" stays disabled until every question has an answer: an option picked, a text typed (not only spaces) or "Other" chosen. A question with a preview shows it as plain text in `<pre>`, never rendered as markdown or HTML, not wrapped and scrolling sideways: on a desktop in a column beside the options, the preview of the option last under the pointer while the pointer is over the question (the "Other" row lets it go) or of the option with the keyboard focus (kept while the focus is in the preview), else of the first chosen one, else the first one that has a preview, the column as tall as the tallest preview of the question; on a phone under each chosen option that has one. ACP agents have no source for it. Since 0.180 also an MCP server's request for input (Claude Code: `elicitation`, §8.1), with `server?` — the server that asks, `message?` — its text, `url?` — the page it sends the person to, then with no `questions`; a question of its form carries `required: true` for a field the server requires and `input` (`integer`, `number`) for a free-text field whose answer must read as one, both absent otherwise and in the agent's questions; the client heads the card "<server> asks", shows the text above the questions, "required" beside a required question's header, the link (only an http, https or mailto one as a link, labelled with the address it opens, a host in its punycode form), no "Other", the submit button ("Done" for a link, the card then saying "Done"; unlike the agent's questions it waits only for what the form's schema says, which a server on the MCP SDK checks the answer against, refusing one that does not match (§8.1): every `required` question answered, an `integer` answer an optional minus and digits, at most 2^53 − 1 in size, a `number` one written in decimal (an optional minus, digits with an optional point, an optional exponent) that JavaScript's `Number()` reads as a finite number; a field neither required nor answered may stay empty) and "Decline" |
-| `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`), `action?` (since 0.180, only for a request with `server`: `accept` — the answers, also none, are the input; `decline` — the person declined, `answers` empty; the client shows "Declined") | client |
+| `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`), `action?` (since 0.180, only for a request with `server`: `accept` — the answers, also none, are the input; `decline` — the person declined, `answers` empty; the client shows "Declined"). Since 0.246 the event of an answer to a request with `server` keeps `answers: {}`: a server's form may ask for a token, so its answers go to the worker in the frame only, and the hub's copy of the frame forgets them once the worker acknowledges it; the card says that the answers go to the server only, and "Answers sent to <server>" | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; since 0.181 also the worker after a background task's end, the task's output file (§8.1), with the same `author`, `kind: text`; since 0.209 also a publication the owner allowed (`hqc_publish`, §7), with `kind: site` (`event.attachment.site.json`); the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `joined_after?` (since 0.221, with `joined` or (since 0.231) `quiet`: as on a `user.message`), `quiet?` (since 0.231: as on a `user.message`), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
@@ -1115,13 +1121,28 @@ MCP calls (worker → hub → worker):
   no address and no header, so the CLI names its tools `mcp__<name>__<tool>` as with a direct
   connection and none is allowed outright; a change reaches the agent at its next start; absent —
   none;
+  `skills` (since 0.245) — `[{name, sha256}]`, the owner's skills the session's project gets
+  (§6 `/api/skills`), on the same terms as `mcp_servers` (not for a restricted session, another
+  runtime than Claude Code or a worker that is not the owner's); the worker takes them only in
+  an environment with `hub_skills = true` (§14), for an unrestricted session of its owner, valid
+  names (`[a-z0-9][a-z0-9_-]{0,63}`) and hashes (64 hex digits) only, one per name. Before each
+  start of the agent it fetches an archive it does not have with `GET /worker/skills/{sha256}`
+  and its token (the hub answers only a skill of the worker's owner, else `404`), checks its
+  sha256 and its content as the hub does (§20) and keeps it in `$HQC_HOME/hub-skills/zips/`,
+  then gives the agent the plugin folder of the set (§8.1). A skill it cannot fetch or that fails
+  a check is left out of that start and logged, the others stay; archives and folders unused
+  for 7 days are removed when the worker starts; a change reaches the agent at its next start;
+  absent — none;
   `allow_rules` (since 0.52, T48) — hqc's allow rules of the
   session's workspace (§3 Workspace), absent when none; the worker keeps the latest list per
   canonical workspace, shared by its sessions there, and drops a rule that is not valid hqc
   syntax; `permission_mode` (since 0.42, T38) — `ask` | `auto` | `allow_all` (since 0.129),
   the session's `permission_mode` (§3); absent — the worker's `[permissions] mode`; the worker
   runs `auto` only with `allow_auto` and `allow_all` only with `allow_all` (§14), otherwise the
-  highest mode it allows, and reports the mode it runs in `session.state`;
+  highest mode it allows, and reports the mode it runs in `session.state`; a session with
+  `provider` runs `ask` where `auto` is asked (since 0.246): Auto's safety check runs on
+  Anthropic's servers and does not pass through a provider's endpoint, so the CLI would refuse
+  every call that needs it;
   `requested_by_owner` (sent only as `true`) — the worker
   owner added the session's workspace: no confirmation of a new folder is needed (§10.2); the worker calls the adapter's `start` or `resume` (§8);
   on `new` the Claude Code adapter still checks for a jsonl with this uuid and, if there is one,
@@ -1203,7 +1224,7 @@ MCP calls (worker → hub → worker):
   `payload.human` (§4), no `peer`, no `schedule_id`, the room did not rewrite its text (§7.1.1) and
   no buffered `send` message of another session stands in front of it (`peer_prefix` is empty);
   absent otherwise (a message of another session, a room's input, a run of a schedule, a note of the
-  hub's own: a resume, `hqc_move`, subagent leftovers). The worker writes Claude Code's
+  hub's own: a resume, `hqc_move`, subagent leftovers, long runs). The worker writes Claude Code's
   `origin: {kind: "human"}` for such an input alone (§8.1); one with a `peer`, a `peer_prefix` or a
   `schedule_id` is not human whatever the frame says. The two exceptions are hqc's own notes that
   stand in front of a human input without taking its mark: a fork's first-input note and the
@@ -1281,7 +1302,7 @@ MCP calls (worker → hub → worker):
 - `session.kill` {session_id} — terminate the agent process.
 - `session.permission_mode` {session_id, permission_mode} → `ack` (since 0.42, T38) — the user
   switched the session's mode (§6). The worker decides as for `session.start` (`auto` only
-  with `allow_auto`, `allow_all` only with `allow_all`); a running agent switches at once,
+  with `allow_auto`, `allow_all` only with `allow_all`, no `auto` on a provider); a running agent switches at once,
   also mid-turn (Claude Code: §8.1), a stopped one starts in the mode; a session the worker
   has not started is only acked (the next `session.start` carries the mode). The hub sends it
   when the worker is connected and
@@ -1404,7 +1425,7 @@ MCP calls (worker → hub → worker):
   with git's message; `force` (only when the user confirmed the files the inspection listed, §6)
   removes them. A worktree folder that is gone already is pruned and `removed: false`. `force`
   changes nothing for a clone.
-- `secret.put` {request_id, session_id, kind, name, value?, vault?, passphrase?, remember?, comment?} →
+- `secret.put` {request_id, session_id, kind, name, value?, vault?, vault_field?, passphrase?, remember?, comment?} →
   `result {request_id, secret {note, path?, fingerprint?, public_key?, remembered?}}` or `error
   {invalid_frame}` with the reason (since 0.147, §14) — a secret or an ssh key for the session's
   running agent. `kind`: `secret` (`value` is the secret: the file `$HQC_SECRETS/<name>` of the
@@ -1417,9 +1438,15 @@ MCP calls (worker → hub → worker):
   0.216) stands for `value` of a `secret` or an `ssh_key`, one of the two exactly: the exact name
   or the id of a Vaultwarden (Bitwarden) entry, one line of 1 to 200 characters, which the worker
   reads itself with `rbw` on its machine (§14) — the value never passes through the hub; a worker
-  without `vault` refuses it, and a locked `rbw`, no entry of that name or id, several of that
-  name, an empty value and one over 64 KiB are refused with the reason, never with what `rbw`
-  printed on its standard output. `note` is what the agent is told, never the value. The worker
+  without `vault` refuses it, and an `rbw` that stays locked (since 0.243 a locked one is asked
+  to unlock, §14), no entry of that name or id,
+  several of that name, an empty value and one over 64 KiB are refused with the reason, never
+  with what `rbw` printed on its standard output. `vault_field` (since 0.243), only with
+  `vault`, one such line too, names the field of the entry to read instead of its password (an
+  ssh key's private key): `notes`, a key of the entry's own data (a login's `username`,
+  `password` and `totp` — the key as stored, not a code —, a card's or an identity's fields, an
+  ssh key's `public_key`), else a custom field by its exact name; the worker refuses a field
+  the entry has not, an empty one, one without text, and a custom name that two fields share. `note` is what the agent is told, never the value. The worker
   takes it only with `session_secrets`, for a session of its owner that is not restricted and
   whose agent runs now; a kept name the workspace has
   already, a bad key, a wrong passphrase are refused, and the reason never carries the value, the
@@ -1431,6 +1458,14 @@ MCP calls (worker → hub → worker):
   0.147) — the ssh keys the worker keeps for the workspace at `path` (a folder inside
   `allowed_roots`, after resolving symlinks), with `session_secrets` only, else `error
   {invalid_frame}`. `key_deleted: false`: the workspace has no such key.
+- `provider.probe` {request_id, base_url} → `result {request_id, provider_probe {models[{id,
+  context_tokens?}], error?}}` (since 0.236) — the models the endpoint at `base_url` lists: `GET
+  /v1/models` (vLLM's `max_model_len`, llama.cpp's `meta.n_ctx_train`, `context_length`), then
+  llama.cpp's `/props` (`n_ctx`, for its one model) and LM Studio's `/api/v0/models` for a missing
+  window, and Ollama's `/api/tags` without `/v1/models`; with the key `worker.toml` keeps for that
+  `base_url`. Only http(s), no redirects, 10 s a request, 1 MiB an answer, and only model ids
+  (printable, at most 200 characters, at most 200 of them) and windows (1000 to 10 000 000) go
+  back, never the endpoint's text.
 - `claude.auth` {request_id} → `result {request_id, claude_auth {logged_in, auth_method?, email?,
   org_name?, subscription_type?, expires_at?, error?}}` (since 0.185) — how the worker's own
   Claude Code is signed in (`claude auth status`); `error` when it could not be read.
@@ -1514,8 +1549,11 @@ MCP calls (worker → hub → worker):
   are; the hub moves only sessions of such a worker (§6). `vault: true` (since 0.216) — its
   `worker.toml` has both `session_secrets` and `vault` (§14): `secret.put` may name a Vaultwarden
   entry instead of the value (§5.3); the hub keeps it with the rest of `capabilities`.
+  `vault_fields: true` (since 0.243), sent with `vault` — the worker reads a field of the entry
+  (`secret.put.vault_field`): an older worker ignores the field and would give the password, so
+  the hub offers the field, and `reads_vault` on a card, only to a worker that sends it.
   `environments` (since 0.56, T43) — the environments of the local config (§14) as `{name,
-  allow_local_mcp?, permissions {unblock?, allow?, deny?}}`, without `default` and never with the
+  allow_local_mcp?, permissions {unblock?, allow?, deny?, remote_unblock?}}`, without `default` and never with the
   values (or the names) of `env`; a plain string, as workers before 0.56 send, reads as an
   environment without rules. `env_bindings` — `{path, environment}`, the path canonical when it
   existed at the worker's start (`worker.hello.json`). The hub keeps both on the worker and sets
@@ -1649,6 +1687,15 @@ MCP calls (worker → hub → worker):
   seconds it has run. Sent directly, once per such end, while the agent runs.
   The hub gives the agent a note as the owner's pending input (§8.1), unless the session is a
   room's or paused, or is not on this worker; it acks the frame either way.
+- `session.long_runs` {session_id, tasks[{task_id, kind, description, running_s}]} → `ack {}`
+  (since 0.244) — background commands or subagents of the session's agent that have each run for
+  another `long_run_note` of the worker (§14; 55 minutes unless set; Claude Code: §8.1): `kind`
+  is `command` or `agent` (a subagent), `task_id` the task's id in the runtime, `description` its
+  description there, `running_s` the seconds it has run. Sent directly, one frame for all the
+  tasks that reached their mark on one tick, while the agent runs. The hub gives the agent a note
+  as the owner's pending input (§8.1), unless the session is a room's or paused, or is not on this
+  worker; it acks the frame either way. A hub older than 0.244 answers it with `error
+  invalid_frame`, so the hub is updated before the workers.
 - `workspace.created` {request_id, canonical | error} → `ack {}` (since 0.58, T45) — the outcome
   of `workspace.create`: the folder is ready at `canonical`, or it was not made (`error`, a
   message for the user; nothing is left on disk). Sent directly when the clone (or since 0.60 the
@@ -1893,12 +1940,20 @@ the rest is marked "later"):
   `400` (not the owner's) or `422 provider_not_allowed`, both on creation too; a change restarts a
   running agent (`session.kill`, then `session.start` with the new description, the transcript
   resumed), a stopped one starts on it; a session on a provider keeps the provider's model,
-  `session.model` does not reach its runtime. The session object's `agent.provider` is {id,
-  label}. `GET/POST /api/providers` ({providers: [...]} and `201`), `PATCH/DELETE
+  `session.model` does not reach its runtime; `permission_mode: auto` for a session with a
+  provider (the one it has or the one the same request gives) is `422 auto_needs_anthropic`
+  (since 0.246, §5.3), and the client offers no Auto there. The session object's
+  `agent.provider` is {id, label}. `GET/POST /api/providers` ({providers: [...]} and `201`), `PATCH/DELETE
   /api/providers/{id}` (§3 Provider; `PATCH` replaces every field; `409 provider_exists` for a
   name the owner has, `409 provider_in_use` on deleting one sessions run on): {name, label,
   base_url, model, context_tokens?} (`context_tokens` 1000 to 10 000 000); a provider object has
   `workers[]`, the owner's workers whose last `hello` allowed it.
+  `POST /api/providers/probe {base_url, name?}` (since 0.236) → `{models[{id, context_tokens?}],
+  error?, worker_id?}`: what the endpoint lists, as one of the owner's online workers reads it
+  (`provider.probe`, §5.3), a worker that allows `name` first, then the others until one answers
+  with models; `409 worker_offline` when none is online. The client's provider form starts with
+  the base URL and fills from it the model (a list it can type over), the context window, the
+  name and the label, each only while the owner has not edited it.
   Remote MCP servers (since 0.235, `docs/ITERATION-7.md`): `GET/POST /api/mcp/servers`
   ({servers: [...]} and `201`), `PATCH/DELETE /api/mcp/servers/{id}`, `POST
   /api/mcp/servers/{id}/test`, the owner's only. A server: {id, name, url, header_names[],
@@ -1920,6 +1975,13 @@ the rest is marked "later"):
   `404` for it, and closed (`DELETE`) when the agent's process stops or after an hour unused;
   redirects are not followed, and the address connected to is the one checked against private
   ranges (§20).
+  `POST /api/mcp/probe {url}` (since 0.236) → `{name?, server_name?, auth, error?}`: the hub sends
+  the server an `initialize` without credentials; `auth` is `none` (it answered; `server_name` is
+  its `serverInfo.name`, and the session it opened is closed), `oauth` (`401` and it names an
+  authorization server), `token` (`401` without one) or `unknown`; `name` is a valid server name
+  from `serverInfo.name` (`github-mcp-server` → `github`) or the host (`mcp.linear.app` →
+  `linear`). The client's form starts with the URL and fills the name and the way to sign in
+  from it while the owner has not edited them; every field stays editable.
   OAuth (T65): a server with `auth: oauth` ({auth, oauth_client_id?, oauth_client_secret?,
   oauth_scope?} in `POST`/`PATCH`; the secret write-only; status `sign_in` until signed in, and
   `signed_in` in the server object) signs in through its authorization server, as MCP's
@@ -1938,10 +2000,29 @@ the rest is marked "later"):
   the section "MCP servers" in Settings (the list with status and tools, add and edit with
   headers or OAuth, Test, Sign in, Sign out, Delete) and the servers a project gets in its
   settings (T66).
-  `POST /api/sessions/{id}/secrets` (since 0.147, §14) {kind, name, value?, vault?, passphrase?,
-  remember?, request_id?} (unknown fields: `422`; one of `value` and `vault` exactly, else `400`;
-  `vault` since 0.216 — a Vaultwarden entry the worker reads itself, §5.3, only on a worker whose
-  `capabilities` have `vault`, else `409 unavailable`): a secret (`kind: secret`) or an ssh private
+  Skills (since 0.245, `docs/ITERATION-8.md`): `GET /api/skills` ({skills: [...]}), `POST
+  /api/skills`, `PATCH/DELETE /api/skills/{id}`, `GET /api/skills/{id}/files` ({files: [{path,
+  size, executable?}]}), the owner's only. A skill: {id, name, description?, allowed_tools[],
+  sha256, size (unpacked bytes), files, all_projects, project_ids[], updated_at}. `POST` is
+  multipart: one `zip` part, or `file` parts whose file names are the paths inside the skill, and
+  an optional `name`; `SKILL.md` at the top or under one top folder; `__MACOSX/`, `.git/` and
+  `.DS_Store` dropped. The name is the frontmatter's `name`, else the top folder's, else `name`;
+  a name the owner has already replaces that skill's content and keeps its projects (`200`), a
+  new one is `201` for all projects. Limits: an upload of 8 MiB, 4 MiB and 500 files unpacked, a
+  path of 200 bytes, 100 skills (`409 too_many_skills`); over the size `413`. A `SKILL.md` with
+  `hooks` is `422 skill_hooks`; a path out of the skill, a link, a bad name or a frontmatter the
+  hub cannot read for sure (§20) `400`. The hub keeps an archive it writes itself (paths sorted,
+  fixed times, mode `0755` for an executable entry of a `.zip`, else `0644`), whose sha256 is the
+  skill's hash: the same files give the same hash. `PATCH` takes {all_projects?, project_ids?}.
+  The client shows the section "Skills" in Settings (upload a folder or a `.zip`, the list with
+  each skill's description, size, files and `allowed-tools`, the projects, delete) and the skills
+  a project gets in its settings.
+  `POST /api/sessions/{id}/secrets` (since 0.147, §14) {kind, name, value?, vault?, vault_field?,
+  passphrase?, remember?, request_id?} (unknown fields: `422`; one of `value` and `vault` exactly,
+  else `400`; `vault` since 0.216 — a Vaultwarden entry the worker reads itself, §5.3, only on a
+  worker whose `capabilities` have `vault`, else `409 unavailable`; `vault_field` since 0.243 — the field of
+  that entry, only with `vault`, else `400`, and only on a worker that also has `vault_fields`,
+  else `409 unavailable`): a secret (`kind: secret`) or an ssh private
   key (`kind: ssh_key`, with `passphrase` and `remember` for it only) for the session's running
   agent, from its owner, on a worker of theirs with `session_secrets` (else `409 unavailable`),
   not the service session, not archived. The hub passes it in `secret.put` (§5.3) and keeps it
@@ -1952,8 +2033,8 @@ the rest is marked "later"):
   kept name the workspace has), `504 worker_timeout`. The feed gets `system secret_given` with the
   name and, for a key, its fingerprint ("Secret WIFI_PASS given", "ssh key pi-lab (SHA256:…)
   given, remembered for this workspace"), and the entry when the worker read it from
-  Vaultwarden ("Secret WIFI_PASS given from Vaultwarden entry home-wifi"; a locked `rbw` is `422
-  secret_refused` too). `request_id` answers the session's open `hqc_secret`
+  Vaultwarden ("Secret WIFI_PASS given from Vaultwarden entry home-wifi", with a field "…, field
+  username"; an `rbw` that stays locked is `422 secret_refused` too). `request_id` answers the session's open `hqc_secret`
   (§7): its `name` and `kind` must be the request's (`400`), a closed one is `409
   request_closed`; the request closes with the call's result and the feed gets `approval.response
   {option_id: give}`; a refused give leaves it open. "Decline" is the request's answer with
@@ -2178,7 +2259,9 @@ the rest is marked "later"):
   thinking above is not. A fork's copy of a message keeps `joined_after` in the copy's own `seq`:
   the last copied event that is no input and stood at or before it, none when that is not past
   the message (a fork leaves out `usage`, `status` and requests, so its `seq` are not the
-  source's).
+  source's). Since 0.239 a `joined_after` that is not a non-negative JSON integer of at most 18
+  digits (every `seq` is one; a worker's event is stored as sent) counts as none: the fork does
+  not fail on it, and the copy has none.
   Since 0.161 a fork before a message the client shows after the
   turns it waited through (the same paragraph; one with `during_text` too) cuts after them: the
   newest cut is the last `agent.message` before the place the client shows the message at, and
@@ -2352,15 +2435,15 @@ the rest is marked "later"):
   body itself: §16. `endpoint`: only `https://` on push service hosts (§20), otherwise `400`;
   at most 10 subscriptions per user (`409 push_limit`); someone else's `endpoint`: `409
   conflict`, not a takeover; a repeated request for one's own subscription updates it.
-- `/api/push/apns` (since 0.237, §16): Apple push to the native iOS client. `GET` →
+- `/api/push/apns` (since 0.248, §16): Apple push to the native iOS client. `GET` →
   `{enabled}` (the hub has `HQC_APNS_*`); `POST {token, sandbox?, key?}` stores the device token the
   app got from iOS (hex, 64 to 200 characters, kept in lower case; `sandbox: true` for a
-  development build, sent through APNs' sandbox host; since 0.238 `key`: the device's notice
+  development build, sent through APNs' sandbox host; since 0.249 `key`: the device's notice
   key, 32 bytes in base64, `400` otherwise; a later `POST` replaces it) → `201 {id}`; `400` for
   another token;
   the limit and the rules of a push subscription apply (`409 push_limit`, someone else's token
   `409 conflict`); `DELETE {token}` → `204`, the device takes no more notices.
-- Native client sign-in (since 0.237, `crates/hqc-hub/src/native.rs`; OIDC mode since 0.240):
+- Native client sign-in (since 0.248, `crates/hqc-hub/src/native.rs`; OIDC mode since 0.251):
   the iOS app cannot read the session cookies of the system browser, and identity providers such
   as Google refuse a login page embedded in an app. The app opens
   `GET /api/native/login?challenge=<base64url SHA-256 of a verifier>&state=<s>` in the system
@@ -2392,7 +2475,8 @@ the rest is marked "later"):
   after now); `DELETE /api/schedules/{id}` → `204`. Another user's schedule or session: `404`.
   The schedule object is `{id, owner_id, session_id, cron?, at?, timezone, message, enabled,
   catch_up, next_run?, last_run?, created_at, updated_at}`. The client lists, pauses, resumes
-  and deletes a session's schedules from the session's "More" menu ("Schedules")
+  and deletes a session's schedules in the block above the input (§6), opened by a "Scheduled:"
+  line there or by the session's "More" menu ("Schedules")
 - later: `/api/projects/{id}/template`
 
 Client layout (since 0.51, T49, `docs/design/redesign-2026-11-01`; since 0.114 the new screen):
@@ -2443,7 +2527,13 @@ below) open a new session in (§3 User `new_session_project_id`), the same on ev
 shows the project in use, the personal one while none is picked or the picked one has left the
 bar, and a pick is stored at once, no "Save"; "Web search" (since
 0.142) picks where "Search in …" of selected text searches: Google (the default), DuckDuckGo,
-Bing or Yandex, kept on this device (`localStorage`), not on the hub; "Models" (since 0.144)
+Bing or Yandex, kept on this device (`localStorage`), not on the hub; "Keys" (since 0.242)
+holds the key of every action below that has one: Quote and Search of selected text, the
+project search, the session column, New session, Archive session, the previous and the next
+session and project, Back and Forward. Each is recorded anew (a press with ⌘, ⌃ or ⌥ held;
+Ctrl or Alt off a Mac; Esc cancels), put back to its default or cleared (Delete), and a key given
+to one action is taken off any other; kept on this device (`localStorage`), not on the hub;
+"Models" (since 0.144)
 lists the user's providers (§3 Provider), each with its model, `base_url` and the workers that
 allow it, or the `[providers.<name>] base_url = "…"` line a `worker.toml` needs when none does,
 with Edit and Delete, and "Add a provider"; the model menus of a session
@@ -2453,7 +2543,10 @@ its alias and whose submenu holds its versions, the versions since 0.168; "Anoth
 providers its worker allows; picking one in a chat asks once ("The agent restarts on …"), and a
 Claude model picked there leaves the provider in the same `PATCH`; a provider session's chat
 header names the provider instead of the model and shows no cost, which the CLI computes at a
-made-up rate for a model it does not know; and
+made-up rate for a model it does not know; "This device" (since 0.240) has "Forget this device",
+which deletes the copies of chats and attachments this device keeps for the user (§6) and then
+reads "Forgotten"; it is off while no user is known (before `/api/me` answers, with none stored on
+the device); and
 "Workers" lists a line per worker: its online dot, name, system (macOS, Linux, Windows), status
 and "Revoke", or "Delete" for a revoked one. The project settings (`#/p/<id>/settings`, "Project
 settings…" in the project's menu, below) have Appearance (the "Project appearance" dialog: the
@@ -2499,7 +2592,8 @@ projects screen), and shows "Archived «name» · find it with the search on the
 s at the bottom of the bar (on a phone "Archived «name» · Undo" at the bottom of the projects
 screen); Undo and Restore send `/unarchive`, and the project comes back in its place; a refusal
 of the hub puts it back on the bar in the hub's order and says why. The project search — its
-magnifier in the bar's head, or ⌘K on a Mac (Ctrl+K elsewhere) from anywhere — finds projects by
+magnifier in the bar's head, or its key from anywhere (⌘K on a Mac, Ctrl+K elsewhere, unless
+changed in Settings ▸ Keys) — finds projects by
 their shown name, the archived ones too (marked "archived") once something is typed: in Compact
 the field takes the place of "HQC" and the bar's list shrinks to the matches, with tiles a 290
 px panel with the names opens over the session column; ↑/↓ select, Enter opens the match, Esc
@@ -2645,7 +2739,8 @@ list on the left." (the time from `archived_at`, none without it), the feed dimm
 
 A window 900–1079 px wide (since 0.114) has no session column in its layout: "Sessions" at the
 left of the chat's header (with the amber count of the project's sessions that wait for the
-user), or ⌘\ (Ctrl+\ off a Mac), slides the column out over the chat from the bar's edge, as
+user), or its key (⌘\, Ctrl+\ off a Mac, unless changed in Settings ▸ Keys), slides the column
+out over the chat from the bar's edge, as
 wide as on a desktop, with a scrim over the rest; a session, a new one, a project or a page
 opened (from the column or elsewhere), Esc, a click on the scrim or leaving that width puts it
 away. With no session open the main column says "Open Sessions to pick a session or start a new
@@ -2682,6 +2777,19 @@ the screen the arrow closed. Each entry keeps in its `history.state` the address
 from. A press on a button of the composer (send, attach, remove a file) leaves the focus in the
 field: a phone keeps its keyboard, and the composer does not grow under the tap by the home
 indicator's room before the click lands.
+
+Keys to move around (since 0.242; before, the macOS app's own shortcuts did this by clicking
+the page), each set in Settings ▸ Keys; the default on a Mac, then elsewhere: New session (⌘N,
+Alt+N) opens the new-session window of the current project — a browser keeps ⌘N and Ctrl+N for a
+new window of its own, so there it needs another key; Archive session (⌃⌘A, Ctrl+Alt+A) archives
+the open session as its row's menu does, with Undo, where the session column shows it (nothing
+where the column is not shown: the Undo is the column's); Previous and Next session (⌥⌘↑ and ⌥⌘↓,
+Alt+↑ and Alt+↓) open the row above or below the current one in the session column, the last or
+the first without one, nothing past either end or where the column is not shown; Previous and
+Next project (⌃⌘↑ and ⌃⌘↓, Alt+Shift+↑ and Alt+Shift+↓) open the tile above or below the current
+one on the project bar; Back and Forward (⌘[ and ⌘], Alt+← and Alt+→) step the page's history.
+They work with the focus in the input too; a key a field or a menu has already taken (prevented)
+is theirs.
 
 The page has one function for a wrapper around it (since 0.188),
 `window.hqc.newSessionInProject()`: it opens that same new-session window, `#/p/<id>/new` of
@@ -2733,10 +2841,17 @@ while it is open: never in the draft, the feed, `localStorage` or `sessionStorag
 `hqc_secret` card (`approval.request` with `tool: hqc_secret` and `secret`) shows "The agent
 asks for a secret / an ssh key: <name>", the agent's purpose and the same fields, with "Give"
 and "Decline"; it is answered once the hub's `approval.response` with `give` or `deny` comes,
-and on the requests screen it has the same form. When the card names a Vaultwarden entry
-(`secret.vault`, since 0.216) it opens on "Vaultwarden | Type it" set to Vaultwarden: the entry
-in a field the owner may change, and "Give" sends `vault` instead of a value — the worker reads
-it, and the value reaches neither the client nor the hub; "Type it" gives the fields above. The
+and on the requests screen it has the same form. When the worker reads
+Vaultwarden and its fields (`secret.reads_vault`, since 0.243) the card has "Vaultwarden | Type it": it opens on
+Vaultwarden when the agent named an entry (`secret.vault`), on "Type it" otherwise. In
+Vaultwarden mode the entry is in a field the owner may change, with a second, labelled field
+"Field" (unmasked: a field's name is not secret, the worker logs it and the feed line names it;
+placeholder "empty: password", for an `ssh_key` "empty: private key"; prefilled with
+`secret.vault_field`, optional); "Give" sends `vault`,
+and `vault_field` when the field is not empty, instead of a value — the worker reads it, and the
+value reaches neither the client nor the hub; "Type it" gives the fields above. A card of a
+worker that reads Vaultwarden but not fields (no `reads_vault`, an entry in `secret.vault`) has
+the switch and opens on the entry, without "Field", as before 0.243. The
 rules screen of a workspace whose worker has `session_secrets` lists the ssh keys kept for it
 (name, fingerprint) with Delete after a confirmation; an offline worker gives a line saying so.
 
@@ -2906,6 +3021,11 @@ browser answers it by selecting the word under the pointer), elsewhere in the ch
 gives the browser's own menu; one inside a selection that the browser cleared on the press (WebKit
 off a Mac) selects it again. Firefox, which does not tell the text under the pointer, gives the
 client's menu while the selection stays as it was and the browser's when the press cleared it.
+Keys for the same (since 0.238; set in Settings ▸ Keys since 0.242), by default ⌘' and ⌘E on a
+Mac, Ctrl+' and Ctrl+E elsewhere: the first quotes the selection as the button does (where there
+is an input), the second searches it as "Search in …" does, in a new tab; they take a selection
+that starts in the feed or in a subagent's history; without one the key is the browser's. The
+button's tooltip and the menu's Quote and Search name the keys in use.
 The input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
 computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input
 takes the caret when the chat opens, once its newest page is in, unless a request waits for an
@@ -2956,10 +3076,15 @@ an input, "Copy" and "Search in …"; it takes the text as Quote does, cut at th
 browser answers it by selecting the word under the pointer), elsewhere in the chat and on a phone
 gives the browser's own menu; one inside a selection that the browser cleared on the press (WebKit
 off a Mac) selects it again. Firefox, which does not tell the text under the pointer, gives the
-client's menu while the selection stays as it was and the browser's when the press cleared it. The
-input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
-computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the
-input takes the caret when the chat opens, once its newest page is in, unless a request waits
+client's menu while the selection stays as it was and the browser's when the press cleared it.
+Keys for the same (since 0.238; set in Settings ▸ Keys since 0.242), by default ⌘' and ⌘E on a
+Mac, Ctrl+' and Ctrl+E elsewhere: the first quotes the selection as the button does (where there
+is an input), the second searches it as "Search in …" does, in a new tab; they take a selection
+that starts in the feed or in a subagent's history; without one the key is the browser's. The
+button's tooltip and the menu's Quote and Search name the keys in use. The input is one
+row: the paperclip, the field growing with its lines up to 200 px, send; on a computer its
+placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input takes the
+caret when the chat opens, once its newest page is in, unless a request waits
 for an answer (an open approval in the feed, or the session `waiting`), another field has the
 focus, or a menu or the slid-out column is open; on a phone only when the chat replaces a new
 session's window. An open chat stays at its bottom while its images load: only a scroll up lets
@@ -3041,10 +3166,16 @@ is not known has none), and the lines of the session's schedules of the latest `
 (§4, §16), after them ("Scheduled: ", the message, `in 12m 34s`), the next one first. A timer's
 dot does not pulse: it waits, it does not run. The wakeups and the cron jobs wait while the agent is
 idle, so the block shows for them with both counts 0, and so for a schedule; a line of a scheduled
-message opens the schedules of the chat ("Schedules" in the menu), and goes when its one-off
-is sent or it is paused or deleted (a recurring one then shows its next run). The same one-line
-ellipsis as the other lines, on a computer and on a
-phone; a dropped socket clears these lines too until the next subscribe.
+message goes when its one-off is sent or it is paused or deleted (a recurring one then shows its
+next run). These lines have the same one-line ellipsis as the other lines, on a computer and on a
+phone; a dropped socket clears them too until the next subscribe. Since 0.237 a line of a scheduled
+message opens and closes, under the last of them, the list of all the session's schedules (`GET
+/api/schedules`, paused and spent ones too), as the task list opens under its row; "Schedules" in
+the "More" menu opens the same list. Each schedule there is a line of when it runs and its next run
+("paused", "sent …"), wrapped, with a small pause or resume button (while it has a next run) and a
+delete button, as a command's stop, and its whole message under it. The list is read again on every
+`schedules.live` and stays in place while the lines above it come and go; while it is open and no
+schedule waits, the block keeps a line "Scheduled: none waiting", which holds it and closes it.
 Since 0.223 the agent's task list (`tasks`, §4, §8.1) is a row of the block, after the goal's
 (below) and ahead of the main agent's, while it has a task that is not completed: "Tasks: 3 of 7
 completed", the completed tasks of all of them, and, when a task is in progress, ` · ` and its
@@ -3146,7 +3277,7 @@ client fetches the session object when it opens an idle chat without `command_in
 from a list among them) and shows, after each command's name in the list, its argument hint
 and then its description, muted, in the same line.
 
-WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 1 MiB; since 0.230 the query `?deflate=raw` asks for compression, below; since 0.239 the iOS app connects with `client=ios`, which only decides whom Apple push waits for, §16): the client sends `subscribe {session_id, after_seq}` and receives
+WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 1 MiB; since 0.230 the query `?deflate=raw` asks for compression, below; since 0.250 the iOS app connects with `client=ios`, which only decides whom Apple push waits for, §16): the client sends `subscribe {session_id, after_seq}` and receives
 events with `seq > after_seq`, then the live stream; `agent.delta` has no `seq`. Since 0.72
 the answer being written comes right after those events, before `subscribed`, as one
 `agent.delta` with its text so far, and the stream carries only the deltas after it. Since 0.161
@@ -3264,7 +3395,22 @@ drops the copy, and the chat shows the hub's page. The copy is the user's: a cha
 `/api/me` answers waits for it. A session the hub answers `404` for is forgotten; one deleted from
 this client, a room's agents with their room and the sessions of a deleted project are forgotten
 with the attachments their copies refer to (`artifact_ids`, `artifact_id`, as the hub's cleanup
-counts them, §12). A failure of the browser's storage leaves the chat as it is without the copy. An
+counts them, §12). Since 0.240 the copies leave the device on their own too. When `/api/me`
+answers `401` or `403` (signed out) the client deletes both databases of the user who signed in
+last on this device (whose id it keeps in `localStorage` `hqc-device-user`), and when another user
+signs in, the previous user's; offline or a hub error keeps them. "Forget this device" in Settings
+deletes the user's two databases; a chat held in memory keeps writing what comes after, not what it
+had not written yet. At most once an hour, after the lists are loaded, the client deletes the copies
+of the sessions the hub no longer lists (their chats forget, with the attachments their copies
+refer to), then the copy of a session and the bytes of an attachment not used for 30 days (a
+session is used when its chat opens, an attachment when it is shown, noted at most once an hour),
+then the least recently used while all copies take more than 200 MB (a session's events counted as
+their JSON, an attachment's bytes as stored). The copy of a chat that is open stays, and counts. A
+copy made before 0.240 has no note of its use and goes at the first clean-up. Another tab that
+deletes a database or opens it at a newer version switches the cache of this tab off until it
+reloads, so a tab of the previous user does not write the copies again; while a deletion of this
+tab's waits behind another tab the cache is off, and the deletion is not waited for. A failure of
+the browser's storage leaves the chat as it is without the copy. An
 older page the copy holds with an input still `pending` in it is taken from the hub: the input may
 have been delivered or taken back (§17.2) since, and the subscribe does not send it again. A
 take-back waits for the hub's newest page of a chat shown from its copy, and writes `withdrawn`
@@ -3443,7 +3589,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
 - `hqc_attach(path?, content?, name?, kind?, caption?)` — upload a file as an artifact
   to the current session; `path` for runtimes with a file system, `content` for the bare model.
   Since 0.34 (T31) the worker's MCP server lists `hqc_attach(path, name?, kind?, caption?)`;
-  `content` comes with the bare model (iteration 8) and is refused until then
+  `content` comes with the bare model (iteration 9) and is refused until then
   (`invalid_args`). The worker daemon does the file part itself, trusting neither the hub nor
   the agent's path (§2.1): `path` is absolute or relative to the session's working directory;
   its canonical form (symlinks resolved) must lie inside the session's workspace and inside
@@ -3461,7 +3607,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   live_attach.rs`): the event lands between the call's `tool.call` and `tool.result`.
 - `hqc_send(text, session?)` — a message to another session without waiting for a reply;
   without `session`, to the owner's personal assistant session. Since 0.35 (T32): `session`
-  is required until the personal session exists (iteration 8); the result is `{to,
+  is required until the personal session exists (iteration 9); the result is `{to,
   delivery}`, `to` — the target's address, `delivery` — `queued` (the input queue, the
   target wakes on sends; by default since 0.55) or `buffered` (the send buffer, §7.1); since 0.47 (T42) also
   `with_reply`: the send goes back with the reply to the target's open ask (§7.1). Since 0.54
@@ -3515,7 +3661,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   cap of its chain (§7.1), and so does the spawned session's first turn. `project` — a slug or an id
   of the owner's project; `workspace` — an id, a label or a path of a workspace of that
   project (else `not_found`), absent — the project's `default_workspace_id` (none:
-  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 8 (else
+  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 9 (else
   `invalid_args`); `model` absent — the calling session's model (a cheap spawner does not
   start an expensive agent by default), present — checked as in §6. `prompt` (not blank)
   becomes a `peer.message` with `mode: send` from the calling session in the new session's
@@ -3764,14 +3910,18 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   address does not change. The result is `{address, title}` — the session's address and the
   title as stored. A repeat of the call (§5.2) sets the same title again.
 
-- `hqc_secret(name, purpose, kind?, vault?)` (since 0.147) — asks the owner for a secret without it
+- `hqc_secret(name, purpose, kind?, vault?, vault_field?)` (since 0.147) — asks the owner for a secret without it
   entering the conversation: `kind` `secret` (the default) or `ssh_key`, `name` a key name of §14,
   `purpose` one line of 1 to 300 characters the owner is shown (a control character, a line or
   paragraph separator or a bidirectional control is `invalid_args`, as for `hqc_move`'s path).
   `vault` (since 0.216) — the Vaultwarden (Bitwarden) entry that holds it, its exact name or its
   id, one such line of 1 to 200 characters: the card shows it for the owner to
-  confirm or change and the worker reads the value (§5.3); on a worker that does not read
-  Vaultwarden the hub leaves it off the card and the owner types the value.
+  confirm or change and the worker reads the value (§5.3); `vault_field` (since 0.243) — the field of that
+  entry when it is not the password (§5.3), one such line, `invalid_args` without `vault`; on a
+  worker that does not read Vaultwarden the hub leaves both off the card and the owner types the
+  value; on a worker that reads Vaultwarden but not fields (`vault_fields`, §5.4) the card keeps
+  the entry and leaves the field off. On a worker that reads both, the card has `reads_vault:
+  true` whether the agent named an entry or not, and the owner may pick the vault there.
   Only on a worker of the owner with `session_secrets`, else `unavailable`. It opens a
   PendingRequest `secret` (§3) with the hub's card in the feed and waits as `hqc_ask` does
   (`ack` now, the `mcp.result` later, kept until the worker acknowledges it); a repeat finds the
@@ -3864,7 +4014,7 @@ to it (`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}`
 server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
 Codes added in 0.35: `timeout` (no reply in time), `limit_exceeded` (a chain limit, §7.1),
 `worker_restart` (the asking worker restarted; never seen by the agent, whose call died).
-Until grants (iteration 9) every tool works only on the calling session's owner's own
+Until grants (iteration 10) every tool works only on the calling session's owner's own
 projects and sessions; anything else is `not_found`.
 
 ### 7.1 Semantics of send and ask **[decision]**
@@ -3990,6 +4140,10 @@ The reply to an ask:
   whose turn on the question is lost (`system turn_lost`: its process stopped, its worker
   restarted, the watchdog) gives no reply; since 0.39 (T36) the ask then fails at once with
   `unavailable` instead of waiting for its timeout (the question is not delivered again).
+  Since 0.241 so does an ask whose input fails for good: the worker refuses it (§5.2; among
+  others an input dropped at the owner's Stop, §17.2), the agent does not start, the session
+  continues in VS Code (§9.3) or is archived: `unavailable`, "<session> did not take the
+  question: <reason>"; before, it waited for its timeout.
   Since 0.69 a turn on the question that ends with `status idle` and no final message (the
   user's "No" to a permission request ends it so, §8.1, as `POST /stop` does; or the turn
   ended by itself without text) fails the ask at once too: `unavailable`, "the turn of
@@ -4269,7 +4423,10 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   take turns, each seeing what the one before stored.
 - An input from the room that fails delivery, with its agent's failed start or rejected by the
   worker (§5.2), writes `system room_stopped` "<agent's title> did not get the message:
-  <reason>" in the room, in both modes.
+  <reason>" in the room, in both modes. Since 0.241 not when the room's message it carries is
+  older than the room's last "Stopped" (`POST /stop`): that Stop wrote its line and ended the
+  round already. An input the agent's worker drops at that Stop, its cap below the agent's
+  mode (§17.2), fails so.
 - An input from the room that reaches an agent while its turn runs joins that turn, as a
   person's message does (`joined`, §17.2): the turn's final message answers both and is one
   post.
@@ -4475,7 +4632,8 @@ worker's responsibility, not the adapter's (§17.2).
 The process `claude -p --output-format stream-json --input-format stream-json
 --include-partial-messages --replay-user-messages --permission-prompts host
 --permission-prompt-tool stdio --thinking-display summarized [--strict-mcp-config] --mcp-config '<json>'
---allowedTools mcp__hqc [--disallowedTools <rules…>] [--settings '<json: the environment's rules, crossSessionInbound?>']
+--allowedTools mcp__hqc [--disallowedTools <rules…>] [--settings '<json: the environment's rules, crossSessionInbound?, skillOverrides?>']
+[--plugin-dir <the hub's skills>]
 (--setting-sources user,local | --setting-sources user,project,local | --restricted)
 --permission-mode <"ask" mode | auto>
 [--append-system-prompt <text>] --session-id <uuid>` for a new session
@@ -4524,7 +4682,19 @@ flag fails every session start. Checked on 2.1.300: `--resume` continues the sam
 jsonl file. `--strict-mcp-config` disables MCP servers from `~/.claude.json`
 and the project's `.mcp.json`; they can be allowed only through the environment (§14,
 `allow_local_mcp`: since 0.56 such a session runs without the flag, the hqc server still comes
-in `--mcp-config`). `--settings` carries the effective rules of the session's environment
+in `--mcp-config`). Since 0.245 the skills of the hub (§5.3 `session.start.skills`, §14
+`hub_skills`) come as a plugin folder the worker builds, `--plugin-dir
+$HQC_HOME/hub-skills/sets/<hash of the set>`: `.claude-plugin/plugin.json` `{"name": "hqc"}`
+written by the worker and `skills/<name>/` unpacked from each archive, nothing of the hub's
+elsewhere in it. The CLI lists such a skill as `hqc:<name>` in `system/init`, and `/<name>` and
+`Skill("<name>")` find it without the prefix when the name is unique (checked on 2.1.312 and
+2.1.328); `--settings` gets `"skillOverrides": {"<name>": "off"}` for each, which hides a
+same-named skill of `~/.claude/skills` (or of the repository with `project_settings`): the hub's
+copy wins, `/<name>` typed in full then answers that the machine's skill is off, and the chat's
+`/` menu offers `hqc:<name>` for `<name>`. Checked on 2.1.328: a skill's `allowed-tools` lets
+its tools run without a card while it is active but not past the worker's `deny`, and a
+`` !`command` `` in `SKILL.md` goes through the same permission check; only a skill's `hooks`
+would run outside them, and such a skill is refused (§20). `--settings` carries the effective rules of the session's environment
 (§14: `[permissions]` merged with the environment's; since 0.84 with `allow_subagent_messages`
 also `crossSessionInbound`, below), and the adapter's own policy (deny
 before asking, `policy_hint`) reads the same merged lists. In the process env: `MCP_TOOL_TIMEOUT` (§7.1): milliseconds, default
@@ -4611,7 +4781,8 @@ gets `HQC_SECRET_TOOLS=1`. The command line has `--chrome` for a session given t
 one, so the CLI's own default (`/chrome`'s "enabled by default") never gives a session the
 browser; the browser tools take the session's mode and the approvals as any other tool. A session on a provider (since 0.144, §3 Provider) gets on top of the environment's
 `env`: `ANTHROPIC_BASE_URL` (its `base_url`), `ANTHROPIC_AUTH_TOKEN` (the `api_key` of
-`worker.toml`, else a placeholder, so the CLI sends no OAuth token of the subscription there),
+`worker.toml`, which since 0.243 may be a Vaultwarden entry read at every start of the agent
+(§14), else a placeholder, so the CLI sends no OAuth token of the subscription there),
 `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`,
 `ANTHROPIC_SMALL_FAST_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL` all set to its `model`, so that a
 server which swaps models on one GPU is never asked for another, `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
@@ -4982,9 +5153,30 @@ commands it started still run (their descriptions as the subagent wrote them): "
 any input, as the note of a pause is (§17.3); none to a room nor to a paused session. The task
 and each description are the model's words, so each goes in as data: a JSON string (its quotes
 and line breaks escaped), with what reads as `[hqc room` or `[hqc peer` escaped as in a room's
-input (§7.1.1) and the worker's input (§7.1); `system`
-`compact_boundary` (`compact_metadata.trigger: manual`
-after `/compact`, 2.1.308 and 2.1.312; an automatic compaction was not checked; its `uuid` is
+input (§7.1.1) and the worker's input (§7.1); since 0.244 a background command or subagent of
+the agent itself (the rows of `subagents.live` of kind `command` and `agent`, no Monitor) that has
+run for the worker's `long_run_note` (§14; 3300 s = 55 minutes unless set, 0 turns the notes off),
+counted from its `task_started`, and for each as long again → the worker sends
+`session.long_runs` (§5.4), on the same tick as the leftovers; the tasks that reach their mark on
+one tick go in one frame. Not watched: a task the CLI runs in the foreground of the main agent's
+turn (`task_started` with `is_backgrounded: false`, until it moves to the background), as a note
+would wait for its end, and a subagent whose `parent_task_id` is a subagent that still runs, as
+its parent waits for it (the same rule keeps that subagent's commands off the rows). A task seen
+for the first time is counted as told for the marks it has already passed: a command or a
+subagent a subagent left running is watched only once that one reports. With the 1-hour prompt
+cache (`usage.cache_ttl_s` 3600) the default is below the hour the cache lives from the agent's
+last request, which is never before a watched task started (for one a subagent left: before that
+subagent's report started a turn of the agent): the turn of the note reads the cache, and as it
+is a request too, it renews the cache for the next note. A value of an hour or more misses it,
+and the worker does not refuse one; with the 5-minute cache or on a provider (§14) the note's turn
+misses the cache at any value. The hub gives the session's agent the note `[hqc] Background work
+of this session is still running: command "<description>" (task <task_id>, <time>); subagent
+"<description>" (task <task_id>, <time>). Check that each still makes progress; stop what hangs or
+is no longer needed with TaskStop, or leave it.` (the times as in the note of a pause; each
+description is the model's word, a JSON string escaped as in the note above) as the session
+owner's pending `user.message`, delivered as any input; none to a room nor to a paused session;
+`system` `compact_boundary` (`compact_metadata.trigger: manual` after `/compact`, 2.1.308 and
+2.1.312; an automatic compaction was not checked; its `uuid` is
 that of the transcript's `system compact_boundary` record) →
 `system context_compacted` with the `event_id` derived from that `uuid`, held until the summary:
 the main agent's next `user` line with `isSynthetic: true` (the transcript's `isCompactSummary`
@@ -5010,10 +5202,10 @@ running turn, then `completed` or `cancelled`; a turn the CLI begins by itself h
 typed, nothing of another session or of the hub's put in front of it or in its place) carries
 `origin: {kind: "human"}`, without which the CLI takes it as unattributed and its strict
 `isHuman()` gates refuse it; a message of another session, a room's input, a run of a schedule and
-a note of the hub's own (a resume, `hqc_move`, subagent leftovers) carry none. Two notes of hqc's own
-do stand in front of a human input, and it stays human: a fork's first input carries the note that
-the session is a copy (§6), and the worker puts the note of the background tasks a move stopped in
-front of the first input after the move. Each input is a line
+a note of the hub's own (a resume, `hqc_move`, subagent leftovers, long runs) carry none. Two
+notes of hqc's own do stand in front of a human input, and it stays human: a fork's first input
+carries the note that the session is a copy (§6), and the worker puts the note of the background
+tasks a move stopped in front of the first input after the move. Each input is a line
 of its own: the worker joins none, so a line never mixes a human's text with another's. The
 input of a turn, for `in_reply_to`, is the one whose `started` or echo begins a turn or comes
 during a turn the CLI began by itself (the first input of a process, and every input with a CLI
@@ -6838,7 +7030,8 @@ artifact's bytes never change (the hub keeps one row per owner, sha256 and name)
 downloaded again, whatever link the next view gets; its record may take another kind (§3), and an
 event naming another kind makes the client ask the hub again, as before. A file's "Download" and a
 text opened in a new tab are not kept; a failure of the browser's storage leaves the client
-downloading as before. In a chat a click on an image and
+downloading as before. They leave the device as the copies of the history do (§6, since 0.240). In
+a chat a click on an image and
 "Open" of a Markdown text (a text named `.md` or `.markdown`, or typed `text/markdown`) show it
 in a viewer over the chat: the image fitted to the window, the Markdown rendered as the agent's
 messages; the viewer has "Download" and closes on its cross, Escape or a click outside it, and
@@ -6943,7 +7136,7 @@ from the `fs.list_dirs` tree or its path is typed in, the worker checks it with 
 the hub stores the canonical path. Since 0.64, when the folder is missing (`400
 path_not_found`) the form offers "Create the folder and add" in place of "Add" (until the path
 or the worker changes), which sends `create: true`. Only the worker's owner can add a workspace to a worker (until
-the sharing of iteration 9 a worker has no other users), so there is no confirmation through the
+the sharing of iteration 10 a worker has no other users), so there is no confirmation through the
 service session yet; if the worker is offline, the workspace is not created. Since 0.58 (T45)
 `clone`: the client gives the URL, the parent folder and a name, the hub checks the parent and
 stores the workspace `creating`, the worker checks the new path itself and clones into it in its
@@ -7002,7 +7195,7 @@ The worker's local config is the only source of truth for:
   old file is ignored with a warning in the log at start;
 - `environments{}` — named environments (`[environments.<name>]`, below; since 0.56, T43);
 - `env_bindings[]` — records `{path, environment, hermes_profile?, foreign_profile?}`
-  (`[[env_bindings]]`; the profiles are iteration 8). A binding is looked up **by the workspace
+  (`[[env_bindings]]`; the profiles are iteration 9). A binding is looked up **by the workspace
   path** (not by the session's `cwd`), canonical (symlinks resolved; the binding's own path is
   resolved again at every lookup, so a binding through a symlink names its target); the longest
   binding that equals or contains the path wins, compared by path components (`/a/b` does not
@@ -7091,10 +7284,12 @@ ssh_keys = ["infra_ed25519"]          # keys of the worker's store, $HQC_HOME/ke
 allow_local_mcp = false
 project_settings = false
 hub_mcp = false                       # true: the owner's remote MCP servers from the hub (0.235)
+hub_skills = false                    # true: the owner's skills from the hub (0.245)
 [environments.infra.permissions]
 unblock = ["Bash(ssh:*)"]             # lift worker-wide deny rules here only
 allow = ["Bash(ssh debian@192.168.1.20:*)"]
 deny = ["Bash(git push:*)"]           # added to the worker's deny
+remote_unblock = { "pi@bench.local" = ["Bash(sudo:*)"] }  # since 0.246: lifted only inside `ssh` to that host
 
 [[env_bindings]]
 path = "/Users/drzlo/work/lab/infra"
@@ -7103,6 +7298,7 @@ environment = "infra"
 [providers.qwen-local]                # since 0.144: a provider of the hub it may run
 base_url = "http://192.168.1.229:8082" # must equal the hub's description
 # api_key = "..."                     # for an endpoint that needs one; never leaves the machine
+# api_key = { vault = "zai key", field = "password" }  # since 0.243: read from Vaultwarden at every agent start; `field` is optional
 ```
 
 - `ssh_keys` (since 0.57, T44): names of keys in the worker's store (below). Every agent process
@@ -7126,7 +7322,26 @@ base_url = "http://192.168.1.229:8082" # must equal the hub's description
   rules of a session: the worker's `deny` minus `unblock`, plus the environment's `deny`; then
   the worker's `allow` and the environment's `allow`; then hqc's folder rules (applied in
   `can_use_tool` below every deny, §3 Workspace); then the session's mode. They go to
-  `--settings` and to the adapter's policy (§8.1); the three levels below stay. **Claude Code
+  `--settings` and to the adapter's policy (§8.1); the three levels below stay.
+  `remote_unblock` (since 0.246, #162): per ssh destination as written (`[user@]host`, matched
+  without DNS; an alias of `~/.ssh/config` only by the alias), Bash rules of the environment's
+  effective `deny` that the adapter's own check does not apply to the command `ssh` sends there,
+  so a session setting up a remote machine gets its `sudo` asked about instead of refused. Only
+  a simple part `ssh [options] <destination> <command>` counts, with options that run nothing
+  locally and keep the listed user (`-4 -6 -A -a -C -q -T -t -v -x`, `-i` with a value, `-p` with
+  digits, `-o Key=Value` with `BatchMode`, `ConnectTimeout`, `IdentitiesOnly`, `IdentityFile`,
+  `LogLevel`, `Port`, `ServerAliveCountMax`, `ServerAliveInterval`, `StrictHostKeyChecking`,
+  `UserKnownHostsFile`), a command whose first word does not start with `-` (OpenSSH reads
+  options after the destination too), and nothing up to that word the shell expands into other
+  words (braces, glob characters), and no `$` anywhere in the part, the remote command
+  included (`${a[${x:='y[$(cmd)]'}]}` runs `cmd` here); a command the matcher does not understand (a `$( )` or a
+  backtick, also in double quotes, which the local shell would run), another host, any other
+  option (`-F`, `-J`, `-l`, `ProxyCommand`, `LocalCommand`, `HostName`, `User`), the rest of the
+  command line and every other rule keep the deny. The rules stay in the CLI's `--settings` `deny`, which does not look into the
+  arguments of `ssh` (checked on 2.1.328), so in `auto` and `allow_all`, where the adapter's
+  check does not run, nothing changes; a rule not in the environment's `deny` or not a Bash
+  rule, and a destination that is not `[user@]host`, are config errors. `hqc-worker env` and
+  `permissions.inspect` show and apply it; **Claude Code
   only**, ACP agents have no equivalent, so for them the `default` environment is weaker: the
   only boundary is the absence of keys;
 - `allow_local_mcp`: allow MCP servers from the machine (Claude Code: without
@@ -7147,6 +7362,12 @@ base_url = "http://192.168.1.229:8082" # must equal the hub's description
   `default` is still read when a session of the bound workspace runs in it. A restricted
   session (§8.4) still gets `--restricted`. Kept on the worker like `ssh_keys`: not in `hello`,
   `hqc-worker env` shows it. **Claude Code only**, ACP agents ignore it; default false;
+- `hub_skills` (since 0.245): the sessions get the skills the hub keeps for their project
+  (§5.3 `session.start.skills`), as the plugin `hqc` (`--plugin-dir`, §8.1), the hub's copy
+  hiding a same-named skill of the machine. Turning it on trusts the hub with instructions and
+  scripts the agent runs, within the worker's `deny` and the session's mode; a skill with
+  `hooks` is never taken (§20). Worker-local like `hub_mcp`, not in `hello`; **Claude Code
+  only**; default false;
 - `launch`: `process` (the only value in the first version; `os-user` and `container`
   are reserved).
 
@@ -7216,13 +7437,37 @@ take an entry whose name merely contains it, or one with a matching site address
 first finds the entry's id in `rbw list --fields id,name,type` (none, or several of that name,
 is refused) and reads by the id — the password (a note's text for a note), the private key of an
 entry of Bitwarden's type "SSH key" (`--field private_key`), and such an entry only for `kind:
-ssh_key` (into the agent's ssh-agent): as a plain `secret` it would be a file the agent reads, so it
-is refused, naming the entry, before anything is read. `rbw unlocked`, the list and the
-read take at most 15 s together. What the worker can read is what the account `rbw` is signed in
+ssh_key` (into the agent's ssh-agent): as a plain `secret` it would be a file the agent reads, so
+anything else — a plain secret, with a field or without, a provider's key — is refused, naming the
+entry, before anything is read. With a field (`vault_field`, since 0.243) the
+worker reads the whole entry (`rbw get --raw`, one JSON object) and picks the field itself, by
+its exact, case-sensitive name: `notes`; else a key of the entry's own data whose value is text
+(`username`, `password`, `totp` — the key as stored —, a card's `number` or `code`, an identity's
+names, an ssh key's `public_key`, `fingerprint`, `private_key`); else the one custom field of
+that name. `rbw get --field` is not used for it: it matches a custom field by a substring of its
+name and could print another field than the one shown. `rbw unlocked`, the list and the read
+take at most 25 s together (since 0.243; 15 s before). What the worker can read is what the account `rbw` is signed in
 with there can, and while `rbw` is unlocked there the commands of every agent on that machine,
 which run as the same user, can read it too without a card: the card decides what the worker
-gives, not what an agent there can reach. A locked `rbw` is refused (unlock it on that machine,
-or type the value), and the card stays open. `hello.capabilities.vault` tells the hub (§5.4);
+gives, not what an agent there can reach. Since 0.243 a locked `rbw` is not refused: `rbw
+unlocked` only tells whether it was locked, and `rbw list` then unlocks it, `rbw-agent` asking for
+the master password through the `pinentry` configured on that machine; with a Touch ID pinentry
+and a short `lock_timeout` in `rbw`'s config a read that finds the vault locked again asks for a
+confirmation there, as `op` does through the 1Password app. The 25 s are the time to answer. Reads on a worker run one at a time, so concurrent ones wait
+for one prompt (the 25 s covers the wait) instead of opening one each. If it is not unlocked
+(the prompt is cancelled, there is no `pinentry` that can ask, as on a machine without a screen)
+or not answered in time, the owner is told and the card stays open: unlock `rbw` on that
+machine, or type the value. A prompt nobody answered stays open there, as `rbw-agent` runs its
+`pinentry` without a time limit and the worker giving up does not close it: answer it, then
+give again. The errors of the read name the reason and the action for `rbw`; the card's "or
+type the value" is added by the worker for a card only, and not to a refusal typing would not get
+past (an SSH key entry asked for as a plain secret, a value over 64 KiB). An unlock done for one
+read opens the vault to every process of that user, and `rbw-agent` (1.15) starts its
+`lock_timeout` (3600 s by default) again at every use by any of them, so an agent's own `rbw get`
+there keeps it open for as long as it reads, without a prompt; a short `lock_timeout` locks it
+only once nothing uses it. The `pinentry` window does not say who asks (an agent's own `rbw get`
+raises the same one).
+`hello.capabilities.vault` tells the hub (§5.4);
 `hqc-worker env` shows `vault`.
 
 The task list tools (since 0.223). `task_tools = true` at the top of `worker.toml` (off by default;
@@ -7233,6 +7478,33 @@ fill the task list row above the input (§6); the older models of the CLI's list
 Sonnet 4.6, Haiku 4.5) have them without it. The worker's own value wins over one of the
 environment's `env`; without `task_tools` the variable is removed from the child's environment.
 `hqc-worker env` shows `task_tools`.
+
+The note of background work that runs long (since 0.244). `long_run_note` at the top of
+`worker.toml`, in seconds like `idle_timeout`, is how often the agent is told that a background
+command or subagent of its own still runs (§8.1): 3300 (55 minutes) unless written, `0` for no
+notes at all. With the 1-hour prompt cache it is below the hour the cache lives after the
+agent's last request, so that the turn of the note reads the cache; a value of an hour or more
+makes that turn miss it, and is not refused; with the 5-minute cache or on a provider that turn
+misses it at any value. `hqc-worker env` shows `long_run_note`.
+
+A provider's key from Vaultwarden (since 0.243). The `api_key` of a `[providers.<name>]` is
+either a string or a table `{ vault = "<entry name or id>", field = "<optional field>" }`, the
+entry and the field as `vault` and `vault_field` of `secret.put` name them (§5.3; unknown keys
+in the table, a bad or empty entry or field are a config error). The owner wrote the reference
+in his own `worker.toml`, so `vault = true` (which gates only the card) is not needed. Whenever
+the worker starts or resumes the agent of a session on that provider it reads the key with
+this machine's `rbw`, as for the card — a locked `rbw` asked to unlock through its `pinentry`,
+25 s in all — and puts it into the `ANTHROPIC_AUTH_TOKEN` of that process, and into a copy of
+the start's spec only: never into the session's own spec, a log line or an error, and not
+through the hub. Each start reads again, so a key changed in Vaultwarden is the next start's; the reads of one worker run one at a time;
+a running agent keeps the key it started with until its next start (a restart of the session,
+an idle stop and the next message). When `rbw` cannot give the key the agent does not start:
+the session's start, or the input that woke it, is answered `agent_start_failed` with "the key
+of the provider <name> could not be read from Vaultwarden: <reason>", not retryable: the hub
+fails the pending input at once instead of retrying three times, which would stack a prompt a
+locked `rbw` left open each time; the owner unlocks `rbw` (or answers the open prompt) on that
+machine and sends again. He sees it where any failed start is shown (§8.1). `hqc-worker env` lists such a provider as "api_key from
+Vaultwarden entry <entry>[, field <field>]".
 
 The browser (since 0.148). `browser = true` at the top of `worker.toml` (off by default; the hub
 cannot turn it on) lets the owner give a session's agent their Chrome on this machine (`PATCH
@@ -7284,7 +7556,7 @@ it finds commands, their output and word forms and puts the best match first:
 - **Configuration `hqc`.** A copy of `russian` whose Latin words go to an English and the rest
   to a Russian Snowball stemmer, both without stop words, so every word stays searchable and
   "переезд" finds "переезда", "deploy" finds "deployed".
-- **Whose.** Until grants (iteration 9): the user's (the calling session's owner's) sessions,
+- **Whose.** Until grants (iteration 10): the user's (the calling session's owner's) sessions,
   archived ones included and marked `archived: true`, the workers' service sessions left out and
   (since 0.172) of a room's agents' sessions their inputs from the room, which the room has
   (§7.1.1); since 0.175, for an agent of a room (`hqc_search_history`, §7) also the room and
@@ -7378,10 +7650,10 @@ pushes nothing; the agent's post in the room, a `peer.message` there, pushes wit
 `session_id`, so the click opens the room, the room's title and the body "<agent's title>:
 <text>".
 
-Since 0.237 the same notices also go over APNs to the user's iOS devices (`/api/push/apns`,
+Since 0.248 the same notices also go over APNs to the user's iOS devices (`/api/push/apns`,
 §6), when the hub has a token-based APNs key (`HQC_APNS_KEY` or `HQC_APNS_KEY_FILE`,
 `HQC_APNS_KEY_ID`, `HQC_APNS_TEAM_ID`, `HQC_APNS_TOPIC` = the app's bundle id; all or none;
-RUNBOOK §1.10): to the same users. Since 0.239 APNs has its own rule: it is skipped only while one
+RUNBOOK §1.10): to the same users. Since 0.250 APNs has its own rule: it is skipped only while one
 of the user's iOS app sockets (`/api/ws?client=ios`) subscribes to the session (or, for a request
 others wait on, to a session of the chain), whatever web clients show it, so a web tab left open
 on a session no longer keeps the phone quiet; Web Push keeps the rule of any live subscription.
@@ -7397,7 +7669,7 @@ the push body's `tag` (its SHA-256 in hex when longer than 64 bytes). APNs answe
 `BadDeviceToken`, `Unregistered` or `DeviceTokenNotForTopic` deletes the device, as a gone Web
 Push subscription is deleted.
 
-Since 0.238 a device that registered a `key` gets its notices sealed end to end. The hub puts
+Since 0.249 a device that registered a `key` gets its notices sealed end to end. The hub puts
 what the payload above says (`title`, `body`, `category`, `session_id`, `open_session_id?`,
 `type`, `request_id?`, `options?`) into a JSON object, seals it with AES-256-GCM under the
 device's key and a random 12-byte nonce, and sends
@@ -7612,7 +7884,21 @@ in `event_id` order, the hub's creation order. The agent knows them next time an
 them now. Each is acked `quiet` when the runtime has taken it, and acked `quiet` again when the hub
 resends it. A slash command among them fails, not retryable ("cancelled by Stop"): it runs or it
 does not, it is no text for the history (what decides is the text the runtime gets: a message of
-another session whose text starts with a path carries a header first and is no command). Until the
+another session whose text starts with a path carries a header first and is no command).
+Since 0.241 so does an input whose cap is below the session's own mode (T39, §7.1:
+a message of another session or a run of an agent's schedule sent with a lower ceiling): it was
+never handled under its cap, and the next turn, in the session's mode, would find it in the
+history unhandled. The worker fails it, not retryable ("dropped at Stop: it may not run in this
+session's permission mode": the feed shows it not delivered with that reason, and an `hqc_ask` it
+carried fails at once, §7.1), and writes in its place, after the quiet inputs, a quiet note of its
+own that names what was dropped and never its text: "[hqc] A message from the session <address>
+was dropped at the owner's Stop because of a permission conflict: it may run only in a lower
+permission mode than this session's. Its text is not shown." ("A scheduled message" for a run of
+a schedule, "A message" otherwise). The note is no input of the hub: the feed does not show it,
+nothing is acked for it, and a `session.kill` or a worker restart before the runtime took it loses
+it. Limitation: an input capped only by the buffered `send` messages it carries in front (T40,
+§7.1), the owner's own message among them, is dropped the same way, and the buffered messages come
+with the next input. Until the
 stopped turn ends nothing new goes into it, and what comes after the Stop is never marked: it waits,
 and goes as an ordinary input once the quiet lines are taken (the CLI runs a "next" line before a
 "later" one, and the agent must see the stopped text first). So a message typed after the Stop runs,
@@ -7871,7 +8157,7 @@ is not asked, does not see the question or the answer, and does not work on it.
   on macOS (ssh keys of environments are 0600 files, §14); on Linux and Windows in the first version the worker token is a 0600 file (§5.1),
   libsecret and DPAPI later.
 - Client: TypeScript, responsive web, PWA; Tauri on the same code later. iOS: Swift and SwiftUI
-  (`ios/`, since 0.236), the same REST API and `/api/ws`, no hub change.
+  (`ios/`, since 0.247), the same REST API and `/api/ws`, no hub change.
 - Shared crates: `hqc-proto` (event and frame schema, versioned),
   `hqc-claude-jsonl` (transcript parser), adapters as separate crates.
 
@@ -7891,7 +8177,7 @@ is not asked, does not see the question or the answer, and does not work on it.
    a session started in VS Code (live test `live_takeover`; checked by hand through the UI on a phone on 2026-10-25).
    Closed on 2026-10-25.
 3. hqc MCP: attach, send, ask, spawn, list, search, schedule; `mcp.call` frames;
-   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 9).
+   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 10).
    Tasks: `docs/ITERATION-3.md`. Criterion checked by hand on the production hub on 2026-10-31.
    Closed on 2026-10-31.
 4. Workspaces: ~~clone~~ (0.58, T45), ~~worktree~~ (0.60, T46), ~~ephemeral~~ (0.61, T47). Environments and bindings on the worker. Moved
@@ -7912,14 +8198,20 @@ is not asked, does not see the question or the answer, and does not work on it.
    once, for all projects or chosen ones; a session's agent gets it under its own name
    (`mcp__<name>__<tool>`) through a stdio relay of the worker, and the hub makes the calls
    with the token or OAuth sign-in it keeps, so no worker, agent or transcript sees it; only an
-   environment with `hub_mcp = true` takes them (§14). MCP servers that run on the machine and
-   skills from the hub (#62) come after it. Tasks: `docs/ITERATION-7.md`.
-8. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
+   environment with `hub_mcp = true` takes them (§14). MCP servers that run on the machine come
+   after it. Tasks: `docs/ITERATION-7.md`.
+8. Skills from the hub (since 0.245, #62): the owner uploads a skill (a folder or a `.zip`)
+   once, for all projects or chosen ones; the worker fetches it by its hash, puts it into a
+   plugin folder of its own and starts the agent with `--plugin-dir`, so the agent has it as
+   `hqc:<name>` (and `/<name>`) on every worker; the hub's copy wins over a same-named skill of
+   the machine; a skill with `hooks` is refused by the hub and the worker; only an environment
+   with `hub_skills = true` takes them (§14). Tasks: `docs/ITERATION-8.md`.
+9. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
    worker; the bare model; the personal assistant session (moved from 3: its default runtime is
    the bare model, §8.3), until then `hqc_send` needs `session`.
-9. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
+10. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
    (0.38, T35, with `hqc_schedule`).
-10. Tauri, native notifications, several agents in one session.
+11. Tauri, native notifications, several agents in one session.
 
 ## 20. Hosting and security
 
@@ -7927,7 +8219,7 @@ is not asked, does not see the question or the answer, and does not work on it.
   it); `/api/*` is behind Cloudflare Access with JWT verification (in OIDC mode, behind the
   proxy's sign-in, the hub verifying the provider's ID token, §6); `/worker/*` is outside
   Access, worker tokens only, rate limit on enroll;
-  `/worker/native/token` (since 0.237, §6) is there too: it gives the Access or OIDC proxy
+  `/worker/native/token` (since 0.248, §6) is there too: it gives the Access or OIDC proxy
   credential only for a one-time code with its verifier, and shares the rate limit of enroll; so is
   `/worker/push/relay` (§16), on a hub that relays, limited per address;
   `artifacts.<hub-domain>` is public, signed links with a TTL only; the publication domain
@@ -7936,6 +8228,11 @@ is not asked, does not see the question or the answer, and does not work on it.
   `HQC_HUB_LISTEN` address and without `HQC_ACCESS_*` or `HQC_OIDC_*`; otherwise the hub does
   not start (§6).
 - Worker tokens: random 256 bits, only the hash in the database; revocation from the UI.
+- `provider.probe` (since 0.236), what is accepted: the hub can make a worker `GET` an http(s)
+  URL it names, in the worker's own network, which the hub could not reach. What comes back is
+  only model ids and context windows parsed from a models list, so a compromised hub learns at
+  most whether an address answers like a model server; nothing is sent there but the key the
+  worker keeps for that same `base_url`.
 - Remote MCP servers (since 0.235), what is accepted: the relay authenticates to the worker with
   the session token, which is on the CLI's command line as for the hqc server (§7.2), so an agent
   allowed to run commands can start a relay of its session's servers itself and call their tools
@@ -7951,6 +8248,30 @@ is not asked, does not see the question or the answer, and does not work on it.
   connection goes to that address, and redirects are not followed. A relay request needs the
   session token of a session the sending worker runs; a server answers only sessions of the
   projects its owner gave it to.
+- Skills from the hub (since 0.245): a skill is instructions and scripts the agent follows and
+  runs, so a hub (or whoever uploads to it as the owner) that gives one to a project steers that
+  project's agents on every worker with `hub_skills`, within the worker's `deny`, its
+  `--disallowedTools` and the session's mode, as input can. Its `allowed-tools` lift the card
+  for those tools while it is active, which a hub could do anyway by answering the card (§2.1).
+  Its `hooks` would run shell commands outside all of that, so the hub refuses a skill with a
+  `hooks` key in any of its `SKILL.md` files, and the worker, which does not trust the hub for
+  it, refuses it again. The check finds the frontmatter as the CLI does (2.1.328: one BOM
+  stripped, `^---\s*\n` with JavaScript's `\s`, up to the first `---` anywhere), refuses a first
+  line with anything but spaces after `---`, and takes the frontmatter only when no character in
+  it breaks a line or spaces but `\n`, `\r\n`, a space and a tab (a lone CR, U+0085, U+2028,
+  U+FEFF and the like are refused: YAML and JavaScript take some of them for line breaks or
+  spaces, and a security review made a hook run past a looser check with a lone CR and with
+  `---` followed by U+FEFF), no line of it starts with a tab, each of its top-level lines is a plain `key:` (no quotes, `{`, `?`,
+  `!` tag, `%` directive, `...` or `<<` merge) and none is `hooks`; and no line of the file at its
+  first column is a `hooks:` key. The worker writes the plugin's manifest itself and the skill's
+  files only under `skills/<name>/` of its own folder, so a skill cannot add a plugin's hooks,
+  MCP servers, agents or commands; it unpacks only relative paths without `..`, no links, with
+  the limits of §6, and checks the archive's sha256, also of an archive it kept, on every start.
+  A set's folder name holds the version of the checks, so a stricter check never reuses a folder
+  an older one built. What is accepted: the folders are the worker user's, so an agent of
+  another session on the same worker can change a set its owner's sessions use (add a plugin's
+  hooks to it), as it can change `~/.claude/settings.json`, which the CLI reads too (§14, the
+  boundary between sessions of one worker is soft).
 - `Origin` **[decision]**: a WebSocket upgrade of `/api/ws` without `Origin`, or with an `Origin`
   that does not match the request's `Host`, gets `403`; non-GET `/api/*` requests with a foreign
   `Origin` get `403` (without `Origin` they pass: that is how non-browser clients come). A match
@@ -8109,7 +8430,7 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
-### 0.239 → 0.240 (native client sign-in behind an OIDC proxy)
+### 0.250 → 0.251 (native client sign-in behind an OIDC proxy)
 §6, §20: `GET /api/native/login` and `POST /worker/native/token` now work in OIDC mode
 (`HQC_OIDC_*`, e.g. Traefik + oauth2-proxy + Keycloak, RUNBOOK §1.9) instead of answering
 `400 not_access`. After `CurrentUser` verifies the OIDC ID token, the hub stores the forwarded
@@ -8119,31 +8440,31 @@ iOS builds keep working. The iOS app stores the cookies (or bearer token) in Key
 absorbs `Set-Cookie` headers from the hub's responses so proxy cookie refreshes keep it signed
 in.
 
-### 0.238 → 0.239 (Apple push whoever else shows the session)
+### 0.249 → 0.250 (Apple push whoever else shows the session)
 §16, §6: APNs is skipped only while the user's iOS app (its socket `/api/ws?client=ios`) shows
 the session, not while any client does: a web tab left open on a session kept every notice of it
 from the phone. The app closes its socket in the background. Web Push is unchanged.
 
-### 0.237 → 0.238 (Apple push notices sealed end to end)
+### 0.248 → 0.249 (Apple push notices sealed end to end)
 §16, §6, §3: the iOS app makes a 32-byte key for its notices and registers it with
 `POST /api/push/apns {key}`; the hub seals each notice to that device with AES-256-GCM and sends
 Apple, and a relay, a generic alert with `mutable-content`, the content in `enc`. The app's
-notification extension opens it on the device. Hub migration `0059` (`apns_devices.notice_key`);
+notification extension opens it on the device. Hub migration `0060` (`apns_devices.notice_key`);
 an app that registered no key gets its notices in the clear as before.
 
-### 0.236 → 0.237 (the iOS client signs in through the browser and gets Apple push)
+### 0.247 → 0.248 (the iOS client signs in through the browser and gets Apple push)
 §6: `GET /api/native/login` and `POST /worker/native/token`, the native client's sign-in
 through the system browser with a one-time code and a verifier, so identity providers that
 refuse an embedded login page (Google) work; `/api/push/apns` for the client's device token.
 §16: the notices of Web Push also go over APNs (`HQC_APNS_*`), with the approval's options so
 the app answers it from the notification; a hub without a key sends through another hub's relay
 (`HQC_APNS_RELAY_URL`, `POST /worker/push/relay`, served with `HQC_APNS_RELAY=1`). §20: `/worker/native/token` outside Access. §3: the
-table `apns_devices` (hub migration `0058`). The iOS client also gains attachments (upload and
+table `apns_devices` (hub migration `0059`). The iOS client also gains attachments (upload and
 preview), rooms, schedules, search, workers with enrollment and Claude Code's sign-in,
 workspaces with a folder browser, and the session controls of the web client (rename, model,
 pause, restart, favorite, archive, delete), all over the existing API.
 
-### 0.235 → 0.236 (a native iOS client)
+### 0.246 → 0.247 (a native iOS client)
 §2, §18: a native iOS client in `ios/` (Swift, SwiftUI, iOS 26) besides the web client. It uses
 only what §6 already gives the web client: `GET /api/me`, `/api/projects`, a project's
 sessions and workspaces, `GET /api/requests`, a session's events by `before_seq`, `POST /input`
@@ -8153,6 +8474,134 @@ request, `PUT /read_cursor`, and `/api/ws` with `subscribe_summary` and `subscri
 sends the `CF_Authorization` cookie with each request; on the WebSocket upgrade it sends
 `Origin` as the hub's origin, which §20 checks (a native client has no Origin of its own). No
 hub, worker or protocol change.
+
+### 0.245 → 0.246 (Auto on a provider; an MCP server's form answers kept out of the history; `sudo` over ssh)
+#194: a session on a model provider in Auto had every call that needs Auto's safety check
+refused by the CLI, since the check runs on Anthropic's servers and does not pass through a
+provider; the agent spent its turns probing what still ran. §5.3: the worker runs such a session
+in `ask` where `auto` is asked; §6: `PATCH /api/sessions/{id}` with `permission_mode: auto` for a
+session with a provider is `422 auto_needs_anthropic`; the client offers no Auto there and says
+why. #129: §4 `clarify.response` of an MCP server's request is stored with `answers: {}`, and
+the frame kept for the worker forgets the answers once acknowledged. #162: §14
+`[environments.<name>.permissions] remote_unblock`, deny rules lifted only in the adapter's own
+check and only for the command `ssh` sends to a named host, with options that run nothing locally.
+
+### 0.244 → 0.245 (iteration 8: skills from the hub)
+§19: a new iteration 8, skills the owner uploads once on the hub (#62); the generic ACP adapter
+becomes iteration 9, sharing 10, Tauri 11, and the references to them follow. §5.3
+`session.start.skills`, `GET /worker/skills/{sha256}`, §6 `/api/skills`, §8.1 `--plugin-dir`, §14
+`hub_skills`, §20. A skill travels as names and hashes; the worker fetches each archive once per
+hash, builds a plugin folder of its own (`hqc`) and starts the agent with `--plugin-dir`, the
+hub's copy winning over a same-named skill of the machine (`skillOverrides`). A skill with
+`hooks` is refused by the hub and the worker, since hooks run outside the worker's `deny`.
+Migration `0058`.
+
+### 0.243 → 0.244 (the agent is told of its background work that runs long)
+A background command or subagent of the agent that ran for hours was known only to the rows above
+the input: an agent whose build hung for 40 minutes was told nothing. §5.4, §8.1: the worker sends
+the new `session.long_runs` when a background command or subagent of the agent has run for the
+worker's new `long_run_note` and for each as long again, counted from its start, all the tasks due
+on one tick in one frame, and the hub gives the agent a note naming each with its task id and run
+time, as the owner's pending input, so that it checks the task and stops what hangs.
+`long_run_note` (§14) is in seconds, 3300 (55 minutes) unless written, `0` for none; with the
+1-hour prompt cache the default is below the hour the cache lives from the agent's last request,
+so the turn of the note reads the cache and renews it for the next note; a value of an hour or
+more makes it miss, and so does the 5-minute cache or a provider at any value. A Monitor, a task
+held on the foreground of the turn and a subagent of a subagent that still runs are not watched;
+a task first seen past a mark is not told of the marks it has passed. The task descriptions are
+the model's words and go into the note as JSON strings, with the marks of a room's and another
+session's lines escaped. §4: the hub is a source of `user.message` on that frame. A hub older
+than 0.244 answers the frame with `invalid_frame`: update the hub before the workers. No
+migration.
+
+### 0.242 → 0.243 (a Vaultwarden secret as T3 Code's 1Password one, and a provider key from Vaultwarden)
+§14, §5.3: a locked `rbw` is no longer refused: `rbw list` unlocks it, `rbw-agent` asking for the
+master password through the `pinentry` of that machine, so a Touch ID pinentry with a short
+`lock_timeout` asks again once the vault locked, as T3 Code's `op` does through the 1Password app
+(an agent's own use of `rbw` there restarts that timeout, §14); the owner is
+told when it stays locked or is not answered in time, and the card stays open. The reads of a
+worker run one at a time, so concurrent ones wait for one prompt; a read's `rbw` calls and that
+wait fit in 25 s (was 15 s), inside the hub's 30 s. Any field of the entry can be read, not only
+the password: `vault_field` (`hqc_secret`, `secret.put`, `POST /api/sessions/{id}/secrets`, the
+card's `secret.vault_field`) names it, and the worker reads `rbw get --raw` and picks the field by
+its exact name, as `rbw get --field` matches a custom field by a substring. An entry of type "SSH
+key" is given only as `kind: ssh_key`, with a field or without. §3, §4, §6: every `hqc_secret` card
+of a worker that reads Vaultwarden and its fields carries `secret.reads_vault` and has "Vaultwarden | Type it",
+opening on Vaultwarden only when the agent named an entry, with an optional "Field". §14, §8.1:
+the `api_key` of a `[providers.<name>]` in `worker.toml` may be `{ vault, field? }`, read with
+`rbw` at every start of the agent into that process only, as T3 Code reads a credential reference
+when a provider starts; a key that cannot be read fails that start, naming the provider, and not
+retryably (the hub's three retries would stack the prompts a locked `rbw` leaves open). No hub
+migration. §5.4: such a worker sends `vault_fields: true`; one before 0.243 would ignore
+`vault_field` and give the password, so the hub puts the field and `reads_vault` on a card, and
+takes `vault_field`, only for a worker that sends it (else `409 unavailable`).
+
+### 0.241 → 0.242 (every key in Settings; the macOS app keeps only its global shortcut)
+§6, the Settings page: the keys of the client — Quote and Search of selected text (0.238), the
+project search, the session column — were fixed, and the macOS app had its own shortcuts in its
+own Settings for a new session, archiving the open session, the previous and the next session and
+project, Back and Forward, which it ran by clicking the page and which a browser did not have. Now
+the client has all of them: a "Keys" section of Settings records each anew, puts it back to its
+default or clears it, kept on the device, and the client does the actions itself, in a browser
+too (where ⌘N and Ctrl+N stay the browser's). The macOS app keeps only the global shortcut of New
+Session in Project; its File and Go menu items stay, without keys. The hub goes first: a client
+before 0.242 has none of these keys, and the new app no longer takes them. The hub's server and
+the worker are unchanged.
+
+### 0.240 → 0.241 (a capped input that waits at the owner's Stop is dropped, and the agent told so)
+§17.2: since 0.231 the owner's Stop writes what waited into the agent's history without a turn,
+an input of another session or a schedule's run capped below the session's mode (T39) included;
+the next turn, in the full mode, found it there unhandled. The worker now fails such an input, not
+retryable, and writes in its place a quiet note that names what was dropped (the sending session,
+a scheduled message, a message), not its text. §7.1: an ask whose input fails for good (the worker
+refuses it, the agent does not start, the session continues in VS Code or is archived) fails at
+once with the reason instead of at its timeout. §7.1.1: such a failure of a room's input whose
+message is older than the room's last Stop adds no line and ends no round. The protocol, the
+client and the macOS app are unchanged.
+
+### 0.239 → 0.240 (the device's copies are cleaned up)
+§6, §12, the Settings page: the copies of the history and of attachments that the client keeps on
+the device since 0.220 only grew, and stayed after the user signed out. Now both databases of a user
+are deleted when the hub answers `/api/me` with `401` or `403`, when another user signs in on the
+device, and by "Forget this device" in Settings; at most once an hour the client deletes the copies
+of sessions the hub no longer lists, those not used for 30 days, and the least recently used beyond
+200 MB. The artifacts database is at version 2, with a store `used` (the last use and size of each
+blob); a history range carries `used_at` and `bytes`. Client only.
+
+### 0.238 → 0.239 (a call whose request id is taken ends at once; a `joined_after` that is no integer)
+§3 PendingRequest: since 0.225 the hub opens no request whose `request_id` an open request of
+another kind of the session holds, but `hqc_publish`, `hqc_move` and `hqc_secret` took the refusal
+for a repeat and their call got no result until its timeout, and `hqc_ask` stored and delivered its
+message and then opened no request, so no reply could reach it. Such a call is now answered at once
+with `unavailable`, the ask before its message is stored; a worker's own request refused this way
+is refused to the worker. §6 fork: the fork read `payload.joined_after` of every event with a
+bigint cast, and a worker's event payload is stored as sent, so a string or a fraction there made
+every fork of the session fail; a value that is not a non-negative JSON integer of at most 18
+digits (every `seq` is one) now counts as none. The clients, the worker and the macOS app are unchanged.
+
+### 0.237 → 0.238 (keys for Quote and Search of selected text)
+§6: Quote and "Search in …" of text selected in the feed had no keys, only the button over the
+input and the menu of a right click. ⌘' (Ctrl+' off a Mac) quotes the selection as the button
+does, where there is an input; ⌘E (Ctrl+E) searches it in a new tab. They are taken only while
+the chat holds a selection that starts in the feed or in a subagent's history; without one, with
+Shift or Alt held, or Ctrl on a Mac, the key stays the browser's. The keys go by the key's place,
+not its letter, so they work in any layout. The Quote button's tooltip and the menu's Quote and
+Search name them.
+
+### 0.236 → 0.237 (the schedules in the block above the input)
+§6, §16: the session's schedules opened in a panel under the chat's header, with its own heading,
+Close, and Pause and Delete buttons unlike anything in the block above the input, though their
+"Scheduled:" lines stand in that block. The panel is gone: a "Scheduled:" line, as the task list's
+row, opens the list under it in the block, a line per schedule with small pause or resume and
+delete buttons and the whole message under it; the "More" menu's "Schedules" opens the same list.
+It is read again whenever `schedules.live` comes, so a sent one-off shows as sent. Only the client.
+
+### 0.235 → 0.236 (a provider and an MCP server filled from their URL)
+§5.3 `provider.probe`, §6 `POST /api/providers/probe`, `POST /api/mcp/probe`. Adding a model
+provider asked for its name, model and context window, and an MCP server for its name and how it
+signs in, which the endpoint itself can tell. Both forms start with the URL; the hub probes it (a
+provider through a worker, which reaches the owner's network) and fills the rest while the owner
+has not edited it; every field stays visible and editable.
 
 ### 0.234 → 0.235 (iteration 7: remote MCP servers relayed by the hub)
 §19: a new iteration 7, remote MCP servers the owner adds once on the hub (#59); the generic ACP

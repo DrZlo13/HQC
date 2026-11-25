@@ -21,10 +21,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.windowController = windowController
         windowController.showWindow(nil)
 
-        // The app's shortcuts, New Session in Project's from any app (their defaults until the
-        // user records others).
-        ShortcutMonitor.shared.onPress = { [weak self] action in
-            self?.perform(action)
+        // The global shortcut, New Session in Project's, from any app (⌃⌥⌘N until the user
+        // records another one).
+        ShortcutMonitor.shared.onPress = { [weak self] in
+            self?.perform(ShortcutMonitor.globalAction)
         }
         ShortcutMonitor.shared.start()
 
@@ -51,9 +51,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    // Shows the window (also when it was closed) and hands a shortcut action to
-    // MainViewController.perform(_:).
-    private func perform(_ action: ShortcutAction) {
+    // Shows the window (also when it was closed) and hands a menu item's or the global
+    // shortcut's action to MainViewController.perform(_:).
+    private func perform(_ action: MenuAction) {
         if let window = windowController?.window, window.isMiniaturized {
             window.deminiaturize(nil)
         }
@@ -73,9 +73,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainViewController?.openSession(serverID: serverID, sessionID: sessionID)
     }
 
-    // The File and Go items of the shortcut actions; the action is the item's represented object.
-    @objc func performShortcutAction(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let action = ShortcutAction(rawValue: raw) else { return }
+    // The File and Go items; the action is the item's represented object.
+    @objc func performMenuAction(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let action = MenuAction(rawValue: raw) else { return }
         perform(action)
     }
 

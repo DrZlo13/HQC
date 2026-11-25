@@ -25,6 +25,7 @@
 import { createServer } from 'node:http';
 import { deflateSync } from 'node:zlib';
 import { randomUUID, generateKeyPairSync } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -86,6 +87,8 @@ export const MOCK_COMMANDS = [
   'security-review',
   'simplify',
   'usage',
+  // A skill of the hub (SPEC 0.245), as the CLI lists a plugin's skill.
+  'hqc:bench',
 ];
 
 export function loadExamples(dir = WIRE) {
@@ -509,7 +512,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {}, demo = fa
         tool: 'hqc_secret',
         description: 'The Wi-Fi password to write into the camera config',
         options: [{ id: 'deny', label: 'Decline', canonical: 'deny' }],
-        secret: { name: 'WIFI_PASS', kind: 'secret', vault: 'home-wifi' },
+        secret: { name: 'WIFI_PASS', kind: 'secret', vault: 'home-wifi', reads_vault: true },
         expires_at: undefined,
         policy_hint: undefined,
         rule_suggestions: undefined,
@@ -761,6 +764,14 @@ $$t(n) = c \\cdot n, \\quad \\text{for every token of length } n.$$
     providers.set(p.id, next);
     return providerView(next);
   });
+  // SPEC 0.236: the models at a base URL, as the mock's one worker reads them.
+  route('POST', '/api/providers/probe', (_, body) => {
+    const base = String(body?.base_url ?? '').trim();
+    if (!/^https?:\/\/\S+$/.test(base)) throw fail(400, 'bad_request', 'base_url must be an http:// or https:// URL');
+    const online = allWorkers().find((w) => w.status === 'online');
+    if (!online) throw fail(409, 'worker_offline', 'no worker of yours is online to read the endpoint');
+    return { models: [{ id: 'qwen3.8-27b', context_tokens: 131072 }, { id: 'qwen3.8-flash-next' }], worker_id: online.id };
+  });
   route('DELETE', '/api/providers/:id', (p) => {
     if (!providers.delete(p.id)) throw fail(404, 'not_found', 'unknown provider');
     return withStatus(204, null);
@@ -859,6 +870,22 @@ $$t(n) = c \\cdot n, \\quad \\text{for every token of length } n.$$
     }
     return into;
   };
+  // SPEC 0.236: how a server signs in, guessed from its host (the mock reaches no server).
+  route('POST', '/api/mcp/probe', (_, body) => {
+    let u;
+    try {
+      u = new URL(String(body?.url ?? ''));
+    } catch {
+      throw fail(400, 'bad_request', 'url: not a URL');
+    }
+    const loopback = /^(localhost|127(\.\d+){3}|\[::1\])$/.test(u.hostname);
+    if (!(u.protocol === 'https:' || (u.protocol === 'http:' && loopback)) || u.username || u.password) throw fail(400, 'bad_request', 'url: https only, without a user or password');
+    const labels = u.hostname.split('.');
+    const label = labels.slice(0, Math.max(1, labels.length - 1)).find((l) => !['mcp', 'api', 'www', 'server'].includes(l));
+    const n = (label ?? '').toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^[-_]+|[-_]+$/g, '').slice(0, 32);
+    const auth = /linear|notion/.test(u.hostname) ? 'oauth' : /githubcopilot/.test(u.hostname) ? 'token' : 'none';
+    return { name: MCP_NAME(n) ? n : null, server_name: null, auth };
+  });
   const mcpOr404 = (id) => {
     const s = mcpServers.get(id);
     if (!s) throw fail(404, 'not_found', 'unknown server');
@@ -906,6 +933,132 @@ $$t(n) = c \\cdot n, \\quad \\text{for every token of length } n.$$
     mcpServers.set(p.id, next);
     return next;
   });
+  // SPEC 0.245 (iteration 8): the owner's skills. A folder comes as `file` parts (paths in
+  // the file names), a `.zip` as one `zip` part; the mock does not open a zip, it takes the
+  // `name` part for its name. A `SKILL.md` with `hooks` is refused, as the hub refuses it.
+  const skills = new Map();
+  const SKILL_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+  {
+    const sample = (name, description, allowed_tools, files, size, all_projects) => {
+      const id = randomUUID();
+      skills.set(id, {
+        id,
+        name,
+        description,
+        allowed_tools,
+        sha256: createHash('sha256').update(name).digest('hex'),
+        size,
+        files,
+        all_projects,
+        project_ids: [],
+        updated_at: now(),
+        file_list: [{ path: 'SKILL.md', size: 1200 }, ...(files > 1 ? [{ path: 'scripts/run.sh', size: size - 1200, executable: true }] : [])],
+      });
+    };
+    sample('bench', 'Runs the benchmarks and compares them with the last run.', ['Bash(cargo bench:*)', 'Read'], 2, 5300, true);
+    sample('release-notes', 'Writes release notes from the merged pull requests.', [], 1, 1900, false);
+  }
+  /** The parts of a multipart body: `{name, filename?, data}`. */
+  const multipartParts = (raw) => {
+    if (!Buffer.isBuffer(raw)) return [];
+    const eol = raw.indexOf('\r\n');
+    if (eol < 0) return [];
+    const delim = raw.subarray(0, eol);
+    const parts = [];
+    let at = eol + 2;
+    for (;;) {
+      const next = raw.indexOf(delim, at);
+      if (next < 0) break;
+      const part = raw.subarray(at, next - 2);
+      const head = part.indexOf('\r\n\r\n');
+      if (head >= 0) {
+        const headers = part.subarray(0, head).toString('utf8');
+        const name = /name="([^"]*)"/.exec(headers)?.[1];
+        const filename = /filename="([^"]*)"/.exec(headers)?.[1];
+        if (name) parts.push({ name, filename, data: part.subarray(head + 4) });
+      }
+      at = next + delim.length + 2;
+      if (raw.subarray(next + delim.length, next + delim.length + 2).toString() === '--') break;
+    }
+    return parts;
+  };
+  /** The frontmatter's `key: value` lines of a SKILL.md. */
+  const frontmatter = (text) => {
+    const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+    const out = {};
+    for (const line of (m?.[1] ?? '').split(/\r?\n/)) {
+      const kv = /^([A-Za-z_-]+):\s*(.*)$/.exec(line);
+      if (kv) out[kv[1]] = kv[2].trim();
+    }
+    return out;
+  };
+  const skillOr404 = (id) => {
+    const s = skills.get(id);
+    if (!s) throw fail(404, 'not_found', 'unknown skill');
+    return s;
+  };
+  const skillView = ({ file_list, ...s }) => s;
+  route('GET', '/api/skills', () => ({ skills: [...skills.values()].sort((a, b) => a.name.localeCompare(b.name)).map(skillView) }));
+  route('POST', '/api/skills', (_, body) => {
+    const parts = multipartParts(body);
+    const zip = parts.find((x) => x.name === 'zip');
+    const files = parts.filter((x) => x.name === 'file');
+    const given = parts.find((x) => x.name === 'name')?.data.toString('utf8');
+    let fm = {};
+    let fileList;
+    if (zip) {
+      if (files.length) throw fail(400, 'bad_request', 'either a zip or files');
+      fileList = [{ path: 'SKILL.md', size: zip.data.length }];
+    } else {
+      if (!files.length) throw fail(400, 'bad_request', 'no files');
+      for (const f of files) {
+        if (!f.filename || f.filename.startsWith('/') || f.filename.split('/').includes('..')) throw fail(400, 'bad_request', `a bad path: ${f.filename}`);
+      }
+      const md = files.find((f) => f.filename === 'SKILL.md');
+      if (!md) throw fail(400, 'bad_request', 'no SKILL.md at the top of the skill');
+      fm = frontmatter(md.data.toString('utf8'));
+      if ('hooks' in fm) throw fail(422, 'skill_hooks', 'SKILL.md has hooks, which would run outside the worker’s deny; remove them');
+      fileList = files.map((f) => ({ path: f.filename, size: f.data.length })).sort((a, b) => (a.path < b.path ? -1 : 1));
+    }
+    const name = fm.name || given || '';
+    if (!SKILL_NAME.test(name)) throw fail(400, 'bad_request', `a bad skill name: "${name}"`);
+    const size = fileList.reduce((n, f) => n + f.size, 0);
+    if (size > 4 << 20) throw fail(413, 'too_large', 'a skill is at most 4 MiB unpacked');
+    const old = [...skills.values()].find((x) => x.name === name);
+    if (!old && skills.size >= 100) throw fail(409, 'too_many_skills', 'at most 100 skills');
+    const s = {
+      id: old?.id ?? randomUUID(),
+      name,
+      description: fm.description || undefined,
+      allowed_tools: (fm['allowed-tools'] ?? '').split(/,\s*/).filter(Boolean),
+      sha256: createHash('sha256').update(body).digest('hex'),
+      size,
+      files: fileList.length,
+      all_projects: old?.all_projects ?? true,
+      project_ids: old?.project_ids ?? [],
+      updated_at: now(),
+      file_list: fileList,
+    };
+    skills.set(s.id, s);
+    return withStatus(old ? 200 : 201, skillView(s));
+  });
+  route('PATCH', '/api/skills/:id', (p, body) => {
+    const s = { ...skillOr404(p.id) };
+    if (body?.all_projects !== undefined) s.all_projects = !!body.all_projects;
+    if (body?.project_ids !== undefined) {
+      if (!Array.isArray(body.project_ids) || body.project_ids.some((id) => !projects.has(id))) throw fail(400, 'bad_request', 'project_ids: not your projects');
+      s.project_ids = [...body.project_ids];
+    }
+    s.updated_at = now();
+    skills.set(s.id, s);
+    return skillView(s);
+  });
+  route('DELETE', '/api/skills/:id', (p) => {
+    skillOr404(p.id);
+    skills.delete(p.id);
+    return withStatus(204, null);
+  });
+  route('GET', '/api/skills/:id/files', (p) => ({ files: skillOr404(p.id).file_list }));
   // SPEC 0.147: a secret or an ssh key for a session's agent, through the worker; the mock
   // keeps no value. The keys a workspace remembers, by workspace id (names and fingerprints).
   const workspaceKeys = new Map();
@@ -913,15 +1066,17 @@ $$t(n) = c \\cdot n, \\quad \\text{for every token of length } n.$$
   const fingerprint = (seed) => `SHA256:${Buffer.from(seed).toString('base64').replace(/=+$/, '').slice(0, 43)}`;
   route('POST', '/api/sessions/:id/secrets', (p, body) => {
     const s = sessionOr404(p.id);
-    const extra = Object.keys(body ?? {}).filter((k) => !['kind', 'name', 'value', 'vault', 'passphrase', 'remember', 'request_id'].includes(k));
+    const extra = Object.keys(body ?? {}).filter((k) => !['kind', 'name', 'value', 'vault', 'vault_field', 'passphrase', 'remember', 'request_id'].includes(k));
     if (extra.length) throw fail(400, 'bad_request', `unknown field \`${extra[0]}\``);
-    const { kind, name, vault } = body ?? {};
+    const { kind, name, vault, vault_field: field } = body ?? {};
     // The worker reads a vault entry itself: the mock has no value then, only a stand-in.
     const value = vault !== undefined ? 'PRIVATE KEY (from the vault)' : body?.value;
     if (!['secret', 'ssh_key'].includes(kind)) throw fail(400, 'bad_request', 'kind is secret or ssh_key');
     if (typeof name !== 'string' || !SECRET_NAME.test(name)) throw fail(422, 'secret_refused', 'a bad name');
     if ((body?.value !== undefined) === (vault !== undefined)) throw fail(400, 'bad_request', 'give exactly one of value and vault');
     if (vault !== undefined && (typeof vault !== 'string' || !vault.trim())) throw fail(400, 'bad_request', 'vault is one line of 1 to 200 characters');
+    if (field !== undefined && vault === undefined) throw fail(400, 'bad_request', 'vault_field needs vault');
+    if (field !== undefined && (typeof field !== 'string' || !field.trim())) throw fail(400, 'bad_request', 'vault_field is one line of 1 to 200 characters');
     if (typeof value !== 'string' || !value) throw fail(400, 'bad_request', 'value is required');
     if (s.system) throw fail(409, 'unavailable', 'a service session takes no secret');
     if (kind === 'ssh_key' && !value.includes('PRIVATE KEY')) throw fail(422, 'secret_refused', 'not an OpenSSH private key');
@@ -940,7 +1095,7 @@ $$t(n) = c \\cdot n, \\quad \\text{for every token of length } n.$$
       if (keys.some((k) => k.name === name)) throw fail(422, 'secret_refused', `this workspace has a key named ${name}`);
       workspaceKeys.set(s.workspace_id, [...keys, { name, fingerprint: fp }]);
     }
-    const from = vault !== undefined ? ` from Vaultwarden entry ${vault}` : '';
+    const from = vault !== undefined ? ` from Vaultwarden entry ${vault}${field !== undefined ? `, field ${field}` : ''}` : '';
     const text = kind === 'ssh_key'
       ? `ssh key ${name} (${fp}) given${from}${remembered ? ', remembered for this workspace' : ''}`
       : `Secret ${name} given${from}`;

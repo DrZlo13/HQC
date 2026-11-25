@@ -3,6 +3,7 @@
 // add and edit form, Test, Delete) and the servers a project's settings list. Header values
 // are write-only: a password field, cleared when the form closes, sent only when given.
 
+import { defaultKey, type KeyAction } from '../src/keys';
 import { afterEach, expect, it, vi } from 'vitest';
 import { render } from 'preact';
 import { act } from 'preact/test-utils';
@@ -121,6 +122,10 @@ it('is a section of Settings', async () => {
     newSessionProject: () => undefined,
     webSearch: WEB_SEARCHES[0],
     providers: [],
+    deviceUser: () => undefined,
+    forgetDevice: async () => {},
+    keyFor: (a: KeyAction) => defaultKey(a),
+    setKey: () => {},
   } as unknown as AppState;
   await mount(app, <Settings app={app} />);
   expect($$('h2').map((h) => h.textContent)).toContain('MCP servers');
@@ -365,4 +370,110 @@ it('an OAuth server: no headers sent, Sign in opens the page the hub gives, Sign
   expect(tab.location.href).toBe('https://linear.app/oauth/authorize?x=1');
   expect(tab.opener).toBeNull();
   open.mockRestore();
+});
+
+// SPEC 0.236: the link first. A pasted or typed URL is checked by the hub, and the fields not
+// edited yet are filled from its answer; all of them stay editable.
+
+async function paste(el: HTMLInputElement, value: string) {
+  await act(async () => {
+    el.dispatchEvent(new Event('paste', { bubbles: true }));
+    el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+}
+const probeLine = () => $('.mcp-probe')?.textContent ?? null;
+const authSelect = () => $<HTMLSelectElement>('select[name="mcp_auth"]')!;
+
+it('the URL is the first field, and a pasted one fills the name and the OAuth sign-in', async () => {
+  const probeMcp = vi.fn(async () => ({ name: 'linear', auth: 'oauth' as const }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => []), probeMcp }));
+  await click($('.btn-add-mcp'));
+  expect($$<HTMLInputElement>('.mcp-form input')[0].name).toBe('mcp_url');
+  await paste(input('mcp_url'), 'https://mcp.linear.app/mcp');
+  expect(probeMcp).toHaveBeenCalledWith('https://mcp.linear.app/mcp');
+  expect(probeLine()).toBe('Signs in with OAuth');
+  expect(input('mcp_name').value).toBe('linear');
+  expect(authSelect().value).toBe('oauth');
+  expect($('.mcp-oauth')).not.toBeNull();
+  // Still editable by hand.
+  await act(async () => {
+    authSelect().value = 'headers';
+    authSelect().dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  expect($('.mcp-headers')).not.toBeNull();
+});
+
+it('a server that needs a token gets an Authorization row; one that needs none, no rows', async () => {
+  const probeMcp = vi.fn(async (url: string) =>
+    url.includes('githubcopilot') ? { name: 'githubcopilot', auth: 'token' as const } : { name: 'kicad', auth: 'none' as const },
+  );
+  await mount(stubApp({ mcpServers: vi.fn(async () => []), probeMcp }));
+  await click($('.btn-add-mcp'));
+  await paste(input('mcp_url'), 'https://api.githubcopilot.com/mcp/');
+  expect(probeLine()).toBe('Needs a token');
+  expect(authSelect().value).toBe('headers');
+  expect($$<HTMLInputElement>('input[name="mcp_header_name"]').map((i) => i.value)).toEqual(['Authorization']);
+  expect(input('mcp_header_value').placeholder).toBe('Bearer …');
+
+  // Checked again on leaving the field after a change: the untouched row goes.
+  await type(input('mcp_url'), 'https://kicad.example/mcp');
+  await act(async () => void input('mcp_url').dispatchEvent(new Event('blur')));
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  expect(probeMcp).toHaveBeenLastCalledWith('https://kicad.example/mcp');
+  expect(probeLine()).toBe('No sign-in needed');
+  expect(input('mcp_header_name')).toBeUndefined();
+  expect(input('mcp_name').value).toBe('kicad');
+});
+
+it('never overwrites a field the owner edited, and checks a URL only once', async () => {
+  const probeMcp = vi.fn(async () => ({ name: 'linear', auth: 'oauth' as const }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => []), probeMcp }));
+  await click($('.btn-add-mcp'));
+  await type(input('mcp_name'), 'mine');
+  await act(async () => {
+    authSelect().value = 'headers';
+    authSelect().dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await paste(input('mcp_url'), 'https://mcp.linear.app/mcp');
+  expect(probeLine()).toBe('Signs in with OAuth');
+  expect(input('mcp_name').value).toBe('mine');
+  expect(authSelect().value).toBe('headers');
+  // The same URL again: no new check.
+  await act(async () => void input('mcp_url').dispatchEvent(new Event('blur')));
+  expect(probeMcp).toHaveBeenCalledTimes(1);
+});
+
+it('a typed URL is checked once typing settles; an error shows under it', async () => {
+  const probeMcp = vi.fn(async () => {
+    throw new ApiError(400, 'url: https only');
+  });
+  await mount(stubApp({ mcpServers: vi.fn(async () => []), probeMcp }));
+  await click($('.btn-add-mcp'));
+  await type(input('mcp_url'), 'https://kicad.example/mc');
+  await type(input('mcp_url'), 'https://kicad.example/mcp');
+  expect(probeMcp).not.toHaveBeenCalled();
+  await act(() => new Promise((r) => setTimeout(r, 600)));
+  expect(probeMcp).toHaveBeenCalledTimes(1);
+  expect(probeMcp).toHaveBeenCalledWith('https://kicad.example/mcp');
+  expect(probeLine()).toBe('url: https only');
+  expect($('.mcp-probe')!.classList.contains('error-text')).toBe(true);
+  // Not a URL yet: nothing asked.
+  await paste(input('mcp_url'), 'kicad.example');
+  expect(probeMcp).toHaveBeenCalledTimes(1);
+});
+
+it('an edit counts every field as edited', async () => {
+  const probeMcp = vi.fn(async () => ({ name: 'linear', auth: 'oauth' as const }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => [GITHUB]), probeMcp }));
+  await click($('.btn-edit-mcp'));
+  // Its own URL is not checked.
+  await act(async () => void input('mcp_url').dispatchEvent(new Event('blur')));
+  expect(probeMcp).not.toHaveBeenCalled();
+  await paste(input('mcp_url'), 'https://mcp.linear.app/mcp');
+  expect(probeMcp).toHaveBeenCalledTimes(1);
+  expect(input('mcp_name').value).toBe('github');
+  expect(authSelect().value).toBe('headers');
 });

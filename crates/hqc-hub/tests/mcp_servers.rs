@@ -682,3 +682,137 @@ async fn oauth_signs_in_with_pkce_and_refreshes_the_token() {
     assert!(v["last_error"].as_str().unwrap().contains("sign in"), "{v}");
     hub.finish().await;
 }
+
+// ---------------------------------------------------------------- probes (SPEC 0.236)
+
+async fn open_server() -> String {
+    // Answers without credentials and names itself.
+    async fn h(Json(m): Json<Value>) -> Response {
+        match m["method"].as_str() {
+            Some("initialize") => (
+                [("mcp-session-id", "probe-1")],
+                Json(json!({"jsonrpc": "2.0", "id": m["id"], "result": {
+                    "protocolVersion": "2025-06-18", "capabilities": {},
+                    "serverInfo": {"name": "context7-mcp", "version": "1"}}})),
+            )
+                .into_response(),
+            _ => StatusCode::ACCEPTED.into_response(),
+        }
+    }
+    let app = Router::new().route("/mcp", post(h).delete(|| async { StatusCode::OK }));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    format!("http://{addr}/mcp")
+}
+
+#[tokio::test]
+async fn a_server_url_is_probed_for_its_name_and_sign_in() {
+    let hub = TestHub::start().await;
+    let open = open_server().await;
+    let (s, v) = hub.post("/api/mcp/probe", json!({"url": open})).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        (v["auth"].as_str(), v["name"].as_str()),
+        (Some("none"), Some("context7")),
+        "{v}"
+    );
+    // A server that wants a token and names no authorization server.
+    let (token_url, _) = fake_server().await;
+    let (_, v) = hub.post("/api/mcp/probe", json!({"url": token_url})).await;
+    assert_eq!(v["auth"], "token", "{v}");
+    let (s, _) = hub.post("/api/mcp/probe", json!({"url": "ftp://x"})).await;
+    assert_eq!(s, 400);
+    hub.finish().await;
+}
+
+#[tokio::test]
+async fn a_provider_url_is_probed_by_a_worker() {
+    let hub = TestHub::start().await;
+    let (s, v) = hub
+        .post(
+            "/api/providers/probe",
+            json!({"base_url": "http://192.168.1.229:8082"}),
+        )
+        .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (409, Some("worker_offline")),
+        "{v}"
+    );
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let ((s, v), f) = while_answering(
+        &mut w,
+        "provider.probe",
+        json!({"provider_probe": {"models": [{"id": "qwen3.8-27b", "context_tokens": 131072}, {"id": "qwen3.8-flash-next"}]}}),
+        hub.post("/api/providers/probe", json!({"base_url": "http://192.168.1.229:8082/"})),
+    )
+    .await;
+    assert_eq!(
+        f["payload"]["base_url"], "http://192.168.1.229:8082",
+        "trailing / dropped"
+    );
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["models"][0]["id"], "qwen3.8-27b");
+    assert_eq!(v["models"][0]["context_tokens"], 131072);
+    assert!(v["worker_id"].is_string());
+    hub.finish().await;
+}
+
+#[tokio::test]
+async fn a_refused_registration_says_its_status_and_type() {
+    let hub = TestHub::start().await;
+    let f = AuthFake {
+        base: Arc::default(),
+        seen: Arc::default(),
+    };
+    let app = Router::new()
+        .route("/mcp", post(auth_mcp))
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            axum::routing::get(prm),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            axum::routing::get(as_meta),
+        )
+        .route(
+            "/register",
+            post(|| async {
+                (
+                    StatusCode::FORBIDDEN,
+                    [("content-type", "text/html; charset=utf-8")],
+                    "<html>Forbidden</html>",
+                )
+            }),
+        )
+        .with_state(f.clone());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    *f.base.lock().unwrap() = base.clone();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+
+    let (s, v) = hub
+        .post(
+            "/api/mcp/servers",
+            json!({"name": "figma", "url": format!("{base}/mcp"), "auth": "oauth"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+    let (s, v) = hub
+        .post(&format!("/api/mcp/servers/{id}/sign_in"), json!({}))
+        .await;
+    assert_ne!(s, 200, "{v}");
+    let text = v.to_string();
+    assert!(
+        text.contains("the registration answered 403 (text/html), not JSON"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Forbidden</html>"),
+        "no text of the page: {text}"
+    );
+    hub.finish().await;
+}

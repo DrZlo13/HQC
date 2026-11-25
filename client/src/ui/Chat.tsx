@@ -5,6 +5,7 @@ import type { AppState } from '../app';
 import { ArtifactStore, formatSize, type LinkCache } from '../artifacts';
 import { copyText } from '../clipboard';
 import { HEIC_NAME, dataUrl, heicToJpeg } from '../heic';
+import { keyMatches, withKey, type Key } from '../keys';
 import { onBack } from '../nav';
 import { PERMISSION_MODES, type EventOf, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState, type SlashCommand } from '../proto';
 import { sideQuestionOf, type OutgoingFile } from '../session';
@@ -38,15 +39,15 @@ import {
   IconSend,
   IconStop,
 } from './icons';
-import { MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatTime, formatTimer, formatTokens, homePath, modeConfirm, modelName, shownModel, spendLabel } from './labels';
+import { AUTO_NEEDS_ANTHROPIC, MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatTime, formatTimer, formatTokens, homePath, modeConfirm, modelName, shownModel, spendLabel } from './labels';
 import { hasOpenTasks, LiveSubagents } from './LiveSubagents';
 import { Loading } from './Loading';
 import { CopyButton } from './Markdown';
-import { selectedText, useQuoteSelection, type QuoteSelection } from './selection';
+import { feedSelectionText, selectedText, useQuoteSelection, type QuoteSelection } from './selection';
 import { PermissionBlock, SECRET_GIVEN } from './permission';
 import { MoveSession } from './ProjectSettings';
 import { WaitedRequests } from './requests';
-import { SchedulesPanel } from './Schedules';
+import { SchedulesList } from './Schedules';
 import { archivedLabel, atWorkAfterTurn, canPause, pausingAfterTurn, restartableSession } from './sessions';
 
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
@@ -640,6 +641,33 @@ export function Chat({
   // A right click on selected text (a computer's; a phone has its own menu for it): Quote, Copy
   // and Search in one place.
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
+  // The keys of the same for a selection that starts in the feed or in a subagent's history: the
+  // quote key quotes it where there is an input, the search key searches it. Without such a
+  // selection the key is the browser's. `actions` is new on every render: the press reads the
+  // latest Quote.
+  const quoteNow = useRef(actions.quote);
+  quoteNow.current = actions.quote;
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.isComposing || e.defaultPrevented) return;
+      const quote = keyMatches(app.keyFor('quote'), e) ? quoteNow.current : undefined;
+      if (!quote && !keyMatches(app.keyFor('search'), e)) return;
+      const text = feedSelectionText(section.current);
+      if (!text) return;
+      e.preventDefault();
+      // A held key repeats: one search tab, not one per repeat.
+      if (e.repeat) return;
+      // As a pick in it: the menu of the selection goes (else it stays over a quoted selection
+      // and its arrow keys take the focus from the input).
+      setSelectionMenu(null);
+      if (quote) {
+        quote(text);
+        document.getSelection()?.removeAllRanges();
+      } else window.open(app.webSearch.url(text), '_blank', 'noopener');
+    };
+    addEventListener('keydown', key);
+    return () => removeEventListener('keydown', key);
+  }, [app]);
   const insertQuote = useRef<((text: string) => void) | null>(null);
   const insertText = useRef<((text: string) => void) | null>(null);
   // The jump to a search hit: the event is there once `lastSeq` reaches it and the older
@@ -1085,7 +1113,6 @@ export function Chat({
           </span>
         </div>
       )}
-      {schedules && <SchedulesPanel api={app.api} sessionId={sessionId} onClose={() => setSchedules(false)} />}
       {moving && info && (
         <div class="move-panel" role="region" aria-label="Move to project">
           <MoveSession app={app} session={info} onDone={() => setMoving(false)} />
@@ -1152,7 +1179,8 @@ export function Chat({
         (info?.subagents ?? 0) > 0 ||
         (info?.background_tasks ?? 0) > 0 ||
         t.liveAgents.some((a) => a.kind === 'wakeup' || a.kind === 'cron') ||
-        t.liveSchedules.length > 0) && (
+        t.liveSchedules.length > 0 ||
+        schedules) && (
         <LiveSubagents
           goal={goal ? { ...goal, running: STOPPABLE.has(state), onClear: inputShown ? clearGoal : undefined } : undefined}
           tasks={t.tasks}
@@ -1161,7 +1189,10 @@ export function Chat({
           receivedAt={t.liveAgentsAt}
           schedules={t.liveSchedules}
           schedulesAt={t.liveSchedulesAt}
-          onSchedules={() => setSchedules(true)}
+          onSchedules={() => setSchedules((o) => !o)}
+          schedulesList={
+            schedules ? <SchedulesList api={app.api} sessionId={sessionId} refresh={t.liveSchedulesAt} /> : undefined
+          }
           onStop={stopTask}
           asking={new Set(open.flatMap((r) => (r.type === 'approval.request' && r.payload.subagent ? [r.payload.subagent.task_id] : [])))}
           history={{
@@ -1199,6 +1230,7 @@ export function Chat({
           insertQuote={insertQuote}
           insertText={insertText}
           quoteSelection={actions.quote ? quoteSelection : undefined}
+          quoteKey={app.keyFor('quote')}
           phone={phone}
           commands={info?.commands}
           commandInfo={info?.command_info}
@@ -1254,6 +1286,7 @@ export function Chat({
                   {
                     label: 'Quote',
                     icon: <IconQuote />,
+                    title: withKey('Quote into the message', app.keyFor('quote')),
                     cls: 'menu-quote',
                     onSelect: () => {
                       actions.quote!(selectionMenu.text);
@@ -1266,6 +1299,7 @@ export function Chat({
             {
               label: `Search in ${app.webSearch.label}`,
               icon: <IconSearch size={16} />,
+              title: withKey('Search the selected text', app.keyFor('search')),
               cls: 'menu-web-search',
               onSelect: () => void window.open(app.webSearch.url(selectionMenu.text), '_blank', 'noopener'),
             },
@@ -1421,7 +1455,10 @@ function modeFace(info: SessionInfo): { cls: string; title: string; text: Compon
     const text = `${MODE_LABELS[runs]} (${MODE_LABELS[asked]} asked)`;
     return {
       cls: MODE_MARKS[runs].cls,
-      title: `The worker runs this session in ${MODE_LABELS[runs]}: until the agent next runs, or for good if the worker does not allow ${MODE_LABELS[asked]}`,
+      title:
+        asked === 'auto' && info.provider
+          ? AUTO_NEEDS_ANTHROPIC
+          : `The worker runs this session in ${MODE_LABELS[runs]}: until the agent next runs, or for good if the worker does not allow ${MODE_LABELS[asked]}`,
       text,
       label: text,
       known: true,
@@ -1574,7 +1611,8 @@ function ModePill({
                   type="button"
                   class={`btn-mode-${m}`}
                   aria-pressed={m === own}
-                  title={SWITCH_TITLES[m]}
+                  disabled={m === 'auto' && !!info.provider && m !== own}
+                  title={m === 'auto' && info.provider ? AUTO_NEEDS_ANTHROPIC : SWITCH_TITLES[m]}
                   data-focus={m === own ? '' : undefined}
                   onClick={() => {
                     setAt(null);
@@ -1815,12 +1853,17 @@ export function commandQuery(text: string): string | undefined {
 }
 
 /** The commands the popup offers for `text`: those starting with what is typed (ignoring
- *  case), in the runtime's order; none when the only one is typed in full already. */
+ *  case), or whose part after the first `:` does (`/bench` offers `hqc:bench`, a skill of the
+ *  hub), in the runtime's order; none when the only one is typed in full already. */
 export function matchCommands(commands: string[] | undefined, text: string): string[] {
   const q = commandQuery(text);
   if (q === undefined || !commands?.length) return [];
   const lq = q.toLowerCase();
-  const out = commands.filter((c) => c.toLowerCase().startsWith(lq));
+  const out = commands.filter((c) => {
+    const lc = c.toLowerCase();
+    const colon = lc.indexOf(':');
+    return lc.startsWith(lq) || (colon >= 0 && lc.slice(colon + 1).startsWith(lq));
+  });
   return out.length === 1 && out[0] === q ? [] : out;
 }
 
@@ -1893,6 +1936,7 @@ export function Composer({
   onRemove = () => {},
   insertQuote,
   quoteSelection,
+  quoteKey = null,
   insertText,
   initial = '',
   onDraft,
@@ -1921,6 +1965,8 @@ export function Composer({
   /** The chat's selection: with it set, "Quote" shows over the field's right end while the chat
    *  holds a selection to quote, and a press puts the text in as `insertQuote` does. */
   quoteSelection?: QuoteSelection;
+  /** The key of Quote, named in its tooltip. */
+  quoteKey?: Key | null;
   /** Set here to a function that adds a text to the message (`withText`), focused, the caret at
    *  its end: a message the user took back. */
   insertText?: { current: ((text: string) => void) | null };
@@ -2278,7 +2324,7 @@ export function Composer({
             <button
               type="button"
               class="btn-quote"
-              title="Quote the selected text into the message"
+              title={withKey('Quote the selected text into the message', quoteKey)}
               // The press takes the text before it clears the selection; the form keeps the field's focus.
               onPointerDown={(e) => {
                 e.preventDefault();

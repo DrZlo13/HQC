@@ -684,7 +684,7 @@ The app (`ios/`, its README) signs in on its own: it opens `/api/native/login` i
 browser, where Cloudflare Access (§1.6) or an OIDC reverse proxy such as Traefik + oauth2-proxy
 + Keycloak (§1.9) signs the person in with any identity provider, and exchanges the one-time code
 at `/worker/native/token`, which both the `hqc-worker` Bypass application of §1.6 and the
-`hqc-worker` router of §1.9 already let through without sign-in (SPEC §6, 0.240). In OIDC mode
+`hqc-worker` router of §1.9 already let through without sign-in (SPEC §6, 0.251). In OIDC mode
 the app stores the proxy's cookies and updates them from `Set-Cookie` headers whenever the proxy
 refreshes them (`addAuthCookiesToResponse` in §1.9).
 
@@ -696,7 +696,7 @@ HQC_APNS_RELAY_URL=https://hqc.drewnja.xyz
 ```
 
 The hub then sends each notice for the app to that relay, which passes it to Apple. The app
-(since its notification extension, SPEC 0.238) registers a key of its own, and the hub seals each
+(since its notification extension, SPEC 0.249) registers a key of its own, and the hub seals each
 notice with it: the relay and Apple see a generic alert, the device token and ciphertext, never the
 session's title, the text or the request. Nothing else leaves the hub. Without the line
 the app works the same, without notifications. Settings in the app says whether they are on.
@@ -957,6 +957,8 @@ project_settings = false              # true: the repository's CLAUDE.md, .claud
 unblock = ["Bash(ssh:*)"]             # deny rules of [permissions] lifted here only
 allow = ["Bash(ssh debian@192.168.1.20:*)"]
 deny = ["Bash(git push:*)"]           # added to the deny of [permissions]
+# lifted only for the command `ssh` sends to this host (SPEC 0.246): a card instead of a refusal
+remote_unblock = { "pi@bench.local" = ["Bash(sudo:*)"] }
 
 [[env_bindings]]
 path = "/Users/me/work/lab/infra"
@@ -974,6 +976,12 @@ environment = "infra"
   `[permissions]` exactly (with the default deny: as listed above), otherwise the worker does not
   start. The rules screen lists the environment's rules with the source
   `worker.toml [environments.infra]`.
+- `remote_unblock` lifts a deny rule only inside `ssh <host> <command>` to that host as written,
+  and only in Ask mode, where the worker checks commands itself: the agent's
+  `ssh pi@bench.local "apt update && sudo apt upgrade"` then gets a permission card instead of a
+  refusal, while a local `sudo`, another host or user, `$( )` or backticks, braces or globs
+  before the command, and options such as `-F`, `-J`, `-l` or `ProxyCommand` (also after the
+  host) stay denied.
 - `env` values never leave the machine: not in the hub, the logs or `hqc-worker env`. `HQC_*`
   names are refused. A changed `worker.toml` takes effect after a restart of the worker.
 - `hqc-worker env` lists the environments (keys by name) and bindings; `hqc-worker env which
@@ -1020,8 +1028,17 @@ label, base URL, model, context window), then allow it on each worker that shoul
 [providers.qwen-local]                  # the provider's name in Settings → Models
 base_url = "http://192.168.1.229:8082"  # must equal the base URL there (a trailing / does not count)
 # api_key = "..."                       # for an endpoint that needs one; stays on this machine
+# api_key = { vault = "zai key" }       # or a Vaultwarden entry (optional `field = "..."`), read by rbw at every agent start
 ```
 
+- A key from Vaultwarden needs [`rbw`](https://github.com/doy/rbw) 1.15 or newer, signed in, on
+  the worker's `PATH`; `vault = true` is not needed (it gates only the `hqc_secret` card). The
+  worker reads the key each time it starts the session's agent; a locked `rbw` asks to unlock
+  through its pinentry (see "Secrets in a session" below; 25 s to answer). A running
+  agent keeps the key it started with: after changing it in Vaultwarden, Restart session. If
+  `rbw` cannot give the key, the agent does not start, once and not three times (no retries:
+  they would stack pinentry windows), and the chat says why; unlock `rbw` (or answer the prompt
+  still open there) and send again.
 - Restart the worker; Settings → Models then lists it among the workers that allow the
   provider, and the model menus of sessions on this worker offer it.
 - A session on a provider: every model name of Claude Code (subagents and the small fast model
@@ -1062,8 +1079,22 @@ device's `authorized_keys`). Only sessions of the worker's owner that are not re
   or its id); the card shows it, you confirm or change it, and the worker reads the value with
   `rbw` itself — it never passes the hub. The worker reads what that `rbw` account can, and
   while `rbw` is unlocked the agents' own commands on that machine can read it as well, without
-  a card. When it is locked the card says so and stays open: unlock `rbw` on that machine, or
-  type the value.
+  a card. The agent may name a field of the entry too (`username`, `notes`, `totp` — the stored
+  secret, not a code —, a custom field's exact name; a worker of hqc 0.243 or newer); the card has a labelled "Field" box for it (unmasked: it is a name, not
+  the password; empty means the password, for an ssh key its private key). A locked `rbw` is asked to unlock: its
+  `pinentry` on that machine asks for the master password. For a confirmation on a read after a
+  pause — what 1Password's Touch ID gives T3 Code — set `rbw config set lock_timeout 1` (seconds) and
+  use a pinentry with Touch ID, for example
+  [pinentry-rbw-macos](https://github.com/pppobear/pinentry-rbw-macos) (third-party, not
+  checked here); the worker waits 25 s for the answer. Reads run one at a time, so concurrent
+  ones wait for one prompt; a prompt nobody answered stays open on that machine (answer it, then
+  give again). An unlock done for one read opens the vault to every process of your user, and
+  `rbw-agent` starts `lock_timeout` (3600 s by default) again at every use by any of them: an
+  agent's own `rbw get` there keeps it open for as long as it reads, without a prompt, and a short
+  `lock_timeout` locks it only once nothing uses it. The window does not say who asks (an
+  agent's own `rbw get` raises the same one). A machine without a screen has no
+  pinentry that can ask: keep `rbw` unlocked there. When it stays locked or is not answered, the
+  card says so and stays open: unlock `rbw` on that machine, or type the value.
 
 **The browser in a session** (SPEC §14, since 0.148). To let an agent look through pages in
 your accounts (listings on eBay, Amazon, AliExpress) in this machine's Chrome:

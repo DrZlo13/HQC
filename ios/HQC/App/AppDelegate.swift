@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        // The notice key exists before the first notice can come (SPEC 0.238).
+        // The notice key exists before the first notice can come (SPEC 0.249).
         DispatchQueue.global(qos: .utility).async { _ = NoticeKey.current() }
         let center = UNUserNotificationCenter.current()
         center.delegate = self

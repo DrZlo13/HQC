@@ -162,10 +162,10 @@ pub fn collapse_id(tag: &str) -> String {
 /// the alert, the session's thread, a category the app hangs its actions on, and what the app
 /// needs to open the session or answer a request from the notification: `session_id`,
 /// `open_session_id`, `type`, `request_id` and, for an approval, its options.
-/// The length of a device's notice key: AES-256 (SPEC 0.238).
+/// The length of a device's notice key: AES-256 (SPEC 0.249).
 pub const NOTICE_KEY_LEN: usize = 32;
 
-/// The notice as Apple gets it. With the device's key (SPEC 0.238) the content (title, text,
+/// The notice as Apple gets it. With the device's key (SPEC 0.249) the content (title, text,
 /// category, session, request and its options) is sealed with AES-256-GCM, and Apple, and a
 /// relay, see only a generic alert with `mutable-content`: the app's notification extension
 /// opens it on the device. Without one, as before: the notice in the clear.

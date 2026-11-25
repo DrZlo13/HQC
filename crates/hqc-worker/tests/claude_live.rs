@@ -54,6 +54,7 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::PermissionMode(m) => format!("permission_mode:{}", m.as_str()),
         AdapterEvent::Limits(_) => "limits".into(),
         AdapterEvent::TaskOutput(p) => format!("task_output:{}", p.display()),
+        AdapterEvent::LongRuns { tasks } => format!("long_runs:{}", tasks.len()),
         AdapterEvent::SubagentLeftovers { commands, .. } => {
             format!("subagent_leftovers:{}", commands.len())
         }
@@ -150,6 +151,8 @@ async fn live_repo_settings_ignored() {
         browser: false,
         browser_refused: None,
         mcp_servers: vec![],
+        skills: vec![],
+        skill_dir: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -290,6 +293,8 @@ async fn live_environment_ssh() {
                 browser: false,
                 browser_refused: None,
                 mcp_servers: vec![],
+                skills: vec![],
+                skill_dir: None,
                 fork: None,
             };
             println!("--- {dir}: environment {}", spec.environment.name);
@@ -521,6 +526,8 @@ async fn live_environment_ssh_keys() {
                 browser: false,
                 browser_refused: None,
                 mcp_servers: vec![],
+                skills: vec![],
+                skill_dir: None,
                 fork: None,
             };
             println!("--- {dir}: environment {}", spec.environment.name);
@@ -672,6 +679,8 @@ async fn live_folder_rules() {
         browser: false,
         browser_refused: None,
         mcp_servers: vec![],
+        skills: vec![],
+        skill_dir: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -780,6 +789,8 @@ async fn live_permission_mode_switch() {
         browser: false,
         browser_refused: None,
         mcp_servers: vec![],
+        skills: vec![],
+        skill_dir: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -937,6 +948,8 @@ async fn live_bash_turn_with_approval() {
         browser: false,
         browser_refused: None,
         mcp_servers: vec![],
+        skills: vec![],
+        skill_dir: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1163,6 +1176,7 @@ async fn live_permission_policy() {
             allow_all: false,
             allow: vec!["Bash(touch hqc-allowed:*)".into()],
             deny,
+            remote_unblock: Default::default(),
         })),
         runtime_session_id: Some(Uuid::new_v4().to_string()),
         system_prompt: None,
@@ -1180,6 +1194,8 @@ async fn live_permission_policy() {
         browser: false,
         browser_refused: None,
         mcp_servers: vec![],
+        skills: vec![],
+        skill_dir: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1317,6 +1333,8 @@ async fn live_ai_title() {
         browser: false,
         browser_refused: None,
         mcp_servers: vec![],
+        skills: vec![],
+        skill_dir: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1504,6 +1522,8 @@ async fn live_input_joins_turn() {
         browser: false,
         browser_refused: None,
         mcp_servers: vec![],
+        skills: vec![],
+        skill_dir: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1659,6 +1679,8 @@ async fn live_move_resumes_in_the_new_folder() {
         browser: false,
         browser_refused: None,
         mcp_servers: vec![],
+        skills: vec![],
+        skill_dir: None,
         fork: None,
     };
     let input = |text: &str| SessionInput {
@@ -1728,5 +1750,120 @@ async fn live_move_resumes_in_the_new_folder() {
         .windows(2)
         .any(|w| w == ["--resume", &claude_session.to_string()]));
     assert!(answer.contains("TANGERINE-41"), "{answer}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// SPEC 0.245 (iteration 8): the hub's skills as the plugin folder the worker builds. The CLI
+/// lists the skill as `hqc:<name>`, and `/<name>` in the text runs it. One turn, haiku.
+///
+/// ```
+/// HQC_LIVE_CLAUDE=1 cargo test -p hqc-worker --test claude_live live_hub_skill -- --nocapture
+/// ```
+#[tokio::test]
+async fn live_hub_skill() {
+    if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
+        eprintln!("skipped: set HQC_LIVE_CLAUDE=1 to run against the real claude");
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tmp")
+        .join(format!("live-skill-{}", Uuid::now_v7()));
+    let work = root.join("work");
+    let plugin = root.join("plugin");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
+    std::fs::create_dir_all(plugin.join("skills/hqc-live-probe")).unwrap();
+    std::fs::write(
+        plugin.join(".claude-plugin/plugin.json"),
+        r#"{"name":"hqc"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        plugin.join("skills/hqc-live-probe/SKILL.md"),
+        "---\nname: hqc-live-probe\ndescription: A probe of hqc's tests.\n---\nReply with exactly: SKILL-OK-7731\n",
+    )
+    .unwrap();
+    let work = work.canonicalize().unwrap();
+    let opts = ClaudeOptions {
+        extra_args: vec!["--max-turns".into(), "2".into()],
+        ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ..ClaudeOptions::default()
+    };
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(Recording::default()));
+    let session_id = Uuid::now_v7();
+    let spec = StartSpec {
+        session_id,
+        runtime: Runtime::ClaudeCode,
+        model: Some("claude-haiku-5-5".into()),
+        workspace: work.clone(),
+        workdir: work.clone(),
+        environment: Arc::new(Environment::default_of(&Permissions::default())),
+        runtime_session_id: Some(Uuid::new_v4().to_string()),
+        system_prompt: None,
+        disallowed_tools: vec![],
+        restricted: false,
+        auto_approve: false,
+        session_token: hqc_worker::token::Secret::new("st"),
+        ask_timeout_s: 600,
+        permission_mode: PermissionMode::Ask,
+        folder_rules: None,
+        has_history: false,
+        provider: None,
+        provider_refused: None,
+        secrets: None,
+        browser: false,
+        browser_refused: None,
+        mcp_servers: vec![],
+        skills: vec![hqc_proto::skills::SkillRef {
+            name: "hqc-live-probe".into(),
+            sha256: "0".repeat(64),
+        }],
+        skill_dir: Some(plugin.canonicalize().unwrap()),
+        fork: None,
+    };
+    let (tx, mut rx) = mpsc::channel(4096);
+    let mut adapter = factory.create(&spec, tx);
+    adapter.start(&spec).await.expect("claude starts");
+    adapter
+        .input(&SessionInput {
+            session_id,
+            event_id: Uuid::now_v7(),
+            text: "/hqc-live-probe".into(),
+            artifact_ids: vec![],
+            peer_prefix: vec![],
+            peer: None,
+            permission_cap: None,
+            schedule_id: None,
+            human: false,
+        })
+        .await
+        .unwrap();
+    let (mut listed, mut text) = (false, String::new());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("turn did not end in 180 s")
+            .expect("channel closed");
+        match &ev {
+            AdapterEvent::Commands(c) => {
+                listed |= c.iter().any(|c| c.name == "hqc:hqc-live-probe");
+            }
+            AdapterEvent::Event(e) => {
+                if let EventKind::AgentMessage { text: t, .. } = &e.kind {
+                    text.push_str(t);
+                }
+            }
+            AdapterEvent::TurnEnded { .. } => break,
+            AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
+            _ => {}
+        }
+    }
+    adapter.kill().await.unwrap();
+    assert!(listed, "hqc:hqc-live-probe is not among the commands");
+    assert!(
+        text.contains("SKILL-OK-7731"),
+        "the skill did not run: {text}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
+import { keyMatches, withKey } from '../keys';
 import type { Project, ProjectSort } from '../proto';
 import { ProjectGlyph, projectName, tileBackground } from './Appearance';
 import { ContextMenu, type MenuEntry } from './ContextMenu';
@@ -62,11 +63,6 @@ export function RailRun({ rate, quiet }: { rate: number; quiet?: boolean }) {
     }
   }, [k]);
   return <span ref={el} class="rail-run" aria-label={quiet ? undefined : 'working'} aria-hidden={quiet ? true : undefined} />;
-}
-
-/** A Mac (or an iPad with a keyboard): ⌘ is the shortcuts' key there, Ctrl elsewhere. */
-export function onMac(): boolean {
-  return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 }
 
 /** The project bar of a desktop (T49, README "Project bar"): a tile per project with its
@@ -141,14 +137,13 @@ export function ProjectRail({ app }: { app: AppState }) {
     else if (toSearchBtn.current) searchBtn.current?.focus();
     toSearchBtn.current = false;
   }, [searching]);
-  // ⌘K on a Mac, Ctrl+K elsewhere, opens the search from anywhere (on a Mac Ctrl+K deletes to
-  // the end of the line in a field); a press outside the bar closes it.
+  // The search key (⌘K on a Mac, Ctrl+K elsewhere, until another is picked in Settings) opens the
+  // search from anywhere; a press outside the bar closes it.
   useEffect(() => {
     const doc = nav.current?.ownerDocument;
     if (!doc) return;
     const key = (e: KeyboardEvent) => {
-      const mod = onMac() ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-      if (!mod || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'k') return;
+      if (!keyMatches(app.keyFor('projectSearch'), e)) return;
       e.preventDefault();
       openSearch();
     };
@@ -249,6 +244,26 @@ export function ProjectRail({ app }: { app: AppState }) {
     ? order.map((id) => app.projects.get(id)).filter((p) => !!p)
     : app.sortedProjects();
 
+  // The keys of the previous and the next project open the tile above or below the current one:
+  // none without a current one, past either end, or while the tiles are being arranged. The
+  // press reads the tiles of the latest render; a key a field or a menu has taken is theirs.
+  const stepTiles = useRef<{ ids: string[]; current: string | null }>({ ids: [], current: null });
+  stepTiles.current = { ids: order ? [] : projects.map((p) => p.id), current };
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.isComposing || e.defaultPrevented) return;
+      const step = keyMatches(app.keyFor('previousProject'), e) ? -1 : keyMatches(app.keyFor('nextProject'), e) ? 1 : 0;
+      if (!step) return;
+      e.preventDefault();
+      const { ids, current: now } = stepTiles.current;
+      const at = now ? ids.indexOf(now) : -1;
+      const to = at < 0 ? undefined : ids[at + step];
+      if (to) location.hash = `#/p/${to}`;
+    };
+    addEventListener('keydown', key);
+    return () => removeEventListener('keydown', key);
+  }, [app]);
+
   // The matches: the projects on the bar, then the archived ones once something is typed.
   const live = app.sortedProjects();
   const hits = searching
@@ -330,7 +345,7 @@ export function ProjectRail({ app }: { app: AppState }) {
       type="button"
       class="rail-btn rail-search"
       aria-label="Search projects"
-      title={`Search projects (${onMac() ? '⌘K' : 'Ctrl+K'})`}
+      title={withKey('Search projects', app.keyFor('projectSearch'))}
       onClick={openSearch}
     >
       <IconSearch size={names ? 14 : 16} />

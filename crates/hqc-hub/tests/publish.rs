@@ -1289,3 +1289,37 @@ fn an_archive_at_the_limits_is_published() {
     std::fs::remove_file(&path).unwrap();
     assert_eq!(site.files.len(), max);
 }
+
+/// SPEC §10.1: a publication whose call's id an open request of another kind holds is refused at
+/// once, not left waiting for an answer that cannot reach it.
+#[tokio::test]
+async fn a_publication_whose_id_another_open_request_holds_is_refused_at_once() {
+    let hub = hub().await;
+    let (worker, mut w, sid, token) = agent(&hub).await;
+    let a = upload_site(&hub, &worker, &sid, &page()).await;
+    let aid = a["id"].as_str().unwrap();
+    let rid = rid();
+    assert!(hqc_hub::db::open_request(
+        &hub.app.db,
+        "approval",
+        sid.parse().unwrap(),
+        &rid,
+        &json!({}),
+        None,
+        None,
+    )
+    .await
+    .unwrap());
+    let f = publish(
+        &mut w,
+        &token,
+        &rid,
+        json!({"artifact_id": aid, "path": "/w/hqc/report"}),
+    )
+    .await;
+    let (code, message) = refused(&f);
+    assert_eq!(code, "unavailable");
+    assert_eq!(message, hqc_hub::db::REQUEST_ID_TAKEN);
+    assert_eq!(open_publications(&hub, &sid).await, 0);
+    hub.finish().await;
+}

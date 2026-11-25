@@ -2075,6 +2075,59 @@ async fn allow_auto_false_runs_ask() {
     w.stop().await;
 }
 
+// #194, SPEC 0.246: Auto's safety check does not pass through a model provider, so a session on
+// one runs Ask where Auto is asked, at the start and on a switch; Allow all stays.
+#[tokio::test]
+async fn auto_on_a_provider_runs_ask() {
+    use hqc_proto::frame::PermissionMode::{AllowAll, Ask};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let cfg = hqc_worker::config::Config::parse(&format!(
+        "{}[permissions]\nallow_all = true\n\
+         [providers.qwen]\nbase_url = \"http://192.168.1.229:8082\"\n",
+        env.config_toml(&hub.url())
+    ))
+    .unwrap();
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let mut start = env.start_payload(sid);
+    start["permission_mode"] = json!("auto");
+    start["provider"] =
+        json!({"name": "qwen", "base_url": "http://192.168.1.229:8082", "model": "qwen"});
+    c.frame("session.start", start).await;
+    c.expect("ack").await;
+    state_with_mode(&mut c, sid, "ask").await;
+    assert_eq!(adapters.start_modes(), [(sid, Ask)]);
+    c.frame(
+        "session.permission_mode",
+        json!({"session_id": sid, "permission_mode": "auto"}),
+    )
+    .await;
+    c.expect("ack").await;
+    c.frame(
+        "session.permission_mode",
+        json!({"session_id": sid, "permission_mode": "allow_all"}),
+    )
+    .await;
+    c.expect("ack").await;
+    adapters
+        .wait_for("switch", |c| {
+            c.contains(&FakeCall::PermissionMode(sid, AllowAll))
+        })
+        .await;
+    assert!(
+        !adapters.calls().iter().any(|c| matches!(
+            c,
+            FakeCall::PermissionMode(_, hqc_proto::frame::PermissionMode::Auto)
+        )),
+        "no switch to auto"
+    );
+    w.stop().await;
+}
+
 // SPEC 0.129: Allow all needs `[permissions] allow_all`, off by default: without it a session
 // the hub asks to run in it runs in the highest mode the worker allows — Auto, or Ask with
 // `allow_auto = false` — at the start and on a switch, and reports that mode.
@@ -4760,12 +4813,267 @@ async fn a_stop_in_the_runtimes_own_turn_writes_what_waits_quiet() {
     w.stop().await;
 }
 
+/// The `error` answering frame `id`, already read or next.
+async fn error_of(c: &mut HubConn, id: &str) -> Value {
+    if let Some(i) = c.skipped.iter().position(|f| f["id"] == id) {
+        return c.skipped.remove(i);
+    }
+    loop {
+        let f = c.expect("error").await;
+        if f["id"] == id {
+            return f;
+        }
+    }
+}
+
+/// The note an agent gets for an input dropped at the owner's Stop because of its cap.
+fn dropped_note(what: &str) -> String {
+    format!(
+        "[hqc] {what} was dropped at the owner's Stop because of a permission \
+         conflict: it may run only in a lower permission mode than this session's. Its text is \
+         not shown."
+    )
+}
+
+/// A capped input `v` that waits in the queue of a session in `auto` while a turn runs, at the
+/// owner's Stop: the error its frame gets, and the text of the one note written quiet after the
+/// turn ended (the input itself is neither written nor run).
+async fn capped_input_at_a_stop(
+    c: &mut HubConn,
+    env: &Env,
+    adapters: &FakeAdapters,
+    v: Value,
+) -> (Value, String) {
+    let sid = Uuid::now_v7();
+    let (a, e) = (
+        Uuid::now_v7(),
+        v["event_id"].as_str().unwrap().parse().unwrap(),
+    );
+    started_in(c, env, sid, "auto").await;
+    let mut a_in = input(sid, a, "A");
+    a_in["human"] = json!(true);
+    c.frame("session.input", a_in).await;
+    adapters
+        .wait_for("input A", has_call(input_call(sid, a)))
+        .await;
+    adapters.accept_input(sid, a).await;
+    assert_eq!(c.expect("ack").await["payload"], json!({"event_id": a}));
+    let mut v = v;
+    v["session_id"] = json!(sid);
+    let fe = c.frame("session.input", v).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let fs = c
+        .frame("session.stop", json!({"session_id": sid, "quiet": true}))
+        .await;
+    assert_eq!(ack_of(c, &fs).await["id"], fs.as_str());
+    adapters.end_turn(sid).await;
+    let calls = adapters
+        .wait_for("the note quiet", |c| {
+            c.iter()
+                .any(|c| matches!(c, FakeCall::InputQuiet { session_id, .. } if *session_id == sid))
+        })
+        .await;
+    let quiet: Vec<&FakeCall> = calls
+        .iter()
+        .filter(|c| matches!(c, FakeCall::InputQuiet { session_id, .. } if *session_id == sid))
+        .collect();
+    assert_eq!(quiet.len(), 1, "{calls:?}");
+    assert!(!calls.contains(&quiet_call(sid, e)), "{calls:?}");
+    assert!(!calls.contains(&input_call(sid, e)), "{calls:?}");
+    let FakeCall::InputQuiet { event_id, .. } = quiet[0] else {
+        unreachable!()
+    };
+    let note = adapters
+        .inputs()
+        .into_iter()
+        .find(|(i, _)| i.event_id == *event_id)
+        .unwrap()
+        .0;
+    assert!(note.peer.is_none() && note.peer_prefix.is_empty() && note.permission_cap.is_none());
+    let err = error_of(c, &fe).await;
+    (err, note.text)
+}
+
+// SPEC 0.231: an input whose cap is below the session's mode that waits at the owner's Stop is
+// not written into the history (the owner's next turn, in the full mode, would see it unhandled
+// there): its frame fails, and the agent gets a quiet note of its own, after the quiet inputs,
+// that the session sent a message and it was dropped, without its text. The note has no frame,
+// so it is acked nowhere, and a normal input waits for it like for any quiet line.
+#[tokio::test]
+async fn a_stop_drops_the_capped_send_that_waits_and_tells_the_agent() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let (a, b, s, n) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+    started_in(&mut c, &env, sid, "auto").await;
+    c.frame("session.input", input(sid, a, "A")).await;
+    adapters
+        .wait_for("input A", has_call(input_call(sid, a)))
+        .await;
+    adapters.accept_input(sid, a).await;
+    assert_eq!(c.expect("ack").await["payload"], json!({"event_id": a}));
+    let fb = c.frame("session.input", input(sid, b, "B")).await;
+    adapters
+        .wait_for("B into the turn", has_call(inject_call(sid, b)))
+        .await;
+    let mut send = send_input(sid, s, "SECRET TEXT");
+    send["permission_cap"] = json!("ask");
+    let fsend = c.frame("session.input", send).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let fstop = c
+        .frame("session.stop", json!({"session_id": sid, "quiet": true}))
+        .await;
+    assert_eq!(ack_of(&mut c, &fstop).await["id"], fstop.as_str());
+    adapters.end_turn_carrying(sid, vec![], vec![b]).await;
+    let calls = adapters
+        .wait_for("B and the note", |c| {
+            c.iter()
+                .filter(|c| matches!(c, FakeCall::InputQuiet { .. }))
+                .count()
+                == 2
+        })
+        .await;
+    let quiet: Vec<&FakeCall> = calls
+        .iter()
+        .filter(|c| matches!(c, FakeCall::InputQuiet { .. }))
+        .collect();
+    assert_eq!(quiet[0], &quiet_call(sid, b), "{calls:?}");
+    let FakeCall::InputQuiet {
+        event_id: note_id, ..
+    } = quiet[1]
+    else {
+        unreachable!()
+    };
+    assert!(!calls.contains(&quiet_call(sid, s)), "{calls:?}");
+    assert!(!calls.contains(&input_call(sid, s)), "{calls:?}");
+    let note = adapters
+        .inputs()
+        .into_iter()
+        .find(|(i, _)| i.event_id == *note_id)
+        .unwrap()
+        .0;
+    assert_eq!(note.text, dropped_note("A message from the session hqc/a"));
+    assert!(!note.text.contains("SECRET TEXT"));
+    // The send's frame fails, not retryable, with the reason.
+    let err = error_of(&mut c, &fsend).await;
+    assert_eq!(err["payload"]["retryable"], false, "{err}");
+    assert_eq!(
+        err["payload"]["message"],
+        "dropped at Stop: it may not run in this session's permission mode",
+        "{err}"
+    );
+    // A normal input waits for the note's acceptance too.
+    let fnew = c.frame("session.input", input(sid, n, "N")).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!adapters.calls().contains(&input_call(sid, n)));
+    adapters.quiet_taken(sid, vec![b, *note_id]).await;
+    assert_eq!(
+        ack_of(&mut c, &fb).await["payload"],
+        json!({"event_id": b, "quiet": true})
+    );
+    adapters
+        .wait_for("N as a turn", has_call(input_call(sid, n)))
+        .await;
+    adapters.accept_input(sid, n).await;
+    // The next ack is N's: the note answered no frame.
+    let next = c.expect("ack").await;
+    assert_eq!(next["id"], fnew.as_str(), "{next}");
+    w.stop().await;
+}
+
+// SPEC 0.231: the note names what was dropped: the message of its `peer` (the buffered sends in
+// front of it stay in the hub's buffer and are not named), a schedule's run, or just a message.
+#[tokio::test]
+async fn the_dropped_note_names_what_was_dropped() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let prefix = json!({"from": "hqc/b", "text": "SECRET", "ts": "2026-11-24T10:00:00Z"});
+    let mut with_peer = send_input(Uuid::nil(), Uuid::now_v7(), "x");
+    with_peer["permission_cap"] = json!("ask");
+    with_peer["peer"]["from"] = json!("hqc/c[x]");
+    with_peer["peer_prefix"] = json!([prefix]);
+    let (err, text) = capped_input_at_a_stop(&mut c, &env, &adapters, with_peer).await;
+    assert_eq!(err["payload"]["retryable"], false, "{err}");
+    assert_eq!(text, dropped_note("A message from the session hqc/c_x_"));
+
+    let mut scheduled = input(Uuid::nil(), Uuid::now_v7(), "tick");
+    scheduled["permission_cap"] = json!("ask");
+    scheduled["schedule_id"] = json!(Uuid::now_v7());
+    let (_, text) = capped_input_at_a_stop(&mut c, &env, &adapters, scheduled).await;
+    assert_eq!(text, dropped_note("A scheduled message"));
+
+    let mut none = input(Uuid::nil(), Uuid::now_v7(), "from a room");
+    none["permission_cap"] = json!("ask");
+    let (_, text) = capped_input_at_a_stop(&mut c, &env, &adapters, none).await;
+    assert_eq!(text, dropped_note("A message"));
+    w.stop().await;
+}
+
+// SPEC 0.231: an input whose cap is the session's own mode lowers nothing: it is written quiet
+// as any other, no note.
+#[tokio::test]
+async fn a_stop_writes_an_input_capped_at_the_sessions_mode_quiet() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let (a, s) = (Uuid::now_v7(), Uuid::now_v7());
+    started_in(&mut c, &env, sid, "auto").await;
+    c.frame("session.input", input(sid, a, "A")).await;
+    adapters
+        .wait_for("input A", has_call(input_call(sid, a)))
+        .await;
+    adapters.accept_input(sid, a).await;
+    assert_eq!(c.expect("ack").await["payload"], json!({"event_id": a}));
+    let mut send = send_input(sid, s, "FYI");
+    send["permission_cap"] = json!("auto");
+    c.frame("session.input", send).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let fs = c
+        .frame("session.stop", json!({"session_id": sid, "quiet": true}))
+        .await;
+    assert_eq!(ack_of(&mut c, &fs).await["id"], fs.as_str());
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("S quiet", has_call(quiet_call(sid, s)))
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let calls = adapters.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| matches!(c, FakeCall::InputQuiet { .. }))
+            .count(),
+        1,
+        "{calls:?}"
+    );
+    w.stop().await;
+}
+
 // SPEC 0.231: a capped input that waits for the runtime to confirm its mode (while the runtime
 // runs a turn of its own) is no reason for the owner's Stop to forget it: it is marked, and
-// written quiet once the stopped turn has ended, not left waiting for a confirmation that comes
-// later.
+// once the stopped turn has ended it fails like any dropped capped input, with the note to the
+// agent, not left waiting for a confirmation that comes later.
 #[tokio::test]
-async fn a_stop_takes_the_capped_input_that_waits_for_its_mode() {
+async fn a_stop_drops_the_capped_input_that_waits_for_its_mode() {
     use PermissionMode::Ask;
     let env = Env::new();
     let adapters = FakeAdapters::new();
@@ -4777,7 +5085,9 @@ async fn a_stop_takes_the_capped_input_that_waits_for_its_mode() {
     started_in(&mut c, &env, sid, "auto").await;
     adapters.set_own_turn(true);
     let e1 = Uuid::now_v7();
-    let f1 = c.frame("session.input", capped_input(sid, e1, "ask")).await;
+    let mut send = send_input(sid, e1, "SECRET TEXT");
+    send["permission_cap"] = json!("ask");
+    let f1 = c.frame("session.input", send).await;
     adapters
         .wait_for("switch down", |c| {
             c.contains(&FakeCall::PermissionMode(sid, Ask))
@@ -4788,18 +5098,23 @@ async fn a_stop_takes_the_capped_input_that_waits_for_its_mode() {
         .await;
     assert_eq!(ack_of(&mut c, &fs).await["id"], fs.as_str());
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(!adapters.calls().contains(&quiet_call(sid, e1)));
+    assert!(!adapters
+        .calls()
+        .iter()
+        .any(|c| matches!(c, FakeCall::InputQuiet { .. })));
     adapters.set_own_turn(false);
     adapters.end_turn(sid).await;
-    adapters
-        .wait_for("e1 quiet", has_call(quiet_call(sid, e1)))
+    let calls = adapters
+        .wait_for("the note quiet", |c| {
+            c.iter().any(|c| matches!(c, FakeCall::InputQuiet { .. }))
+        })
         .await;
-    assert!(!adapters.calls().contains(&input_call(sid, e1)));
-    adapters.quiet_taken(sid, vec![e1]).await;
-    assert_eq!(
-        ack_of(&mut c, &f1).await["payload"],
-        json!({"event_id": e1, "quiet": true})
-    );
+    assert!(!calls.contains(&quiet_call(sid, e1)), "{calls:?}");
+    assert!(!calls.contains(&input_call(sid, e1)), "{calls:?}");
+    let note = adapters.inputs().pop().unwrap().0;
+    assert_eq!(note.text, dropped_note("A message from the session hqc/a"));
+    let err = error_of(&mut c, &f1).await;
+    assert_eq!(err["payload"]["retryable"], false, "{err}");
     w.stop().await;
 }
 

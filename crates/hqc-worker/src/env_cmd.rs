@@ -54,9 +54,13 @@ pub fn summary(cfg: &Config) -> String {
         let _ = writeln!(out, "    allow_local_mcp: {}", e.allow_local_mcp);
         let _ = writeln!(out, "    project_settings: {}", e.project_settings);
         let _ = writeln!(out, "    hub_mcp: {}", e.hub_mcp);
+        let _ = writeln!(out, "    hub_skills: {}", e.hub_skills);
         list(&mut out, "unblock", &e.rules.unblock);
         list(&mut out, "allow", &e.rules.allow);
         list(&mut out, "deny", &e.rules.deny);
+        for (host, rules) in &e.rules.remote_unblock {
+            list(&mut out, &format!("remote_unblock (ssh {host})"), rules);
+        }
     }
     out.push_str("bindings:\n");
     if cfg.env_bindings.is_empty() {
@@ -71,10 +75,13 @@ pub fn summary(cfg: &Config) -> String {
         out.push_str("  none\n");
     }
     for p in &cfg.providers {
-        let key = if p.api_key.is_some() {
-            "api_key ***"
-        } else {
-            "no api_key"
+        let key = match (&p.api_key, &p.api_key_vault) {
+            (_, Some(v)) => match &v.field {
+                Some(f) => format!("api_key from Vaultwarden entry {}, field {f}", v.entry),
+                None => format!("api_key from Vaultwarden entry {}", v.entry),
+            },
+            (Some(_), None) => "api_key ***".to_string(),
+            (None, None) => "no api_key".to_string(),
         };
         let _ = writeln!(out, "  {}: {} ({key})", p.name, p.base_url);
     }
@@ -98,6 +105,14 @@ pub fn summary(cfg: &Config) -> String {
         out,
         "task_tools: {}",
         if cfg.task_tools { "on" } else { "off" }
+    );
+    let _ = writeln!(
+        out,
+        "long_run_note: {}",
+        match cfg.long_run_note {
+            Some(every) => format!("{} s", every.as_secs()),
+            None => "off".into(),
+        }
     );
     out.push_str("workspace keys:\n");
     match cfg.secrets.all() {
@@ -174,6 +189,15 @@ pub fn which(cfg: &Config, path: &Path) -> anyhow::Result<String> {
             "off"
         }
     );
+    let _ = writeln!(
+        out,
+        "    the hub's skills: {}",
+        if e.hub_skills {
+            "taken (hub_skills), as the plugin hqc (--plugin-dir)"
+        } else {
+            "off"
+        }
+    );
     let p = &cfg.permissions;
     let _ = writeln!(
         out,
@@ -234,6 +258,31 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("sk-zai-secret"));
+    }
+
+    #[test]
+    fn a_vault_key_is_listed_by_its_entry() {
+        let c = Config::parse(
+            "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n\
+             [providers.zai]\nbase_url = \"https://api.z.ai/api/anthropic\"\n\
+             api_key = { vault = \"zai key\" }\n\
+             [providers.kimi]\nbase_url = \"https://api.kimi.example\"\n\
+             api_key = { vault = \"kimi\", field = \"token\" }\n",
+        )
+        .unwrap();
+        let out = summary(&c);
+        assert!(
+            out.contains(
+                "zai: https://api.z.ai/api/anthropic (api_key from Vaultwarden entry zai key)"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "kimi: https://api.kimi.example (api_key from Vaultwarden entry kimi, field token)"
+            ),
+            "{out}"
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub mod connection;
 pub mod enroll;
 pub mod env_cmd;
 pub mod fs;
+pub mod hub_skills;
 pub mod inbox;
 pub mod known_paths;
 pub mod link;
@@ -22,6 +23,7 @@ pub mod mirror;
 pub mod outbox;
 pub mod peer;
 pub mod permissions;
+pub mod provider_probe;
 pub mod secrets;
 pub mod ssh;
 pub mod supervisor;
@@ -105,6 +107,9 @@ impl Worker {
         if self.config.session_secrets && self.config.vault {
             if let Some(o) = capabilities.as_object_mut() {
                 o.insert("vault".into(), true.into());
+                // A worker that reads fields of an entry says so; an older one would ignore
+                // `vault_field` and give the password.
+                o.insert("vault_fields".into(), true.into());
             }
         }
         // Workspaces are hub objects (SPEC §3); only `allowed_roots` bounds them here.
@@ -211,6 +216,8 @@ impl Worker {
         let conn_stop = CancellationToken::new();
         let conn_task = tokio::spawn(conn.run(conn_stop.clone()));
 
+        // SPEC 0.245: the hub's skills no session has used for a week.
+        hub_skills::sweep(&self.config.skills_root, hub_skills::UNUSED);
         let mut sup = Supervisor::new(
             Arc::new(self.config),
             self.adapters,

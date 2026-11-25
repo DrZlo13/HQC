@@ -1105,7 +1105,37 @@ async fn only_the_worker_owner_answers_an_mcp_servers_request() {
         f["payload"],
         json!({"session_id": sid, "request_id": "c-1", "answers": {"1": "Yes"}, "action": "accept"})
     );
+    // #129: a server's form may ask for a token. The history keeps that it was answered, and
+    // the frame kept for the worker forgets the answers once the worker has them.
+    let kept: Value = sqlx::query_scalar(
+        "SELECT payload FROM events WHERE session_id = $1 AND type = 'clarify.response'",
+    )
+    .bind(s.id)
+    .fetch_one(&hub.app.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        kept,
+        json!({"request_id": "c-1", "answers": {}, "action": "accept"})
+    );
     w.reply(&f["id"], "ack", json!({})).await;
+    let mut forgotten = false;
+    for _ in 0..50 {
+        let r: Value = sqlx::query_scalar(
+            "SELECT result FROM pending_requests WHERE session_id = $1 AND request_id = 'c-1'",
+        )
+        .bind(s.id)
+        .fetch_one(&hub.app.db)
+        .await
+        .unwrap();
+        if r["payload"]["answers"] == json!({}) {
+            assert_eq!(r["payload"]["action"], "accept");
+            forgotten = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(forgotten, "the delivered answers are forgotten");
     hub.finish().await;
 }
 
@@ -2825,6 +2855,97 @@ async fn subagent_leftovers_for_another_workers_session_write_nothing() {
                 "ended_s": 1805,
                 "commands": [
                     {"task_id": "b3k9wq2lz", "description": "Wait for the suite", "running_s": 9300},
+                ],
+            }),
+        )
+        .await;
+    let ack = w2.expect("ack").await;
+    assert_eq!(ack["id"], id.as_str(), "{ack}");
+    w.expect_silence(Duration::from_millis(300)).await;
+    let notes = hub
+        .events(&sid)
+        .await
+        .into_iter()
+        .filter(|e| e["type"] == "user.message")
+        .count();
+    assert_eq!(notes, 0);
+    hub.finish().await;
+}
+
+/// SPEC 0.244, §8.1: `session.long_runs` gives the session's agent a note, the owner's pending
+/// `user.message` that names each task with its task id and run time, delivered as any input;
+/// the frame is acked.
+#[tokio::test]
+async fn long_runs_give_the_agent_a_note() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("long-runs").await;
+    ack_start(&mut w, &sid).await;
+    w.send(
+        "session.long_runs",
+        json!({
+            "session_id": sid,
+            "tasks": [
+                {"task_id": "b3k9wq2lz", "kind": "command", "description": "Run the full build", "running_s": 3300},
+                {"task_id": "a6996d99c", "kind": "agent", "description": "Heightmap: 25 frames", "running_s": 6602},
+            ],
+        }),
+    )
+    .await;
+    let mut got = vec![w.recv().await, w.recv().await];
+    got.sort_by_key(|f| f["type"].as_str().unwrap().to_string());
+    assert_eq!(
+        (got[0]["type"].as_str(), got[1]["type"].as_str()),
+        (Some("ack"), Some("session.input")),
+        "{got:?}"
+    );
+    let si = &got[1];
+    assert!(si["payload"].get("human").is_none(), "{si}");
+    assert_eq!(
+        si["payload"]["text"],
+        "[hqc] Background work of this session is still running: command \"Run the full \
+         build\" (task b3k9wq2lz, 55 min); subagent \"Heightmap: 25 frames\" (task a6996d99c, \
+         1 h 50 min). Check that each still makes progress; stop what hangs or is no longer \
+         needed with TaskStop, or leave it."
+    );
+    let (_, me) = hub.get("/api/me").await;
+    let events = hub.events(&sid).await;
+    let note = events
+        .iter()
+        .find(|e| e["event_id"] == si["payload"]["event_id"])
+        .expect("the note is stored");
+    assert_eq!(
+        (
+            note["type"].as_str(),
+            note["author"]["kind"].as_str(),
+            &note["author"]["id"]
+        ),
+        (Some("user.message"), Some("user"), &me["id"]),
+        "{note}"
+    );
+    hub.finish().await;
+}
+
+/// SPEC 0.244, §8.1: `session.long_runs` naming a session of another worker is acked and writes
+/// nothing: the session's worker gets no input and the session no `user.message`.
+#[tokio::test]
+async fn long_runs_for_another_workers_session_write_nothing() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("long-runs-other").await;
+    ack_start(&mut w, &sid).await;
+    let (_, token2) = hub.enroll("other-mac").await;
+    let mut w2 = FakeWorker::connect(&hub, &token2).await.unwrap();
+    w2.hello(WS_PATH, Uuid::new_v4()).await;
+    let id = w2
+        .send(
+            "session.long_runs",
+            json!({
+                "session_id": sid,
+                "tasks": [
+                    {"task_id": "b3k9wq2lz", "kind": "command", "description": "Run the full build", "running_s": 3300},
                 ],
             }),
         )

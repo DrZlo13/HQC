@@ -47,6 +47,7 @@ pub mod search;
 pub mod secrets;
 pub mod security;
 pub mod side;
+pub mod skills;
 pub mod spawn;
 pub mod state;
 pub mod titles;
@@ -147,11 +148,24 @@ pub fn router(app: AppState) -> Router {
             axum::routing::patch(mcp_servers::update).delete(mcp_servers::delete),
         )
         .route("/api/mcp/servers/{id}/test", post(mcp_servers::test))
+        .route("/api/mcp/probe", post(mcp_servers::probe))
         .route(
             "/api/mcp/servers/{id}/sign_in",
             post(mcp_servers::sign_in).delete(mcp_servers::sign_out),
         )
         .route("/api/mcp/oauth/callback", get(mcp_servers::oauth_callback))
+        .route(
+            "/api/skills",
+            get(skills::list)
+                .post(skills::upload)
+                .layer(axum::extract::DefaultBodyLimit::max(skills::BODY_LIMIT)),
+        )
+        .route(
+            "/api/skills/{id}",
+            axum::routing::patch(skills::update).delete(skills::delete),
+        )
+        .route("/api/skills/{id}/files", get(skills::files))
+        .route("/api/providers/probe", post(providers::probe))
         .route(
             "/api/providers",
             get(providers::list).post(providers::create),
@@ -238,6 +252,7 @@ pub fn router(app: AppState) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route("/worker/artifacts/{id}", get(artifacts::for_worker))
+        .route("/worker/skills/{sha256}", get(skills::for_worker))
         .route(
             "/api/schedules",
             get(schedules::list).post(schedules::create_api),

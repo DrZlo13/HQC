@@ -3,7 +3,7 @@
 A native iPhone and iPad client for the hub, in Swift and SwiftUI with the iOS 26 Liquid Glass
 design. It covers what you do with hqc day to day, against the hub's REST API and `/api/ws` as
 the web client does (SPEC §6), plus two hub routes made for it: sign-in through the system
-browser and Apple push (SPEC 0.237).
+browser and Apple push (SPEC 0.248).
 
 ## What it does
 
@@ -54,7 +54,7 @@ browser and Apple push (SPEC 0.237).
   `WhisperKit`, 99 languages). Offered during onboarding and managed in Settings → Voice input
   (enable/disable, download, update/re-download, delete models). Hold the composer's mic button
   to record with an audio-reactive halo, slide left to cancel, or slide up to lock hands-free.
-- **Notifications.** Sealed end to end (SPEC 0.238): the app makes a key, kept in a keychain
+- **Notifications.** Sealed end to end (SPEC 0.249): the app makes a key, kept in a keychain
   group it shares with its notification extension (`HQCNotifications`), and the hub seals each
   notice with it, so Apple and the relay see only a generic alert; the extension opens it on the
   device. Apple push for permission requests, questions, final answers, room posts
@@ -104,7 +104,7 @@ working project's tile at the speed of its agents' output tokens.
 Access and OIDC proxies (such as Traefik + oauth2-proxy + Keycloak, RUNBOOK §1.9) run with every
 identity provider, Google included, and with the browser's own SSO session. The hub hands back a
 one-time code, which the app exchanges with a verifier only it holds for the Access token or the
-OIDC proxy's session cookies (SPEC §6, 0.240); the credentials stay in the app's Keychain and go
+OIDC proxy's session cookies (SPEC §6, 0.251); the credentials stay in the app's Keychain and go
 with every request and the WebSocket upgrade, with `Origin` set to the hub's origin (SPEC §20),
 and refreshed `Set-Cookie` headers from the hub's host update the stored cookies automatically.
 When the session expires, the next request comes back as a redirect or `401` and the app asks to

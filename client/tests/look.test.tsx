@@ -87,8 +87,8 @@ it('Settings has one Look switch next to the theme; a pick goes to the hub as `P
     me = { ...me, ...body };
     return new Response(JSON.stringify(me), { status: 200, headers: { 'content-type': 'application/json' } });
   };
-  // Settings lists the workers and the MCP servers too; this test is about the look.
-  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => [] }), socket);
+  // Settings lists the workers, the MCP servers and the skills too; this test is about the look.
+  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => [], skills: async () => [] }), socket);
   app.me = ME;
   root = document.createElement('div');
   document.body.appendChild(root);

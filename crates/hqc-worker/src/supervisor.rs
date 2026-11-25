@@ -31,10 +31,15 @@
 //!   the runtime started by itself) marks what waits at that moment (the queue, a capped input
 //!   waiting for its mode) and, when the turn ends, what the runtime dropped from it, to be
 //!   written into the agent's history without a turn ([`Adapter::input_quiet_with`], in
-//!   `event_id` order); a slash command among them fails with "cancelled by Stop". Until the
+//!   `event_id` order); a slash command among them fails with "cancelled by Stop". So does an
+//!   input whose cap is below the session's own mode (T39): it was never handled under its cap
+//!   and the owner's next turn would see it unhandled in the full mode, so the hub gets an error
+//!   for it and the agent gets a quiet note of its own instead ([`peer::dropped_note`]): what
+//!   was dropped (another session's message, a scheduled run), without its text. Until the
 //!   turn ends nothing new goes into it; what comes after the Stop is never marked. A quiet
 //!   input's acceptance is `ack {event_id, quiet: true}` ([`AdapterEvent::QuietTaken`]), also
-//!   when it is resent. A quiet line the runtime drops ([`AdapterEvent::QuietCancelled`]) is
+//!   when it is resent; a note has no frame of the hub, so nothing is acked or remembered for
+//!   it. A quiet line the runtime drops ([`AdapterEvent::QuietCancelled`]) is
 //!   written again. A normal input waits for their acks (the CLI takes a "next" line before a
 //!   "later" one), as do the idle unload and a move. A pause's stop (no `quiet`), a Stop with no
 //!   turn running and a `session.kill` mark and write nothing.
@@ -62,8 +67,9 @@
 //!   stops, and again as it is on every [`AdapterEvent::Heartbeat`]. The output file of a
 //!   background task that ended ([`AdapterEvent::TaskOutput`]) is uploaded and becomes an
 //!   `attachment` of the session. The commands a subagent left running 30 minutes after it
-//!   reported ([`AdapterEvent::SubagentLeftovers`]) go as `session.subagent_leftovers`, not
-//!   once the agent is stopped.
+//!   reported ([`AdapterEvent::SubagentLeftovers`]) go as `session.subagent_leftovers`, and the
+//!   background commands and subagents that have each run through another `long_run_note`
+//!   ([`AdapterEvent::LongRuns`]) as `session.long_runs`, neither once the agent is stopped.
 //! - A tool result with files ([`AdapterEvent::ToolResult`]: its whole text, its images) goes to
 //!   the hub once they are uploaded with `PUT /worker/artifacts`, before the adapter's next
 //!   event (SPEC §8.1).
@@ -119,11 +125,11 @@ use std::path::{Path, PathBuf};
 use hqc_proto::event::{ArtifactKind, EventKind, LiveKind, PeerMode};
 use hqc_proto::frame::{
     error_code, worker_approval, Ack, ClaudeAuthResult, ClaudeLoginDoneResult, ClaudeLoginResult,
-    Envelope, HeldBy, HubFrame, InputNowResult, InputWithdrawnResult, LockedBy, PermissionMode,
-    ProcessState, RequestResult, ResultBody, Runtime, SecretOutcome, SecretPut, SecretPutResult,
-    SessionInput, SessionStart, StartMode, SubagentHistoryResult, SubagentLeftovers, TitleRequest,
-    TitleResult, WireError, WorkerApprovalRequest, WorkerFrame, WorkspaceKeyDeleteResult,
-    WorkspaceKeysResult,
+    Envelope, HeldBy, HubFrame, InputNowResult, InputWithdrawnResult, LockedBy, LongRuns,
+    PermissionMode, ProcessState, RequestResult, ResultBody, Runtime, SecretOutcome, SecretPut,
+    SecretPutResult, SessionInput, SessionStart, StartMode, SubagentHistoryResult,
+    SubagentLeftovers, TitleRequest, TitleResult, WireError, WorkerApprovalRequest, WorkerFrame,
+    WorkspaceKeyDeleteResult, WorkspaceKeysResult,
 };
 
 /// Why `secret.put` and the workspace keys are refused on a worker without them (SPEC 0.147).
@@ -255,6 +261,8 @@ pub struct Supervisor {
     factory: Arc<dyn AdapterFactory>,
     link: HubLink,
     artifacts: ArtifactClient,
+    /// The hub's skills, fetched and put into plugin folders (SPEC 0.245).
+    skills: Arc<crate::hub_skills::HubSkills>,
     sessions: HashMap<Uuid, SessionHandle>,
     shutdown_timeout: Duration,
     /// One permit per running agent process (`max_sessions`).
@@ -418,6 +426,10 @@ impl Supervisor {
         let (outcomes_tx, outcomes_rx) = mpsc::unbounded_channel();
         Self {
             workspaces: crate::workspaces::Workspaces::new(cfg.clone(), created, link.clone()),
+            skills: Arc::new(crate::hub_skills::HubSkills::new(
+                cfg.skills_root.clone(),
+                artifacts.clone(),
+            )),
             artifacts,
             slots: Arc::new(Semaphore::new(cfg.max_sessions)),
             titler: Arc::new(crate::title::Titler::from_config(&cfg)),
@@ -943,6 +955,23 @@ impl Supervisor {
                 });
                 return;
             }
+            // SPEC 0.236: what a model endpoint lists, for Settings to fill a provider.
+            HubFrame::ProviderProbe(r) => {
+                let (link, cfg) = (self.link.clone(), self.cfg.clone());
+                tokio::spawn(async move {
+                    let provider_probe = crate::provider_probe::probe(&cfg, &r.base_url).await;
+                    link.reply(
+                        &id,
+                        WorkerFrame::Result(RequestResult {
+                            request_id: r.request_id,
+                            body: ResultBody::ProviderProbe(
+                                hqc_proto::frame::ProviderProbeResult { provider_probe },
+                            ),
+                        }),
+                    );
+                });
+                return;
+            }
             HubFrame::ClaudeLogin(r) => {
                 let (link, bin, logins) =
                     (self.link.clone(), self.claude_bin(), self.logins.clone());
@@ -1212,6 +1241,7 @@ impl Supervisor {
             events_open: true,
             link: self.link.clone(),
             artifacts: self.artifacts.clone(),
+            skills: self.skills.clone(),
             roots: self.cfg.allowed_roots.clone(),
             mirror: self.mirror.clone(),
             idle_timeout: self.cfg.idle_timeout,
@@ -1353,6 +1383,10 @@ struct Queued {
     /// A Stop came while it waited: it is written into the agent's history without a turn
     /// ([`Session::write_quiet`]), never as an input of a turn.
     quiet: bool,
+    /// Not an input of the hub but hqc's own note to the agent that an input was dropped at the
+    /// Stop ([`Session::mark_quiet`]): it has no frame to ack or fail, and it is written after
+    /// the quiet inputs.
+    note: bool,
 }
 
 struct Turn {
@@ -1393,6 +1427,7 @@ struct Session {
     events_open: bool,
     link: HubLink,
     artifacts: ArtifactClient,
+    skills: Arc<crate::hub_skills::HubSkills>,
     /// `allowed_roots` of the worker config: `.hqc/` is added to a git exclude file only
     /// inside them (SPEC §14).
     roots: Vec<std::path::PathBuf>,
@@ -1883,6 +1918,7 @@ impl Session {
     /// Under a cap (T39) the runtime goes no higher than the cap: a lower mode comes at once,
     /// the rest when the capped turn ends.
     async fn switch_mode(&mut self, mode: PermissionMode) {
+        let mode = crate::config::auto_off_provider(self.id, mode, self.spec.provider.is_some());
         if self.spec.permission_mode == mode {
             return;
         }
@@ -1917,6 +1953,9 @@ impl Session {
         let Some(proc) = self.adapter.secrets() else {
             anyhow::bail!("the agent is not running: give it once it runs");
         };
+        if put.vault_field.is_some() && put.vault.is_none() {
+            anyhow::bail!("vault_field needs a vault entry");
+        }
         // A vault entry is read here, by this machine's `rbw`: the value never came from the hub.
         let vaulted = match put.vault.as_deref() {
             None => None,
@@ -1933,8 +1972,23 @@ impl Session {
                     anyhow::bail!("give the value or the vault entry, not both");
                 }
                 hqc_proto::frame::check_vault_entry(entry).map_err(anyhow::Error::msg)?;
-                tracing::info!(session_id = %self.id, %entry, "reading a secret from Vaultwarden");
-                Some(crate::vault::read_for(rbw, entry, put.kind == SecretKind::SshKey).await?)
+                let field = put.vault_field.as_deref();
+                if let Some(f) = field {
+                    hqc_proto::frame::check_vault_field(f).map_err(anyhow::Error::msg)?;
+                }
+                tracing::info!(session_id = %self.id, %entry, ?field, "reading a secret from Vaultwarden");
+                Some(
+                    crate::vault::read_for(rbw, entry, field, put.kind == SecretKind::SshKey)
+                        .await
+                        .map_err(|e| {
+                            // Typing the value does not get past a refusal of the entry itself.
+                            if e.is::<crate::vault::Refused>() {
+                                e
+                            } else {
+                                anyhow::anyhow!("{e}, or type the value")
+                            }
+                        })?,
+                )
             }
         };
         if put.vault.is_none() && put.value.is_none() && put.kind != SecretKind::SshKeygen {
@@ -2253,6 +2307,7 @@ impl Session {
             input,
             requeued: 0,
             quiet: false,
+            note: false,
         });
         if self.state == ProcessState::Stopped {
             if let Err(e) = self.ensure_running().await {
@@ -2344,9 +2399,10 @@ impl Session {
     }
 
     /// Writes the inputs a Stop marked into the agent's history without a turn, in `event_id`
-    /// order (the hub's creation order), to wait in [`Session::quiet_out`] for the runtime to
-    /// take them; one whose attachments or write fail gets the error as any input. `true`: there
-    /// were some.
+    /// order (the hub's creation order) and the notes of dropped inputs after them, to wait in
+    /// [`Session::quiet_out`] for the runtime to take them; one whose attachments or write fail
+    /// gets the error as any input (a note has no frame: it is only logged). `true`: there were
+    /// some.
     async fn write_quiet(&mut self) -> bool {
         let (mut marked, rest): (Vec<Queued>, Vec<Queued>) = std::mem::take(&mut self.queue)
             .into_iter()
@@ -2355,7 +2411,7 @@ impl Session {
         if marked.is_empty() {
             return false;
         }
-        marked.sort_by_key(|q| q.input.event_id);
+        marked.sort_by_key(|q| (q.note, q.input.event_id));
         for q in marked {
             let Some((input, files)) = self.prepared(&q).await else {
                 continue;
@@ -2366,11 +2422,13 @@ impl Session {
                     self.quiet_out.push(q);
                 }
                 Err(e) => {
-                    tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, "input failed: {e:#}");
-                    self.reply_input(
-                        &q.frame_id,
-                        wire_error(error_code::INTERNAL, format!("{e:#}"), true),
-                    );
+                    tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, note = q.note, "input failed: {e:#}");
+                    if !q.note {
+                        self.reply_input(
+                            &q.frame_id,
+                            wire_error(error_code::INTERNAL, format!("{e:#}"), true),
+                        );
+                    }
                 }
             }
         }
@@ -2908,10 +2966,13 @@ impl Session {
                         continue;
                     };
                     let q = self.quiet_out.remove(i);
-                    self.reply_input(&q.frame_id, quiet_ack(event_id));
+                    // A note answers no frame of the hub, which never sends its id again.
+                    if !q.note {
+                        self.reply_input(&q.frame_id, quiet_ack(event_id));
+                        self.remember_delivered(event_id, Taken::Quiet);
+                    }
                     // It carried the note of a move that stopped background tasks (`prepared`).
                     self.stopped_by_move = 0;
-                    self.remember_delivered(event_id, Taken::Quiet);
                 }
                 if self.quiet_out.is_empty() {
                     // A move that waited for the acks goes, and what came meanwhile runs.
@@ -3040,6 +3101,15 @@ impl Session {
                         }));
                 }
             }
+            // As the leftovers: the tasks of a process already stopped stopped with it.
+            AdapterEvent::LongRuns { tasks } => {
+                if self.state != ProcessState::Stopped {
+                    self.link.send(WorkerFrame::LongRuns(LongRuns {
+                        session_id: self.id,
+                        tasks,
+                    }));
+                }
+            }
             AdapterEvent::RuntimeSessionId(r) => {
                 // A start of this task resumes it, as the hub's next `session.start` will
                 // (after `/clear` the transcript is another one, SPEC §8.1).
@@ -3142,6 +3212,7 @@ impl Session {
                         input: t.input,
                         requeued: t.requeued,
                         quiet: false,
+                        note: false,
                     },
                 );
             } else if !t.accepted {
@@ -3150,6 +3221,7 @@ impl Session {
                     input: t.input,
                     requeued: t.requeued,
                     quiet: false,
+                    note: false,
                 });
             }
         }
@@ -3198,7 +3270,10 @@ impl Session {
     /// Marks input `q` of the owner's Stop (SPEC 0.231) to be written into the agent's history
     /// without a turn ([`Session::write_quiet`], in `event_id` order): the agent knows it next
     /// time and does not act on it now. A slash command fails: it runs or it does not, it is not
-    /// text for the history.
+    /// text for the history. So does an input whose cap is below the session's own mode (T39):
+    /// it was never handled under its cap, and the owner's next turn in the full mode would see
+    /// it unhandled, so it is not written; the agent gets a note of its own after the inputs
+    /// instead, naming the sender (the `peer` only) and not showing the text ([`peer::dropped_note`]).
     fn mark_quiet(&mut self, mut q: Queued) {
         // What the runtime gets decides: a message of another session that starts with a path
         // carries a header first and is no command.
@@ -3208,6 +3283,33 @@ impl Session {
             .starts_with('/')
         {
             self.cancelled_by_stop(&q.frame_id, q.input.event_id);
+        } else if cap(&q.input) < self.spec.permission_mode {
+            tracing::info!(session_id = %self.id, event_id = %q.input.event_id, "input dropped at stop: its cap is below the session's mode");
+            self.reply_input(
+                &q.frame_id,
+                wire_error(
+                    error_code::INTERNAL,
+                    "dropped at Stop: it may not run in this session's permission mode".to_string(),
+                    false,
+                ),
+            );
+            self.queue.push_back(Queued {
+                frame_id: String::new(),
+                input: SessionInput {
+                    session_id: self.id,
+                    event_id: Uuid::now_v7(),
+                    text: crate::peer::dropped_note(&q.input),
+                    artifact_ids: vec![],
+                    peer_prefix: vec![],
+                    peer: None,
+                    permission_cap: None,
+                    schedule_id: None,
+                    human: false,
+                },
+                requeued: 0,
+                quiet: true,
+                note: true,
+            });
         } else {
             q.quiet = true;
             self.queue.push_back(q);
@@ -3238,15 +3340,17 @@ impl Session {
         if q.requeued >= MAX_REQUEUES {
             // The runtime keeps ending turns without taking this input: give it up instead of
             // resending it forever (the hub marks it failed after the retries of SPEC §5.2).
-            tracing::error!(session_id = %self.id, event_id = %q.input.event_id, "input never taken by the runtime; giving up");
-            self.reply_input(
-                &q.frame_id,
-                wire_error(
-                    error_code::INTERNAL,
-                    "the runtime ended its turns without taking this input".to_string(),
-                    false,
-                ),
-            );
+            tracing::error!(session_id = %self.id, event_id = %q.input.event_id, note = q.note, "input never taken by the runtime; giving up");
+            if !q.note {
+                self.reply_input(
+                    &q.frame_id,
+                    wire_error(
+                        error_code::INTERNAL,
+                        "the runtime ended its turns without taking this input".to_string(),
+                        false,
+                    ),
+                );
+            }
             return;
         }
         tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, "turn ended before the input was accepted; requeued");
@@ -3301,10 +3405,37 @@ impl Session {
         // `mode: resume` from the hub, or this process ran the agent before (kill, idle
         // timeout, crash). The Claude Code adapter checks for the transcript either way.
         let mode = self.start_mode();
-        let spec = StartSpec {
+        // SPEC 0.245: the hub's skills as they are now, in a plugin folder; those that could
+        // not be had are left out of this start.
+        let (skill_dir, skills) = match self.skills.prepare(self.id, &self.spec.skills).await {
+            Some((dir, have)) => (Some(dir), have),
+            None => (None, vec![]),
+        };
+        let mut spec = StartSpec {
             permission_mode: mode,
+            skill_dir,
+            skills,
             ..self.spec.clone()
         };
+        // A provider key kept in Vaultwarden is read at every start, into this copy only: a key
+        // changed there is the next start's, and the session's own spec never holds it.
+        if let Some(p) = spec.provider.as_mut() {
+            if let Some(k) = p.api_key_vault.take() {
+                tracing::info!(session_id = %self.id, provider = %p.name, entry = %k.entry, "reading a provider key from Vaultwarden");
+                match crate::vault::read_for(&k.rbw, &k.entry, k.field.as_deref(), false).await {
+                    Ok(v) => p.api_key = Some(crate::token::Secret::new(v)),
+                    Err(e) => {
+                        let e = anyhow::Error::new(ProviderKeyUnreadable(format!(
+                            "the key of the provider {} could not be read from Vaultwarden: {e}",
+                            p.name
+                        )));
+                        tracing::warn!(session_id = %self.id, "agent start failed: {e:#}");
+                        self.set_state(ProcessState::Stopped);
+                        return Err(e);
+                    }
+                }
+            }
+        }
         let r = if self.started_once || self.resume_requested {
             self.adapter.resume(&spec).await
         } else {
@@ -3406,7 +3537,7 @@ impl Session {
     /// Every queued input gets the start failure; the hub counts them (SPEC §5.2).
     fn fail_queue(&mut self, e: &anyhow::Error) {
         let transcript = self.transcript();
-        for q in self.queue.drain(..) {
+        for q in self.queue.drain(..).filter(|q| !q.note) {
             self.link
                 .reply_input(self.id, transcript.as_deref(), &q.frame_id, start_failed(e));
         }
@@ -3554,8 +3685,26 @@ fn waits(e: &anyhow::Error) -> bool {
     e.is::<NoSlot>()
 }
 
+/// The key of the session's provider could not be read from Vaultwarden. Not retryable: a
+/// pinentry window the read left open stays open on this machine, and the hub's retries (three,
+/// seconds apart) would only stack more of them; the owner unlocks `rbw` and sends again.
+#[derive(Debug)]
+struct ProviderKeyUnreadable(String);
+
+impl std::fmt::Display for ProviderKeyUnreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ProviderKeyUnreadable {}
+
 fn start_failed(e: &anyhow::Error) -> WorkerFrame {
-    wire_error(error_code::AGENT_START_FAILED, format!("{e:#}"), true)
+    wire_error(
+        error_code::AGENT_START_FAILED,
+        format!("{e:#}"),
+        !e.is::<ProviderKeyUnreadable>(),
+    )
 }
 
 /// The most of a background task's output uploaded: 2 MB, what "Open" of a text shows in the

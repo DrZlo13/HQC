@@ -31,7 +31,7 @@ extension HubClient {
         (try? await get("/api/push/apns", as: JSONValue.self))?["enabled"]?.bool ?? false
     }
 
-    /// With `key`, the hub seals each notice for this device (SPEC 0.238).
+    /// With `key`, the hub seals each notice for this device (SPEC 0.249).
     func registerDevice(token: String, sandbox: Bool, key: String? = nil) async throws {
         var body: [String: Any] = ["token": token, "sandbox": sandbox]
         if let key { body["key"] = key }

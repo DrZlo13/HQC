@@ -16,6 +16,7 @@ import { Api, ApiError } from '../src/api';
 import { ARCHIVE_UNDO_MS, AppState } from '../src/app';
 import { tabMark } from '../src/favicon';
 import { parseEvent, type ListMode, type Project, type ProjectSort, type SessionInfo, type SessionState, type Workspace } from '../src/proto';
+import { onMac } from '../src/keys';
 import { trackHistory } from '../src/nav';
 import { applyLook } from '../src/theme';
 import { Timeline } from '../src/timeline';
@@ -25,7 +26,7 @@ import { ChatItems, type ChatActions } from '../src/ui/cards';
 import { Chat } from '../src/ui/Chat';
 import { tileBackground } from '../src/ui/Appearance';
 import { PhoneHome } from '../src/ui/PhoneHome';
-import { ProjectRail, RailRun, onMac, runSpeed, runningTitle } from '../src/ui/ProjectRail';
+import { ProjectRail, RailRun, runSpeed, runningTitle } from '../src/ui/ProjectRail';
 import { ProjectSettings } from '../src/ui/ProjectSettings';
 import { LIST_WIDTH_MAX, LIST_WIDTH_MIN, LIST_WIDTH_STEP, SESSION_DRAG, SessionList, WidthGrip } from '../src/ui/SessionList';
 import { ALLOW_ALL_CONFIRM } from '../src/ui/labels';
@@ -1661,7 +1662,7 @@ describe('the project bar: search, menu, archive', () => {
     // Ctrl+K (not on a Mac) opens it from anywhere; no match says so; Esc puts the title and the
     // list back, the focus on the magnifier.
     await act(async () => {
-      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', code: 'KeyK', ctrlKey: true, bubbles: true, cancelable: true }));
     });
     expect(document.activeElement).toBe(field());
     await typeQuery('zzz');
@@ -1673,7 +1674,7 @@ describe('the project bar: search, menu, archive', () => {
     expect(bar()).toHaveLength(5);
     // Again (a capital K too); a press outside the bar closes it.
     await act(async () => {
-      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'K', ctrlKey: true, bubbles: true, cancelable: true }));
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'K', code: 'KeyK', ctrlKey: true, bubbles: true, cancelable: true }));
     });
     expect(field()).not.toBeNull();
     await act(async () => {
@@ -1694,7 +1695,7 @@ describe('the project bar: search, menu, archive', () => {
     await mount(<ProjectRail app={app} />);
     const press = (mod: 'metaKey' | 'ctrlKey') =>
       act(async () => {
-        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', [mod]: true, bubbles: true, cancelable: true }));
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', code: 'KeyK', [mod]: true, bubbles: true, cancelable: true }));
       });
     const platform = vi.spyOn(navigator, 'platform', 'get');
     try {

@@ -299,7 +299,14 @@ pub async fn answer(
             hqc_proto::replace_nul_json(&mut answers);
             let mut frame =
                 json!({"session_id": s.id, "request_id": request_id, "answers": answers});
-            let mut event = json!({"request_id": request_id, "answers": answers});
+            // An MCP server's form may ask for a token: its answers go to the worker only, the
+            // history keeps that it was answered (#129, SPEC 0.246).
+            let kept = if from_server {
+                json!({})
+            } else {
+                answers.clone()
+            };
+            let mut event = json!({"request_id": request_id, "answers": kept});
             if let Some(a) = action {
                 frame["action"] = json!(a);
                 event["action"] = json!(a);
@@ -619,7 +626,7 @@ pub async fn worker_approval(
     });
     let mut stored = payload.clone();
     hqc_proto::replace_nul_json(&mut stored);
-    if !db::open_request(
+    match db::open_request_as(
         &app.db,
         "worker_approval",
         s.id,
@@ -630,7 +637,9 @@ pub async fn worker_approval(
     )
     .await?
     {
-        return Ok(WorkerApproval::Stored);
+        db::Opened::New => {}
+        db::Opened::Repeat => return Ok(WorkerApproval::Stored),
+        db::Opened::Taken => return Ok(WorkerApproval::Refused(db::REQUEST_ID_TAKEN.to_string())),
     }
     tracing::info!(%worker_id, request_id = %r.request_id, kind = %r.kind, "worker asks its owner");
     events::store_hub_event(

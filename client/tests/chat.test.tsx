@@ -24,11 +24,11 @@ import {
   type SpawnedBy,
   type SubagentHistory,
 } from '../src/proto';
-import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, modelName, shownModel } from '../src/ui/labels';
+import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, formatCost, formatTokens, modelName, shownModel } from '../src/ui/labels';
 import { limitNotice } from '../src/ui/limits';
 import { Timeline } from '../src/timeline';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
-import { Chat, withQuote } from '../src/ui/Chat';
+import { Chat, matchCommands, withQuote } from '../src/ui/Chat';
 import { LiveSubagents } from '../src/ui/LiveSubagents';
 import { WEB_SEARCHES } from '../src/websearch';
 
@@ -259,6 +259,23 @@ describe('permission mode', () => {
     ({ app } = setup('idle'));
     await mount(app);
     expect(mark()).toEqual({ auto: undefined, ask: undefined });
+  });
+
+  it('offers no Auto on a session on a model provider, and says why it runs Ask (#194)', async () => {
+    const provider = { id: 'p1', label: 'Qwen (local)' };
+    const { app, api } = setup('idle', { permission_mode: 'auto', effective_permission_mode: 'ask', provider });
+    await mount(app);
+    expect(mark().ask).toBe('Ask (Auto asked)');
+    expect($('.perm-ask')!.getAttribute('title')).toContain('safety check runs on Anthropic');
+    render(null, root);
+    const s = setup('idle', { effective_permission_mode: 'ask', provider });
+    await mount(s.app);
+    const items = await menu();
+    const auto = items.find((b) => b.textContent === 'Auto')!;
+    expect(auto.disabled).toBe(true);
+    expect(auto.title).toContain('does not work on a model provider');
+    expect(items.find((b) => b.textContent === 'Allow all')!.disabled).toBe(false);
+    expect(api.patchSession).not.toHaveBeenCalled();
   });
 
   it('switches to Auto after a one-line confirmation and back to Ask without one', async () => {
@@ -1934,6 +1951,9 @@ describe('live subagents', () => {
 
   it('shows the block for the session\'s schedules alone: "Scheduled:", the message, the countdown; a click opens the schedules', async () => {
     const { api, app } = setup('idle', { subagents: 0, background_tasks: 0 });
+    (api.schedules as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 'sc1', session_id: 's1', message: 'Check the nightly build', enabled: true, timezone: 'UTC', cron: '0 9 * * *', catch_up: false },
+    ]);
     await mount(app);
     expect($('.live-agents')).toBeNull();
     await act(async () => subscriber!.onEvent(schedulesLive()));
@@ -1942,16 +1962,93 @@ describe('live subagents', () => {
       "Scheduled: Summarize yesterday's commits",
     ]);
     expect(rows()[0][1]).toMatch(/^in 1[12]m \d+s$/);
-    expect(rows()[1][1]).toMatch(/^in 22h \d+m \d+s$/);
+    // 23 h exactly: the same millisecond as the event shows `23h 0m 0s`, any later one `22h 59m …`.
+    expect(rows()[1][1]).toMatch(/^in (23h 0m 0s|22h 59m \d+s)$/);
     expect($('.live-agents-dot')!.classList.contains('live-agents-dot-still')).toBe(true);
+    expect($('.live-schedules')).toBeNull();
+    const toggles = () => [...root.querySelectorAll<HTMLElement>('.live-agents button.live-agents-opens')];
+    expect(toggles().map((b) => b.getAttribute('aria-expanded'))).toEqual(['false', 'false']);
+    await act(async () => toggles()[0].click());
+    await act(async () => {});
+    // The list opens in the block above the input, under the last schedule row; no panel under the header.
+    expect($('.live-agents .live-schedules')).not.toBeNull();
+    expect($('.live-agents-list > li:last-child .live-schedules')).not.toBeNull();
     expect($('.schedules')).toBeNull();
-    await act(async () => $('.live-agents-open')!.click());
-    expect($('.schedules')).not.toBeNull();
     expect(api.schedules).toHaveBeenCalledWith('s1');
     expect(api.subagentHistory).not.toHaveBeenCalled();
+    expect(toggles().map((b) => b.getAttribute('aria-expanded'))).toEqual(['true', 'true']);
+    await act(async () => toggles()[1].click());
+    expect($('.live-schedules')).toBeNull();
+    expect($('.live-agents')).not.toBeNull();
     // The list emptied: the block goes.
     await act(async () => subscriber!.onEvent(schedulesLive((e) => (e.payload.schedules = []))));
     expect($('.live-agents')).toBeNull();
+  });
+
+  it('opens the list from the menu\'s "Schedules"; an emptied list stays with "none waiting" until its row closes it', async () => {
+    const list = [
+      {
+        id: 'sc1',
+        session_id: 's1',
+        message: 'Check the nightly build',
+        enabled: true,
+        timezone: 'UTC',
+        cron: '0 9 * * *',
+        next_run: new Date(Date.now() + 60_000).toISOString(),
+        catch_up: false,
+      },
+    ];
+    const { api, app } = setup('idle', { subagents: 0, background_tasks: 0 });
+    (api.schedules as ReturnType<typeof vi.fn>).mockResolvedValue(list);
+    await mount(app);
+    await act(async () => subscriber!.onEvent(schedulesLive()));
+    await act(async () => $('.btn-more')!.click());
+    await act(async () => $('.btn-schedules')!.click());
+    await act(async () => {});
+    expect($('.schedules')).toBeNull();
+    expect($('.live-agents .live-schedules .live-schedule-text')!.textContent).toBe('Check the nightly build');
+    // Nothing is scheduled any more: the block stays for its list, on a row of its own.
+    (api.schedules as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    await act(async () => subscriber!.onEvent(schedulesLive((e) => (e.payload.schedules = []))));
+    await act(async () => {});
+    expect($('.live-agents')).not.toBeNull();
+    expect($('.live-agents-list > li > .live-agents-row')!.textContent).toContain('Scheduled: none waiting');
+    expect($('.live-agents .live-agents-note')!.textContent).toContain('None.');
+    await act(async () => (root.querySelector('.live-agents button.live-agents-opens') as HTMLElement).click());
+    expect($('.live-agents')).toBeNull();
+  });
+
+  it('keeps the open list in place while the last "Scheduled:" line goes, and reads it again', async () => {
+    const one = (message: string) => ({
+      id: 'sc1',
+      session_id: 's1',
+      message,
+      enabled: true,
+      timezone: 'UTC',
+      cron: '0 9 * * *',
+      next_run: new Date(Date.now() + 60_000).toISOString(),
+      catch_up: false,
+    });
+    const { api, app } = setup('idle', { subagents: 0, background_tasks: 0 });
+    (api.schedules as ReturnType<typeof vi.fn>).mockResolvedValue([one('Check the nightly build')]);
+    await mount(app);
+    await act(async () => subscriber!.onEvent(schedulesLive()));
+    await act(async () => (root.querySelector('.live-agents button.live-agents-opens') as HTMLElement).click());
+    await act(async () => {});
+    const list = $('.live-schedules');
+    expect(list).not.toBeNull();
+    expect(api.schedules).toHaveBeenCalledTimes(1);
+    // The hub's next list, a moment later, without the last line; the list's own read changed too.
+    (api.schedules as ReturnType<typeof vi.fn>).mockResolvedValue([one('Check the nightly build twice')]);
+    await new Promise((r) => setTimeout(r, 5));
+    await act(async () => subscriber!.onEvent(schedulesLive((e) => (e.payload.schedules = e.payload.schedules.slice(0, 1)))));
+    await act(async () => {});
+    const lines = [...root.querySelectorAll('.live-agents-list > li > .live-agents-row .live-agents-what')];
+    expect(lines.map((l) => l.textContent)).toEqual(['Scheduled: Check the nightly build and report failures']);
+    // The same list, not one made anew under the line that is last now, and read again.
+    expect($('.live-schedules')).toBe(list);
+    expect(api.schedules).toHaveBeenCalledTimes(2);
+    expect($('.live-schedule-text')!.textContent).toBe('Check the nightly build twice');
   });
 
   it('counts a timer down from the time its list came, "due" at 0, and the running rows up', async () => {
@@ -2939,6 +3036,19 @@ describe('the session\'s tokens in the header (SPEC 0.229)', () => {
     await act(async () => $('.btn-more')!.click());
     expect($('.menu-info')!.textContent).toContain('$2.25 · 3.4M tokens this session');
   });
+
+  it('drops the cents from $100 up and counts billions as B', async () => {
+    const big = [
+      ...history.slice(0, 2),
+      ev('event.usage', 3, (e) => (e.payload = { input_tokens: 2, output_tokens: 5, cost_usd: 150.4, session_cost_usd: 3324.84, session_tokens: 8_672_000_000 })),
+    ];
+    const { app } = setup('idle', { history: big, commands: [] });
+    await mount(app);
+    expect($('.chat-cost')!.textContent).toBe('$3325 · 8.7B tokens this session');
+    expect([...root.querySelectorAll('.usage')].map((l) => l.textContent!).join()).toMatch(/ · \$150(?![.\d])/);
+    expect([formatCost(99.994), formatCost(99.996), formatCost(0.0734, true)]).toEqual(['$99.99', '$100', '$0.073']);
+    expect([999_499, 999_500, 999_400_000, 999_500_000, 12_345_000_000].map(formatTokens)).toEqual(['999k', '1M', '999M', '1B', '12B']);
+  });
 });
 
 describe('context and cache in the header (SPEC 0.222)', () => {
@@ -3167,6 +3277,26 @@ describe('slash command completion (T27)', () => {
     expect(items[2].textContent, 'nothing said of it').toBe('/code-review');
     await press('Enter');
     expect(area().value, 'only the name goes in').toBe('/compact ');
+  });
+
+  it('matches a namespaced command by the part after «:» (a skill of the hub, hqc:<name>)', async () => {
+    const cmds = ['compact', 'hqc:bench', 'benchmark', 'anthropic-skills:pdf', 'hqc:compare'];
+    expect(matchCommands(cmds, '/bench'), 'runtime order').toEqual(['hqc:bench', 'benchmark']);
+    expect(matchCommands(cmds, '/BE')).toEqual(['hqc:bench', 'benchmark']);
+    expect(matchCommands(cmds, '/comp')).toEqual(['compact', 'hqc:compare']);
+    expect(matchCommands(cmds, '/pd')).toEqual(['anthropic-skills:pdf']);
+    expect(matchCommands(cmds, '/hqc:b')).toEqual(['hqc:bench']);
+    expect(matchCommands(['hqc:bench'], '/bench'), 'the name typed in full still offers hqc:<name>').toEqual(['hqc:bench']);
+    expect(matchCommands(cmds, '/hqc:bench'), 'typed in full').toEqual([]);
+    expect(matchCommands(cmds, '/ench'), 'not in the middle').toEqual([]);
+    expect(matchCommands(cmds, '/skills')).toEqual([]);
+
+    const { app } = setup('idle', { commands: cmds });
+    await mount(app);
+    await type('/bench');
+    expect(options()).toEqual(['/hqc:bench', '/benchmark']);
+    await press('Enter');
+    expect(area().value).toBe('/hqc:bench ');
   });
 
   it('no list, no popup; an idle session without a list fetches the session again', async () => {
@@ -4446,6 +4576,144 @@ describe('Quote', () => {
     expect($('.ctx-menu .menu-web-search')!.textContent!.trim()).toBe('Search in Yandex');
     act(() => app.setWebSearch(WEB_SEARCHES[0]));
     vi.unstubAllGlobals();
+  });
+
+  /** A key pressed where the focus is (`code`: its place, as a layout-free key reads); whether
+   *  the browser keeps it (not prevented). */
+  const press = async (code: string, mods: { metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean; repeat?: boolean }) => {
+    let kept = true;
+    await act(() => {
+      const at = document.activeElement ?? document.body;
+      kept = at.dispatchEvent(new KeyboardEvent('keydown', { code, key: code === 'Quote' ? "'" : code.slice(3).toLowerCase(), bubbles: true, cancelable: true, ...mods }));
+    });
+    return kept;
+  };
+
+  it('⌘\' quotes the text selected in the feed and ⌘E searches it, with Ctrl off a Mac; else the keys are the browser\'s', async () => {
+    const open = vi.fn();
+    vi.stubGlobal('open', open);
+    const platform = vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    try {
+      const { app } = setup('idle');
+      await mount(app);
+      await typeDraft('Look at this');
+      // Nothing selected.
+      expect(await press('Quote', { metaKey: true })).toBe(true);
+      await select(textNode('All tests pass.'), 4, 9);
+      // Ctrl on a Mac, with Shift, another key.
+      expect(await press('Quote', { ctrlKey: true })).toBe(true);
+      expect(await press('Quote', { metaKey: true, shiftKey: true })).toBe(true);
+      expect(await press('KeyQ', { metaKey: true })).toBe(true);
+      expect(area().value).toBe('Look at this');
+      // The tooltips name the keys.
+      expect(quoteButton()!.title).toBe("Quote the selected text into the message (⌘')");
+      await rightClick(textNode('All tests pass.'));
+      expect($('.ctx-menu .menu-quote')!.getAttribute('title')).toBe("Quote into the message (⌘')");
+      expect($('.ctx-menu .menu-web-search')!.getAttribute('title')).toBe('Search the selected text (⌘E)');
+      // Quote, pressed while the menu is open: after the draft, the caret in the field, the
+      // selection cleared, the menu gone as on a pick in it.
+      expect(await press('Quote', { metaKey: true })).toBe(false);
+      expect(area().value).toBe('Look at this\n\n> tests\n\n');
+      expect(document.activeElement).toBe(area());
+      expect(document.getSelection()!.rangeCount).toBe(0);
+      expect($('.ctx-menu')).toBeNull();
+      // Search: in a new tab, without the opener.
+      await select(textNode('All tests pass.'), 4, 9);
+      expect(await press('KeyE', { metaKey: true })).toBe(false);
+      expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=tests', '_blank', 'noopener');
+      // The key held down repeats: still taken, no second tab.
+      expect(await press('KeyE', { metaKey: true, repeat: true })).toBe(false);
+      expect(open).toHaveBeenCalledTimes(1);
+      // Off a Mac: Ctrl, not ⌘.
+      platform.mockReturnValue('Linux x86_64');
+      expect(await press('KeyE', { metaKey: true })).toBe(true);
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(await press('Quote', { ctrlKey: true })).toBe(false);
+      expect(area().value).toBe('Look at this\n\n> tests\n\n> tests\n\n');
+      // A selection that starts in the header, or the field's own, is not the feed's.
+      await select(textNode('test 12', '.chat-head'));
+      expect(await press('KeyE', { ctrlKey: true })).toBe(true);
+      await select(null);
+      area().setSelectionRange(0, 4);
+      expect(await press('Quote', { ctrlKey: true })).toBe(true);
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(area().value).toBe('Look at this\n\n> tests\n\n> tests\n\n');
+    } finally {
+      platform.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('searches with ⌘E where there is no input, where ⌘\' stays the browser\'s, and quotes once the input is back', async () => {
+    const open = vi.fn();
+    vi.stubGlobal('open', open);
+    const platform = vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    try {
+      const { api, app } = setup('locked_vscode');
+      await mount(app);
+      await select(textNode('All tests pass.'), 4, 9);
+      expect(await press('Quote', { metaKey: true })).toBe(true);
+      expect(await press('KeyE', { metaKey: true })).toBe(false);
+      expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=tests', '_blank', 'noopener');
+      // VS Code lets go of the open chat's session: the input comes back, and ⌘' quotes into it.
+      const idle = { ...app.sessions.get('s1')!, state: 'idle' as const };
+      api.session.mockResolvedValue(idle);
+      await act(async () =>
+        app.mergeSummary([{ session_id: 's1', project_id: 'p1', title: idle.title, state: 'idle', queue_len: 0, unread: 0, last_seq: 7, last_read_seq: 7 }]),
+      );
+      expect(area(), 'the input is back').not.toBeNull();
+      await select(textNode('All tests pass.'), 4, 9);
+      expect(await press('Quote', { metaKey: true })).toBe(false);
+      expect(area().value).toBe('> tests\n\n');
+    } finally {
+      platform.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('quotes and searches by the keys picked in Settings, and names them in the tooltips; a key left without is the browser\'s and named nowhere', async () => {
+    const open = vi.fn();
+    vi.stubGlobal('open', open);
+    const platform = vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    try {
+      const { app } = setup('idle');
+      await mount(app);
+      await typeDraft('Look at this');
+      await act(() => {
+        app.setKey('quote', { code: 'KeyJ', meta: false, ctrl: false, alt: true, shift: false });
+        app.setKey('search', { code: 'KeyL', meta: true, ctrl: false, alt: false, shift: true });
+      });
+      await select(textNode('All tests pass.'), 4, 9);
+      // The old keys are the browser's now.
+      expect(await press('Quote', { metaKey: true })).toBe(true);
+      expect(await press('KeyE', { metaKey: true })).toBe(true);
+      expect(area().value).toBe('Look at this');
+      expect(open).not.toHaveBeenCalled();
+      expect(quoteButton()!.title).toBe('Quote the selected text into the message (⌥J)');
+      await rightClick(textNode('All tests pass.'));
+      expect($('.ctx-menu .menu-quote')!.getAttribute('title')).toBe('Quote into the message (⌥J)');
+      expect($('.ctx-menu .menu-web-search')!.getAttribute('title')).toBe('Search the selected text (⇧⌘L)');
+      expect(await press('KeyL', { metaKey: true, shiftKey: true })).toBe(false);
+      expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=tests', '_blank', 'noopener');
+      expect(await press('KeyJ', { altKey: true })).toBe(false);
+      expect(area().value).toBe('Look at this\n\n> tests\n\n');
+      // Without keys: the browser's, and no key in the tooltips.
+      await act(() => {
+        app.setKey('quote', null);
+        app.setKey('search', null);
+      });
+      await select(textNode('All tests pass.'), 4, 9);
+      expect(await press('KeyJ', { altKey: true })).toBe(true);
+      expect(await press('KeyL', { metaKey: true, shiftKey: true })).toBe(true);
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(quoteButton()!.title).toBe('Quote the selected text into the message');
+      await rightClick(textNode('All tests pass.'));
+      expect($('.ctx-menu .menu-quote')!.getAttribute('title')).toBe('Quote into the message');
+      expect($('.ctx-menu .menu-web-search')!.getAttribute('title')).toBe('Search the selected text');
+    } finally {
+      platform.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 
   it('takes any selection in the feed on a right click, and has no Quote where there is no input', async () => {

@@ -8133,7 +8133,8 @@ is not asked, does not see the question or the answer, and does not work on it.
    each by name next to `hqc` and the hub's relays, with `--strict-mcp-config` kept, so no
    server of `~/.claude.json` and no `claude.ai` connector comes with them; secrets are read
    from Vaultwarden at every start through a launcher of the worker, never on a command line;
-   `hello` names them for Settings. The hub cannot add or start one (§2.1). Tasks:
+   the launcher pins a hash of each server's tools, and a changed list fails the server until
+   the owner approves it on the machine; `hello` names them for Settings. The hub cannot add or start one (§2.1). Tasks:
    `docs/ITERATION-9.md`.
 10. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
    worker; the bare model; the personal assistant session (moved from 3: its default runtime is

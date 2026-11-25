@@ -67,18 +67,20 @@ agent of that folder the owner's mail. With `--strict-mcp-config` it gets none o
   RUNBOOK say that this includes the account's `claude.ai` connectors, and point to
   `mcp_servers` instead.
 
-## Open questions (for vvzvlad and the owner)
+## Decided with the owner (2026-11-25)
 
-1. **Pinning the tools (from MCPProxy).** The launcher sees `tools/list`. It could keep a hash of
-   the tool names and descriptions per server, and on a change refuse the server until the owner
-   runs `hqc-worker mcp approve <name>` on the machine: a package update that changes a tool's
-   description (a prompt injection in it) would not reach the agent silently. Worth it now, or
-   later? It costs the launcher parsing the protocol instead of `exec`.
-2. **Also take named servers from `~/.claude.json`?** `use_machine_mcp = ["kicad"]` would pass
-   through what `claude mcp add` already set up, without repeating it in `worker.toml`. It ties
-   the worker to the CLI's file format and its project scopes. Proposed: no, `worker.toml` only.
-3. **`cwd` of a stdio server**: the session's folder (as the CLI does now) or the worker's home?
-   Proposed: the session's working folder, as the CLI does.
+1. **The tools are pinned (from MCPProxy).** The launcher reads the server's `tools/list` and keeps
+   a hash of the tool names, descriptions and input schemas per environment and server in
+   `$HQC_HOME/mcp-pins.json` (0600). The first start records it. On a later change the launcher
+   fails the server, so the agent has none of its tools, and a `system` line names the server
+   and the command to run; the owner checks the change and runs
+   `hqc-worker mcp approve <env>/<name>` on the machine.
+   A package update that rewrites a tool's description (a prompt injection in it) therefore
+   never reaches an agent unseen. The launcher thus speaks the protocol between the CLI and the
+   program instead of only `exec`ing it.
+2. **Only `worker.toml`.** The worker does not read `~/.claude.json` or a repository's
+   `.mcp.json`: a server an environment gets is the one written in its table.
+3. **A stdio server runs in the session's working folder**, as the CLI runs one now.
 
 ## T70. The worker: `mcp_servers` per environment
 
@@ -90,10 +92,20 @@ The `default` environment has none. `StartSpec` carries them.
 ## T71. The launcher and `--mcp-config`
 
 `hqc-worker mcp --local <name>`: asks the daemon for the spec of this session's server, resolves
-vault values, `exec`s a `stdio` program with its environment (the child allowlist of §8.1 plus
-the server's `env`), or relays `http` with its headers. `adapter/claude_code.rs` adds an entry per
+vault values, starts a `stdio` program in the session's working folder with its environment (the
+child allowlist of §8.1 plus the server's `env`) and passes the messages between it and the CLI,
+or relays `http` with its headers. `adapter/claude_code.rs` adds an entry per
 server. A server that cannot start (a missing program, a locked vault) fails that server only and
 says so in a `system` line, as a refused provider key does.
+
+## T71a. Pinning
+
+The launcher hashes `tools/list` (names, descriptions, input schemas, sorted) and compares it
+with `$HQC_HOME/mcp-pins.json`: no pin, record it; the same, go on; another, fail the server with
+a `system` line (`mcp_tools_changed`, the server and the command to run) and log the names of the
+tools that changed. `hqc-worker mcp approve <env>/<name>` shows what changed against the pin and
+records the new hash; `hqc-worker mcp pins` lists them. A `notifications/tools/list_changed` in
+the middle of a process is checked the same way.
 
 ## T72. `hello` and the hub
 

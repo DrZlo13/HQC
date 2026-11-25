@@ -773,7 +773,9 @@ fn for_rule<'a>(
     let shown: Vec<&str> = parts
         .iter()
         .map(|p| match ssh_destination(&p.words) {
-            Some(d) if hosts.contains(&d) => {
+            // Any `$` in the part, also in the remote command: `${a[${x:='y[$(cmd)]'}]}` runs
+            // `cmd` here while bash expands it (an array index is arithmetic).
+            Some(d) if hosts.contains(&d) && !p.text.contains(['$', '`']) => {
                 lifted = true;
                 "ssh"
             }
@@ -1592,6 +1594,10 @@ mod tests {
             // Another user than the one listed.
             "ssh -l root pi@bench.local 'cd / && sudo id'",
             "ssh -o User=root pi@bench.local 'cd / && sudo id'",
+            // A parameter expansion in the remote command runs `$( )` here.
+            "ssh pi@bench.local echo ${a[${x:='y[$(sudo id)]'}]}",
+            "ssh pi@bench.local echo ${a:${x:='y[$(sudo id)]'}}",
+            "ssh pi@bench.local 'cd / && sudo ls $HOME'",
         ] {
             assert_eq!(denied(c), Some("Bash(sudo:*)"), "{c}");
         }

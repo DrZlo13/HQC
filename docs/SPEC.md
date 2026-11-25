@@ -7295,7 +7295,8 @@ base_url = "http://192.168.1.229:8082" # must equal the hub's description
   `LogLevel`, `Port`, `ServerAliveCountMax`, `ServerAliveInterval`, `StrictHostKeyChecking`,
   `UserKnownHostsFile`), a command whose first word does not start with `-` (OpenSSH reads
   options after the destination too), and nothing up to that word the shell expands into other
-  words (`$`, braces, glob characters); a command the matcher does not understand (a `$( )` or a
+  words (braces, glob characters), and no `$` anywhere in the part, the remote command
+  included (`${a[${x:='y[$(cmd)]'}]}` runs `cmd` here); a command the matcher does not understand (a `$( )` or a
   backtick, also in double quotes, which the local shell would run), another host, any other
   option (`-F`, `-J`, `-l`, `ProxyCommand`, `LocalCommand`, `HostName`, `User`), the rest of the
   command line and every other rule keep the deny. The rules stay in the CLI's `--settings` `deny`, which does not look into the

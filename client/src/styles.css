@@ -3550,6 +3550,8 @@ button.btn-mode-pill.perm-allow-all:hover,
   border-left: 3px solid var(--accent);
   color: var(--muted);
   cursor: pointer;
+  /* Its own: a leading quote stands outside `.msg-text`, whose pre-wrap keeps the line breaks. */
+  white-space: pre-wrap;
 }
 /* A quote that starts the message: a block above the time (the time floats on the line of the
    text after it). */

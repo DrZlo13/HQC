@@ -65,9 +65,7 @@ export function stripMarkdown(text: string): string {
 }
 
 /** The text of an event the feed shows (a quoted text may come from any of them), and whether
- *  the feed renders it as Markdown (`markdown`: then its marks are not in the quote). The
- *  owner's own message without its quote lines: an earlier message that quoted the same text is
- *  not its source. */
+ *  the feed renders it as Markdown (`markdown`: then its marks are not in the quote). */
 export function eventText(e: HqcEvent, t: Pick<Timeline, 'callFor'>): { text: string; markdown: boolean } {
   const md = (text: string) => ({ text, markdown: true });
   const plain = (text: string) => ({ text, markdown: false });
@@ -79,12 +77,12 @@ export function eventText(e: HqcEvent, t: Pick<Timeline, 'callFor'>): { text: st
     case 'agent.thinking':
       return plain(e.payload.text);
     case 'user.message':
-      return plain(
-        e.payload.text
-          .split('\n')
-          .filter((l) => !QUOTE_LINE.test(l))
-          .join('\n'),
-      );
+      return plain(ownText(e.payload.text));
+    // The owner's text instead of a request.
+    case 'approval.response':
+      return plain(ownText(e.payload.message ?? ''));
+    case 'side.question':
+      return plain(e.payload.text);
     case 'side.answer':
       return md(e.payload.text ?? '');
     case 'system':
@@ -117,6 +115,15 @@ export function eventText(e: HqcEvent, t: Pick<Timeline, 'callFor'>): { text: st
     default:
       return plain('');
   }
+}
+
+/** The owner's text without its quote lines: an earlier message that quoted the same text is not
+ *  its source. */
+function ownText(text: string): string {
+  return text
+    .split('\n')
+    .filter((l) => !QUOTE_LINE.test(l))
+    .join('\n');
 }
 
 /** The key an event is compared by: its text, without the marks of Markdown when the feed renders

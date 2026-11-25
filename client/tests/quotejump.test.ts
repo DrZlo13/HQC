@@ -91,9 +91,14 @@ describe('what the feed shows of an event, and how', () => {
       message: 'The server wants a choice',
       questions: [{ id: 'a', text: 'Which flavour?', header: 'Flavour', options: ['vanilla bean', 'dark chocolate'], option_descriptions: ['plain', 'the bitter one'], option_previews: ['', 'a dark mockup'] }],
     });
-    const all = [report, approval, clarify];
+    const answer = ev(4, 'approval.response', { request_id: 'r', option_id: 'deny', by: 'u', message: '> echo hello world\nnot this way, use the make target' });
+    const side = ev(5, 'side.question', { text: 'what does the stub flash first' });
+    const all = [report, approval, clarify, answer, side];
     expect(find(all, 'report body of the subagent')).toBe(1);
+    // The text answer's own quote of the command is not its source.
     expect(find(all, 'echo hello world')).toBe(2);
+    expect(find(all, 'use the make target')).toBe(4);
+    expect(find(all, 'stub flash first')).toBe(5);
     expect(find(all, 'Run a script')).toBe(2);
     expect(find(all, 'dark chocolate')).toBe(3);
     expect(find(all, 'the bitter one')).toBe(3);

@@ -297,3 +297,10 @@ describe('a message swiped to the left', () => {
     expect(rule('.feed-swipe-icon').display).toBe('none');
   });
 });
+
+describe("the owner's quote", () => {
+  it('keeps its line breaks above the time too, outside the text whose pre-wrap keeps them', () => {
+    expect(rule('.msg-text')['white-space']).toBe('pre-wrap');
+    expect(rule('.msg-quote')['white-space']).toBe('pre-wrap');
+  });
+});

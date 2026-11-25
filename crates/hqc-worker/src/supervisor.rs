@@ -50,7 +50,10 @@
 //!   the runtime's confirmed mode is not above; it passes the waiting inputs before it that
 //!   are no person's and cannot join
 //!   ([`Session::inject_next`]), as the VS Code tab takes what the user types meanwhile.
-//!   Its acceptance is `ack {event_id, joined: true}`, also when it is resent; the first
+//!   Its acceptance is `ack {event_id, joined: true}`, also when it is resent; so is that of
+//!   an input given as a turn of its own while the runtime ran one it started by itself
+//!   ([`Adapter::runs_own_turn`]) and taken into that one, if it may join (no `schedule_id`;
+//!   no `peer`, or a `send`: what the hub keeps `joined`, SPEC 0.251); the first
 //!   input the turn carries to the next one becomes that turn, one the runtime will not take
 //!   goes back to the head of the queue, as does every one not taken when the process exits.
 //! - `subagents` (Claude Code: [`AdapterEvent::Subagents`]) and `background_tasks`
@@ -2923,19 +2926,34 @@ impl Session {
                     self.side_answer(event_id, text, error.as_deref());
                 }
             }
-            AdapterEvent::InputAccepted { event_id } => {
+            AdapterEvent::InputAccepted {
+                event_id,
+                joined: into_running,
+            } => {
                 let transcript = self.transcript();
                 let (joined, slash) = if let Some(t) =
                     self.turn.as_mut().filter(|t| t.input.event_id == event_id)
                 {
                     t.accepted = true;
+                    // Written as our turn while the runtime ran one of its own, it went into
+                    // that turn: an input the hub keeps `joined` on (no `schedule_id`; no
+                    // `peer`, or a `send`) is `joined` (SPEC 0.251), where the runtime took it;
+                    // another one opens its turn on the hub as before.
+                    let input = &t.input;
+                    let joined = into_running
+                        && input.schedule_id.is_none()
+                        && input.peer.as_ref().is_none_or(|p| p.mode == PeerMode::Send);
                     self.link.reply_input(
                         self.id,
                         transcript.as_deref(),
                         &t.frame_id,
-                        ack(Some(event_id)),
+                        if joined {
+                            joined_ack(event_id)
+                        } else {
+                            ack(Some(event_id))
+                        },
                     );
-                    (false, t.input.text.starts_with('/'))
+                    (joined, t.input.text.starts_with('/'))
                 } else if let Some(i) = self
                     .injected
                     .iter()

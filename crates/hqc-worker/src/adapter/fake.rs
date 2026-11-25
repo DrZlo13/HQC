@@ -197,8 +197,27 @@ impl FakeAdapters {
     }
 
     pub async fn accept_input(&self, session_id: Uuid, event_id: Uuid) {
-        self.emit(session_id, AdapterEvent::InputAccepted { event_id })
-            .await;
+        self.emit(
+            session_id,
+            AdapterEvent::InputAccepted {
+                event_id,
+                joined: false,
+            },
+        )
+        .await;
+    }
+
+    /// The runtime took input `event_id`, written as a turn of its own, into the turn it runs
+    /// by itself (Claude Code: echoed before that turn's `result`).
+    pub async fn accept_input_joined(&self, session_id: Uuid, event_id: Uuid) {
+        self.emit(
+            session_id,
+            AdapterEvent::InputAccepted {
+                event_id,
+                joined: true,
+            },
+        )
+        .await;
     }
 
     /// The runtime dropped the quiet line of an input it had not taken.

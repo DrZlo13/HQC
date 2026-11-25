@@ -379,7 +379,10 @@ fn check_ids(fx: &Fixture, evs: &[AdapterEvent], session_id: Uuid, input_id: Uui
         }
     }
     assert_eq!(from_records, fx.expected_ids());
-    assert!(evs.contains(&AdapterEvent::InputAccepted { event_id: input_id }));
+    assert!(evs.contains(&AdapterEvent::InputAccepted {
+        event_id: input_id,
+        joined: false
+    }));
 }
 
 async fn run(
@@ -1878,7 +1881,10 @@ async fn stop_interrupts_then_falls_back_to_sigint() {
         .unwrap();
     assert_eq!(
         h.next().await,
-        AdapterEvent::InputAccepted { event_id: input_id }
+        AdapterEvent::InputAccepted {
+            event_id: input_id,
+            joined: false
+        }
     );
     assert_eq!(shape(&[h.next().await]), ["delta"]);
     h.adapter.stop().await.unwrap();
@@ -1948,7 +1954,10 @@ async fn stop_escalates_to_sigterm_when_sigint_does_not_end_the_turn() {
         .unwrap();
     assert_eq!(
         h.next().await,
-        AdapterEvent::InputAccepted { event_id: input_id }
+        AdapterEvent::InputAccepted {
+            event_id: input_id,
+            joined: false
+        }
     );
     assert_eq!(shape(&[h.next().await]), ["delta"]);
     h.adapter.stop().await.unwrap();
@@ -2226,7 +2235,10 @@ async fn start_the_turn(h: &mut Harness) {
         .unwrap();
     assert_eq!(
         h.next().await,
-        AdapterEvent::InputAccepted { event_id: input_id }
+        AdapterEvent::InputAccepted {
+            event_id: input_id,
+            joined: false
+        }
     );
     assert_eq!(shape(&[h.next().await]), ["delta"]);
 }
@@ -4378,6 +4390,8 @@ fn an_input_during_a_turn_the_cli_starts_by_itself_keeps_its_last_text() {
             "turn_ended []"
         ]
     );
+    // Taken after the `result` of the CLI's own turn, B ran as a turn of its own (SPEC 0.251).
+    assert_eq!(accepted(&out), [(b.event_id, false)]);
     let finals: Vec<bool> = events(&emitted(out))
         .into_iter()
         .filter_map(|e| match &e.kind {
@@ -5373,7 +5387,7 @@ async fn local_command_without_echo_is_taken() {
     assert!(accepted < status && status < ended, "{s:?}");
     assert!(events
         .iter()
-        .any(|e| matches!(e, AdapterEvent::InputAccepted { event_id } if *event_id == id)));
+        .any(|e| matches!(e, AdapterEvent::InputAccepted { event_id, .. } if *event_id == id)));
 }
 
 /// A `result` with no model turn and no tokens (a local slash command, the empty second
@@ -8339,7 +8353,7 @@ fn trace(actions: &[Action], names: &[(Uuid, &str)]) -> Vec<String> {
     actions
         .iter()
         .filter_map(|a| match a {
-            Action::Emit(AdapterEvent::InputAccepted { event_id }) => {
+            Action::Emit(AdapterEvent::InputAccepted { event_id, .. }) => {
                 Some(format!("accepted {}", name(event_id)))
             }
             Action::Emit(AdapterEvent::TurnEnded { carried, dropped }) if dropped.is_empty() => {
@@ -8496,6 +8510,9 @@ fn a_message_during_the_final_answer_is_carried() {
             "turn_ended []"
         ]
     );
+    // Written into the turn but carried past its `result`, B is the next turn's own input, not
+    // one joined (SPEC 0.251).
+    assert_eq!(accepted(&out), [(a.event_id, false), (b.event_id, false)]);
 }
 
 /// A message written before `interrupt`: the interrupted turn ends with
@@ -9166,6 +9183,66 @@ fn a_message_taken_into_a_turn_the_cli_began_is_its_input() {
             "turn_ended []"
         ]
     );
+}
+
+/// As above with the `init` the CLI sends before the turn it begins by itself (2.1.312): the
+/// message written as a turn of ours then and echoed before that turn's `result` went into it,
+/// and is accepted as joined (SPEC 0.251); the input of a turn of its own is not.
+#[test]
+fn a_message_taken_into_a_turn_the_cli_began_joined_it() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(
+        sid,
+        "Run the bash command `sleep 6` in the background and reply with the single word WAITING.",
+    );
+    let b = user_input(sid, "Reply with the single word PONG.");
+    let init = json!({"type": "system", "subtype": "init", "model": "claude-haiku-5-5",
+        "permissionMode": "default", "session_id": CLI_SESSION})
+    .to_string();
+    let ua = line_uuid(&core.input(&a));
+    let mut out = play(&mut core, &lines_of(&[
+        lifecycle(&ua, "queued"),
+        lifecycle(&ua, "started"),
+        echo(&ua, &a.text),
+        bash("toolu_01Bg", "sleep 6"),
+        r#"{"type":"system","subtype":"task_started","task_id":"b2k5bg0e1","tool_use_id":"toolu_01Bg","description":"Sleep for 6 seconds","is_backgrounded":true,"task_type":"local_bash","uuid":"0f6c1d2e-6666-4a55-9d0e-1a2b3c4d5e01","session_id":"42e1f456-d428-4380-ad8a-473e21ef9ff7"}"#.into(),
+        tool_result("toolu_01Bg"),
+        reply("WAITING"),
+        result("success"),
+        lifecycle(&ua, "completed"),
+        r#"{"type":"system","subtype":"task_notification","task_id":"b2k5bg0e1","tool_use_id":"toolu_01Bg","status":"completed","output_file":"/tmp/tasks/b2k5bg0e1.output","summary":"Background command \"Sleep for 6 seconds\" completed (exit code 0)","uuid":"0f6c1d2e-6666-4a55-9d0e-1a2b3c4d5e02","session_id":"42e1f456-d428-4380-ad8a-473e21ef9ff7"}"#.into(),
+        init,
+        bash("toolu_02Fg", "sleep 8"),
+    ]));
+    assert!(core.runs_own_turn());
+    let ub = line_uuid(&core.input(&b));
+    out.extend(play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "queued"),
+            tool_result("toolu_02Fg"),
+            echo(&ub, &b.text),
+            lifecycle(&ub, "started"),
+            reply("PONG"),
+            result("success"),
+            lifecycle(&ub, "completed"),
+        ]),
+    ));
+    assert_eq!(accepted(&out), [(a.event_id, false), (b.event_id, true)]);
+}
+
+/// The inputs `actions` accept, in order, each with its `joined`.
+fn accepted(actions: &[Action]) -> Vec<(Uuid, bool)> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::InputAccepted { event_id, joined }) => {
+                Some((*event_id, *joined))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// While a permission request is open nothing goes into the turn; the answer opens it again.

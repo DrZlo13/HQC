@@ -159,6 +159,15 @@ describe('the text of a clipped selection', () => {
     expect(got).toBe('Intro\n\nFile\tStatus\na.rs\tok\nb.rs\tno\n\none\ntwo\n\nOutro');
   });
 
+  it("reads a quote block of the owner's message on lines of its own", async () => {
+    const got = await quoted(
+      [agent(1, 'Intro', 0, true), user(2, 'before\n\n> q one\n> q two\n\nafter')],
+      (r) => [textOf(r, 'Intro'), 0],
+      (r) => [textOf(r, 'after'), 5],
+    );
+    expect(got).toBe('Intro\n\nbefore\nq one\nq two\nafter');
+  });
+
   it("leaves the answer's usage line out when the range runs past the answer's end", async () => {
     const usage = ev('event.usage', (e) => {
       e.seq = 2;

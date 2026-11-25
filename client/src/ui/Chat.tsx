@@ -43,6 +43,7 @@ import { AUTO_NEEDS_ANTHROPIC, MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agen
 import { hasOpenTasks, LiveSubagents } from './LiveSubagents';
 import { Loading } from './Loading';
 import { CopyButton, markdownText } from './Markdown';
+import { findQuoteAfter, findQuoteSource, quoteClick, showQuote, type QuoteClick, type QuoteKeys } from './quotejump';
 import { listenForSwipeQuote } from './swipequote';
 import { feedSelectionText, firstSentences, selectedText, useQuoteSelection, withoutQuoteLines, type QuoteSelection } from './selection';
 import { PermissionBlock, SECRET_GIVEN } from './permission';
@@ -149,6 +150,7 @@ export function Chat({
   useEffect(() => {
     setLoaded(chat.loaded);
     from.current = undefined;
+    setQuoteJump(null);
     void chat.open().then(() => setLoaded(true));
     return () => chat.close();
   }, [chat]);
@@ -680,40 +682,83 @@ export function Chat({
   }, [app]);
   const insertQuote = useRef<((text: string) => void) | null>(null);
   const insertText = useRef<((text: string) => void) | null>(null);
-  // The jump to a search hit: the event is there once `lastSeq` reaches it and the older
+  // The jump to an event: a search hit (`focusSeq`, SPEC §15) or the source of a quote the owner
+  // clicked (`quoteJump`, SPEC §6). The event is there once `lastSeq` reaches it and the older
   // history (`olderFrom`) is loaded down to it. The block that holds it is the one that starts
   // at it, else the last one that starts at or before it (a hidden event's neighbour; an answer
-  // may stand above an earlier input, SPEC §6); the feed renders from there if it did not.
-  const focused = useRef<number | undefined>(undefined);
+  // may stand above an earlier input, SPEC §6); the feed renders from there if it did not. A
+  // jump is done once, by its identity: a new click on the same quote jumps again.
+  const [quoteJump, setQuoteJump] = useState<{ seq: number; quote: QuoteKeys } | null>(null);
+  const focusJump = useMemo(() => (focusSeq === undefined ? undefined : { seq: focusSeq, quote: undefined }), [focusSeq]);
+  const jumped = useRef(new WeakSet<object>());
   useLayoutEffect(() => {
     const el = scroller.current;
-    if (!el || focusSeq === undefined || focused.current === focusSeq || t.lastSeq < focusSeq) return;
-    if (t.olderFrom > focusSeq) {
-      void chat.loadOlder(focusSeq, true);
+    const jump = [quoteJump, focusJump].find((j) => j && !jumped.current.has(j));
+    if (!el || !jump || t.lastSeq < jump.seq) return;
+    if (t.olderFrom > jump.seq) {
+      void chat.loadOlder(jump.seq, true);
       return;
     }
-    if (focusSeq < (from.current ?? 0)) {
+    if (jump.seq < (from.current ?? 0)) {
       let at = 0;
       blocks.forEach((b, i) => {
-        if ((blockSeq(b) ?? Infinity) <= focusSeq) at = i;
+        if ((blockSeq(b) ?? Infinity) <= jump.seq) at = i;
       });
       from.current = blockSeq(blocks[at]) ?? 0;
       grow((n) => n + 1);
       return;
     }
-    let target = el.querySelector<HTMLElement>(`.feed-block[data-seq="${focusSeq}"]`) ?? undefined;
+    let target = el.querySelector<HTMLElement>(`.feed-block[data-seq="${jump.seq}"]`) ?? undefined;
     if (!target) {
       for (const b of el.querySelectorAll<HTMLElement>('.feed-block[data-seq]')) {
-        if (Number(b.dataset.seq) <= focusSeq) target = b;
+        if (Number(b.dataset.seq) <= jump.seq) target = b;
       }
     }
     if (!target) return;
-    focused.current = focusSeq;
+    jumped.current.add(jump);
     stick.current = false;
+    // The quoted text itself when it is in the DOM; else the block, as a search hit.
+    if (jump.quote && showQuote(target, el, jump.quote)) return;
     el.querySelector('.feed-block.is-found')?.classList.remove('is-found');
     target.classList.add('is-found');
     target.scrollIntoView?.({ block: 'center' });
   });
+  // A click on a quote: its source is looked for in the loaded events before the quote, then in
+  // each older page as it comes in (each event once), then after the quote; one search at a time.
+  const quoting = useRef(false);
+  const live = useRef<typeof chat | null>(null);
+  useEffect(() => {
+    live.current = chat;
+    return () => {
+      live.current = null;
+    };
+  }, [chat]);
+  const followQuote = async ({ keys, before }: QuoteClick) => {
+    if (quoting.current) return;
+    quoting.current = true;
+    try {
+      let upTo = before;
+      for (;;) {
+        const seq = findQuoteSource(t.events(), t, keys, upTo);
+        if (seq !== undefined) return setQuoteJump({ seq, quote: keys });
+        const olderFrom = t.olderFrom;
+        if (olderFrom <= 0) break;
+        // The next pass reads only the page that comes in now.
+        upTo = olderFrom;
+        // With `downTo` the older history comes in pages of 1000 events, not 200: one page here.
+        await chat.loadOlder(olderFrom - 1);
+        if (live.current !== chat) return;
+        if (t.olderFrom >= olderFrom) return setNotice('Older history did not load');
+      }
+      // A quote taken from an answer still being written: its message is stored once it is done,
+      // after the message that quotes it.
+      const after = before === undefined ? undefined : findQuoteAfter(t.events(), t, keys, before);
+      if (after !== undefined) return setQuoteJump({ seq: after, quote: keys });
+      setNotice('The quoted text is not in this chat');
+    } finally {
+      quoting.current = false;
+    }
+  };
 
   const stop = () => act(() => chat.stop(), 'Not stopped');
   // A goal is cleared by the slash command, which Claude Code takes between turns (SPEC 0.218):
@@ -1150,7 +1195,14 @@ export function Chat({
           }
         }}
       >
-        <div class="feed" ref={feed}>
+        <div
+          class="feed"
+          ref={feed}
+          onClick={(e) => {
+            const quote = quoteClick(e, e.currentTarget);
+            if (quote) void followQuote(quote);
+          }}
+        >
           {/* The empty feed's note in its middle: the first page on its way, or no requests
               once it is in (before, the feed has no items either). */}
           {!loaded && (

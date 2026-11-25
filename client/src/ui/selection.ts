@@ -12,7 +12,7 @@ const MESSAGE = '.msg-agent, .msg-user, .relay, .thinking';
  *  inside the message is the browser's own text): its time, the head of a message from another
  *  session or of a room post, the peek of a reasoning, the caption bar of a code block, the meta
  *  line and the buttons. */
-const LEFT_OUT = '.msg-time, .relay-head, .room-post-head, .side-question-head, .side-wait, .thinking-peek, .md-code-bar, .meta, .msg-buttons';
+export const LEFT_OUT = '.msg-time, .relay-head, .room-post-head, .side-question-head, .side-wait, .thinking-peek, .md-code-bar, .meta, .msg-buttons';
 const STRUCTURE = new Set(['TABLE', 'THEAD', 'TBODY', 'TR', 'UL', 'OL']);
 /** A line break around these. */
 const BLOCKS = new Set(['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'PRE', 'BLOCKQUOTE', 'DIV', 'UL', 'OL', 'TABLE', 'HR']);

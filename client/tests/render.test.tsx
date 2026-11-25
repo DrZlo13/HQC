@@ -4606,6 +4606,24 @@ describe("the feed like the Claude Code tab", () => {
     expect(pending.querySelector(".msg-text")!.textContent).toBe("_still_ typed");
     expect(root.querySelector(".msg-user strong, .msg-user em, .msg-user li, .msg-user code")).toBeNull();
   });
+
+  it("shows a run of '>' lines in the user's message as one quote block, without a blank line around it", () => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.user.message", (e) => {
+        e.payload.text = "before\n\n> one\n> two\n>\n> three\n\nafter > not a quote\nlast";
+        e.payload.artifact_ids = [];
+      }),
+    );
+    show(t);
+    const text = root.querySelector(".msg-user .msg-text")!;
+    // The fourth node is the message's buttons, at the end of its text.
+    expect([...text.childNodes].slice(0, 3).map((n) => n.nodeName)).toEqual(["#text", "BLOCKQUOTE", "#text"]);
+    expect(text.childNodes[0].textContent).toBe("before");
+    expect((text.childNodes[1] as HTMLElement).className).toBe("msg-quote");
+    expect(text.childNodes[1].textContent).toBe("one\ntwo\n\nthree");
+    expect(text.childNodes[2].textContent).toBe("after > not a quote\nlast");
+  });
 });
 
 // An answer the hub took closes the card at once, before the response event comes over the

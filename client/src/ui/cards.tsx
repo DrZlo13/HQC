@@ -1099,9 +1099,30 @@ function QuickAddButton({ text, quick }: { text: string; quick: NonNullable<Chat
  *  Markdown; `tail` (the message's buttons) at the end of its last line. Trailing line breaks
  *  are not shown: they would put the buttons lines below the text. */
 function UserText({ text, tail }: { text: string; tail?: ComponentChildren }) {
+  // A run of lines that start with `>` is a quote block, as in Telegram (the lines `Quote` puts
+  // in the input); the blank line a quote is followed by is the block's own margin. The rest is
+  // text as typed.
+  const parts: { quote: boolean; lines: string[] }[] = [];
+  for (const line of text.trimEnd().split('\n')) {
+    const quote = /^\s*>/.test(line);
+    const last = parts.at(-1);
+    if (last && last.quote === quote) last.lines.push(line);
+    else parts.push({ quote, lines: [line] });
+  }
+  parts.forEach((p, i) => {
+    if (p.quote) return;
+    if (parts[i - 1] && p.lines[0] === '') p.lines.shift();
+    if (parts[i + 1] && p.lines.at(-1) === '') p.lines.pop();
+  });
   return (
     <div class="text msg-text">
-      {text.trimEnd()}
+      {parts.map((p) =>
+        p.quote ? (
+          <blockquote class="msg-quote">{p.lines.map((l) => l.replace(/^\s*> ?/, '')).join('\n')}</blockquote>
+        ) : (
+          p.lines.length > 0 && p.lines.join('\n')
+        ),
+      )}
       {tail}
     </div>
   );

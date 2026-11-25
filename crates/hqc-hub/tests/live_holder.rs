@@ -106,6 +106,7 @@ async fn live_holder_blocks_takeover() {
         machine_id: None,
         known_paths_file: run.join("home/known_workspaces.json"),
         mcp_socket: None,
+        drain: None,
         logs: None,
         mirror: Some(MirrorOptions {
             projects_dir: claude_dir.join("projects"),

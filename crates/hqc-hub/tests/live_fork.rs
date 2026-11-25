@@ -132,6 +132,7 @@ async fn live_a_fork_knows_only_what_came_before() {
         machine_id: None,
         known_paths_file: run.join("home/known_workspaces.json"),
         mcp_socket: Some(socket),
+        drain: None,
         logs: None,
         mirror: Some(MirrorOptions {
             projects_dir: claude_dir.join("projects"),

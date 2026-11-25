@@ -99,6 +99,7 @@ async fn live_attach_writes_the_event() {
         machine_id: None,
         known_paths_file: run.join("home/known_workspaces.json"),
         mcp_socket: Some(socket),
+        drain: None,
         logs: None,
         mirror: None,
     };

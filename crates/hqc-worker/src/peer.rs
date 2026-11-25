@@ -59,10 +59,10 @@ pub fn header(p: &PeerHeader) -> String {
     }
 }
 
-/// The note an agent gets for an input dropped at the owner's Stop because its cap is below
-/// the session's mode: what was dropped (the message of its `peer`, a schedule's run, or just a
-/// message), never its text. Buffered `send` messages in front of it stay in the hub's buffer
-/// and come with the next input, so they are not named.
+/// The note an agent gets for an input dropped at the owner's Stop because it has a cap below
+/// `allow_all` (SPEC 0.248): what was dropped (the message of its `peer`, a schedule's run, or
+/// just a message), never its text. Buffered `send` messages in front of it stay in the hub's
+/// buffer and come with the next input, so they are not named.
 pub fn dropped_note(input: &SessionInput) -> String {
     let what = match (&input.peer, input.schedule_id) {
         (Some(p), _) => format!("A message from the session {}", field(&p.from)),
@@ -71,7 +71,7 @@ pub fn dropped_note(input: &SessionInput) -> String {
     };
     format!(
         "[hqc] {what} was dropped at the owner's Stop because of a permission conflict: it may \
-         run only in a lower permission mode than this session's. Its text is not shown."
+         run only in a permission mode below Allow all. Its text is not shown."
     )
 }
 

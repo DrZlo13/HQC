@@ -27,22 +27,22 @@
 //!   adapter reports [`AdapterEvent::InputAccepted`] (SPEC §5.2). The queue lives in memory:
 //!   the hub's `pending` inputs are the source of truth and come again after `hello`, so an
 //!   input already queued or delivered is recognised by `event_id` and not run twice.
-//! - The owner's Stop (`session.stop {quiet: true}`, SPEC 0.231) with a turn running (also one
-//!   the runtime started by itself) marks what waits at that moment (the queue, a capped input
-//!   waiting for its mode) and, when the turn ends, what the runtime dropped from it, to be
-//!   written into the agent's history without a turn ([`Adapter::input_quiet_with`], in
-//!   `event_id` order); a slash command among them fails with "cancelled by Stop". So does an
-//!   input whose cap is below the session's own mode (T39): it was never handled under its cap
-//!   and the owner's next turn would see it unhandled in the full mode, so the hub gets an error
-//!   for it and the agent gets a quiet note of its own instead ([`peer::dropped_note`]): what
-//!   was dropped (another session's message, a scheduled run), without its text. Until the
-//!   turn ends nothing new goes into it; what comes after the Stop is never marked. A quiet
-//!   input's acceptance is `ack {event_id, quiet: true}` ([`AdapterEvent::QuietTaken`]), also
-//!   when it is resent; a note has no frame of the hub, so nothing is acked or remembered for
-//!   it. A quiet line the runtime drops ([`AdapterEvent::QuietCancelled`]) is
-//!   written again. A normal input waits for their acks (the CLI takes a "next" line before a
-//!   "later" one), as do the idle unload and a move. A pause's stop (no `quiet`), a Stop with no
-//!   turn running and a `session.kill` mark and write nothing.
+//! - The owner's Stop (`session.stop {quiet: true}`, SPEC 0.231) with a turn running (also one the
+//!   runtime started by itself) marks what waits at that moment (the queue, a capped input waiting
+//!   for its mode) and, when the turn ends, what the runtime dropped from it, to be written into
+//!   the agent's history without a turn ([`Adapter::input_quiet_with`], in `event_id` order); a
+//!   slash command among them fails with "cancelled by Stop". So does an input with a cap below
+//!   `allow_all` (T39, SPEC 0.248): it was never handled under its cap, and the owner's next turn
+//!   would see it unhandled in the session's mode then, which may be raised to `allow_all`
+//!   meanwhile, so the hub gets an error for it and the agent gets a quiet note of its own instead
+//!   ([`peer::dropped_note`]): what was dropped (another session's message, a scheduled run),
+//!   without its text. Until the turn ends nothing new goes into it; what comes after the Stop is
+//!   never marked. A quiet input's acceptance is `ack {event_id, quiet: true}`
+//!   ([`AdapterEvent::QuietTaken`]), also when it is resent; a note has no frame of the hub, so
+//!   nothing is acked or remembered for it. A quiet line the runtime drops
+//!   ([`AdapterEvent::QuietCancelled`]) is written again. A normal input waits for their acks (the
+//!   CLI takes a "next" line before a "later" one), as do the idle unload and a move. A pause's
+//!   stop (no `quiet`), a Stop with no turn running and a `session.kill` mark and write nothing.
 //! - While a turn runs, the first waiting input that may join goes into it when the runtime
 //!   can take it ([`Adapter::can_inject`]) and the turn's own input is no `hqc_ask`: a
 //!   person's input (no `peer`, no `schedule_id`) that is no slash command and has no cap,
@@ -3270,9 +3270,10 @@ impl Session {
     /// Marks input `q` of the owner's Stop (SPEC 0.231) to be written into the agent's history
     /// without a turn ([`Session::write_quiet`], in `event_id` order): the agent knows it next
     /// time and does not act on it now. A slash command fails: it runs or it does not, it is not
-    /// text for the history. So does an input whose cap is below the session's own mode (T39):
-    /// it was never handled under its cap, and the owner's next turn in the full mode would see
-    /// it unhandled, so it is not written; the agent gets a note of its own after the inputs
+    /// text for the history. So does an input with a cap below `allow_all` (T39, SPEC 0.248),
+    /// also one at the session's own mode: it was never handled under its cap, and the owner's
+    /// next turn would see it unhandled in the session's mode then, which the owner may raise
+    /// meanwhile, so it is not written; the agent gets a note of its own after the inputs
     /// instead, naming the sender (the `peer` only) and not showing the text ([`peer::dropped_note`]).
     fn mark_quiet(&mut self, mut q: Queued) {
         // What the runtime gets decides: a message of another session that starts with a path
@@ -3283,13 +3284,14 @@ impl Session {
             .starts_with('/')
         {
             self.cancelled_by_stop(&q.frame_id, q.input.event_id);
-        } else if cap(&q.input) < self.spec.permission_mode {
-            tracing::info!(session_id = %self.id, event_id = %q.input.event_id, "input dropped at stop: its cap is below the session's mode");
+        } else if capped(&q.input) {
+            tracing::info!(session_id = %self.id, event_id = %q.input.event_id, "input dropped at stop: its cap is below allow_all");
             self.reply_input(
                 &q.frame_id,
                 wire_error(
                     error_code::INTERNAL,
-                    "dropped at Stop: it may not run in this session's permission mode".to_string(),
+                    "dropped at Stop: it may run only in a permission mode below Allow all"
+                        .to_string(),
                     false,
                 ),
             );

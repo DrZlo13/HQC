@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.254, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.255, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -172,7 +172,7 @@ OIDC sign-in, §6; hub migration `0031_oidc_subject`), `display_name`, `api_keys
 (OpenRouter, Anthropic API; encrypted with the hub's master key, which lives in the hub's
 env/file, not in the database), `timezone`, `personal_project_id` (the implicit personal
 project, created on first sign-in; the personal assistant session lives in it), `theme`,
-`look`, `project_sort`, `new_session_project_id`.
+`look`, `project_sort`, `new_session_project_id`, `quick_messages`.
 
 `theme` (since 0.51, T49) — the client's base palette: three dark ones, `warm` (default) |
 `graphite` | `contrast`, and since 0.88 their light counterparts `warm_light` |
@@ -203,6 +203,12 @@ the user picks one in Settings and again when that project is deleted (`ON DELET
 the same on every device of the user (`PATCH /api/me`, §6). The hub stores it; the client uses
 it only while the project is on the bar, else the user's personal project, so there is always
 a target and no "none" choice (§6 client layout, the phone and Settings).
+
+`quick_messages` (since 0.255, hub migration `0061_user_quick_messages`) — the user's own quick
+messages: texts (`text[]`, empty by default) that every project's chat offers before the
+project's own (§3 Project `quick_messages`, §6 client layout), in the order the user keeps them,
+the same on every device (`PATCH /api/me`, §6). The same rules as a project's list: each at least
+one character other than whitespace and at most 10 000 characters, at most 100.
 
 `timezone` (since 0.38, T35) — an IANA name, `UTC` until set; the default zone of new
 schedules (§16). The client sets it to the browser's zone (`PATCH /api/me`, §6) when it starts
@@ -1764,13 +1770,15 @@ HTTP API (iteration 1 and projects with workspaces from iteration 2; the list is
 the rest is marked "later"):
 
 - `GET /api/me` → `{id, email, display_name, timezone, personal_project_id, theme, look,
-  project_sort, new_session_project_id, limit_notice_percent}` (`api.me.json`;
+  project_sort, new_session_project_id, quick_messages, limit_notice_percent}` (`api.me.json`;
   `limit_notice_percent` since 0.190: the hub's `HQC_LIMIT_NOTICE_PERCENT`, the limit bar's
   threshold below, 70 from a hub before it); `PATCH /api/me` {timezone?, theme?, look?,
-  project_sort?, new_session_project_id?} (since 0.38, `api.me.patch.request.json`; an unknown
+  project_sort?, new_session_project_id?, quick_messages?} (since 0.38, `api.me.patch.request.json`; an unknown
   zone: `400`; `theme` since 0.51, `look` and `project_sort` since 0.114, §3 User, another value:
   `422`; `new_session_project_id` since 0.188: a project that is not the user's or does not
-  exist: `404`, nothing stored) → the same object;
+  exist: `404`, nothing stored; `quick_messages` since 0.255: the whole list, replacing the stored
+  one, a blank message, one over 10 000 characters or more than 100: `400`, nothing stored,
+  not even another field of the request) → the same object;
   later keys; `PUT /api/me/project_order` {project_ids} (since 0.64,
   `api.project_order.request.json`) → `{projects[]}` in that order: the user's own order of the
   project bar, kept per user (`users.project_order`); ids that are not the user's projects and
@@ -2487,7 +2495,11 @@ arrow to the address it was opened from (on a computer, from `#/`, the current p
 project the phone's floating button and a wrapper's shortcut (`window.hqc.newSessionInProject()`,
 below) open a new session in (§3 User `new_session_project_id`), the same on every device; it
 shows the project in use, the personal one while none is picked or the picked one has left the
-bar, and a pick is stored at once, no "Save"; "Web search" (since
+bar, and a pick is stored at once, no "Save"; "Quick messages" (since 0.255), after it, the
+user's own quick messages, offered in every project before the project's own (below), edited as
+the project's (below): the intro line "Texts sent to the agent with one press from the button
+beside the message field, in every project, before the project's own. The same on every
+device.", the list, "Add a quick message"; "Web search" (since
 0.142) picks where "Search in …" of selected text searches: Google (the default), DuckDuckGo,
 Bing or Yandex, kept on this device (`localStorage`), not on the hub; "Keys" (since 0.242)
 holds the key of every action below that has one: Quote and Search of selected text, the
@@ -2758,18 +2770,22 @@ The page has one function for a wrapper around it (since 0.188),
 the project in use, and, called before `/api/me` has answered and that project is known, does it
 as soon as they are. The macOS app hangs its global shortcut on it.
 
-Quick messages (since 0.167, §3 Project). A chat whose project is known has a lightning-bolt
-button in the composer's row, right after the attach one (and after the key button, when there is
-one). It opens a list above the field, in the look of the command list: a row per message of the
-project in its stored order, its first line on one line ending in "…" when it does not fit, the
-whole text as the row's title (each row a button, so Tab reaches it), and a last row "Edit quick messages", a link to the project's
+Quick messages (since 0.167, §3 Project; the user's own since 0.255, §3 User). A chat whose
+project is known has a lightning-bolt button in the composer's row, right after the attach one (and
+after the key button, when there is one). It opens a list above the field, in the look of the
+command list: a row per message, the user's own in their order, then the project's in its stored
+order, a text in both once at its place in the user's list (since 0.255); its first line on one
+line ending in "…" when it does not fit, the
+whole text as the row's title (each row a button, so Tab reaches it), and a last row "Edit quick
+messages: all projects · this project", links to Settings (`#/settings`) and to the project's
 settings (`#/p/<id>/settings`); with no messages the list says "No quick messages yet — add them
-in project settings" with the same link. A press on a message sends it at once as the input of
+in Settings or in project settings", with the same two links. A press on a message sends it at once as the input of
 the session, exactly as stored, and closes the list; what is typed in the field and the files
 attached stay as they are, unsent. Esc and a press outside close the list, the field keeps the
 focus; the list and the field's completion list are never open together. Opening the list asks
-the hub for the project again (`GET /api/projects/{id}`): the list kept on the client shows at
-once, and what another device changed shows when the answer comes.
+the hub for the project and for the user again (`GET /api/projects/{id}`, `GET /api/me`): the
+lists kept on the client show at once, and what another device changed shows when the answers
+come.
 Each message in the list is a button. The opener has `aria-expanded` and, while the list is open,
 `aria-controls`; Esc on a message of the list puts the focus back on the opener. The new session's
 window has no such button.
@@ -2778,8 +2794,9 @@ its buttons, right before fork (since 0.204); like fork, not while it waits for 
 when it was not delivered. A press reads the project from the hub, adds the
 message's text exactly as typed at the end of that list and sends it whole in `PATCH
 /api/projects/{id}`; a text the hub's list has already sends nothing. A text the project's list
-has is a check, "In quick messages", that cannot be pressed; the hub's refusal is said in the
-chat's notice. The service session has no such button.
+has, or the user's own list has (since 0.255), is a check, "In quick messages", that cannot be
+pressed; the hub's refusal is said in the chat's notice. The button always adds to the
+project's list. The service session has no such button.
 The project settings have a section "Quick messages" between Appearance and Workspaces: a line
 saying what they are, the list in stored order (each message as written, kept to 3 lines, with
 "Edit" and "Delete"), and "Add a quick message"; the form for a new or an edited message is a
@@ -2789,7 +2806,9 @@ is open the other buttons are disabled. Every change
 first reads the project from the hub, applies itself to that list (an added message goes last; an
 edit replaces the first message equal to the text it started from, or adds the new text when none
 is; a delete removes the first message equal to its text, and sends nothing when none is), sends
-the whole list in `PATCH /api/projects/{id}` and shows the hub's refusal under the list.
+the whole list in `PATCH /api/projects/{id}` and shows the hub's refusal under the list. The
+Settings section (since 0.255) is the same editor over the user's list: it reads `GET /api/me`
+and sends the whole list in `PATCH /api/me`.
 The messages cannot be reordered and have no names.
 
 Secrets (since 0.147, §14). The composer of a session whose worker has `session_secrets` has a
@@ -8438,6 +8457,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.254 → 0.255 (quick messages for every project)
+§3 User `quick_messages` (hub migration `0061_user_quick_messages`), §6 `GET`/`PATCH /api/me`
+(`Me.quick_messages`, `PatchMe.quick_messages`; the whole list replaces the stored one, refused
+as a project's list is, `400`, before anything of the request is stored), §6 client layout: the
+user's own quick messages, edited in Settings after "New session" with the project editor, show in
+every project's composer before the project's own (a text in both once); the list's last row links
+to Settings and to the project's settings; opening the list re-reads `/api/me` too; the "In quick
+messages" check of a message counts the user's list. "Add to quick messages" still adds to the
+project's list.
 
 ### 0.253 → 0.254 (a button to the bottom of the chat)
 §6: scrolled up through a long chat, the only way back to the newest text was to scroll all the

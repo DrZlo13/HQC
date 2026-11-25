@@ -1079,6 +1079,7 @@ async fn command_line_carries_permissions() {
         allow_all: false,
         allow: vec!["Bash(cargo test:*)".into(), "Read".into()],
         deny: vec!["Bash(git push:*)".into()],
+        remote_unblock: Default::default(),
     });
     let (tx, _rx) = mpsc::channel(16);
     let mut a = factory.create(&s, tx);
@@ -2790,6 +2791,7 @@ fn policy(allow: &[&str], deny: &[&str]) -> Arc<crate::permissions::Policy> {
             allow_all: false,
             allow: allow.iter().map(|r| r.to_string()).collect(),
             deny: deny.iter().map(|r| r.to_string()).collect(),
+            remote_unblock: Default::default(),
         },
     ))
 }

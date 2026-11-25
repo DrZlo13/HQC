@@ -192,6 +192,8 @@ struct RawEnvPermissions {
     allow: Vec<String>,
     #[serde(default)]
     deny: Vec<String>,
+    #[serde(default)]
+    remote_unblock: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -372,6 +374,7 @@ fn parse_environment(
         unblock: raw.permissions.unblock,
         allow: raw.permissions.allow,
         deny: raw.permissions.deny,
+        remote_unblock: raw.permissions.remote_unblock,
     };
     Ok(Environment {
         name: name.into(),
@@ -1840,6 +1843,29 @@ environment = "lab"
         assert!(env("infra").project_settings);
         assert!(!env("lab").project_settings);
         assert!(!c.default_environment.project_settings);
+    }
+
+    /// #162: `remote_unblock` is read per host and reaches the environment's permissions; a
+    /// rule that is not one of its deny rules is an error at load.
+    #[test]
+    fn remote_unblock_in_worker_toml() {
+        let toml = |rule: &str| {
+            format!(
+                "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n\
+                 [environments.bench.permissions]\nunblock = [\"Bash(ssh:*)\"]\n\
+                 remote_unblock = {{ \"pi@bench.local\" = [\"{rule}\"] }}\n\
+                 [[env_bindings]]\npath = \"/a/bench\"\nenvironment = \"bench\"\n"
+            )
+        };
+        let c = Config::parse(&toml("Bash(sudo:*)")).unwrap();
+        let e = c.environments.iter().find(|e| e.name == "bench").unwrap();
+        assert_eq!(
+            e.permissions.remote_unblock["pi@bench.local"],
+            ["Bash(sudo:*)"]
+        );
+        assert_eq!(e.rules.remote_unblock["pi@bench.local"], ["Bash(sudo:*)"]);
+        let err = Config::parse(&toml("Bash(curl:*)")).unwrap_err();
+        assert!(format!("{err:#}").contains("remote_unblock"), "{err:#}");
     }
 
     /// SPEC 0.235: the hub's MCP servers only in an environment with `hub_mcp`, for an

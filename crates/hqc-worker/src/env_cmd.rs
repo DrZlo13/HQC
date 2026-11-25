@@ -58,6 +58,9 @@ pub fn summary(cfg: &Config) -> String {
         list(&mut out, "unblock", &e.rules.unblock);
         list(&mut out, "allow", &e.rules.allow);
         list(&mut out, "deny", &e.rules.deny);
+        for (host, rules) in &e.rules.remote_unblock {
+            list(&mut out, &format!("remote_unblock (ssh {host})"), rules);
+        }
     }
     out.push_str("bindings:\n");
     if cfg.env_bindings.is_empty() {

@@ -1545,7 +1545,7 @@ MCP calls (worker → hub → worker):
   (`secret.put.vault_field`): an older worker ignores the field and would give the password, so
   the hub offers the field, and `reads_vault` on a card, only to a worker that sends it.
   `environments` (since 0.56, T43) — the environments of the local config (§14) as `{name,
-  allow_local_mcp?, permissions {unblock?, allow?, deny?}}`, without `default` and never with the
+  allow_local_mcp?, permissions {unblock?, allow?, deny?, remote_unblock?}}`, without `default` and never with the
   values (or the names) of `env`; a plain string, as workers before 0.56 send, reads as an
   environment without rules. `env_bindings` — `{path, environment}`, the path canonical when it
   existed at the worker's start (`worker.hello.json`). The hub keeps both on the worker and sets
@@ -7251,6 +7251,7 @@ hub_skills = false                    # true: the owner's skills from the hub (0
 unblock = ["Bash(ssh:*)"]             # lift worker-wide deny rules here only
 allow = ["Bash(ssh debian@192.168.1.20:*)"]
 deny = ["Bash(git push:*)"]           # added to the worker's deny
+remote_unblock = { "pi@bench.local" = ["Bash(sudo:*)"] }  # since 0.246: lifted only inside `ssh` to that host
 
 [[env_bindings]]
 path = "/Users/drzlo/work/lab/infra"
@@ -7283,7 +7284,23 @@ base_url = "http://192.168.1.229:8082" # must equal the hub's description
   rules of a session: the worker's `deny` minus `unblock`, plus the environment's `deny`; then
   the worker's `allow` and the environment's `allow`; then hqc's folder rules (applied in
   `can_use_tool` below every deny, §3 Workspace); then the session's mode. They go to
-  `--settings` and to the adapter's policy (§8.1); the three levels below stay. **Claude Code
+  `--settings` and to the adapter's policy (§8.1); the three levels below stay.
+  `remote_unblock` (since 0.246, #162): per ssh destination as written (`[user@]host`, matched
+  without DNS; an alias of `~/.ssh/config` only by the alias), Bash rules of the environment's
+  effective `deny` that the adapter's own check does not apply to the command `ssh` sends there,
+  so a session setting up a remote machine gets its `sudo` asked about instead of refused. Only
+  a simple part `ssh [options] <destination> <command>` counts, with options that run nothing
+  locally (`-4 -6 -A -a -C -q -T -t -v -x`, `-i -l -p` with a value, `-o Key=Value` with
+  `BatchMode`, `ConnectTimeout`, `IdentitiesOnly`, `IdentityFile`, `LogLevel`, `Port`,
+  `ServerAliveCountMax`, `ServerAliveInterval`, `StrictHostKeyChecking`, `User`,
+  `UserKnownHostsFile`); a command the matcher does not understand (a `$( )` or a backtick, also
+  in double quotes, which the local shell would run), another host, any other option (`-F`,
+  `-J`, `ProxyCommand`, `LocalCommand`), the rest of the command line and every other rule keep
+  the deny. The rules stay in the CLI's `--settings` `deny`, which does not look into the
+  arguments of `ssh` (checked on 2.1.328), so in `auto` and `allow_all`, where the adapter's
+  check does not run, nothing changes; a rule not in the environment's `deny` or not a Bash
+  rule, and a destination that is not `[user@]host`, are config errors. `hqc-worker env` and
+  `permissions.inspect` show and apply it; **Claude Code
   only**, ACP agents have no equivalent, so for them the `default` environment is weaker: the
   only boundary is the absence of keys;
 - `allow_local_mcp`: allow MCP servers from the machine (Claude Code: without
@@ -8329,14 +8346,16 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
-### 0.245 → 0.246 (Auto on a provider; an MCP server's form answers kept out of the history)
+### 0.245 → 0.246 (Auto on a provider; an MCP server's form answers kept out of the history; `sudo` over ssh)
 #194: a session on a model provider in Auto had every call that needs Auto's safety check
 refused by the CLI, since the check runs on Anthropic's servers and does not pass through a
 provider; the agent spent its turns probing what still ran. §5.3: the worker runs such a session
 in `ask` where `auto` is asked; §6: `PATCH /api/sessions/{id}` with `permission_mode: auto` for a
 session with a provider is `422 auto_needs_anthropic`; the client offers no Auto there and says
 why. #129: §4 `clarify.response` of an MCP server's request is stored with `answers: {}`, and
-the frame kept for the worker forgets the answers once acknowledged.
+the frame kept for the worker forgets the answers once acknowledged. #162: §14
+`[environments.<name>.permissions] remote_unblock`, deny rules lifted only in the adapter's own
+check and only for the command `ssh` sends to a named host, with options that run nothing locally.
 
 ### 0.244 → 0.245 (iteration 8: skills from the hub)
 §19: a new iteration 8, skills the owner uploads once on the hub (#62); the generic ACP adapter

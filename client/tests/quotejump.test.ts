@@ -85,10 +85,11 @@ describe('what the feed shows of an event, and how', () => {
 
   it('the report of a subagent on its card, a request\'s command and a question\'s option are found', () => {
     const report = ev(1, 'system', { code: 'task_notification', text: 'The **report** body of the subagent' });
-    const approval = ev(2, 'approval.request', { request_id: 'r', tool: 'Bash', description: 'Run a script', args_preview: '{"command":"echo hello world"}', options: [] });
+    const approval = ev(2, 'approval.request', { request_id: 'r', tool: 'Bash', description: 'Run a script', reason: 'An ask rule requires approval', args_preview: '{"command":"echo hello world"}', options: [] });
     const clarify = ev(3, 'clarify.request', {
       request_id: 'q',
-      questions: [{ id: 'a', text: 'Which flavour?', header: 'Flavour', options: ['vanilla bean', 'dark chocolate'], option_descriptions: ['plain', 'the bitter one'] }],
+      message: 'The server wants a choice',
+      questions: [{ id: 'a', text: 'Which flavour?', header: 'Flavour', options: ['vanilla bean', 'dark chocolate'], option_descriptions: ['plain', 'the bitter one'], option_previews: ['', 'a dark mockup'] }],
     });
     const all = [report, approval, clarify];
     expect(find(all, 'report body of the subagent')).toBe(1);
@@ -98,6 +99,9 @@ describe('what the feed shows of an event, and how', () => {
     expect(find(all, 'the bitter one')).toBe(3);
     expect(find(all, 'Which flavour')).toBe(3);
     expect(find(all, 'Flavour')).toBe(3);
+    expect(find(all, 'ask rule requires approval')).toBe(2);
+    expect(find(all, 'server wants a choice')).toBe(3);
+    expect(find(all, 'a dark mockup')).toBe(3);
   });
 
   it('a worker log line is text, not Markdown', () => {

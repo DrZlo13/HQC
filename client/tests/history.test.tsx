@@ -757,6 +757,18 @@ describe('the chat on screen', () => {
     expect(api.eventsBefore).toHaveBeenCalledTimes(1);
   });
 
+  it('a search hit in the newest page is marked once the feed is drawn from it, not on the render before', async () => {
+    Element.prototype.scrollIntoView = () => {};
+    const { app } = open([...range(1, 449), usage(450)]);
+    // Not through `mount`: the render that puts the page into the timeline and the one that draws
+    // it from there are two, and the hit must not be counted done on the first.
+    await act(async () => render(<Chat app={app} sessionId={SID} focusSeq={440} />, root));
+    await tick(50);
+    await act(async () => app.setRequests(app.requests));
+    await tick(30);
+    expect(root.querySelector<HTMLElement>('.feed-block.is-found')?.dataset.seq).toBe('440');
+  });
+
   it('loads older history down to the event of an open request', async () => {
     const { app, api } = open([...range(1, 99), wire(100, { type: 'approval.request', payload: { request_id: 'r1', tool: 'Bash', description: 'ls', options: [] } }), ...range(101, 449), usage(450)], {
       requests: [{ request_id: 'r1', seq: 100 }],
@@ -1169,6 +1181,38 @@ describe('the chat on screen', () => {
       expect(hl.set['quote-jump']).toBeUndefined();
       expect(root.querySelector('.feed-block.is-found')).toBeNull();
       document.getSelection()!.removeAllRanges();
+    });
+
+    const tool = (seq: number, type: 'tool.call' | 'tool.result', payload: Record<string, unknown>) => wire(seq, { type, payload });
+
+    it('a quote of the reply to an hqc_ask lands on the block that shows the reply, not on "Sent to"', async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([
+        tool(1, 'tool.call', { call_id: 'c1', tool: 'hqc_ask', args_preview: '{"session":"other/s2","text":"what time is it"}' }),
+        tool(2, 'tool.result', { call_id: 'c1', error: false, result_preview: '{"from":"other/s2","reply":"The purple elephant answer"}' }),
+        owner(3, '> purple elephant answer\n\nwhy?'),
+      ]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      await click(quoteOf());
+      expect(hl.set['quote-jump']).toHaveLength(1);
+      const block = (hl.set['quote-jump'][0].startContainer.parentElement as HTMLElement).closest('.feed-block')!;
+      expect(block.getAttribute('data-seq')).toBe('2');
+      expect(block.querySelector('.relay-head')).not.toBeNull();
+    });
+
+    it("a quote of a foreground subagent's report marks the block of its end, not of its start", async () => {
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([
+        tool(1, 'tool.call', { call_id: 'a1', tool: 'Agent', args_preview: '{"description":"Look","prompt":"look around"}' }),
+        tool(2, 'tool.result', { call_id: 'a1', error: false, result_preview: 'The golden report text of the subagent' }),
+        owner(3, '> golden report text\n\nwhy?'),
+      ]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      await click(quoteOf());
+      expect(root.querySelector<HTMLElement>('.feed-block.is-found')!.dataset.seq).toBe('2');
     });
 
     it('finds a quote of an answer stored after the message that quotes it', async () => {

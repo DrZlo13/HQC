@@ -3551,6 +3551,12 @@ button.btn-mode-pill.perm-allow-all:hover,
   color: var(--muted);
   cursor: pointer;
 }
+/* A quote that starts the message: a block above the time (the time floats on the line of the
+   text after it). */
+.msg-quote-lead {
+  display: block;
+  margin: 0 0 4px;
+}
 
 .delivery-failed {
   color: var(--danger);

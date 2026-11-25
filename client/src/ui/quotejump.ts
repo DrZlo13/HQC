@@ -90,14 +90,16 @@ export function eventText(e: HqcEvent, t: Pick<Timeline, 'callFor'>): { text: st
     case 'system':
       return PLAIN_SYSTEM.has(e.payload.code) ? plain(e.payload.text) : md(e.payload.text);
     case 'approval.request': {
-      // What the card shows: the description and the values of the call's arguments.
-      const { description, args_preview } = e.payload;
-      return plain([description, ...stringValues(args_preview)].join('\n'));
+      // What the card shows: the description, the reason and the values of the call's arguments.
+      const { description, reason, args_preview } = e.payload;
+      return plain([description, reason, ...stringValues(args_preview)].filter(Boolean).join('\n'));
     }
     case 'clarify.request':
       return plain(
-        e.payload.questions
-          .flatMap((q) => [q.header, q.text, ...(q.options ?? []), ...(q.option_descriptions ?? [])])
+        [
+          e.payload.message,
+          ...e.payload.questions.flatMap((q) => [q.header, q.text, ...(q.options ?? []), ...(q.option_descriptions ?? []), ...(q.option_previews ?? [])]),
+        ]
           .filter(Boolean)
           .join('\n'),
       );

@@ -341,12 +341,16 @@ export function blockSeq(b: Block): number | undefined {
   }
 }
 
-/** The index in `blocks` of the block that draws the event `seq`, among its own events (an
+/** The index in `blocks` of the block that draws the event `seq`: the block that starts at it
+ *  (a reply and the subagent's report are each in two blocks, and the one that starts at the
+ *  event is the one that shows its text), else the block that holds it among its own events (an
  *  answer's usage, a request's call, the sends and files of a reply, the rows of a group of
  *  calls); undefined when none does (a hidden event). `question`: the `event_id` of the side
  *  question when the event is its answer, which is drawn in the question's block. */
 export function drawingBlock(blocks: readonly Block[], seq: number, question?: string): number | undefined {
   const is = (e: { seq?: number } | undefined) => e?.seq === seq;
+  const starts = blocks.findIndex((b) => blockSeq(b) === seq);
+  if (starts >= 0) return starts;
   const i = blocks.findIndex((b) => {
     switch (b.kind) {
       case 'agent':
@@ -958,17 +962,21 @@ function Bubble({
   note,
   time,
   buttons,
+  lead,
   children,
 }: {
   ts: string;
   note?: BubbleNote;
   time?: ComponentChildren;
+  /** The quote a message starts with (`leadQuote`): above the time, in a block of its own. */
+  lead?: ComponentChildren;
   /** The buttons of a bubble with no text, left of the time. */
   buttons?: ComponentChildren;
   children: ComponentChildren;
 }) {
   return (
     <div class="msg-bubble">
+      {lead}
       <MessageTime
         ts={ts}
         before={[
@@ -1020,6 +1028,7 @@ function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'
   const waiting = event.author.kind === 'user' && d === 'pending' && event.payload.human === true;
   const sendable = waiting && !event.payload.text.trim().startsWith('/');
   const hasText = !!event.payload.text;
+  const { lead, rest } = leadQuote(event.payload.text);
   const buttons = (hasText || fork || waiting) && (
     <MessageButtons tail={hasText}>
       {hasText && <CopyButton text={event.payload.text} icon />}
@@ -1053,6 +1062,7 @@ function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'
     <div class="msg-user">
       <Bubble
         ts={event.ts}
+        lead={lead}
         buttons={hasText ? undefined : buttons}
         note={event.payload.joined ? JOINED : undefined}
         time={[
@@ -1066,7 +1076,7 @@ function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'
           ),
         ]}
       >
-        {hasText && <UserText text={event.payload.text} tail={buttons} />}
+        {hasText && <UserText text={rest} tail={buttons} />}
         {ids.length > 0 && (
           <div class="attachments">
             {ids.map((id) => (
@@ -1129,14 +1139,47 @@ function QuickAddButton({ text, quick }: { text: string; quick: NonNullable<Chat
   );
 }
 
+/** A quote block of the owner's text: the lines of a run of `>` lines without their marks. A
+ *  quote is a button of the keyboard; a click on it goes to the text it quotes (quotejump.ts). */
+function Quote({ lines, lead }: { lines: string[]; lead?: boolean }) {
+  return (
+    <blockquote
+      class={lead ? 'msg-quote msg-quote-lead' : 'msg-quote'}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        e.currentTarget.click();
+      }}
+    >
+      {lines.map((l) => l.slice(l.startsWith('> ') ? 2 : 1)).join('\n')}
+    </blockquote>
+  );
+}
+
+/** A message that starts with a quote shows it above the time, full width, as Telegram does: an
+ *  inline quote as wide as the bubble would not fit beside the time and drop under it, leaving the
+ *  first line empty. `lead` is that quote (none when the text does not start with one), `rest`
+ *  the text after it, without the blank lines between them. */
+function leadQuote(text: string): { lead?: ComponentChildren; rest: string } {
+  const lines = text.trimEnd().split('\n');
+  if (!QUOTE_LINE.test(lines[0])) return { rest: text };
+  const n = lines.findIndex((l) => !QUOTE_LINE.test(l));
+  const end = n < 0 ? lines.length : n;
+  const rest = lines.slice(end);
+  while (rest.length && !rest[0].trim()) rest.shift();
+  return { lead: <Quote lines={lines.slice(0, end)} lead />, rest: rest.join('\n') };
+}
+
 /** What the user typed, as the tab shows it: the text as is with its line breaks, no
  *  Markdown; `tail` (the message's buttons) at the end of its last line. Trailing line breaks
  *  are not shown: they would put the buttons lines below the text. */
 function UserText({ text, tail }: { text: string; tail?: ComponentChildren }) {
   // A run of lines that start with `>` (the lines `Quote` puts in the input) is a quote block,
-  // as in Telegram; the rest is text as typed. A quote is inline, next to the bubble's time, so
-  // the one line break between it and the text beside it is a character of that text: the blank
-  // lines between them are dropped.
+  // as in Telegram; the rest is text as typed. A quote here is inline, next to the bubble's time
+  // (one that starts the message is `leadQuote`'s), so the one line break between it and the text
+  // beside it is a character of that text: the blank lines between them are dropped.
   const parts: { quote: boolean; lines: string[] }[] = [];
   for (const line of text.trimEnd().split('\n')) {
     const quote = QUOTE_LINE.test(line);
@@ -1147,22 +1190,7 @@ function UserText({ text, tail }: { text: string; tail?: ComponentChildren }) {
   return (
     <div class="text msg-text">
       {parts.map((p, i) => {
-        if (p.quote) {
-          return (
-            <blockquote
-              class="msg-quote"
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key !== 'Enter' && e.key !== ' ') return;
-                e.preventDefault();
-                e.currentTarget.click();
-              }}
-            >
-              {p.lines.map((l) => l.slice(l.startsWith('> ') ? 2 : 1)).join('\n')}
-            </blockquote>
-          );
-        }
+        if (p.quote) return <Quote lines={p.lines} />;
         const [before, after] = [parts[i - 1], parts[i + 1]];
         const lines = [...p.lines];
         // The blank lines next to a quote go; the one line break that stays is added below.
@@ -1180,6 +1208,7 @@ function UserText({ text, tail }: { text: string; tail?: ComponentChildren }) {
 /** "Reply with text instead": the user's text went to the agent with the denial. */
 function TextAnswer({ event }: { event: EventOf<'approval.response'> }) {
   const text = event.payload.message!;
+  const { lead, rest } = leadQuote(text);
   const buttons = (
     <MessageButtons tail>
       <CopyButton text={text} icon />
@@ -1187,8 +1216,8 @@ function TextAnswer({ event }: { event: EventOf<'approval.response'> }) {
   );
   return (
     <div class="msg-user msg-answer">
-      <Bubble ts={event.ts} note={INSTEAD}>
-        <UserText text={text} tail={buttons} />
+      <Bubble ts={event.ts} note={INSTEAD} lead={lead}>
+        <UserText text={rest} tail={buttons} />
       </Bubble>
     </div>
   );
@@ -1196,9 +1225,11 @@ function TextAnswer({ event }: { event: EventOf<'approval.response'> }) {
 
 function PendingBubble({ pending, actions }: { pending: PendingMessage; actions: ChatActions }) {
   const sending = pending.status === 'sending';
+  const { lead, rest } = leadQuote(pending.text);
   return (
     <div class={`msg-user msg-pending ${sending ? '' : 'msg-failed'}`}>
       <div class="msg-bubble">
+        {lead}
         {/* Being sent: a clock where the time will stand once the hub has the message, as a
             messenger shows it; the words are its tooltip and its name. */}
         {sending && (
@@ -1206,7 +1237,7 @@ function PendingBubble({ pending, actions }: { pending: PendingMessage; actions:
             <IconClock size={13} />
           </span>
         )}
-        {pending.text && <UserText text={pending.text} />}
+        {rest && <UserText text={rest} />}
         {pending.attachments && <PendingAttachments files={pending.attachments} />}
       </div>
       {!sending && (

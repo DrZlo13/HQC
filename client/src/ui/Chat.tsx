@@ -700,6 +700,8 @@ export function Chat({
       void chat.loadOlder(jump.seq, true);
       return;
     }
+    // The page may be in the timeline before the feed is drawn from it: nothing to look for yet.
+    if (!loaded || !blocks.length) return;
     // The block that draws the event, else the last that starts at or before it.
     const event = t.events().find((e) => e.seq === jump.seq);
     let at = drawingBlock(blocks, jump.seq, event?.type === 'side.answer' ? event.payload.question : undefined);

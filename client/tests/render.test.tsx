@@ -4626,7 +4626,7 @@ describe("the feed like the Claude Code tab", () => {
     expect(text.childNodes[2].textContent).toBe("\nafter > not a quote\nlast");
   });
 
-  it("puts no line break before a quote that starts the message nor after one that ends it", () => {
+  it("puts no line break after a quote that ends the message, nor around the one that starts it", () => {
     const t = new Timeline();
     t.apply(
       ev("event.user.message", (e) => {
@@ -4636,10 +4636,72 @@ describe("the feed like the Claude Code tab", () => {
     );
     show(t);
     const text = root.querySelector(".msg-user .msg-text")!;
-    expect([...text.childNodes].slice(0, 3).map((n) => n.nodeName)).toEqual(["BLOCKQUOTE", "#text", "BLOCKQUOTE"]);
-    expect(text.childNodes[1].textContent).toBe("\nmiddle\n");
+    // The first quote stands above the time, not in the text.
+    expect([...text.childNodes].slice(0, 2).map((n) => n.nodeName)).toEqual(["#text", "BLOCKQUOTE"]);
+    expect(text.childNodes[0].textContent).toBe("middle\n");
+    expect((text.childNodes[1] as HTMLElement).className).toBe("msg-quote");
     // Nothing between the quote and the buttons at the end.
-    expect(text.childNodes[3]?.nodeName).not.toBe("#text");
+    expect(text.childNodes[2]?.nodeName).not.toBe("#text");
+  });
+
+  it("shows a quote that starts a message above the time, full width, and the rest of the text after it", () => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.user.message", (e) => {
+        e.payload.text = "> one\n> two\n\n\nthe rest";
+        e.payload.artifact_ids = [];
+      }),
+    );
+    t.addPending("op-2", "> pending quote\n\npending rest");
+    show(t);
+    const [sent, pending] = [...root.querySelectorAll(".msg-user .msg-bubble")];
+    const lead = sent.firstElementChild as HTMLElement;
+    expect(lead.className).toBe("msg-quote msg-quote-lead");
+    expect(lead.getAttribute("role")).toBe("button");
+    expect(lead.getAttribute("tabindex")).toBe("0");
+    expect(lead.textContent).toBe("one\ntwo");
+    expect(lead.nextElementSibling!.classList.contains("msg-time")).toBe(true);
+    const text = sent.querySelector(".msg-text")!;
+    expect(text.querySelector(".msg-quote")).toBeNull();
+    expect(text.firstChild!.textContent).toBe("the rest");
+    // A message being sent: the quote above its clock.
+    const plead = pending.firstElementChild as HTMLElement;
+    expect(plead.className).toBe("msg-quote msg-quote-lead");
+    expect(plead.nextElementSibling!.className).toBe("msg-time msg-sending");
+    expect(pending.querySelector(".msg-text")!.textContent).toBe("pending rest");
+  });
+
+  it("a quote in the middle or at the end of a message stays inline, beside the text", () => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.user.message", (e) => {
+        e.payload.text = "text\n> mid\ntext";
+        e.payload.artifact_ids = [];
+      }),
+    );
+    show(t);
+    expect(root.querySelector(".msg-user .msg-quote-lead")).toBeNull();
+    expect(root.querySelector(".msg-user .msg-text > .msg-quote")).not.toBeNull();
+  });
+
+  it("a message that is only a quote keeps its buttons", () => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.user.message", (e) => {
+        e.payload.text = "> only a quote";
+        e.payload.artifact_ids = [];
+      }),
+    );
+    t.apply(
+      ev("event.approval.response.message", (e) => ((e.seq = 2), (e.payload.message = "> a quoted answer"))),
+    );
+    show(t);
+    const bubble = root.querySelector(".msg-user:not(.msg-answer) .msg-bubble")!;
+    expect(bubble.querySelector(".msg-quote-lead")!.textContent).toBe("only a quote");
+    expect(bubble.querySelector(".msg-text .msg-tail button[aria-label]")).not.toBeNull();
+    const answer = root.querySelector(".msg-user.msg-answer .msg-bubble")!;
+    expect(answer.querySelector(".msg-quote-lead")!.textContent).toBe("a quoted answer");
+    expect(answer.querySelector(".msg-text .msg-tail button[aria-label]")).not.toBeNull();
   });
 
   it("is a quote only as `Quote` writes it: '> text' or a bare '>'; '>>> x' and an indented '> x' stay text", () => {
@@ -4716,6 +4778,19 @@ describe("the feed like the Claude Code tab", () => {
     const sides = buildFeed(q.items(), q);
     expect(drawingBlock(sides, 21, q.events()[0].event_id)).toBe(0);
     expect(drawingBlock(sides, 21)).toBeUndefined();
+  });
+
+  it("drawingBlock gives an event that two blocks hold to the one that starts at it: a reply's result, a foreground subagent's report", () => {
+    const mk = (seq: number, type: string, payload: object) =>
+      parseEvent({ session_id: "s", event_id: `0199f3a2-7c10-7000-8000-${String(seq).padStart(12, "0")}`, seq, ts: "2026-10-24T18:00:00Z", author: { kind: "agent", id: "s" }, type, payload });
+    const t = new Timeline();
+    t.apply(mk(1, "tool.call", { call_id: "a", tool: "hqc_ask", args_preview: '{"session":"other","text":"what?"}' }));
+    t.apply(mk(2, "tool.result", { call_id: "a", error: false, result_preview: '{"from":"other","reply":"the reply"}' }));
+    t.apply(mk(3, "tool.call", { call_id: "b", tool: "Agent", args_preview: '{"description":"d","prompt":"p"}' }));
+    t.apply(mk(4, "tool.result", { call_id: "b", error: false, result_preview: "the report" }));
+    const blocks = buildFeed(t.items(), t);
+    expect(blocks.map((b) => b.kind)).toEqual(["sent", "reply-from", "subagent", "subagent-end"]);
+    expect([1, 2, 3, 4].map((seq) => drawingBlock(blocks, seq))).toEqual([0, 1, 2, 3]);
   });
 
 });

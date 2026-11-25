@@ -168,6 +168,15 @@ describe('the text of a clipped selection', () => {
     expect(got).toBe('Intro\n\nbefore\nq one\nq two\nafter');
   });
 
+  it("reads a quote that starts the owner's message above its text, on a line of its own", async () => {
+    const got = await quoted(
+      [agent(1, 'Intro', 0, true), user(2, '> q one\n> q two\n\nafter text')],
+      (r) => [textOf(r, 'Intro'), 0],
+      (r) => [textOf(r, 'after text'), 10],
+    );
+    expect(got).toBe('Intro\n\nq one\nq two\n\nafter text');
+  });
+
   it("leaves the answer's usage line out when the range runs past the answer's end", async () => {
     const usage = ev('event.usage', (e) => {
       e.seq = 2;

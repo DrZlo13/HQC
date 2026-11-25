@@ -120,6 +120,7 @@
 //!   another writer.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -293,7 +294,12 @@ pub struct Supervisor {
     workspaces: Arc<crate::workspaces::Workspaces>,
     /// The sign-ins of the worker's Claude Code under way (SPEC 0.185).
     logins: crate::claude_auth::Logins,
+    /// `SIGUSR1` (#220, SPEC 0.256): stop once no agent works, see [`Supervisor::run`].
+    drain: Option<CancellationToken>,
 }
+
+/// The longest a drain waits for the agents' work to end before it stops them anyway.
+pub const DRAIN_MAX: Duration = Duration::from_secs(30 * 60);
 
 /// A confirmation asked for and the `session.start` frames that wait for it.
 struct Waiting {
@@ -310,6 +316,8 @@ struct Outcome {
 struct SessionHandle {
     tx: mpsc::UnboundedSender<Cmd>,
     task: JoinHandle<()>,
+    /// [`Session::working`], as the session last saw it.
+    busy: Arc<AtomicBool>,
     /// The workspace of the last `session.start` the session took: another one is a move.
     workspace: PathBuf,
 }
@@ -440,6 +448,7 @@ impl Supervisor {
             factory,
             link,
             sessions: HashMap::new(),
+            drain: None,
             shutdown_timeout,
             known,
             waiting: HashMap::new(),
@@ -468,13 +477,45 @@ impl Supervisor {
         self
     }
 
+    /// Cancelled: stop as on `shutdown` once no session's agent works ([`Session::working`]),
+    /// or after [`DRAIN_MAX`]; a restart then loses nothing an agent was doing (#220).
+    pub fn with_drain(mut self, drain: CancellationToken) -> Self {
+        self.drain = Some(drain);
+        self
+    }
+
+    /// Whether any session's agent works.
+    fn any_working(&self) -> bool {
+        self.sessions
+            .values()
+            .any(|h| h.busy.load(Ordering::Relaxed))
+    }
+
     /// Runs until `shutdown`, then kills every agent (SPEC §17.3: on worker restart all
     /// agents are `stopped`) and returns once their final events are in the outbox.
     pub async fn run(mut self, mut rx: mpsc::Receiver<Inbound>, shutdown: CancellationToken) {
         let mut outcomes = self.outcomes_rx.take().expect("run once");
+        let drain = self.drain.clone().unwrap_or_default();
+        let mut draining: Option<tokio::time::Instant> = None;
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
+                _ = drain.cancelled(), if draining.is_none() && self.drain.is_some() => {
+                    tracing::info!("asked to stop once no agent works (at most {} min)", DRAIN_MAX.as_secs() / 60);
+                    draining = Some(tokio::time::Instant::now());
+                }
+                _ = tick.tick(), if draining.is_some() => {
+                    let since = draining.expect("draining");
+                    if !self.any_working() {
+                        tracing::info!("no agent works: stopping");
+                        break;
+                    }
+                    if since.elapsed() >= DRAIN_MAX {
+                        tracing::warn!("agents still work after {} min: stopping anyway", DRAIN_MAX.as_secs() / 60);
+                        break;
+                    }
+                }
                 m = rx.recv() => match m {
                     Some(m) => self.handle(m),
                     None => break,
@@ -1236,7 +1277,9 @@ impl Supervisor {
         let (ev_tx, ev_rx) = mpsc::channel(ADAPTER_EVENT_BUFFER);
         let adapter = self.factory.create(spec, ev_tx);
         let (tx, rx) = mpsc::unbounded_channel();
+        let busy = Arc::new(AtomicBool::new(false));
         let s = Session {
+            busy: busy.clone(),
             id: spec.session_id,
             spec: spec.clone(),
             adapter,
@@ -1284,6 +1327,7 @@ impl Supervisor {
         };
         SessionHandle {
             tx,
+            busy,
             task: tokio::spawn(s.run(rx)),
             workspace: spec.workspace.clone(),
         }
@@ -1423,6 +1467,8 @@ fn capped(input: &SessionInput) -> bool {
 }
 
 struct Session {
+    /// [`Session::working`], for a drain of the supervisor.
+    busy: Arc<AtomicBool>,
     id: Uuid,
     spec: StartSpec,
     adapter: Box<dyn Adapter>,
@@ -1516,6 +1562,7 @@ struct Session {
 impl Session {
     async fn run(mut self, mut cmds: mpsc::UnboundedReceiver<Cmd>) {
         loop {
+            self.busy.store(self.working(), Ordering::Relaxed);
             let idle_deadline = self.idle_deadline();
             let lowering_deadline = self.lowering.as_ref().map(|l| l.deadline);
             tokio::select! {
@@ -1568,24 +1615,28 @@ impl Session {
         }
     }
 
+    /// Whether the agent does something a stop would cut: a turn, its own or ours, input that
+    /// waits for it, a background subagent or command (they outlive the turn and may be silent
+    /// for long, a build), a side question, a mode switch under way. Armed wakeups and cron jobs
+    /// are not work: they may wait for hours.
+    fn working(&self) -> bool {
+        !self.queue.is_empty()
+            || (self.state == ProcessState::Running
+                && (self.turn.is_some()
+                    || self.adapter.runs_own_turn()
+                    || !self.injected.is_empty()
+                    || !self.quiet_out.is_empty()
+                    || self.lowering.is_some()
+                    || self.subagents > 0
+                    || self.background_tasks > 0
+                    || !self.side_pending.is_empty()))
+    }
+
     fn idle_deadline(&self) -> Option<Instant> {
         let t = self.idle_timeout?;
-        // A background subagent or command outlives the turn and may be silent for long (a
-        // build). A turn the runtime started by itself is a turn as well: it is silent while it
-        // waits for an approval or an answer, or runs a long command. An armed wakeup and a cron
-        // job die with the process: the agent is idle from the latest of their times on (a job
-        // without a known next fire holds nothing). A side question waits for its answer.
-        (self.state == ProcessState::Running
-            && self.turn.is_none()
-            && !self.adapter.runs_own_turn()
-            && self.injected.is_empty()
-            && self.quiet_out.is_empty()
-            && self.lowering.is_none()
-            && self.queue.is_empty()
-            && self.subagents == 0
-            && self.background_tasks == 0
-            && self.side_pending.is_empty())
-        .then(|| {
+        // An armed wakeup and a cron job die with the process: the agent is idle from the latest
+        // of their times on (a job without a known next fire holds nothing).
+        (self.state == ProcessState::Running && !self.working()).then(|| {
             let crons = self.live.iter().flat_map(|(rows, at)| {
                 rows.iter()
                     .filter(|r| r.kind == Some(LiveKind::Cron))

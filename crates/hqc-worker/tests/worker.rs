@@ -3425,6 +3425,33 @@ async fn turn_of(c: &mut HubConn, env: &Env, adapters: &FakeAdapters, sid: Uuid,
     assert_eq!(c.expect("ack").await["payload"], json!({"event_id": a}));
 }
 
+// #220, SPEC 0.256: SIGUSR1 stops the worker only once no agent works: not during a turn, not
+// while a background task of the agent runs after it; then at once.
+#[tokio::test]
+async fn a_drain_stops_the_worker_once_no_agent_works() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    turn_of(&mut c, &env, &adapters, sid, Uuid::now_v7()).await;
+    w.drain.cancel();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(!w.task.is_finished(), "a turn runs");
+    adapters.emit(sid, AdapterEvent::BackgroundTasks(1)).await;
+    adapters.end_turn(sid).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(!w.task.is_finished(), "a background task runs");
+    adapters.emit(sid, AdapterEvent::BackgroundTasks(0)).await;
+    tokio::time::timeout(WAIT, w.task)
+        .await
+        .expect("stopped once nothing works")
+        .unwrap()
+        .unwrap();
+}
+
 /// The ack of frame `id`, skipped or next; other acks read meanwhile are dropped.
 async fn ack_of(c: &mut HubConn, id: &str) -> Value {
     if let Some(i) = c

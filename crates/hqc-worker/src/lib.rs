@@ -80,6 +80,8 @@ pub struct Worker {
     /// The socket of the hqc MCP servers (`$HQC_HOME/mcp.sock`, SPEC §7.2); `None`: not
     /// served.
     pub mcp_socket: Option<PathBuf>,
+    /// Cancelled (`SIGUSR1`): stop once no agent works (#220, [`Supervisor::with_drain`]).
+    pub drain: Option<CancellationToken>,
 }
 
 pub struct MirrorOptions {
@@ -254,6 +256,9 @@ impl Worker {
                 m.poll,
                 mirror_stop.clone(),
             )));
+        }
+        if let Some(d) = self.drain {
+            sup = sup.with_drain(d);
         }
         sup.run(inbound_rx, shutdown).await;
         log_stop.cancel();

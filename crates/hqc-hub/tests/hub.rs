@@ -3786,6 +3786,91 @@ async fn a_worker_restart_drops_the_kept_subagents() {
     hub.finish().await;
 }
 
+/// #220, SPEC 0.256: a worker restart kills the agent's background work, so the hub tells the
+/// agent at once: a pending note of the owner naming what was running, which starts the session
+/// on the new worker process; a second restart soon after writes no second note.
+#[tokio::test]
+async fn a_worker_restart_tells_the_agent_what_it_lost() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Background work").await;
+    ack_start(&mut w, &sid).await;
+    let agents = json!([{"task_id": "a1", "description": "Review the \"diff\"", "duration_ms": 1000, "kind": "agent"}]);
+    w.event(agent_event(
+        &sid,
+        "subagents.live",
+        json!({ "agents": agents }),
+    ))
+    .await;
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "running", "locked_by": "hqc", "subagents": 1,
+               "background_tasks": 0}),
+    )
+    .await;
+    w.expect("ack").await;
+    // An idle session with nothing running gets nothing.
+    let quiet = hub.create_session("Idle").await;
+    ack_start(&mut w, &quiet).await;
+
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (mut w2, _) = FakeWorker::online_boot(&hub, &token, WS_PATH, Uuid::new_v4()).await;
+    let start = w2.expect("session.start").await;
+    assert_eq!(start["payload"]["session_id"], sid.as_str(), "{start}");
+    w2.reply(&start["id"], "ack", json!({})).await;
+    let input = w2.expect("session.input").await;
+    let text = input["payload"]["text"].as_str().unwrap().to_string();
+    assert!(
+        text.starts_with("[hqc] The worker running you restarted at "),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#"subagent "Review the \"diff\"""#),
+        "the description as a JSON string: {text}"
+    );
+    let events = hub.events(&sid).await;
+    let note = events
+        .iter()
+        .find(|e| e["type"] == "user.message")
+        .expect("the note");
+    assert_eq!(note["payload"]["restart"], true);
+    assert!(hub
+        .events(&quiet)
+        .await
+        .iter()
+        .all(|e| e["type"] != "user.message"));
+
+    // The new process runs it and dies at once: no second note within ten minutes.
+    w2.reply(
+        &input["id"],
+        "ack",
+        json!({"event_id": input["payload"]["event_id"]}),
+    )
+    .await;
+    w2.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "running", "locked_by": "hqc", "subagents": 0,
+               "background_tasks": 2}),
+    )
+    .await;
+    w2.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (mut w3, _) = FakeWorker::online_boot(&hub, &token, WS_PATH, Uuid::new_v4()).await;
+    w3.expect_silence(Duration::from_millis(500)).await;
+    let notes = hub
+        .events(&sid)
+        .await
+        .into_iter()
+        .filter(|e| e["type"] == "user.message")
+        .count();
+    assert_eq!(notes, 1);
+    hub.finish().await;
+}
+
 /// SPEC §4: the empty list goes directly and is lost with a broken link, and a worker that
 /// reconnects without a restart repeats only a list that is not empty. A `session.state` that
 /// counts no subagent but a background task keeps the list, which holds the agent's background

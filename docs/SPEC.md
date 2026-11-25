@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.253, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.254, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -3129,7 +3129,14 @@ while it goes on, the chat sets no scroll position of its own: it neither follow
 renders older blocks, so a scroll up stops at the top of the rendered blocks until the scroll
 settles (since 0.136 for a wheel, since 0.198 for the rest). Once it settles, the chat follows the
 bottom if the feed still holds it and something moved it meanwhile, and renders the 60 older
-blocks if the feed is still within 400 px of its top.
+blocks if the feed is still within 400 px of its top. Since 0.254, while the feed does not follow
+its bottom (a move up that left it 80 px or more above its bottom, or a jump to an event, let go of
+it) and the bottom is more than two of the feed's windows down, a button with a chevron down stands
+in the middle of the feed's bottom edge, over the feed: the send button's corners, 56 × 28 px (48 ×
+24 in Compact on a computer). Its press puts the feed at its bottom and the feed follows it again,
+and keeps the focus in the input. Pressed while the user's scroll goes on (a fling coasting under
+it), the rest of that scroll does not let go of the bottom, and in WebKit the feed goes there once
+the scroll settles; a new input up after the press is a scroll of its own.
 
 Messages between sessions in the feed (since 0.54, T51; mockups `Session`, `AskingSession`,
 `MSession2`): violet blocks (`--relay`) with an arrow, ↗ for what left this session and ↙
@@ -8431,6 +8438,12 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.253 → 0.254 (a button to the bottom of the chat)
+§6: scrolled up through a long chat, the only way back to the newest text was to scroll all the
+way down by hand. While the feed does not follow its bottom and the bottom is more than two of the
+feed's windows down, a button in the middle of the feed's bottom edge now puts the feed at its
+bottom, and the feed follows it again. Client only.
 
 ### 0.252 → 0.253 (a click on a quote goes to the text it quotes)
 §6: the user's `>` lines (what Quote puts in) showed as typed, with nothing that led back to what

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.248, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.249, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -3357,8 +3357,12 @@ drops the copy, and the chat shows the hub's page. The copy is the user's: a cha
 `/api/me` answers waits for it. A session the hub answers `404` for is forgotten; one deleted from
 this client, a room's agents with their room and the sessions of a deleted project are forgotten
 with the attachments their copies refer to (`artifact_ids`, `artifact_id`, as the hub's cleanup
-counts them, §12). Since 0.240 the copies leave the device on their own too. When `/api/me`
-answers `401` or `403` (signed out) the client deletes both databases of the user who signed in
+counts them, §12). Since 0.240 the copies leave the device on their own too. When `/api/me` answers
+`401` or `403` (signed out; since 0.249 also a redirect: the client asks it with
+`redirect: 'manual'`, and a sign-in proxy such as Cloudflare Access or oauth2-proxy answers a
+signed-out user with a redirect to its sign-in page, which, followed, fails `fetch` as offline; the
+hub never redirects `/api/me`, so any redirect is taken for a sign-out, and one for another reason
+costs the copies, which download again) the client deletes both databases of the user who signed in
 last on this device (whose id it keeps in `localStorage` `hqc-device-user`), and when another user
 signs in, the previous user's; offline or a hub error keeps them. "Forget this device" in Settings
 deletes the user's two databases; a chat held in memory keeps writing what comes after, not what it
@@ -8349,6 +8353,12 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.248 → 0.249 (a sign-in proxy's redirect at sign-out wipes the device's copies)
+§6: since 0.240 the client deletes the device's copies of a user when `/api/me` answers `401` or
+`403`, but a sign-in proxy (Cloudflare Access, oauth2-proxy) answers a signed-out user with a
+redirect to its sign-in page; `fetch` followed it, failed as offline, and the copies stayed. The
+client now asks `/api/me` with `redirect: 'manual'` and takes a redirect for `401`. Client only.
 
 ### 0.247 → 0.248 (every capped input that waits at the owner's Stop is dropped)
 §17.2: since 0.241 the owner's Stop drops an input of another session or a schedule's run capped

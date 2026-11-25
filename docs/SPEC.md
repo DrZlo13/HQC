@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.249, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.250, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -3316,8 +3316,11 @@ than `running`, and
 `system context_compacted`, with which a `/compact` starts, and since 0.218 `system
 command_output`, with which a slash command's turn starts), to its end (the final
 `agent.message`, `status` `idle` or `error`, `system turn_lost`); a delivered input waited only
-if the first end after it is not its own (`in_reply_to`). Inputs waiting one behind another
-take the turns in `seq` order: the first delivered one starts at the agent's first event of
+if the first end after it is not its own (`in_reply_to`) and, since 0.250, when that end is a
+`system turn_lost`, only if it was delivered after it (`delivered_at` against the `ts` of
+`turn_lost`, both the hub's clock): delivered before, it went into the turn that was lost, its
+own or one the runtime ran by itself, which `turn_lost` does not name. Inputs waiting one behind
+another take the turns in `seq` order: the first delivered one starts at the agent's first event of
 work after the end of the turn before, or before the end of its own turn when that comes
 first, an end that names it or, with no turn opened since the end before, one that names no
 input and is no `status` (a `status` there closes the same turn as the end before it). A
@@ -8353,6 +8356,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.249 → 0.250 (a message taken into a turn that was lost is not left waiting at the bottom)
+The runtime ran a turn by itself, took the owner's message into it (the worker had written it as
+a turn: a plain `ack`, no `joined`) and its process died: `system turn_lost` names no input, so
+the client counted the message as waiting through that turn, and as the next turn was another
+message's, it and the message joined behind it stood queued under everything that came later,
+for good. §6: when the first end after a delivered input is `turn_lost`, the input waited only if
+it was delivered after it; delivered before, it stands at its own place, as in the turn it went
+into. The hub's `waited_place` (the cut of a fork before such a message) follows the client.
 
 ### 0.248 → 0.249 (a sign-in proxy's redirect at sign-out wipes the device's copies)
 §6: since 0.240 the client deletes the device's copies of a user when `/api/me` answers `401` or

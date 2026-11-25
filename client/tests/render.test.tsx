@@ -848,6 +848,48 @@ describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
     expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e3", "e7", "e4", "e8", "e9"]);
   });
 
+  it("one the runtime took into a turn that was then lost stands in that turn, not queued at the bottom", () => {
+    // The runtime ran a turn by itself, took input 2 into it (a plain ack: the worker wrote it
+    // as a turn) and input 3 joined behind it, then its process died. The hub's `turn_lost`
+    // names no input, and the next turn is input 8's.
+    const t = new Timeline();
+    t.applyAll([
+      call(1, "a", "Bash", { command: "make" }),
+      input(2, 4.5),
+      input(3, 4.6, (e) => ((e.payload.joined = true), (e.payload.joined_after = 4))),
+      result(4, "a"),
+      agentText(5, "On it.", false),
+      call(6, "b", "Bash", { command: "make flash" }),
+      ev("event.system", (e) => {
+        e.seq = 7;
+        e.ts = at(7);
+        e.payload = { code: "turn_lost", text: "The agent process stopped during a turn; the turn was lost" };
+      }),
+      input(8, 8.1),
+      final(9, 8),
+      idle(10, 8),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e3", "e5", "e6", "e7", "e8", "e9", "e10"]);
+    show(t);
+    expect(time(2)).toBe(formatTime(at(2)));
+  });
+
+  it("one delivered after its turn was lost waited through that turn", () => {
+    const t = new Timeline();
+    t.applyAll([
+      call(1, "a", "Bash", { command: "make" }),
+      input(2, 7.5),
+      ev("event.system", (e) => {
+        e.seq = 3;
+        e.ts = at(7);
+        e.payload = { code: "turn_lost", text: "The agent process stopped during a turn; the turn was lost" };
+      }),
+      call(4, "b", "Bash", { command: "make" }),
+      final(5, 2),
+    ]);
+    expect(order(t)).toEqual(["e1", "e3", "e2", "e4", "e5"]);
+  });
+
   it("a delivery frame with joined_after moves a live message, and it is kept when the hub copy comes again", () => {
     const t = new Timeline();
     t.applyAll([input(1, 1.2), input(2), call(3, "a", "Bash", { command: "ls" }), result(4, "a"), agentText(5, "Next", false)]);

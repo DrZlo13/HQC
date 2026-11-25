@@ -258,6 +258,15 @@ pub struct SecretAsk {
     /// in its `worker.toml`); the owner confirms or changes it on the card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<String>,
+    /// The field of that entry the agent proposes, when it is not the password; only where the
+    /// worker also reads fields (`hello.capabilities.vault_fields`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_field: Option<String>,
+    /// The worker reads Vaultwarden and fields of an entry (`capabilities.vault_fields`): the
+    /// card offers the vault even when the agent named no entry, and a "Field" box. A worker
+    /// that reads no fields never gets it, since it would ignore a field and give the password.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reads_vault: bool,
 }
 
 /// One subagent of `subagents.live` (SPEC §4, since 0.101), or (since 0.127) one background

@@ -485,7 +485,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
         tool: 'hqc_secret',
         description: 'The Wi-Fi password to write into the camera config',
         options: [{ id: 'deny', label: 'Decline', canonical: 'deny' }],
-        secret: { name: 'WIFI_PASS', kind: 'secret', vault: 'home-wifi' },
+        secret: { name: 'WIFI_PASS', kind: 'secret', vault: 'home-wifi', reads_vault: true },
         expires_at: undefined,
         policy_hint: undefined,
         rule_suggestions: undefined,
@@ -781,15 +781,17 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   const fingerprint = (seed) => `SHA256:${Buffer.from(seed).toString('base64').replace(/=+$/, '').slice(0, 43)}`;
   route('POST', '/api/sessions/:id/secrets', (p, body) => {
     const s = sessionOr404(p.id);
-    const extra = Object.keys(body ?? {}).filter((k) => !['kind', 'name', 'value', 'vault', 'passphrase', 'remember', 'request_id'].includes(k));
+    const extra = Object.keys(body ?? {}).filter((k) => !['kind', 'name', 'value', 'vault', 'vault_field', 'passphrase', 'remember', 'request_id'].includes(k));
     if (extra.length) throw fail(400, 'bad_request', `unknown field \`${extra[0]}\``);
-    const { kind, name, vault } = body ?? {};
+    const { kind, name, vault, vault_field: field } = body ?? {};
     // The worker reads a vault entry itself: the mock has no value then, only a stand-in.
     const value = vault !== undefined ? 'PRIVATE KEY (from the vault)' : body?.value;
     if (!['secret', 'ssh_key'].includes(kind)) throw fail(400, 'bad_request', 'kind is secret or ssh_key');
     if (typeof name !== 'string' || !SECRET_NAME.test(name)) throw fail(422, 'secret_refused', 'a bad name');
     if ((body?.value !== undefined) === (vault !== undefined)) throw fail(400, 'bad_request', 'give exactly one of value and vault');
     if (vault !== undefined && (typeof vault !== 'string' || !vault.trim())) throw fail(400, 'bad_request', 'vault is one line of 1 to 200 characters');
+    if (field !== undefined && vault === undefined) throw fail(400, 'bad_request', 'vault_field needs vault');
+    if (field !== undefined && (typeof field !== 'string' || !field.trim())) throw fail(400, 'bad_request', 'vault_field is one line of 1 to 200 characters');
     if (typeof value !== 'string' || !value) throw fail(400, 'bad_request', 'value is required');
     if (s.system) throw fail(409, 'unavailable', 'a service session takes no secret');
     if (kind === 'ssh_key' && !value.includes('PRIVATE KEY')) throw fail(422, 'secret_refused', 'not an OpenSSH private key');
@@ -808,7 +810,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       if (keys.some((k) => k.name === name)) throw fail(422, 'secret_refused', `this workspace has a key named ${name}`);
       workspaceKeys.set(s.workspace_id, [...keys, { name, fingerprint: fp }]);
     }
-    const from = vault !== undefined ? ` from Vaultwarden entry ${vault}` : '';
+    const from = vault !== undefined ? ` from Vaultwarden entry ${vault}${field !== undefined ? `, field ${field}` : ''}` : '';
     const text = kind === 'ssh_key'
       ? `ssh key ${name} (${fp}) given${from}${remembered ? ', remembered for this workspace' : ''}`
       : `Secret ${name} given${from}`;

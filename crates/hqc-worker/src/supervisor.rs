@@ -1943,6 +1943,9 @@ impl Session {
         let Some(proc) = self.adapter.secrets() else {
             anyhow::bail!("the agent is not running: give it once it runs");
         };
+        if put.vault_field.is_some() && put.vault.is_none() {
+            anyhow::bail!("vault_field needs a vault entry");
+        }
         // A vault entry is read here, by this machine's `rbw`: the value never came from the hub.
         let vaulted = match put.vault.as_deref() {
             None => None,
@@ -1959,8 +1962,23 @@ impl Session {
                     anyhow::bail!("give the value or the vault entry, not both");
                 }
                 hqc_proto::frame::check_vault_entry(entry).map_err(anyhow::Error::msg)?;
-                tracing::info!(session_id = %self.id, %entry, "reading a secret from Vaultwarden");
-                Some(crate::vault::read_for(rbw, entry, put.kind == SecretKind::SshKey).await?)
+                let field = put.vault_field.as_deref();
+                if let Some(f) = field {
+                    hqc_proto::frame::check_vault_field(f).map_err(anyhow::Error::msg)?;
+                }
+                tracing::info!(session_id = %self.id, %entry, ?field, "reading a secret from Vaultwarden");
+                Some(
+                    crate::vault::read_for(rbw, entry, field, put.kind == SecretKind::SshKey)
+                        .await
+                        .map_err(|e| {
+                            // Typing the value does not get past a refusal of the entry itself.
+                            if e.is::<crate::vault::Refused>() {
+                                e
+                            } else {
+                                anyhow::anyhow!("{e}, or type the value")
+                            }
+                        })?,
+                )
             }
         };
         if put.vault.is_none() && put.value.is_none() && put.kind != SecretKind::SshKeygen {
@@ -3368,10 +3386,29 @@ impl Session {
         // `mode: resume` from the hub, or this process ran the agent before (kill, idle
         // timeout, crash). The Claude Code adapter checks for the transcript either way.
         let mode = self.start_mode();
-        let spec = StartSpec {
+        let mut spec = StartSpec {
             permission_mode: mode,
             ..self.spec.clone()
         };
+        // A provider key kept in Vaultwarden is read at every start, into this copy only: a key
+        // changed there is the next start's, and the session's own spec never holds it.
+        if let Some(p) = spec.provider.as_mut() {
+            if let Some(k) = p.api_key_vault.take() {
+                tracing::info!(session_id = %self.id, provider = %p.name, entry = %k.entry, "reading a provider key from Vaultwarden");
+                match crate::vault::read_for(&k.rbw, &k.entry, k.field.as_deref(), false).await {
+                    Ok(v) => p.api_key = Some(crate::token::Secret::new(v)),
+                    Err(e) => {
+                        let e = anyhow::Error::new(ProviderKeyUnreadable(format!(
+                            "the key of the provider {} could not be read from Vaultwarden: {e}",
+                            p.name
+                        )));
+                        tracing::warn!(session_id = %self.id, "agent start failed: {e:#}");
+                        self.set_state(ProcessState::Stopped);
+                        return Err(e);
+                    }
+                }
+            }
+        }
         let r = if self.started_once || self.resume_requested {
             self.adapter.resume(&spec).await
         } else {
@@ -3621,8 +3658,26 @@ fn waits(e: &anyhow::Error) -> bool {
     e.is::<NoSlot>()
 }
 
+/// The key of the session's provider could not be read from Vaultwarden. Not retryable: a
+/// pinentry window the read left open stays open on this machine, and the hub's retries (three,
+/// seconds apart) would only stack more of them; the owner unlocks `rbw` and sends again.
+#[derive(Debug)]
+struct ProviderKeyUnreadable(String);
+
+impl std::fmt::Display for ProviderKeyUnreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ProviderKeyUnreadable {}
+
 fn start_failed(e: &anyhow::Error) -> WorkerFrame {
-    wire_error(error_code::AGENT_START_FAILED, format!("{e:#}"), true)
+    wire_error(
+        error_code::AGENT_START_FAILED,
+        format!("{e:#}"),
+        !e.is::<ProviderKeyUnreadable>(),
+    )
 }
 
 /// The most of a background task's output uploaded: 2 MB, what "Open" of a text shows in the

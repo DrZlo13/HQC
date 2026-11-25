@@ -641,22 +641,44 @@ fn rbw_marker(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join("rbw-called")
 }
 
-/// A fake `rbw` in `dir`: it touches [`rbw_marker`] on every call; `unlocked` fails while
-/// `locked` exists; `list` has one entry, `home-wifi` with the id `id-wifi`; `get -- id-wifi`
-/// prints `vaulted-pass`, `get` of any other id fails.
-fn fake_rbw(dir: &std::path::Path, locked: &std::path::Path) -> std::path::PathBuf {
+/// The file the fake `rbw` of [`fake_rbw`] touches on every `get`.
+fn rbw_get_marker(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("rbw-get-called")
+}
+
+/// Writes `body` as an executable script at `path` and waits until it can be run: another
+/// test's fork may still hold the write handle (`ETXTBSY`), and the worker would report a
+/// missing `rbw` for it.
+fn write_script(path: &std::path::Path, body: &str) {
     use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for _ in 0..100 {
+        match std::process::Command::new(path).arg("--probe").output() {
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            _ => break,
+        }
+    }
+}
+
+/// A fake `rbw` in `dir`: it touches [`rbw_marker`] on every call and [`rbw_get_marker`] on
+/// every `get`; `unlocked` and `list` fail while `locked` exists (the unlock `list` asks for is
+/// not answered); `list` has two entries, `home-wifi` with the id `id-wifi` and `pi-lab`, an SSH
+/// Key, with the id `id-ssh`; `get -- id-wifi` prints `vaulted-pass`, `get --raw -- id-wifi`
+/// prints the entry as JSON with the username `vaulted-user`, `get` of any other id fails.
+fn fake_rbw(dir: &std::path::Path, locked: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("rbw");
-    std::fs::write(
+    write_script(
         &path,
-        format!(
-            "#!/bin/sh\ntouch {}\ncase \"$1\" in unlocked) [ -e {} ] && exit 1; exit 0;; list) printf 'id-wifi\\thome-wifi\\tLogin\\n';; get) [ \"$3\" = id-wifi ] || {{ echo 'no entry found' >&2; exit 1; }}; echo vaulted-pass;; esac\n",
+        &format!(
+            "#!/bin/sh\ntouch {}\ncase \"$1\" in unlocked) [ -e {l} ] && exit 1; exit 0;; list) [ -e {l} ] && {{ echo 'pinentry cancelled' >&2; exit 1; }}; printf 'id-wifi\\thome-wifi\\tLogin\\nid-ssh\\tpi-lab\\tSSH Key\\n';; get) touch {g}; if [ \"$2\" = --raw ]; then [ \"$4\" = id-wifi ] || {{ echo 'no entry found' >&2; exit 1; }}; echo '{{\"data\":{{\"username\":\"vaulted-user\",\"password\":\"vaulted-pass\"}},\"fields\":[],\"notes\":null}}'; else [ \"$3\" = id-wifi ] || {{ echo 'no entry found' >&2; exit 1; }}; echo vaulted-pass; fi;; esac\n",
             rbw_marker(dir).display(),
-            locked.display()
+            g = rbw_get_marker(dir).display(),
+            l = locked.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 
@@ -704,6 +726,10 @@ async fn secrets_and_keys_reach_the_running_agent() {
     let hello = c.handshake().await;
     assert_eq!(hello["payload"]["session_secrets"], true);
     assert_eq!(hello["payload"]["capabilities"]["vault"], true, "{hello}");
+    assert_eq!(
+        hello["payload"]["capabilities"]["vault_fields"], true,
+        "{hello}"
+    );
 
     let sid = Uuid::now_v7();
     c.frame("session.start", env.start_payload(sid)).await;
@@ -767,7 +793,24 @@ async fn secrets_and_keys_reach_the_running_agent() {
         std::fs::read_to_string(format!("{dir}/VAULT_PASS")).unwrap(),
         "vaulted-pass"
     );
-    // A locked vault, both a value and an entry, and a bad entry are refused, nothing written.
+    // A field of the entry: the worker reads the whole entry (`get --raw`) and picks it.
+    let r = ask(
+        &mut c,
+        put(
+            "secret",
+            "VAULT_USER",
+            json!({"vault": "home-wifi", "vault_field": "username"}),
+        ),
+    )
+    .await;
+    assert_eq!(r["type"], "result", "{r}");
+    assert!(!r.to_string().contains("vaulted-user"), "{r}");
+    assert_eq!(
+        std::fs::read_to_string(format!("{dir}/VAULT_USER")).unwrap(),
+        "vaulted-user"
+    );
+    // A locked vault that is not unlocked, both a value and an entry, and a bad entry are
+    // refused, nothing written.
     std::fs::write(&locked, "").unwrap();
     let r = ask(
         &mut c,
@@ -775,8 +818,9 @@ async fn secrets_and_keys_reach_the_running_agent() {
     )
     .await;
     assert_eq!(r["type"], "error", "{r}");
-    assert!(
-        r["payload"]["message"].as_str().unwrap().contains("locked"),
+    assert_eq!(
+        r["payload"]["message"],
+        "Vaultwarden is locked on this machine and rbw could not unlock it: pinentry cancelled, or type the value",
         "{r}"
     );
     assert!(!std::path::Path::new(&format!("{dir}/LOCKED_PASS")).exists());
@@ -797,6 +841,18 @@ async fn secrets_and_keys_reach_the_running_agent() {
             "vault is one line",
         ),
         (
+            put("secret", "NO_ENTRY", json!({"vault_field": "username"})),
+            "vault_field needs a vault entry",
+        ),
+        (
+            put(
+                "secret",
+                "BAD_FIELD",
+                json!({"vault": "home-wifi", "vault_field": "a\nb"}),
+            ),
+            "vault_field is one line",
+        ),
+        (
             put("ssh_keygen", "KEYGEN", json!({"vault": "home-wifi"})),
             "ssh_keygen takes no vault entry",
         ),
@@ -811,6 +867,20 @@ async fn secrets_and_keys_reach_the_running_agent() {
         assert!(!rbw_marker(&home_path).exists(), "rbw ran for {p}");
     }
     assert!(!std::path::Path::new(&format!("{dir}/BOTH")).exists());
+    // An SSH key asked for as a plain secret is refused before `rbw get`, and typing the value
+    // is not offered: it would be the very file the refusal keeps the key out of.
+    let _ = std::fs::remove_file(rbw_get_marker(&home_path));
+    let r = ask(
+        &mut c,
+        put("secret", "SSH_AS_FILE", json!({"vault": "pi-lab"})),
+    )
+    .await;
+    assert_eq!(r["type"], "error", "{r}");
+    let msg = r["payload"]["message"].as_str().unwrap();
+    assert!(msg.contains("is an SSH key"), "{msg}");
+    assert!(!msg.contains("or type the value"), "{msg}");
+    assert!(!rbw_get_marker(&home_path).exists(), "rbw get ran");
+    assert!(!std::path::Path::new(&format!("{dir}/SSH_AS_FILE")).exists());
 
     // A key with a passphrase: wrong, then right, and kept for the workspace.
     let keys = tempfile::tempdir().unwrap();
@@ -918,6 +988,100 @@ async fn secrets_and_keys_reach_the_running_agent() {
     w.stop().await;
 }
 
+/// A provider's `api_key` kept in Vaultwarden is read by the worker's `rbw` at every start of the
+/// agent, into the CLI's `ANTHROPIC_AUTH_TOKEN` and nowhere else: the same session, started
+/// again, gets the key as it is in Vaultwarden then. An `rbw` that fails fails the start with the
+/// reason, before the CLI is spawned, and not retryably (the owner unlocks `rbw`, then sends
+/// again). No `vault` flag is needed: the owner wrote the reference in his own `worker.toml`.
+#[tokio::test]
+async fn a_providers_key_is_read_from_the_vault_at_every_agent_start() {
+    let env = Env::new();
+    let home = tempfile::Builder::new()
+        .prefix("hqc-pkey-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    let claude = ScriptedClaude::new(&fixture("stream-permission-allow-2.1.307.jsonl"));
+    let factory = ClaudeCodeAdapters::new(
+        ClaudeOptions {
+            config_dir: Some(env.dir.path().join("claude-config")),
+            ssh: hqc_worker::ssh::Store::in_home(&home_path),
+            ..ClaudeOptions::default()
+        },
+        Arc::new(claude.clone()),
+    );
+    let mut config = hqc_worker::config::Config::parse(&format!(
+        "{}[providers.zai]\nbase_url = \"https://api.z.ai/api/anthropic\"\n\
+         api_key = {{ vault = \"zai-key\" }}\n",
+        env.config_toml("http://127.0.0.1:1")
+    ))
+    .unwrap();
+    let mut hub = FakeHub::start().await;
+    config.hub_url = hub.url();
+    config.secrets = hqc_worker::secrets::Stores::in_home(&home_path);
+    // A fake `rbw`: the key is what the file `key` holds now; `unlocked` and `list` fail while
+    // the file `locked` exists.
+    let (key, locked) = (home_path.join("key"), home_path.join("locked"));
+    std::fs::write(&key, "key-one\n").unwrap();
+    let rbw = home_path.join("rbw");
+    write_script(
+        &rbw,
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in unlocked) [ -e {l} ] && exit 1; exit 0;; list) [ -e {l} ] && {{ echo 'pinentry cancelled' >&2; exit 1; }}; printf 'id-zai\\tzai-key\\tLogin\\n';; get) cat {k};; esac\n",
+            l = locked.display(),
+            k = key.display()
+        ),
+    );
+    config.rbw_bin = rbw;
+    let w = start_worker_factory(&env, config, Arc::new(factory));
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let sid = Uuid::now_v7();
+    let start = |sid: Uuid| {
+        let mut p = env.start_payload(sid);
+        p["provider"] = json!({"name": "zai", "base_url": "https://api.z.ai/api/anthropic",
+                               "model": "glm-5"});
+        p
+    };
+    let token = |n: usize| {
+        let cmd = claude.commands()[n].clone();
+        cmd.env
+            .iter()
+            .find(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN")
+            .map(|(_, v)| v.clone())
+    };
+
+    // Read at the start: the CLI gets it as its token, the frame answers without it.
+    c.frame("session.start", start(sid)).await;
+    let ack = c.expect("ack").await;
+    assert!(!ack.to_string().contains("key-one"), "{ack}");
+    assert_eq!(token(0).as_deref(), Some("key-one"));
+
+    // The key changed in Vaultwarden: the same session's next start reads it again.
+    std::fs::write(&key, "key-two\n").unwrap();
+    c.frame("session.kill", json!({"session_id": sid})).await;
+    c.expect("ack").await;
+    c.frame("session.start", start(sid)).await;
+    c.expect("ack").await;
+    assert_eq!(claude.commands().len(), 2);
+    assert_eq!(token(1).as_deref(), Some("key-two"));
+
+    // A locked `rbw` that is not unlocked: the start fails with the reason, no CLI is spawned,
+    // and the error is not retryable (a retry would stack another prompt on that machine).
+    std::fs::write(&locked, "").unwrap();
+    c.frame("session.start", start(Uuid::now_v7())).await;
+    let e = c.expect("error").await;
+    assert_eq!(e["payload"]["code"], "agent_start_failed", "{e}");
+    assert_eq!(e["payload"]["retryable"], false, "{e}");
+    let msg = e["payload"]["message"].as_str().unwrap();
+    assert_eq!(
+        msg,
+        "the key of the provider zai could not be read from Vaultwarden: Vaultwarden is locked on this machine and rbw could not unlock it: pinentry cancelled"
+    );
+    assert_eq!(claude.commands().len(), 2, "the CLI ran without its key");
+    w.stop().await;
+}
+
 /// The vault is offered only with `vault` and `session_secrets` both on: a worker with
 /// `session_secrets` alone has no `capabilities.vault` and refuses an entry; `vault` alone is
 /// not `session_secrets`.
@@ -954,10 +1118,13 @@ async fn the_vault_needs_both_flags() {
         let w = start_worker_factory(&env, config, Arc::new(factory));
         let mut c = hub.accept().await;
         let hello = c.handshake().await;
-        assert!(
-            hello["payload"]["capabilities"].get("vault").is_none(),
-            "{hello}"
-        );
+        // `vault_fields` is told exactly when `vault` is.
+        for cap in ["vault", "vault_fields"] {
+            assert!(
+                hello["payload"]["capabilities"].get(cap).is_none(),
+                "{cap}: {hello}"
+            );
+        }
         let sid = Uuid::now_v7();
         c.frame("session.start", env.start_payload(sid)).await;
         c.expect("ack").await;

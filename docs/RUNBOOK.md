@@ -940,8 +940,17 @@ label, base URL, model, context window), then allow it on each worker that shoul
 [providers.qwen-local]                  # the provider's name in Settings → Models
 base_url = "http://192.168.1.229:8082"  # must equal the base URL there (a trailing / does not count)
 # api_key = "..."                       # for an endpoint that needs one; stays on this machine
+# api_key = { vault = "zai key" }       # or a Vaultwarden entry (optional `field = "..."`), read by rbw at every agent start
 ```
 
+- A key from Vaultwarden needs [`rbw`](https://github.com/doy/rbw) 1.15 or newer, signed in, on
+  the worker's `PATH`; `vault = true` is not needed (it gates only the `hqc_secret` card). The
+  worker reads the key each time it starts the session's agent; a locked `rbw` asks to unlock
+  through its pinentry (see "Secrets in a session" below; 25 s to answer). A running
+  agent keeps the key it started with: after changing it in Vaultwarden, Restart session. If
+  `rbw` cannot give the key, the agent does not start, once and not three times (no retries:
+  they would stack pinentry windows), and the chat says why; unlock `rbw` (or answer the prompt
+  still open there) and send again.
 - Restart the worker; Settings → Models then lists it among the workers that allow the
   provider, and the model menus of sessions on this worker offer it.
 - A session on a provider: every model name of Claude Code (subagents and the small fast model
@@ -982,8 +991,22 @@ device's `authorized_keys`). Only sessions of the worker's owner that are not re
   or its id); the card shows it, you confirm or change it, and the worker reads the value with
   `rbw` itself — it never passes the hub. The worker reads what that `rbw` account can, and
   while `rbw` is unlocked the agents' own commands on that machine can read it as well, without
-  a card. When it is locked the card says so and stays open: unlock `rbw` on that machine, or
-  type the value.
+  a card. The agent may name a field of the entry too (`username`, `notes`, `totp` — the stored
+  secret, not a code —, a custom field's exact name; a worker of hqc 0.243 or newer); the card has a labelled "Field" box for it (unmasked: it is a name, not
+  the password; empty means the password, for an ssh key its private key). A locked `rbw` is asked to unlock: its
+  `pinentry` on that machine asks for the master password. For a confirmation on a read after a
+  pause — what 1Password's Touch ID gives T3 Code — set `rbw config set lock_timeout 1` (seconds) and
+  use a pinentry with Touch ID, for example
+  [pinentry-rbw-macos](https://github.com/pppobear/pinentry-rbw-macos) (third-party, not
+  checked here); the worker waits 25 s for the answer. Reads run one at a time, so concurrent
+  ones wait for one prompt; a prompt nobody answered stays open on that machine (answer it, then
+  give again). An unlock done for one read opens the vault to every process of your user, and
+  `rbw-agent` starts `lock_timeout` (3600 s by default) again at every use by any of them: an
+  agent's own `rbw get` there keeps it open for as long as it reads, without a prompt, and a short
+  `lock_timeout` locks it only once nothing uses it. The window does not say who asks (an
+  agent's own `rbw get` raises the same one). A machine without a screen has no
+  pinentry that can ask: keep `rbw` unlocked there. When it stays locked or is not answered, the
+  card says so and stays open: unlock `rbw` on that machine, or type the value.
 
 **The browser in a session** (SPEC §14, since 0.148). To let an agent look through pages in
 your accounts (listings on eBay, Amazon, AliExpress) in this machine's Chrome:

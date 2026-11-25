@@ -1207,6 +1207,7 @@ environment = "gw"
         model: "qwen3.8-27b".into(),
         context_tokens: Some(200_000),
         api_key: None,
+        api_key_vault: None,
     });
     let on = a.command(&s, &Uuid::nil(), Launch::New, None, None);
     assert_eq!(

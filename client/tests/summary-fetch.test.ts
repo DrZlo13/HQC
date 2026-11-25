@@ -111,7 +111,7 @@ it('fetches the lists when the session it fetched has moved into a project the p
 /** An `AppState` that has taken its summaries from a socket's `onSummary`, as `init` wires it. */
 async function wired() {
   const api = {
-    me: vi.fn(async () => ({ id: 'u', email: 'u@example.com', personal_project_id: 'p1', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null }) as Me),
+    me: vi.fn(async () => ({ id: 'u', email: 'u@example.com', personal_project_id: 'p1', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null, quick_messages: [] }) as Me),
     session: vi.fn(async (id: string) => info(id)),
     allSessions: vi.fn(async () => [] as SessionInfo[]),
     projects: vi.fn(async () => [project]),

@@ -25,7 +25,7 @@ sha2 = "0.10"
 hmac = "0.12"
 rand = "0.8"
 base64 = "0.22"
-# End-to-end encrypted Apple push notices (SPEC 0.249).
+# End-to-end encrypted Apple push notices (SPEC 0.259).
 aes-gcm = "0.10"
 futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }

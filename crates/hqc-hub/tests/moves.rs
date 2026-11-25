@@ -1165,6 +1165,7 @@ async fn only_the_owner_answers_a_move() {
         look: Default::default(),
         project_sort: Default::default(),
         new_session_project_id: None,
+        quick_messages: Vec::new(),
     };
     let s = hqc_hub::db::session(&hub.app.db, sid.parse().unwrap())
         .await
@@ -1876,7 +1877,9 @@ async fn a_worker_restart_cancels_a_move_request() {
         .await;
     let mut w = FakeWorker::connect(&hub, &worker_token).await.unwrap();
     w.hello_with(ROOT, Uuid::new_v4(), moves()).await;
-    w.expect_silence(Duration::from_millis(300)).await;
+    // The cut turn is told to the agent (SPEC 0.256): a start, no frame for the move.
+    let st = w.expect("session.start").await;
+    assert_eq!(st["payload"]["mode"], "resume", "{st}");
     let cancel = cancels(&hub, &sid).await;
     assert_eq!(cancel.len(), 1, "{cancel:?}");
     assert_eq!(

@@ -110,6 +110,7 @@ async fn live_a_asks_b_and_gets_its_reply() {
         machine_id: None,
         known_paths_file: run.join("home/known_workspaces.json"),
         mcp_socket: Some(socket),
+        drain: None,
         logs: None,
         mirror: None,
     };

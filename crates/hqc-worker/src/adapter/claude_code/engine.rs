@@ -2462,8 +2462,11 @@ impl Core {
                 if self.lifecycle && (!w.mid_turn || w.carried) {
                     self.last_input = Some(w.event_id);
                 }
+                // A carried input runs as a turn of its own; one written as a turn while the CLI
+                // ran one it started by itself, echoed before that turn's `result`, went into it.
                 vec![Action::Emit(AdapterEvent::InputAccepted {
                     event_id: w.event_id,
+                    joined: !w.carried && (w.mid_turn || self.self_turn),
                 })]
             }
             None => {
@@ -3391,6 +3394,7 @@ impl Core {
                 tracing::info!(session_id = %self.session_id, event_id = %w.event_id, "input taken without an echo (local command)");
                 taken.push(Action::Emit(AdapterEvent::InputAccepted {
                     event_id: w.event_id,
+                    joined: false,
                 }));
             }
         }

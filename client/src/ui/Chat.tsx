@@ -7,13 +7,13 @@ import { copyText } from '../clipboard';
 import { HEIC_NAME, dataUrl, heicToJpeg } from '../heic';
 import { keyMatches, withKey, type Key } from '../keys';
 import { onBack } from '../nav';
-import { PERMISSION_MODES, type EventOf, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState, type SlashCommand } from '../proto';
+import { PERMISSION_MODES, type EventOf, type HqcEvent, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState, type SlashCommand } from '../proto';
 import { sideQuestionOf, type OutgoingFile } from '../session';
 import { duringText, type Timeline } from '../timeline';
 import { ModelName, isTypedModel, type ModelChoice, modelMenuItems } from './agentSettings';
 import { ArtifactViewer, type ViewedArtifact } from './attachments';
 import { LimitBar, Limits } from './limits';
-import { ActivityLine, FeedBlocks, activityShown, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
+import { ActivityLine, FeedBlocks, activityShown, StreamingMessage, blockSeq, drawingBlock, onlyRequests, type ChatActions } from './cards';
 import { peerMessages } from './relay';
 import { buildFeed } from './feed';
 import { useNow, useSubscription } from './hooks';
@@ -42,8 +42,10 @@ import {
 import { AUTO_NEEDS_ANTHROPIC, MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatTime, formatTimer, formatTokens, homePath, modeConfirm, modelName, shownModel, spendLabel } from './labels';
 import { hasOpenTasks, LiveSubagents } from './LiveSubagents';
 import { Loading } from './Loading';
-import { CopyButton } from './Markdown';
-import { feedSelectionText, selectedText, useQuoteSelection, type QuoteSelection } from './selection';
+import { CopyButton, markdownText } from './Markdown';
+import { findQuoteAfter, findQuoteSource, quoteClick, showQuote, type QuoteClick, type QuoteKeys } from './quotejump';
+import { listenForSwipeQuote } from './swipequote';
+import { feedSelectionText, firstSentences, selectedText, useQuoteSelection, withoutQuoteLines, type QuoteSelection } from './selection';
 import { PermissionBlock, SECRET_GIVEN } from './permission';
 import { MoveSession } from './ProjectSettings';
 import { WaitedRequests } from './requests';
@@ -148,6 +150,7 @@ export function Chat({
   useEffect(() => {
     setLoaded(chat.loaded);
     from.current = undefined;
+    setQuoteJump(null);
     void chat.open().then(() => setLoaded(true));
     return () => chat.close();
   }, [chat]);
@@ -354,7 +357,7 @@ export function Chat({
     // As the composer's list: not in the service session, which has no composer.
     quickMessages: project && !system
       ? {
-          has: (text) => (project.quick_messages ?? []).includes(text),
+          has: (text) => app.quickMessages(project).includes(text),
           add: (text) => app.addQuickMessage(project.id, text).catch((err: Error) => setNotice(`Not added to quick messages: ${err.message}`)),
         }
       : undefined,
@@ -429,6 +432,14 @@ export function Chat({
     );
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // The button to the bottom: shown while the feed does not follow its bottom (a scroll up or a
+  // jump to an event let go of it) and the bottom is more than two screens down; a press goes to
+  // the bottom and follows it again.
+  const [away, setAway] = useState(false);
+  const awayNow = () => {
+    const el = scroller.current;
+    return !!el && !stick.current && el.scrollHeight - el.scrollTop - el.clientHeight > 2 * el.clientHeight;
+  };
   // The last scroll position: only a move up lets go of the bottom. A scroll event can come
   // after the feed grew (an image loaded) and before it is followed: far from the bottom then,
   // but the user did not leave it.
@@ -470,6 +481,9 @@ export function Chat({
   /** `goesUp`: the input's direction; a scroll event without an input keeps the last one. */
   const userScrolled = (goesUp?: boolean) => {
     if (goesUp !== undefined) upward.current = goesUp;
+    // An input up is a scroll of its own, not the rest of the one the button to the bottom was
+    // pressed in (a touch that only stops a fling gives no direction).
+    if (goesUp) goingDown.current = false;
     userAt.current = performance.now();
     clearTimeout(settle.current);
     // The timer is the end of the scroll (a later input or scroll event would have reset it),
@@ -480,12 +494,28 @@ export function Chat({
       userAt.current = -Infinity;
       // The next scroll gives its own direction with its first input.
       upward.current = false;
+      goingDown.current = false;
       // A render with nothing held would pull a feed scrolled a little up, still counted at
       // its bottom, back down.
       if (!heldBack.current && !more.current) return;
       heldBack.current = false;
       grow((n) => n + 1);
     }, SCROLL_SETTLE_MS);
+  };
+  // The button to the bottom pressed while the user's scroll still goes on (a fling coasting
+  // under it): the rest of that scroll does not let go of the bottom, and the feed goes there
+  // once it settles. In WebKit, where a position set in the scroll is dropped, only then.
+  const goingDown = useRef(false);
+  const toBottom = () => {
+    const el = scroller.current;
+    if (!el) return;
+    stick.current = true;
+    setAway(false);
+    if (userScrolling()) {
+      goingDown.current = true;
+      heldBack.current = true;
+    }
+    if (!holding()) el.scrollTop = el.scrollHeight;
   };
   // Blocks added above keep what is on screen in place: the distance to the bottom stays.
   const keep = useRef<number | undefined>(undefined);
@@ -626,6 +656,8 @@ export function Chat({
     const el = scroller.current;
     if (!el || !feed.current || typeof ResizeObserver === 'undefined') return;
     const o = new ResizeObserver(() => {
+      // Grown while scrolled up, the feed may put its bottom past two screens: the button shows.
+      setAway(awayNow());
       if (!stick.current) return;
       if (userScrolling()) heldBack.current = true;
       else el.scrollTop = el.scrollHeight;
@@ -634,6 +666,15 @@ export function Chat({
     o.observe(el);
     return () => o.disconnect();
   }, []);
+  // A message swiped to the left is quoted (swipequote.ts); `actions` is new on every render, the
+  // listener reads the latest.
+  const swiped = useRef((_seq: number) => {});
+  swiped.current = (seq) => {
+    const e = t.events().find((x) => x.seq === seq);
+    const q = e && messageQuote(e);
+    if (q && actions.quote) actions.quote(q);
+  };
+  useEffect(() => (feed.current ? listenForSwipeQuote(feed.current, (seq) => swiped.current(seq)) : undefined), []);
   // The Quote button over the composer takes the text selected in the feed or in a subagent's history (selection.ts).
   const section = useRef<HTMLElement>(null);
   const quoteSelection = useQuoteSelection(section, !!actions.quote);
@@ -670,40 +711,94 @@ export function Chat({
   }, [app]);
   const insertQuote = useRef<((text: string) => void) | null>(null);
   const insertText = useRef<((text: string) => void) | null>(null);
-  // The jump to a search hit: the event is there once `lastSeq` reaches it and the older
-  // history (`olderFrom`) is loaded down to it. The block that holds it is the one that starts
-  // at it, else the last one that starts at or before it (a hidden event's neighbour; an answer
-  // may stand above an earlier input, SPEC §6); the feed renders from there if it did not.
-  const focused = useRef<number | undefined>(undefined);
+  // The jump to an event: a search hit (`focusSeq`, SPEC §15) or the source of a quote the owner
+  // clicked (`quoteJump`, SPEC §6). The event is there once `lastSeq` reaches it and the older
+  // history (`olderFrom`) is loaded down to it. The block that holds it is the one that draws it
+  // (`drawingBlock`: an event may be drawn inside another's block), else the last one that
+  // starts at or before it (a hidden event's neighbour; an answer may stand above an earlier
+  // input, SPEC §6); the feed renders from there if it did not. A
+  // jump is done once, by its identity: a new click on the same quote jumps again.
+  const [quoteJump, setQuoteJump] = useState<{ seq: number; quote: QuoteKeys } | null>(null);
+  const focusJump = useMemo(() => (focusSeq === undefined ? undefined : { seq: focusSeq, quote: undefined }), [focusSeq]);
+  const jumped = useRef(new WeakSet<object>());
   useLayoutEffect(() => {
     const el = scroller.current;
-    if (!el || focusSeq === undefined || focused.current === focusSeq || t.lastSeq < focusSeq) return;
-    if (t.olderFrom > focusSeq) {
-      void chat.loadOlder(focusSeq, true);
+    const jump = [quoteJump, focusJump].find((j) => j && !jumped.current.has(j));
+    if (!el || !jump || t.lastSeq < jump.seq) return;
+    if (t.olderFrom > jump.seq) {
+      void chat.loadOlder(jump.seq, true);
       return;
     }
-    if (focusSeq < (from.current ?? 0)) {
-      let at = 0;
+    // The page may be in the timeline before the feed is drawn from it: nothing to look for yet.
+    if (!loaded || !blocks.length) return;
+    // The block that draws the event, else the last that starts at or before it.
+    const event = t.events().find((e) => e.seq === jump.seq);
+    let at = drawingBlock(blocks, jump.seq, event?.type === 'side.answer' ? event.payload.question : undefined);
+    if (at === undefined) {
+      at = 0;
       blocks.forEach((b, i) => {
-        if ((blockSeq(b) ?? Infinity) <= focusSeq) at = i;
+        if ((blockSeq(b) ?? Infinity) <= jump.seq) at = i;
       });
-      from.current = blockSeq(blocks[at]) ?? 0;
+    }
+    // A block with no `seq` (or none at all) has nothing to scroll to: the jump is done.
+    const seq = blocks[at] && blockSeq(blocks[at]);
+    if (seq === undefined) {
+      jumped.current.add(jump);
+      return;
+    }
+    // Before the first block shown: the feed renders from it, and the effect runs again.
+    if (at < start) {
+      from.current = seq;
       grow((n) => n + 1);
       return;
     }
-    let target = el.querySelector<HTMLElement>(`.feed-block[data-seq="${focusSeq}"]`) ?? undefined;
-    if (!target) {
-      for (const b of el.querySelectorAll<HTMLElement>('.feed-block[data-seq]')) {
-        if (Number(b.dataset.seq) <= focusSeq) target = b;
-      }
-    }
+    // Done once the block is looked for, found or not: no render comes round again for it.
+    jumped.current.add(jump);
+    const target = el.querySelector<HTMLElement>(`.feed-block[data-seq="${seq}"]`);
     if (!target) return;
-    focused.current = focusSeq;
     stick.current = false;
+    // The quoted text itself when it is in the DOM; else the block, as a search hit.
+    if (jump.quote && showQuote(target, el, jump.quote)) return;
     el.querySelector('.feed-block.is-found')?.classList.remove('is-found');
     target.classList.add('is-found');
     target.scrollIntoView?.({ block: 'center' });
   });
+  // A click on a quote: its source is looked for in the loaded events before the quote, then in
+  // each older page as it comes in (each event once), then after the quote; one search at a time.
+  const quoting = useRef(false);
+  const live = useRef<typeof chat | null>(null);
+  useEffect(() => {
+    live.current = chat;
+    return () => {
+      live.current = null;
+    };
+  }, [chat]);
+  const followQuote = async ({ keys, before }: QuoteClick) => {
+    if (quoting.current) return;
+    quoting.current = true;
+    try {
+      let upTo = before;
+      for (;;) {
+        const seq = findQuoteSource(t.events(), t, keys, upTo);
+        if (seq !== undefined) return setQuoteJump({ seq, quote: keys });
+        const olderFrom = t.olderFrom;
+        if (olderFrom <= 0) break;
+        // The next pass reads only the page that comes in now.
+        upTo = olderFrom;
+        // With `downTo` the older history comes in pages of 1000 events, not 200: one page here.
+        await chat.loadOlder(olderFrom - 1);
+        if (live.current !== chat) return;
+        if (t.olderFrom >= olderFrom) return setNotice('Older history did not load');
+      }
+      // A quote taken from an answer still being written: its message is stored once it is done,
+      // after the message that quotes it.
+      const after = before === undefined ? undefined : findQuoteAfter(t.events(), t, keys, before);
+      if (after !== undefined) return setQuoteJump({ seq: after, quote: keys });
+      setNotice('The quoted text is not in this chat');
+    } finally {
+      quoting.current = false;
+    }
+  };
 
   const stop = () => act(() => chat.stop(), 'Not stopped');
   // A goal is cleared by the slash command, which Claude Code takes between turns (SPEC 0.218):
@@ -1118,47 +1213,72 @@ export function Chat({
           <MoveSession app={app} session={info} onDone={() => setMoving(false)} />
         </div>
       )}
-      <div
-        class="timeline"
-        ref={scroller}
-        onScroll={(e) => {
-          const el = e.currentTarget as HTMLDivElement;
-          // A scroll event while the user's scroll goes on is its momentum or its bounce.
-          const user = userScrolling();
-          if (user) userScrolled();
-          const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-          const range = el.scrollHeight - el.clientHeight;
-          if (near || (el.scrollTop < lastTop.current && ((user && upward.current) || range === lastRange.current))) stick.current = near;
-          lastTop.current = el.scrollTop;
-          lastRange.current = range;
-          if (el.scrollTop < 400 && start > 0) {
-            if (holding()) more.current = true;
-            else showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
-          } else if (loaded && el.scrollTop < 400 && t.olderFrom > 0) {
-            asked.current = true;
-            void chat.loadOlder();
-          }
-        }}
-      >
-        <div class="feed" ref={feed}>
-          {/* The empty feed's note in its middle: the first page on its way, or no requests
-              once it is in (before, the feed has no items either). */}
-          {!loaded && (
-            <div class="feed-note">
-              <Loading center />
-            </div>
-          )}
-          {chat.loadingOlder && start === 0 && (
-            <div class="feed-older">
-              <Loading />
-            </div>
-          )}
-          <FeedBlocks blocks={start ? blocks.slice(start) : blocks} actions={actions} />
-          {requestsOnly && loaded && items.length === 0 && <div class="feed-note">No requests</div>}
-          {t.streaming && <StreamingMessage text={t.streaming} />}
-          <FeedBlocks blocks={under} actions={actions} />
-          {!system && <WaitedRequests app={app} sessionId={sessionId} />}
+      {/* The button to the bottom stands in the middle of the feed's bottom edge, outside its scroll. */}
+      <div class="timeline-wrap">
+        <div
+          class="timeline"
+          ref={scroller}
+          onScroll={(e) => {
+            const el = e.currentTarget as HTMLDivElement;
+            // A scroll event while the user's scroll goes on is its momentum or its bounce.
+            const user = userScrolling();
+            if (user) userScrolled();
+            const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+            const range = el.scrollHeight - el.clientHeight;
+            if (!goingDown.current && (near || (el.scrollTop < lastTop.current && ((user && upward.current) || range === lastRange.current))))
+              stick.current = near;
+            setAway(awayNow());
+            lastTop.current = el.scrollTop;
+            lastRange.current = range;
+            if (el.scrollTop < 400 && start > 0) {
+              if (holding()) more.current = true;
+              else showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
+            } else if (loaded && el.scrollTop < 400 && t.olderFrom > 0) {
+              asked.current = true;
+              void chat.loadOlder();
+            }
+          }}
+        >
+          <div
+            class="feed"
+            ref={feed}
+            onClick={(e) => {
+              const quote = quoteClick(e, e.currentTarget);
+              if (quote) void followQuote(quote);
+            }}
+          >
+            {/* The empty feed's note in its middle: the first page on its way, or no requests
+                once it is in (before, the feed has no items either). */}
+            {!loaded && (
+              <div class="feed-note">
+                <Loading center />
+              </div>
+            )}
+            {chat.loadingOlder && start === 0 && (
+              <div class="feed-older">
+                <Loading />
+              </div>
+            )}
+            <FeedBlocks blocks={start ? blocks.slice(start) : blocks} actions={actions} swipe />
+            {requestsOnly && loaded && items.length === 0 && <div class="feed-note">No requests</div>}
+            {t.streaming && <StreamingMessage text={t.streaming} />}
+            <FeedBlocks blocks={under} actions={actions} swipe />
+            {!system && <WaitedRequests app={app} sessionId={sessionId} />}
+          </div>
         </div>
+        {away && (
+          <button
+            type="button"
+            class="icon-btn btn-to-bottom"
+            aria-label="To the bottom of the chat"
+            title="To the bottom"
+            // A press does not take the focus from the input (on a phone, the keyboard stays).
+            onPointerDown={(e) => e.preventDefault()}
+            onClick={toBottom}
+          >
+            <IconChevronDown size={16} />
+          </button>
+        )}
       </div>
       {notice && (
         <div class="notice" role="alert" onClick={() => setNotice(null)}>
@@ -1255,13 +1375,14 @@ export function Chat({
           giveSecret={!system && app.takesSecrets(info?.worker_id) ? (f) => app.api.giveSecret(sessionId, f) : undefined}
           quick={
             project && {
-              messages: project.quick_messages ?? [],
-              refresh: () => void app.refreshProject(project.id).catch(() => {}),
+              messages: app.quickMessages(project),
+              refresh: () => void Promise.all([app.refreshUserQuickMessages(), app.refreshProject(project.id)]).catch(() => {}),
               send: (text) => {
                 stick.current = true;
                 chat.send(text, []);
               },
-              settingsHref: `#/p/${project.id}/settings`,
+              settingsHref: '#/settings',
+              projectSettingsHref: `#/p/${project.id}/settings`,
             }
           }
         />
@@ -1345,6 +1466,20 @@ export function withQuote(draft: string, quote: string): string {
     .join('\n');
   const head = draft.trimEnd();
   return `${head ? `${head}\n\n` : ''}${lines}\n\n`;
+}
+
+/** What a swipe to the left quotes of the message `e`: the first two sentences of its text, the
+ *  owner's own without its quote lines (`QUOTE_LINE`); empty for an event that is no message. */
+export function messageQuote(e: HqcEvent): string {
+  switch (e.type) {
+    case 'agent.message':
+    case 'peer.message':
+      return firstSentences(markdownText(e.payload.text));
+    case 'user.message':
+      return firstSentences(withoutQuoteLines(e.payload.text));
+    default:
+      return '';
+  }
 }
 
 /** The draft with `text` after it, a blank line between them when the draft has text. */
@@ -1981,10 +2116,17 @@ export function Composer({
   /** "Secret" beside attach (SPEC 0.147): only where the session's worker takes secrets. The
    *  answer's `note` goes into the text; the value goes nowhere else. */
   giveSecret?: (f: SecretFields) => Promise<SecretGiven>;
-  /** The project's quick messages: a button beside the field opens them, one press of a message
-   *  sends it (`send`) and leaves the field's text and files as they are. `settingsHref` is where
-   *  the list is edited. */
-  quick?: { messages: string[]; send: (text: string) => void; refresh: () => void; settingsHref: string };
+  /** The quick messages (the user's own, then the project's): a button beside the field opens
+   *  them, one press of a message sends it (`send`) and leaves the field's text and files as they
+   *  are. `settingsHref` is where the user's own list is edited, `projectSettingsHref` the
+   *  project's. */
+  quick?: {
+    messages: string[];
+    send: (text: string) => void;
+    refresh: () => void;
+    settingsHref: string;
+    projectSettingsHref: string;
+  };
 }) {
   const [text, setText] = useState(initial);
   const typed = useRef(false);
@@ -2272,10 +2414,14 @@ export function Composer({
             <li class="quick-edit">
               {quick.messages.length === 0 ? (
                 <>
-                  No quick messages yet — <a href={quick.settingsHref}>add them in project settings</a>
+                  No quick messages yet — add them in <a href={quick.settingsHref}>Settings</a> or in{' '}
+                  <a href={quick.projectSettingsHref}>project settings</a>
                 </>
               ) : (
-                <a href={quick.settingsHref}>Edit quick messages</a>
+                <>
+                  Edit quick messages: <a href={quick.settingsHref}>all projects</a> ·{' '}
+                  <a href={quick.projectSettingsHref}>this project</a>
+                </>
               )}
             </li>
           </ul>

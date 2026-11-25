@@ -37,8 +37,10 @@ pub enum AdapterEvent {
     ToolResult { event: Event, files: ResultFiles },
     /// The runtime has taken the input `event_id` (Claude Code: the `--replay-user-messages`
     /// echo; ACP: `session/prompt` sent). Only now does the hub get `ack {event_id}`
-    /// (SPEC §5.2).
-    InputAccepted { event_id: Uuid },
+    /// (SPEC §5.2). `joined`: the runtime took it into a turn already running, not one of its
+    /// own (Claude Code: written into the running turn and not carried past it, or written as a
+    /// turn of its own while the CLI ran one it started by itself, and taken during that one).
+    InputAccepted { event_id: Uuid, joined: bool },
     /// The turn started by the last `input` is over (final answer, error or `stop`); the
     /// next queued input may go. `carried`: inputs written during the turn that it did not
     /// take and that the runtime runs next by itself (Claude Code), in the order written.

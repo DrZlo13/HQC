@@ -1278,6 +1278,10 @@ pub struct Me {
     /// project is deleted.
     #[serde(default)]
     pub new_session_project_id: Option<Uuid>,
+    /// The user's own quick messages, shown in every project before the project's own; empty
+    /// from hubs before it.
+    #[serde(default)]
+    pub quick_messages: Vec<String>,
     /// The share of a usage window, in percent, from which the chat shows the limit bar above
     /// the input: the hub's `HQC_LIMIT_NOTICE_PERCENT`, `0` no bar; 70 from hubs before it.
     #[serde(default = "default_limit_notice_percent")]
@@ -1307,6 +1311,10 @@ pub struct PatchMe {
     /// One of the user's own projects; another user's or a missing one `404`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_session_project_id: Option<Uuid>,
+    /// The whole list of the user's own quick messages, replacing the stored one; at most 100,
+    /// none blank, none longer than 10 000 characters, else `400`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quick_messages: Option<Vec<String>>,
 }
 
 /// `POST /api/workers/enroll/confirm`; case and the dash of `code` do not matter.
@@ -1817,11 +1825,17 @@ mod tests {
             Some("0199f3a2-7c10-7000-8000-0000000000d1".parse().unwrap())
         );
         assert!(serde_json::from_str::<PatchMe>(r#"{"new_session_project_id":"x"}"#).is_err());
+        assert_eq!(
+            m.quick_messages,
+            Some(vec!["What is going on?".into(), "Merge".into()])
+        );
+        assert_eq!(me.quick_messages, vec!["What is going on?", "Merge"]);
         let old: Me = serde_json::from_str(
             r#"{"id":"0199f3a2-7c10-7000-8000-0000000000aa","email":"a","display_name":"a","timezone":"UTC","personal_project_id":"0199f3a2-7c10-7000-8000-0000000000d1"}"#,
         )
         .unwrap();
         assert_eq!(old.new_session_project_id, None, "absent from older hubs");
+        assert!(old.quick_messages.is_empty(), "absent from older hubs");
         assert_eq!(me.limit_notice_percent, 90);
         let mut old: Value =
             serde_json::from_str(include_str!("../examples/wire/api.me.json")).unwrap();

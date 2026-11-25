@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 import Security
 
-/// The key this device makes for its notices (SPEC 0.249): 32 random bytes, kept in the keychain
+/// The key this device makes for its notices (SPEC 0.259): 32 random bytes, kept in the keychain
 /// group the app shares with its notification extension, sent to the hub with the device token.
 /// The hub seals each notice with it; only this device can open them.
 nonisolated enum NoticeKey {

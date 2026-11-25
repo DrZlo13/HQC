@@ -227,6 +227,7 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
             quota_retry: hqc_worker::mirror::QUOTA_RETRY,
         }
     });
+    let drain = CancellationToken::new();
     let worker = Worker {
         mirror,
         config,
@@ -241,14 +242,35 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
         shutdown_timeout: Duration::from_secs(10),
         machine_id: hqc_worker::machine::fingerprint(config::hqc_home().ok().as_deref()),
         mcp_socket: Some(mcp_socket),
+        drain: Some(drain.clone()),
     };
 
     let shutdown = CancellationToken::new();
     tokio::spawn(wait_for_signal(shutdown.clone()));
+    tokio::spawn(wait_for_drain(drain));
     let (status, _) = tokio::sync::watch::channel(Status::Connecting);
     worker.run(shutdown, status).await?;
     tracing::info!("worker stopped");
     Ok(())
+}
+
+/// SIGUSR1 (#220, SPEC 0.256): stop once no agent works, at most
+/// [`hqc_worker::supervisor::DRAIN_MAX`] from now; the service manager starts the worker again
+/// (a new binary, say) and no agent loses a turn or its background work to it.
+async fn wait_for_drain(drain: CancellationToken) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut usr1 = signal(SignalKind::user_defined1()).expect("SIGUSR1 handler");
+        usr1.recv().await;
+        tracing::info!("SIGUSR1 received: stopping once no agent works");
+        drain.cancel();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = drain;
+        std::future::pending::<()>().await;
+    }
 }
 
 /// SIGTERM or Ctrl-C: graceful shutdown (kill agents, flush the outbox).

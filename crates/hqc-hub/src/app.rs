@@ -335,6 +335,17 @@ impl AppState {
     /// so (SPEC §4): its worker restarted, its `session.state` says it stopped, or it was
     /// deleted. A kept list is dropped and the session's subscribers get an empty
     /// `subagents.live`, as from the worker.
+    /// The session's kept `subagents.live` payload, if any (the work its agent runs or armed).
+    pub fn live_agents_of(&self, session_id: Uuid) -> Option<Value> {
+        let lists = self.live_agents.lock().unwrap();
+        lists.get(&session_id).map(|(e, _)| e["payload"].clone())
+    }
+
+    /// Sessions with a kept `subagents.live` list.
+    pub fn sessions_with_live_agents(&self) -> Vec<Uuid> {
+        self.live_agents.lock().unwrap().keys().copied().collect()
+    }
+
     pub fn drop_live_agents(&self, session_id: Uuid) {
         let mut lists = self.live_agents.lock().unwrap();
         if lists.remove(&session_id).is_some() {

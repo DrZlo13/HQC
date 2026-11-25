@@ -684,7 +684,7 @@ The app (`ios/`, its README) signs in on its own: it opens `/api/native/login` i
 browser, where Cloudflare Access (§1.6) or an OIDC reverse proxy such as Traefik + oauth2-proxy
 + Keycloak (§1.9) signs the person in with any identity provider, and exchanges the one-time code
 at `/worker/native/token`, which both the `hqc-worker` Bypass application of §1.6 and the
-`hqc-worker` router of §1.9 already let through without sign-in (SPEC §6, 0.251). In OIDC mode
+`hqc-worker` router of §1.9 already let through without sign-in (SPEC §6, 0.261). In OIDC mode
 the app stores the proxy's cookies and updates them from `Set-Cookie` headers whenever the proxy
 refreshes them (`addAuthCookiesToResponse` in §1.9).
 
@@ -696,7 +696,7 @@ HQC_APNS_RELAY_URL=https://hqc.drewnja.xyz
 ```
 
 The hub then sends each notice for the app to that relay, which passes it to Apple. The app
-(since its notification extension, SPEC 0.249) registers a key of its own, and the hub seals each
+(since its notification extension, SPEC 0.259) registers a key of its own, and the hub seals each
 notice with it: the relay and Apple see a generic alert, the device token and ciphertext, never the
 session's title, the text or the request. Nothing else leaves the hub. Without the line
 the app works the same, without notifications. Settings in the app says whether they are on.
@@ -1226,12 +1226,19 @@ Claude Code login), which is available only in the user's session.
 ```sh
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.hqc.worker.plist
 launchctl print gui/$(id -u)/local.hqc.worker | grep -E 'state|pid'
-launchctl kickstart -k gui/$(id -u)/local.hqc.worker   # restart (e.g. after an update)
+launchctl kill SIGUSR1 gui/$(id -u)/local.hqc.worker  # restart once no agent works (an update)
+launchctl kickstart -k gui/$(id -u)/local.hqc.worker   # restart now
 launchctl bootout gui/$(id -u)/local.hqc.worker        # stop
 ```
 
 Stopping sends SIGTERM: the worker ends the agent processes, reports `stopped` to the hub and
 spends up to 5 s flushing the outbox; whatever is unsent stays on disk and goes out on the next start.
+
+For an update, install the new binary and send `SIGUSR1` instead (SPEC 0.256): the worker waits
+until no agent has a turn, waiting input or background work (at most 30 minutes), then stops as
+on SIGTERM, and launchd (`KeepAlive`) starts the new binary. A turn, a background subagent or a
+build is not cut. On Linux under systemd: `systemctl --user kill -s USR1 hqc-worker`. Whatever a
+restart still takes (a crash, a reboot, the 30 minutes), the hub tells the agent in a note.
 
 A Keychain item is bound to the signature of the binary that created it. An unsigned build (`cargo build`, the linker's ad-hoc signature) gets a new signature on every rebuild, so after `hqc-worker` is replaced, the worker under launchd gets stuck on a Keychain dialog on the Mac's screen (`SecurityAgent` shows up next to it in `ps`), and the log stays empty. Verified 2026-10-23 on 0.1.0. For a machine where the worker is rebuilt, use the file store: `HQC_TOKEN_STORE=file` at `enroll` and the same variable in the plist's `EnvironmentVariables`; the token lives in `$HQC_HOME/token` with mode 0600. Keychain makes sense only for a signed release binary.
 

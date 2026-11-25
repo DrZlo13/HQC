@@ -29,6 +29,7 @@ import { limitNotice } from '../src/ui/limits';
 import { Timeline } from '../src/timeline';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
 import { Chat, matchCommands, withQuote } from '../src/ui/Chat';
+import { firstSentences } from '../src/ui/selection';
 import { LiveSubagents } from '../src/ui/LiveSubagents';
 import { WEB_SEARCHES } from '../src/websearch';
 
@@ -2753,13 +2754,17 @@ describe('quick messages', () => {
       area().value = text;
       area().dispatchEvent(new Event('input', { bubbles: true }));
     });
-  /** A chat whose project has `messages`; sending reaches the hub as `api.input`. */
-  async function chat(messages: string[]) {
+  /** The user, with `own` as their own quick messages. */
+  const userWith = (own: string[]) => ({ id: 'u', email: 'a@b.c', personal_project_id: 'p1', theme: 'warm' as const, look: 'spacious' as const, project_sort: 'custom' as const, new_session_project_id: null, quick_messages: own });
+  /** A chat whose project has `messages` and whose user has `own`; sending reaches the hub as
+   *  `api.input`. */
+  async function chat(messages: string[], own: string[] = []) {
     const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+    app.me = userWith(own);
     app.projects.set('p1', { id: 'p1', name: 'hqc', slug: 'hqc', description: '', is_personal: false, color: 'teal', quick_messages: messages, created_at: '2026-10-01T00:00:00Z' });
     // GET /api/projects/{id}, which opening the list asks for: the hub's list, which another
     // device may have changed.
-    Object.assign(api, { input: vi.fn(() => new Promise(() => {})), project: vi.fn(async () => app.project('p1')) });
+    Object.assign(api, { input: vi.fn(() => new Promise(() => {})), project: vi.fn(async () => app.project('p1')), me: vi.fn(async () => app.me) });
     await mount(app);
     return api as unknown as { input: ReturnType<typeof vi.fn>; project: ReturnType<typeof vi.fn> };
   }
@@ -2779,10 +2784,26 @@ describe('quick messages', () => {
     expect(button.getAttribute('aria-controls')).toBe('composer-quick');
     expect(items().map((i) => i.textContent)).toEqual(['Continue', 'Run the tests']);
     expect(items().map((i) => i.getAttribute('title'))).toEqual(MESSAGES);
-    expect($('.quick-edit a')!.textContent).toBe('Edit quick messages');
-    expect($('.quick-edit a')!.getAttribute('href')).toBe('#/p/p1/settings');
+    expect($('.quick-edit')!.textContent).toBe('Edit quick messages: all projects · this project');
+    expect([...root.querySelectorAll('.quick-edit a')].map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
+      ['all projects', '#/settings'],
+      ['this project', '#/p/p1/settings'],
+    ]);
     await open();
     expect($('.quick-popup')).toBeNull();
+  });
+
+  it('lists the user\'s own messages first, then the project\'s, a text in both once at the user\'s place', async () => {
+    await chat(['Continue', 'Run the tests', 'Continue'], ['Merge', 'Continue']);
+    await open();
+    expect(items().map((i) => i.textContent)).toEqual(['Merge', 'Continue', 'Run the tests']);
+  });
+
+  it('shows the user\'s own messages alone in a project that has none', async () => {
+    await chat([], ['Merge']);
+    await open();
+    expect(items().map((i) => i.textContent)).toEqual(['Merge']);
+    expect($('.quick-edit')!.textContent).toBe('Edit quick messages: all projects · this project');
   });
 
   it('sends the exact text of the pressed message and leaves the typed text and the files alone', async () => {
@@ -2841,6 +2862,47 @@ describe('quick messages', () => {
     expect(items().map((i) => i.textContent)).toEqual(['Continue', 'Added on the phone']);
   });
 
+  it('asks the hub for the user too on opening, and shows what another device added when the answer comes', async () => {
+    const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+    app.me = userWith(['Merge']);
+    app.projects.set('p1', { id: 'p1', name: 'hqc', slug: 'hqc', description: '', is_personal: false, color: 'teal', quick_messages: ['Continue'], created_at: '2026-10-01T00:00:00Z' });
+    let answer!: () => void;
+    const me = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          answer = () => resolve(userWith(['Merge', 'Added on the phone']));
+        }),
+    );
+    Object.assign(api, { project: vi.fn(async () => app.project('p1')), me });
+    await mount(app);
+    expect(me).not.toHaveBeenCalled();
+    await open();
+    expect(me).toHaveBeenCalledTimes(1);
+    expect(items().map((i) => i.textContent)).toEqual(['Merge', 'Continue']);
+    await act(async () => answer());
+    expect(items().map((i) => i.textContent)).toEqual(['Merge', 'Added on the phone', 'Continue']);
+  });
+
+  it('takes only the list from the answer: a theme saved while the hub was asked stays', async () => {
+    const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+    app.me = userWith(['Merge']);
+    let answer!: () => void;
+    // The hub's answer was made before the save below, so it still has the old theme.
+    const me = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          answer = () => resolve({ ...userWith(['Merge', 'Added on the phone']), theme: 'warm' as const });
+        }),
+    );
+    Object.assign(api, { me });
+    const asked = app.refreshUserQuickMessages();
+    app.me = { ...app.me, theme: 'graphite' };
+    answer();
+    await asked;
+    expect(app.me.theme).toBe('graphite');
+    expect(app.me.quick_messages).toEqual(['Merge', 'Added on the phone']);
+  });
+
   it('is never open together with the list of completions: each closes the other', async () => {
     const { app, api } = setup('idle', { history: HISTORY.slice(0, 3), commands: ['compact', 'context'] });
     app.projects.set('p1', { id: 'p1', name: 'hqc', slug: 'hqc', description: '', is_personal: false, color: 'teal', quick_messages: MESSAGES, created_at: '2026-10-01T00:00:00Z' });
@@ -2856,12 +2918,15 @@ describe('quick messages', () => {
     expect($('#composer-commands')).not.toBeNull();
   });
 
-  it('with no messages says where to add them, with the same link', async () => {
+  it('with no messages says where to add them, with a link to each place', async () => {
     await chat([]);
     await open();
     expect(items()).toEqual([]);
-    expect($('.quick-edit')!.textContent).toBe('No quick messages yet — add them in project settings');
-    expect($('.quick-edit a')!.getAttribute('href')).toBe('#/p/p1/settings');
+    expect($('.quick-edit')!.textContent).toBe('No quick messages yet — add them in Settings or in project settings');
+    expect([...root.querySelectorAll('.quick-edit a')].map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
+      ['Settings', '#/settings'],
+      ['project settings', '#/p/p1/settings'],
+    ]);
   });
 
   describe('added from a message', () => {
@@ -2898,6 +2963,16 @@ describe('quick messages', () => {
       await vi.waitFor(() => expect(button().getAttribute('aria-label')).toBe('In quick messages'));
       expect(button().disabled).toBe(true);
       expect(button().getAttribute('title')).toBe('In quick messages');
+    });
+
+    it('a text in the user\'s own list is a check', async () => {
+      const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+      app.me = userWith([TEXT]);
+      app.projects.set('p1', { ...PROJECT, quick_messages: [] });
+      Object.assign(api, { project: vi.fn(async () => ({ ...PROJECT, quick_messages: [] })) });
+      await mount(app);
+      expect(button().getAttribute('aria-label')).toBe('In quick messages');
+      expect(button().disabled).toBe(true);
     });
 
     it('a text already in the list is a check', async () => {
@@ -3410,6 +3485,80 @@ describe('history', () => {
     expect(scroller.scrollTop).toBe(3000);
   });
 
+  it('shows the button to the bottom while scrolled up past two screens; its press goes to the bottom and follows it again', async () => {
+    const watched = new Map<Element, () => void>();
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        cb: () => void;
+        constructor(cb: () => void) {
+          this.cb = cb;
+        }
+        observe(el: Element) {
+          watched.set(el, this.cb);
+        }
+        disconnect() {}
+      },
+    );
+    let height = 5000;
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? height : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? 600 : 0;
+    });
+    const { app } = setup('idle', { history: long });
+    await mount(app);
+    const scroller = root.querySelector<HTMLElement>('.timeline')!;
+    const button = () => root.querySelector<HTMLButtonElement>('.btn-to-bottom');
+    expect(scroller.scrollTop).toBe(5000);
+    expect(button()).toBeNull();
+    // Up by less than 80 px the feed still follows its bottom: no button.
+    for (const top of [4400, 4350]) {
+      await act(async () => {
+        scroller.scrollTop = top;
+        scroller.dispatchEvent(new Event('scroll'));
+      });
+    }
+    expect(button()).toBeNull();
+    // Let go of the bottom, but less than two screens (1200 px) above it: still no button.
+    await act(async () => {
+      scroller.scrollTop = 4000;
+      scroller.dispatchEvent(new Event('scroll'));
+    });
+    expect(button()).toBeNull();
+    // The feed grows under the reader with no scroll (an answer is written): its bottom is now
+    // more than two screens down.
+    height = 6000;
+    await act(async () => watched.get(scroller)?.());
+    expect(scroller.scrollTop).toBe(4000);
+    expect(button()).not.toBeNull();
+    // A press does not take the focus from the input.
+    const down = new Event('pointerdown', { bubbles: true, cancelable: true });
+    button()!.dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(true);
+    await act(async () => button()!.click());
+    expect(scroller.scrollTop).toBe(6000);
+    expect(button()).toBeNull();
+    // The feed grows again: the chat follows its bottom.
+    height = 6600;
+    await act(async () => watched.get(scroller)?.());
+    expect(scroller.scrollTop).toBe(6600);
+    // Scrolled up past two screens and back down by hand, the button comes and goes.
+    for (const top of [6000, 3000]) {
+      await act(async () => {
+        scroller.scrollTop = top;
+        scroller.dispatchEvent(new Event('scroll'));
+      });
+    }
+    expect(button()).not.toBeNull();
+    await act(async () => {
+      scroller.scrollTop = 5990;
+      scroller.dispatchEvent(new Event('scroll'));
+    });
+    expect(button()).toBeNull();
+  });
+
   it('shows the newest page at once and loads the older history behind it', async () => {
     tall();
     const { api, app } = setup('idle', { history: long });
@@ -3830,6 +3979,63 @@ describe('history', () => {
         await tick(450);
         expect(blocks().length).toBe(120);
         expect(scroller.scrollTop).toBe(6020);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('in WebKit the button to the bottom pressed in a fling is not undone by the rest of it; the feed goes down as it settles', async () => {
+      const scroller = await feedOf(() => 5000);
+      await scrollTo(scroller, 4400);
+      const button = () => root.querySelector<HTMLButtonElement>('.btn-to-bottom');
+      clock();
+      try {
+        await on(scroller, touch('touchstart', 100));
+        await on(scroller, touch('touchmove', 400));
+        await scrollTo(scroller, 3000);
+        await on(scroller, touch('touchend'));
+        await scrollTo(scroller, 2000);
+        expect(button()).not.toBeNull();
+        await act(async () => button()!.click());
+        expect(button()).toBeNull();
+        expect(scroller.scrollTop).toBe(2000);
+        // The fling coasts on up under the button: WebKit would drop a position set now.
+        await tick(50);
+        await scrollTo(scroller, 1500);
+        await tick(50);
+        await scrollTo(scroller, 1200);
+        expect(button()).toBeNull();
+        expect(scroller.scrollTop).toBe(1200);
+        await tick(450);
+        expect(scroller.scrollTop).toBe(5000);
+        expect(button()).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a wheel up right after the button to the bottom is a scroll of its own, not taken back to the bottom as it settles', async () => {
+      vi.spyOn(Object.getPrototypeOf(navigator), 'userAgent', 'get').mockReturnValue(CHROMIUM);
+      const scroller = await feedOf(() => 5000);
+      await scrollTo(scroller, 4400);
+      const button = () => root.querySelector<HTMLButtonElement>('.btn-to-bottom');
+      clock();
+      try {
+        await on(scroller, new WheelEvent('wheel', { deltaY: -100 }));
+        await scrollTo(scroller, 2000);
+        await act(async () => button()!.click());
+        expect(scroller.scrollTop).toBe(5000);
+        // The browser's scroll event for the press, then a new wheel up before the first scroll
+        // settled.
+        await scrollTo(scroller, 5000);
+        await tick(100);
+        await on(scroller, new WheelEvent('wheel', { deltaY: -100 }));
+        await scrollTo(scroller, 3500);
+        await tick(100);
+        await scrollTo(scroller, 2500);
+        await tick(450);
+        expect(scroller.scrollTop).toBe(2500);
+        expect(button()).not.toBeNull();
       } finally {
         vi.useRealTimers();
       }
@@ -4899,6 +5105,121 @@ describe('Quote', () => {
     expect(withQuote('', 'one')).toBe('> one\n\n');
     expect(withQuote('  \n', 'one')).toBe('> one\n\n');
     expect(withQuote('draft\n\n', 'one\n\n  two\r\nthree')).toBe('draft\n\n> one\n>\n>   two\n> three\n\n');
+  });
+});
+
+describe('A swipe to the left quotes a message', () => {
+  const area = () => $('.composer-input') as HTMLTextAreaElement;
+  const touch = (target: Element, type: string, x?: number) => {
+    const fingers = x === undefined ? [] : [{ clientX: x, clientY: 30 }];
+    const lift = type === 'touchend';
+    target.dispatchEvent(Object.assign(new Event(type, { bubbles: true }), { touches: lift ? [] : fingers, changedTouches: fingers }));
+  };
+  /** Pulls `el`'s block 100 px to the left and lifts the finger. */
+  const swipe = (el: Element) =>
+    act(() => {
+      touch(el, 'touchstart', 300);
+      touch(el, 'touchmove', 250);
+      touch(el, 'touchmove', 200);
+      touch(el, 'touchend');
+    });
+  const THREE = 'First one. Second one. Third one.';
+
+  it('puts the first two sentences of an agent\'s answer after the draft and focuses the field', async () => {
+    const { app } = setup('idle', { history: [HISTORY[0], ev('event.agent.message', 2, (e) => (e.payload.text = THREE))] });
+    await mount(app);
+    await act(async () => {
+      area().value = 'Look at this';
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const block = $('.msg-agent')!.closest('.feed-block')!;
+    expect(block.classList.contains('feed-swipe')).toBe(true);
+    expect(block.querySelector('.feed-swipe-icon')).not.toBeNull();
+    await swipe($('.msg-agent')!);
+    expect(area().value).toBe('Look at this\n\n> First one. Second one. …\n\n');
+    expect(document.activeElement).toBe(area());
+  });
+
+  it('quotes a Markdown answer as text', async () => {
+    const { app } = setup('idle', { history: [HISTORY[0], ev('event.agent.message', 2, (e) => (e.payload.text = '# Done\nThe **tests** pass.'))] });
+    await mount(app);
+    await swipe($('.msg-agent')!);
+    expect(area().value).toBe('> Done\n>\n> The tests pass.\n\n');
+  });
+
+  it("quotes the user's message without its quote lines", async () => {
+    const { app } = setup('idle', {
+      history: [ev('event.user.message', 1, (e) => ((e.payload.text = '> earlier quote\nMy words. More words. And more.'), (e.payload.artifact_ids = [])))],
+    });
+    await mount(app);
+    await swipe($('.msg-user')!);
+    expect(area().value).toBe('> My words. More words. …\n\n');
+  });
+
+  it('quotes the intro and the first item of a list, not the list', async () => {
+    const text = 'Done:\n\n- PR merged\n- branch rebased\n- workers updated\n- app rebuilt\n- notes written';
+    const { app } = setup('idle', { history: [HISTORY[0], ev('event.agent.message', 2, (e) => (e.payload.text = text))] });
+    await mount(app);
+    await swipe($('.msg-agent')!);
+    expect(area().value).toBe(withQuote('', 'Done:\n\nPR merged…'));
+  });
+
+  it("quotes the agent's answer to a message of another session", async () => {
+    const q = ev('event.peer.message', 1, (e) => {
+      e.event_id = '0199f3a2-7c10-7000-8000-0000000000a1';
+      e.payload = { ...e.payload, mode: 'ask', text: 'Question?' };
+    });
+    const a = ev('event.agent.message', 2, (e) => (e.payload = { text: THREE, final: true, in_reply_to: q.event_id }));
+    const { app } = setup('idle', { history: [q, a] });
+    await mount(app);
+    const block = $('.feed-block[data-seq="2"]')!;
+    expect(block.classList.contains('feed-swipe')).toBe(true);
+    await swipe(block.firstElementChild!);
+    expect(area().value).toBe('> First one. Second one. …\n\n');
+  });
+
+  it("quotes a message of another session, not an empty one", async () => {
+    const peer = (seq: number, text: string) => ev('event.peer.message', seq, (e) => (e.payload = { ...e.payload, mode: 'send', text }));
+    const { app } = setup('idle', { history: [peer(1, THREE), peer(2, '  ')] });
+    await mount(app);
+    expect($('.feed-block[data-seq="2"]')?.classList.contains('feed-swipe') ?? false).toBe(false);
+    const block = $('.feed-block[data-seq="1"]')!;
+    expect(block.classList.contains('feed-swipe')).toBe(true);
+    await swipe(block.firstElementChild!);
+    expect(area().value).toBe('> First one. Second one. …\n\n');
+  });
+
+  it("is not offered on a user's message of nothing but quote lines", async () => {
+    const { app } = setup('idle', {
+      history: [ev('event.user.message', 1, (e) => ((e.payload.text = '> only a quote\n> more'), (e.payload.artifact_ids = [])))],
+    });
+    await mount(app);
+    expect($('.msg-user')).not.toBeNull();
+    expect($('.feed-swipe')).toBeNull();
+  });
+
+  it('is not offered on an archived session, nor on a tool group', async () => {
+    const { app } = setup('idle');
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true, state: 'archived' });
+    await mount(app);
+    expect($('.feed-swipe')).toBeNull();
+    render(null, root);
+    const open = setup('idle');
+    await mount(open.app);
+    // Only the blocks of a message: the tool call and the permission request of the history are not.
+    const blocks = [...document.querySelectorAll('.feed-block')];
+    expect(blocks.length).toBeGreaterThan(3);
+    for (const b of blocks) expect(b.classList.contains('feed-swipe'), b.className).toBe(!!b.querySelector('.msg-agent, .msg-user'));
+    expect($('.feed-swipe')).not.toBeNull();
+  });
+});
+
+describe('the first sentences', () => {
+  it('are two, with «…» after a space when the head ends in a sentence mark, and a blank line between paragraphs is no sentence', () => {
+    expect(firstSentences('Done.\n\nThe tests pass. Next.')).toBe('Done.\n\nThe tests pass. …');
+    expect(firstSentences('Done.\n\nThe tests pass.')).toBe('Done.\n\nThe tests pass.');
+    expect(firstSentences('One. Two. Three')).toBe('One. Two. …');
+    expect(firstSentences('one\n\ntwo\n\nthree')).toBe('one\n\ntwo…');
   });
 });
 

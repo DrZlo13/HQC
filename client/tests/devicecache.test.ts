@@ -12,7 +12,7 @@ import { deviceHistoryCache } from '../src/historycache';
 import type { Artifact, Me, SessionInfo } from '../src/proto';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
 
-const ME: Me = { id: 'u-device', email: 'me@example.com', personal_project_id: 'p', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null };
+const ME: Me = { id: 'u-device', email: 'me@example.com', personal_project_id: 'p', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null, quick_messages: [] };
 const socket = { onState: () => {}, onRequests: () => {}, onSummary: () => {}, start: () => {} } as unknown as HubSocket;
 const wire = (seq: number) => ({
   session_id: 's1',

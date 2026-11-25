@@ -42,6 +42,8 @@ pub struct UserRow {
     pub project_sort: String,
     /// The project a new session is quick-started in (SPEC §3 User); null: not picked.
     pub new_session_project_id: Option<Uuid>,
+    /// The user's own quick messages, shown in every project (SPEC §3 User).
+    pub quick_messages: Vec<String>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]
@@ -2296,6 +2298,27 @@ pub async fn sessions_of_worker(db: &PgPool, worker_id: Uuid) -> sqlx::Result<Ve
         .await
 }
 
+/// What a worker restart may have taken from its sessions (#220): each live session of the
+/// worker, neither a room, a paused one nor its service session, whose turn was open, whose agent
+/// had background work or subagents, or that is in `live` (a kept list of what its agent runs or
+/// armed); with those three facts.
+pub async fn sessions_busy_at_restart(
+    db: &PgPool,
+    worker_id: Uuid,
+    live: &[Uuid],
+) -> sqlx::Result<Vec<(Uuid, bool, i32, i32)>> {
+    sqlx::query_as(
+        "SELECT id, turn_open, background_tasks, subagents FROM sessions
+         WHERE worker_id = $1 AND NOT archived AND NOT system AND room_mode IS NULL
+           AND paused_at IS NULL
+           AND (turn_open OR background_tasks > 0 OR subagents > 0 OR id = ANY($2))",
+    )
+    .bind(worker_id)
+    .bind(live)
+    .fetch_all(db)
+    .await
+}
+
 /// Sessions of the worker with input waiting for delivery (SPEC §5.2: re-sent after `hello`).
 pub async fn sessions_with_pending_input(db: &PgPool, worker_id: Uuid) -> sqlx::Result<Vec<Uuid>> {
     sqlx::query_scalar(
@@ -4040,7 +4063,7 @@ pub async fn push_subs_of(db: &PgPool, user: Uuid) -> sqlx::Result<Vec<PushSubRo
 pub struct ApnsDeviceRow {
     pub token: String,
     pub sandbox: bool,
-    /// The device's key for sealing its notices (SPEC 0.249); absent for an older app.
+    /// The device's key for sealing its notices (SPEC 0.259); absent for an older app.
     pub notice_key: Option<Vec<u8>>,
 }
 

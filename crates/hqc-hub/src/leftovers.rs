@@ -120,6 +120,127 @@ fn long_note(f: &LongRuns) -> String {
     )
 }
 
+/// What a worker restart took from one session's agent (#220, SPEC 0.256): its open turn, the
+/// background work it had and what it armed. Read before the hub forgets them on `hello`.
+pub struct LostWork {
+    session_id: uuid::Uuid,
+    turn: bool,
+    /// `background_tasks` + `subagents` as the worker last reported them.
+    running: i32,
+    /// The kept `subagents.live` rows: kind and description.
+    live: Vec<(LiveKind, String)>,
+}
+
+/// The sessions of worker `worker_id` whose agent lost something to its restart: a turn, a
+/// background command or subagent, a wakeup or a cron job (they all die with the process).
+pub async fn lost_on_restart(app: &AppState, worker_id: Uuid) -> anyhow::Result<Vec<LostWork>> {
+    let live = app.sessions_with_live_agents();
+    let rows = db::sessions_busy_at_restart(&app.db, worker_id, &live).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(session_id, turn, background, subagents)| {
+            let live = app
+                .live_agents_of(session_id)
+                .and_then(|p| p.get("agents").and_then(|a| a.as_array()).cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|a| {
+                    let kind = serde_json::from_value(a.get("kind")?.clone()).ok()?;
+                    Some((kind, a.get("description")?.as_str()?.to_string()))
+                })
+                .collect();
+            LostWork {
+                session_id,
+                turn,
+                running: background + subagents,
+                live,
+            }
+        })
+        .filter(|l| l.turn || l.running > 0 || !l.live.is_empty())
+        .collect())
+}
+
+/// A second note within this time is not written: a worker that dies again at once (its agent
+/// brought the machine down, say) would otherwise restart the agent into it over and over.
+const RESTART_NOTE_GAP: &str = "10 minutes";
+
+/// The note of [`restart_note`] for each of `lost` as the owner's pending `user.message` with
+/// `restart: true`, before `after_hello` starts the sessions with input waiting; none for a
+/// session that got one in the last [`RESTART_NOTE_GAP`].
+pub async fn tell_restart(
+    app: &AppState,
+    lost: &[LostWork],
+    at: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
+    for l in lost {
+        let Some(s) = db::session(&app.db, l.session_id).await? else {
+            continue;
+        };
+        let recent: bool = sqlx::query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM events WHERE session_id = $1 AND type = 'user.message'
+               AND payload->>'restart' = 'true' AND ts > now() - interval '{RESTART_NOTE_GAP}')"
+        ))
+        .bind(s.id)
+        .fetch_one(&app.db)
+        .await?;
+        if recent {
+            tracing::warn!(session_id = %s.id, "worker restarted again soon after a restart note: none this time");
+            continue;
+        }
+        events::store_hub_event(
+            app,
+            &s,
+            user_author(s.owner_id),
+            "user.message",
+            json!({"text": restart_note(l, at), "artifact_ids": [], "restart": true}),
+            None,
+            Some("pending"),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// The input of [`tell_restart`] (SPEC §17.3). The descriptions are the model's words, each a
+/// JSON string ([`quoted`]).
+fn restart_note(l: &LostWork, at: chrono::DateTime<chrono::Utc>) -> String {
+    let mut note = format!(
+        "[hqc] The worker running you restarted at {} UTC, and your process with it.",
+        at.format("%H:%M")
+    );
+    if l.turn {
+        note.push_str(" It cut the turn you were in: a step that shows as rejected or interrupted was the restart, not the user. Check what is already done before you repeat a step that changes something, then go on with the task.");
+    }
+    let items: Vec<String> = l
+        .live
+        .iter()
+        .map(|(kind, d)| {
+            let what = match kind {
+                LiveKind::Agent => "subagent",
+                LiveKind::Command => "background command",
+                LiveKind::Monitor => "monitor",
+                LiveKind::Wakeup => "wakeup",
+                LiveKind::Cron => "cron job",
+                LiveKind::Unknown => "task",
+            };
+            format!("{what} {}", quoted(d))
+        })
+        .collect();
+    if !items.is_empty() {
+        note.push_str(&format!(
+            " What you had running or armed did not survive it: {}. Check what got done and start again what is still needed.",
+            items.join("; ")
+        ));
+    } else if l.running > 0 {
+        note.push_str(&format!(
+            " Your {} background task{} did not survive it. Check what got done and start again what is still needed.",
+            l.running,
+            if l.running == 1 { "" } else { "s" }
+        ));
+    }
+    note
+}
+
 /// `text` as a JSON string, its quotes and line breaks escaped, with what reads as the mark of a
 /// line from a room or from another session escaped too (as `rooms.rs` does in a room's input):
 /// a model's text in the hub's note can end neither the quote nor the line, nor pass for such a

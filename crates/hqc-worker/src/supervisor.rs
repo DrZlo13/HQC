@@ -27,22 +27,22 @@
 //!   adapter reports [`AdapterEvent::InputAccepted`] (SPEC §5.2). The queue lives in memory:
 //!   the hub's `pending` inputs are the source of truth and come again after `hello`, so an
 //!   input already queued or delivered is recognised by `event_id` and not run twice.
-//! - The owner's Stop (`session.stop {quiet: true}`, SPEC 0.231) with a turn running (also one
-//!   the runtime started by itself) marks what waits at that moment (the queue, a capped input
-//!   waiting for its mode) and, when the turn ends, what the runtime dropped from it, to be
-//!   written into the agent's history without a turn ([`Adapter::input_quiet_with`], in
-//!   `event_id` order); a slash command among them fails with "cancelled by Stop". So does an
-//!   input whose cap is below the session's own mode (T39): it was never handled under its cap
-//!   and the owner's next turn would see it unhandled in the full mode, so the hub gets an error
-//!   for it and the agent gets a quiet note of its own instead ([`peer::dropped_note`]): what
-//!   was dropped (another session's message, a scheduled run), without its text. Until the
-//!   turn ends nothing new goes into it; what comes after the Stop is never marked. A quiet
-//!   input's acceptance is `ack {event_id, quiet: true}` ([`AdapterEvent::QuietTaken`]), also
-//!   when it is resent; a note has no frame of the hub, so nothing is acked or remembered for
-//!   it. A quiet line the runtime drops ([`AdapterEvent::QuietCancelled`]) is
-//!   written again. A normal input waits for their acks (the CLI takes a "next" line before a
-//!   "later" one), as do the idle unload and a move. A pause's stop (no `quiet`), a Stop with no
-//!   turn running and a `session.kill` mark and write nothing.
+//! - The owner's Stop (`session.stop {quiet: true}`, SPEC 0.231) with a turn running (also one the
+//!   runtime started by itself) marks what waits at that moment (the queue, a capped input waiting
+//!   for its mode) and, when the turn ends, what the runtime dropped from it, to be written into
+//!   the agent's history without a turn ([`Adapter::input_quiet_with`], in `event_id` order); a
+//!   slash command among them fails with "cancelled by Stop". So does an input with a cap below
+//!   `allow_all` (T39, SPEC 0.248): it was never handled under its cap, and the owner's next turn
+//!   would see it unhandled in the session's mode then, which may be raised to `allow_all`
+//!   meanwhile, so the hub gets an error for it and the agent gets a quiet note of its own instead
+//!   ([`peer::dropped_note`]): what was dropped (another session's message, a scheduled run),
+//!   without its text. Until the turn ends nothing new goes into it; what comes after the Stop is
+//!   never marked. A quiet input's acceptance is `ack {event_id, quiet: true}`
+//!   ([`AdapterEvent::QuietTaken`]), also when it is resent; a note has no frame of the hub, so
+//!   nothing is acked or remembered for it. A quiet line the runtime drops
+//!   ([`AdapterEvent::QuietCancelled`]) is written again. A normal input waits for their acks (the
+//!   CLI takes a "next" line before a "later" one), as do the idle unload and a move. A pause's
+//!   stop (no `quiet`), a Stop with no turn running and a `session.kill` mark and write nothing.
 //! - While a turn runs, the first waiting input that may join goes into it when the runtime
 //!   can take it ([`Adapter::can_inject`]) and the turn's own input is no `hqc_ask`: a
 //!   person's input (no `peer`, no `schedule_id`) that is no slash command and has no cap,
@@ -50,7 +50,10 @@
 //!   the runtime's confirmed mode is not above; it passes the waiting inputs before it that
 //!   are no person's and cannot join
 //!   ([`Session::inject_next`]), as the VS Code tab takes what the user types meanwhile.
-//!   Its acceptance is `ack {event_id, joined: true}`, also when it is resent; the first
+//!   Its acceptance is `ack {event_id, joined: true}`, also when it is resent; so is that of
+//!   an input given as a turn of its own while the runtime ran one it started by itself
+//!   ([`Adapter::runs_own_turn`]) and taken into that one, if it may join (no `schedule_id`;
+//!   no `peer`, or a `send`: what the hub keeps `joined`, SPEC 0.251); the first
 //!   input the turn carries to the next one becomes that turn, one the runtime will not take
 //!   goes back to the head of the queue, as does every one not taken when the process exits.
 //! - `subagents` (Claude Code: [`AdapterEvent::Subagents`]) and `background_tasks`
@@ -117,6 +120,7 @@
 //!   another writer.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -290,7 +294,12 @@ pub struct Supervisor {
     workspaces: Arc<crate::workspaces::Workspaces>,
     /// The sign-ins of the worker's Claude Code under way (SPEC 0.185).
     logins: crate::claude_auth::Logins,
+    /// `SIGUSR1` (#220, SPEC 0.256): stop once no agent works, see [`Supervisor::run`].
+    drain: Option<CancellationToken>,
 }
+
+/// The longest a drain waits for the agents' work to end before it stops them anyway.
+pub const DRAIN_MAX: Duration = Duration::from_secs(30 * 60);
 
 /// A confirmation asked for and the `session.start` frames that wait for it.
 struct Waiting {
@@ -307,6 +316,8 @@ struct Outcome {
 struct SessionHandle {
     tx: mpsc::UnboundedSender<Cmd>,
     task: JoinHandle<()>,
+    /// [`Session::working`], as the session last saw it.
+    busy: Arc<AtomicBool>,
     /// The workspace of the last `session.start` the session took: another one is a move.
     workspace: PathBuf,
 }
@@ -437,6 +448,7 @@ impl Supervisor {
             factory,
             link,
             sessions: HashMap::new(),
+            drain: None,
             shutdown_timeout,
             known,
             waiting: HashMap::new(),
@@ -465,13 +477,45 @@ impl Supervisor {
         self
     }
 
+    /// Cancelled: stop as on `shutdown` once no session's agent works ([`Session::working`]),
+    /// or after [`DRAIN_MAX`]; a restart then loses nothing an agent was doing (#220).
+    pub fn with_drain(mut self, drain: CancellationToken) -> Self {
+        self.drain = Some(drain);
+        self
+    }
+
+    /// Whether any session's agent works.
+    fn any_working(&self) -> bool {
+        self.sessions
+            .values()
+            .any(|h| h.busy.load(Ordering::Relaxed))
+    }
+
     /// Runs until `shutdown`, then kills every agent (SPEC §17.3: on worker restart all
     /// agents are `stopped`) and returns once their final events are in the outbox.
     pub async fn run(mut self, mut rx: mpsc::Receiver<Inbound>, shutdown: CancellationToken) {
         let mut outcomes = self.outcomes_rx.take().expect("run once");
+        let drain = self.drain.clone().unwrap_or_default();
+        let mut draining: Option<tokio::time::Instant> = None;
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
+                _ = drain.cancelled(), if draining.is_none() && self.drain.is_some() => {
+                    tracing::info!("asked to stop once no agent works (at most {} min)", DRAIN_MAX.as_secs() / 60);
+                    draining = Some(tokio::time::Instant::now());
+                }
+                _ = tick.tick(), if draining.is_some() => {
+                    let since = draining.expect("draining");
+                    if !self.any_working() {
+                        tracing::info!("no agent works: stopping");
+                        break;
+                    }
+                    if since.elapsed() >= DRAIN_MAX {
+                        tracing::warn!("agents still work after {} min: stopping anyway", DRAIN_MAX.as_secs() / 60);
+                        break;
+                    }
+                }
                 m = rx.recv() => match m {
                     Some(m) => self.handle(m),
                     None => break,
@@ -1233,7 +1277,9 @@ impl Supervisor {
         let (ev_tx, ev_rx) = mpsc::channel(ADAPTER_EVENT_BUFFER);
         let adapter = self.factory.create(spec, ev_tx);
         let (tx, rx) = mpsc::unbounded_channel();
+        let busy = Arc::new(AtomicBool::new(false));
         let s = Session {
+            busy: busy.clone(),
             id: spec.session_id,
             spec: spec.clone(),
             adapter,
@@ -1281,6 +1327,7 @@ impl Supervisor {
         };
         SessionHandle {
             tx,
+            busy,
             task: tokio::spawn(s.run(rx)),
             workspace: spec.workspace.clone(),
         }
@@ -1420,6 +1467,8 @@ fn capped(input: &SessionInput) -> bool {
 }
 
 struct Session {
+    /// [`Session::working`], for a drain of the supervisor.
+    busy: Arc<AtomicBool>,
     id: Uuid,
     spec: StartSpec,
     adapter: Box<dyn Adapter>,
@@ -1513,6 +1562,7 @@ struct Session {
 impl Session {
     async fn run(mut self, mut cmds: mpsc::UnboundedReceiver<Cmd>) {
         loop {
+            self.busy.store(self.working(), Ordering::Relaxed);
             let idle_deadline = self.idle_deadline();
             let lowering_deadline = self.lowering.as_ref().map(|l| l.deadline);
             tokio::select! {
@@ -1565,24 +1615,28 @@ impl Session {
         }
     }
 
+    /// Whether the agent does something a stop would cut: a turn, its own or ours, input that
+    /// waits for it, a background subagent or command (they outlive the turn and may be silent
+    /// for long, a build), a side question, a mode switch under way. Armed wakeups and cron jobs
+    /// are not work: they may wait for hours.
+    fn working(&self) -> bool {
+        !self.queue.is_empty()
+            || (self.state == ProcessState::Running
+                && (self.turn.is_some()
+                    || self.adapter.runs_own_turn()
+                    || !self.injected.is_empty()
+                    || !self.quiet_out.is_empty()
+                    || self.lowering.is_some()
+                    || self.subagents > 0
+                    || self.background_tasks > 0
+                    || !self.side_pending.is_empty()))
+    }
+
     fn idle_deadline(&self) -> Option<Instant> {
         let t = self.idle_timeout?;
-        // A background subagent or command outlives the turn and may be silent for long (a
-        // build). A turn the runtime started by itself is a turn as well: it is silent while it
-        // waits for an approval or an answer, or runs a long command. An armed wakeup and a cron
-        // job die with the process: the agent is idle from the latest of their times on (a job
-        // without a known next fire holds nothing). A side question waits for its answer.
-        (self.state == ProcessState::Running
-            && self.turn.is_none()
-            && !self.adapter.runs_own_turn()
-            && self.injected.is_empty()
-            && self.quiet_out.is_empty()
-            && self.lowering.is_none()
-            && self.queue.is_empty()
-            && self.subagents == 0
-            && self.background_tasks == 0
-            && self.side_pending.is_empty())
-        .then(|| {
+        // An armed wakeup and a cron job die with the process: the agent is idle from the latest
+        // of their times on (a job without a known next fire holds nothing).
+        (self.state == ProcessState::Running && !self.working()).then(|| {
             let crons = self.live.iter().flat_map(|(rows, at)| {
                 rows.iter()
                     .filter(|r| r.kind == Some(LiveKind::Cron))
@@ -2923,19 +2977,34 @@ impl Session {
                     self.side_answer(event_id, text, error.as_deref());
                 }
             }
-            AdapterEvent::InputAccepted { event_id } => {
+            AdapterEvent::InputAccepted {
+                event_id,
+                joined: into_running,
+            } => {
                 let transcript = self.transcript();
                 let (joined, slash) = if let Some(t) =
                     self.turn.as_mut().filter(|t| t.input.event_id == event_id)
                 {
                     t.accepted = true;
+                    // Written as our turn while the runtime ran one of its own, it went into
+                    // that turn: an input the hub keeps `joined` on (no `schedule_id`; no
+                    // `peer`, or a `send`) is `joined` (SPEC 0.251), where the runtime took it;
+                    // another one opens its turn on the hub as before.
+                    let input = &t.input;
+                    let joined = into_running
+                        && input.schedule_id.is_none()
+                        && input.peer.as_ref().is_none_or(|p| p.mode == PeerMode::Send);
                     self.link.reply_input(
                         self.id,
                         transcript.as_deref(),
                         &t.frame_id,
-                        ack(Some(event_id)),
+                        if joined {
+                            joined_ack(event_id)
+                        } else {
+                            ack(Some(event_id))
+                        },
                     );
-                    (false, t.input.text.starts_with('/'))
+                    (joined, t.input.text.starts_with('/'))
                 } else if let Some(i) = self
                     .injected
                     .iter()
@@ -3270,9 +3339,10 @@ impl Session {
     /// Marks input `q` of the owner's Stop (SPEC 0.231) to be written into the agent's history
     /// without a turn ([`Session::write_quiet`], in `event_id` order): the agent knows it next
     /// time and does not act on it now. A slash command fails: it runs or it does not, it is not
-    /// text for the history. So does an input whose cap is below the session's own mode (T39):
-    /// it was never handled under its cap, and the owner's next turn in the full mode would see
-    /// it unhandled, so it is not written; the agent gets a note of its own after the inputs
+    /// text for the history. So does an input with a cap below `allow_all` (T39, SPEC 0.248),
+    /// also one at the session's own mode: it was never handled under its cap, and the owner's
+    /// next turn would see it unhandled in the session's mode then, which the owner may raise
+    /// meanwhile, so it is not written; the agent gets a note of its own after the inputs
     /// instead, naming the sender (the `peer` only) and not showing the text ([`peer::dropped_note`]).
     fn mark_quiet(&mut self, mut q: Queued) {
         // What the runtime gets decides: a message of another session that starts with a path
@@ -3283,13 +3353,14 @@ impl Session {
             .starts_with('/')
         {
             self.cancelled_by_stop(&q.frame_id, q.input.event_id);
-        } else if cap(&q.input) < self.spec.permission_mode {
-            tracing::info!(session_id = %self.id, event_id = %q.input.event_id, "input dropped at stop: its cap is below the session's mode");
+        } else if capped(&q.input) {
+            tracing::info!(session_id = %self.id, event_id = %q.input.event_id, "input dropped at stop: its cap is below allow_all");
             self.reply_input(
                 &q.frame_id,
                 wire_error(
                     error_code::INTERNAL,
-                    "dropped at Stop: it may not run in this session's permission mode".to_string(),
+                    "dropped at Stop: it may run only in a permission mode below Allow all"
+                        .to_string(),
                     false,
                 ),
             );

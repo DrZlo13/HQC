@@ -278,6 +278,69 @@ it("sends the hub's list with the one change: what another device added is kept,
   await app.refreshProject(pid);
 });
 
+it("Settings has the user's own quick messages: add, edit in place, delete; each save sends the hub's list with the one change, and a refusal shows", async () => {
+  const from = location.hash;
+  location.hash = '#/settings';
+  await until('the Settings page', () => $('.settings-new-session'));
+  const heading = await until('the section', () => $$('h2').find((h) => h.textContent === 'Quick messages'));
+  expect(heading.nextElementSibling!.className).toBe('muted');
+  expect(heading.nextElementSibling!.textContent).toContain('in every project, before the project\'s own');
+  const stored = async () => (await app.api.me()).quick_messages;
+  const texts = () => $$('.quick-text').map((t) => t.textContent);
+  const type = async (text: string) => {
+    const area = await until('the form', () => $<HTMLTextAreaElement>('.quick-input'));
+    area.value = text;
+    area.dispatchEvent(new win.Event('input', { bubbles: true }) as unknown as Event);
+    await new Promise((r) => setTimeout(r, 10));
+  };
+  const save = async () => {
+    $<HTMLButtonElement>('.btn-quick-save')!.click();
+    await until('the form closed', () => !$('.quick-form'));
+  };
+  const add = async (text: string) => {
+    $<HTMLButtonElement>('.btn-quick-add')!.click();
+    await type(text);
+    await save();
+  };
+  expect(texts()).toEqual([]);
+
+  await add('What is going on?');
+  await add('Merge');
+  expect(await stored()).toEqual(['What is going on?', 'Merge']);
+  expect(texts()).toEqual(['What is going on?', 'Merge']);
+  expect(app.me!.quick_messages).toEqual(['What is going on?', 'Merge']);
+
+  // Another device adds one: nothing of it is dropped by the next save.
+  await app.api.setUserQuickMessages(['What is going on?', 'Merge', 'from the phone']);
+  await add('last');
+  expect(await stored()).toEqual(['What is going on?', 'Merge', 'from the phone', 'last']);
+
+  // Edited in place, the order stays; deleted, the one pressed goes.
+  $$('.btn-quick-edit')[1].click();
+  await type('Merge it');
+  await save();
+  expect(await stored()).toEqual(['What is going on?', 'Merge it', 'from the phone', 'last']);
+  $$('.btn-quick-delete')[2].click();
+  await until('deleted', () => texts().join('|') === 'What is going on?|Merge it|last');
+  expect(await stored()).toEqual(['What is going on?', 'Merge it', 'last']);
+
+  // The hub's refusal shows under the list, and the form stays.
+  $$('.btn-quick-edit')[0].click();
+  await type('x'.repeat(10001));
+  $<HTMLButtonElement>('.btn-quick-save')!.click();
+  await until("the hub's refusal", () => $('.page-body .error-text'));
+  expect($('.page-body .error-text')!.textContent).toContain('longer than 10000 characters');
+  expect($('.quick-form')).not.toBeNull();
+  expect(await stored()).toEqual(['What is going on?', 'Merge it', 'last']);
+  $<HTMLButtonElement>('.btn-quick-cancel')!.click();
+  await until('closed', () => !$('.quick-form') && !$('.page-body .error-text'));
+
+  await app.api.setUserQuickMessages([]);
+  await app.refreshUserQuickMessages();
+  location.hash = from;
+  await until('the project settings again', () => $('.quick-messages'));
+});
+
 it('previews in the dialog, changes nothing on Cancel and saves color and icon', async () => {
   const pid = app.me!.personal_project_id;
   expect(rootVar('--accent')).toBe(colorHex('slate'));
@@ -375,7 +438,7 @@ it('saves letters in upper case and uploads an image; a wrong file never leaves 
 it('picks the app theme on the Settings page: a light tile applies at once and goes to the hub', async () => {
   location.hash = '#/settings';
   await until('theme tiles', () => $$('.theme-group .base-pick').length === 6);
-  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Look', 'New session', 'Web search', 'Keys', 'Models', 'MCP servers', 'Skills', 'Notifications', 'This device', 'Workers']);
+  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Look', 'New session', 'Quick messages', 'Web search', 'Keys', 'Models', 'MCP servers', 'Skills', 'Notifications', 'This device', 'Workers']);
   expect($$('.theme-group-label').map((l) => l.textContent)).toEqual(['Dark', 'Light']);
   expect($('.base-pick[aria-pressed=true]')!.textContent).toBe('Warm');
   button('Graphite', '[aria-label="Light themes"]')!.click();

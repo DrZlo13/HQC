@@ -11,7 +11,7 @@ use hqc_proto::event::{
     ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, GrantPlace, LiveKind,
     LiveSubagent, OptionGrant, SessionState, TaskStatus,
 };
-use hqc_proto::frame::{Activity, LeftoverCommand, Runtime, SessionInput, SlashCommand};
+use hqc_proto::frame::{Activity, LeftoverCommand, LongRun, Runtime, SessionInput, SlashCommand};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -314,6 +314,7 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             // `a_task_end_carries_its_usage_and_output` looks at it.
             AdapterEvent::TaskOutput(_) => continue,
             AdapterEvent::SubagentLeftovers { .. } => "subagent_leftovers".into(),
+            AdapterEvent::LongRuns { .. } => "long_runs".into(),
             AdapterEvent::QuietTaken { .. } => "quiet_taken".into(),
             AdapterEvent::QuietCancelled { .. } => "quiet_cancelled".into(),
             AdapterEvent::SideAnswer { .. } => "side_answer".into(),
@@ -11629,6 +11630,230 @@ fn a_command_a_subagent_left_running_is_told_once_after_30_min() {
     assert_eq!(leftovers_of(core.leftovers(at + half_hour)), []);
     let (mut core, at) = fed(&[LEFT_RUNNING[0]]);
     assert_eq!(leftovers_of(core.leftovers(at + half_hour)), []);
+}
+
+/// The tasks of the [`AdapterEvent::LongRuns`] of `actions`, one list per event.
+fn long_runs_of(actions: Vec<Action>) -> Vec<Vec<LongRun>> {
+    actions
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::LongRuns { tasks }) => Some(tasks),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The lines of a background command: the CLI's list, then its `task_started`.
+const BACKGROUND_COMMAND: [&str; 2] = [
+    r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b2st7oc3z","task_type":"local_bash","description":"Run the full pass over 1000 boards on cirunner"}]}"#,
+    r#"{"type":"system","subtype":"task_started","task_id":"b2st7oc3z","tool_use_id":"toolu_01Run","description":"Run the full pass over 1000 boards on cirunner","is_backgrounded":true,"task_type":"local_bash"}"#,
+];
+
+/// `core` after it has read `lines`, and the instant after them (the rows count from before it).
+fn fed_into(mut core: Core, lines: &[&str]) -> (Core, std::time::Instant) {
+    for l in lines {
+        core.on_line(l);
+    }
+    (core, std::time::Instant::now())
+}
+
+/// A core of the default period that has read `lines`.
+fn fed(lines: &[&str]) -> (Core, std::time::Instant) {
+    fed_into(Core::new(Uuid::now_v7(), false), lines)
+}
+
+/// A background command that runs on is told at 55 min and again at each 55 min after, with its
+/// task, description and run time; not a second before, and not twice for one mark.
+#[test]
+fn a_background_command_is_told_every_55_min() {
+    let (mut core, at) = fed(&BACKGROUND_COMMAND);
+    let every = Duration::from_secs(55 * 60);
+    let short = Duration::from_secs(5);
+    assert!(long_runs_of(core.long_runs(at)).is_empty());
+    assert!(long_runs_of(core.long_runs(at + every - short)).is_empty());
+    let told = long_runs_of(core.long_runs(at + every));
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0].len(), 1);
+    let t = &told[0][0];
+    assert_eq!(
+        (t.task_id.as_str(), t.kind, t.description.as_str()),
+        (
+            "b2st7oc3z",
+            LiveKind::Command,
+            "Run the full pass over 1000 boards on cirunner"
+        )
+    );
+    assert!((3300..3310).contains(&t.running_s), "{}", t.running_s);
+    assert!(long_runs_of(core.long_runs(at + every + short)).is_empty());
+    assert!(long_runs_of(core.long_runs(at + 2 * every - short)).is_empty());
+    let told = long_runs_of(core.long_runs(at + 2 * every));
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!((6600..6610).contains(&told[0][0].running_s));
+}
+
+/// A background subagent is told as a task of kind agent.
+#[test]
+fn a_background_subagent_is_told_every_55_min() {
+    let (mut core, at) = fed(&LEFT_RUNNING[..2]);
+    assert!(long_runs_of(core.long_runs(at)).is_empty());
+    let told = long_runs_of(core.long_runs(at + Duration::from_secs(55 * 60)));
+    assert_eq!(told.len(), 1, "{told:?}");
+    let t = &told[0][0];
+    assert_eq!(
+        (t.task_id.as_str(), t.kind, t.description.as_str()),
+        (
+            "a6996d99c74dd1835",
+            LiveKind::Agent,
+            "Heightmap: 25 frames, summed match"
+        )
+    );
+}
+
+/// A Monitor of the agent and a command or subagent held on the foreground of its turn are
+/// listed, but never told of: a note would wait for the end of the turn they hold.
+#[test]
+fn a_monitor_and_a_foreground_call_are_not_told() {
+    let monitor = json!({"type": "assistant", "message": {"model": "claude-haiku-5-5",
+        "role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01Watch",
+            "name": "Monitor", "input": {"command": "tail -f run.log",
+                "description": "Watch the run's log"}}]},
+        "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+    .to_string();
+    let lines = [
+        monitor.as_str(),
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bwatch1","task_type":"local_bash","description":"Watch the run's log"},{"task_id":"bfis28nrx","task_type":"local_bash","description":"Sleep for 15 seconds"},{"task_id":"ac5672f5fc80df8ec","task_type":"local_agent","description":"Run ping and reply with 4"}]}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"bwatch1","tool_use_id":"toolu_01Watch","description":"Watch the run's log","is_backgrounded":true,"task_type":"local_bash"}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"bfis28nrx","tool_use_id":"toolu_01FoCFY4DmUbVxXAembc44PX","description":"Sleep for 15 seconds","is_backgrounded":false,"task_type":"local_bash"}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"ac5672f5fc80df8ec","tool_use_id":"toolu_01TYRCeySHmvXd7Md3Y1rgb8","description":"Run ping and reply with 4","subagent_type":"general-purpose","is_backgrounded":false,"spawn_depth":1,"task_type":"local_agent"}"#,
+    ];
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let mut rows = Vec::new();
+    for l in lines {
+        for a in core.on_line(l) {
+            if let Action::Emit(AdapterEvent::LiveSubagents(list)) = a {
+                rows = list;
+            }
+        }
+    }
+    let mut kinds: Vec<_> = rows.iter().map(|r| (r.task_id.as_str(), r.kind)).collect();
+    kinds.sort_by_key(|k| k.0);
+    // The three are rows, so that nothing but the rule keeps them from being told.
+    assert_eq!(
+        kinds,
+        [
+            ("ac5672f5fc80df8ec", Some(LiveKind::Agent)),
+            ("bfis28nrx", Some(LiveKind::Command)),
+            ("bwatch1", Some(LiveKind::Monitor)),
+        ]
+    );
+    let at = std::time::Instant::now();
+    for hours in [1, 2, 5] {
+        let late = at + Duration::from_secs(hours * 3600);
+        assert!(long_runs_of(core.long_runs(late)).is_empty(), "{hours} h");
+    }
+}
+
+/// Two tasks that reach their mark on one tick are told in one event.
+#[test]
+fn tasks_due_together_are_told_in_one_event() {
+    let lines: Vec<&str> = LEFT_RUNNING[..2]
+        .iter()
+        .chain(&BACKGROUND_COMMAND)
+        .copied()
+        .collect();
+    let (mut core, at) = fed(&lines);
+    assert!(long_runs_of(core.long_runs(at)).is_empty());
+    let told = long_runs_of(core.long_runs(at + Duration::from_secs(55 * 60)));
+    assert_eq!(told.len(), 1, "{told:?}");
+    let mut ids: Vec<_> = told[0]
+        .iter()
+        .map(|t| (t.task_id.as_str(), t.kind))
+        .collect();
+    ids.sort_by_key(|k| k.0);
+    assert_eq!(
+        ids,
+        [
+            ("a6996d99c74dd1835", LiveKind::Agent),
+            ("b2st7oc3z", LiveKind::Command)
+        ]
+    );
+}
+
+/// [`LEFT_RUNNING`]: the loop the subagent left becomes a row when the subagent reports, and
+/// the first tick that sees it is past the 55 min it has run: the marks it has passed are not
+/// told, the next one is.
+#[test]
+fn a_command_first_seen_late_is_told_at_its_next_mark() {
+    let (mut core, at) = fed(&LEFT_RUNNING);
+    let every = Duration::from_secs(55 * 60);
+    assert!(long_runs_of(core.long_runs(at + every + Duration::from_secs(60))).is_empty());
+    assert!(long_runs_of(core.long_runs(at + 2 * every - Duration::from_secs(5))).is_empty());
+    let told = long_runs_of(core.long_runs(at + 2 * every));
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0][0].task_id, "bq4wq8f2x");
+}
+
+/// `long_run_note` sets the period: a task is told at each multiple of it, and with `None`
+/// never.
+#[test]
+fn the_period_is_the_workers_setting() {
+    let ten_min = Duration::from_secs(600);
+    let core = Core::new(Uuid::now_v7(), false).with_long_run_note(Some(ten_min));
+    let (mut core, at) = fed_into(core, &BACKGROUND_COMMAND);
+    assert!(long_runs_of(core.long_runs(at)).is_empty());
+    assert!(long_runs_of(core.long_runs(at + ten_min - Duration::from_secs(5))).is_empty());
+    let told = long_runs_of(core.long_runs(at + ten_min));
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!((600..610).contains(&told[0][0].running_s));
+    assert_eq!(long_runs_of(core.long_runs(at + 2 * ten_min)).len(), 1);
+
+    let core = Core::new(Uuid::now_v7(), false).with_long_run_note(None);
+    let (mut core, at) = fed_into(core, &BACKGROUND_COMMAND);
+    for hours in [0, 1, 5, 24] {
+        let late = at + Duration::from_secs(hours * 3600);
+        assert!(long_runs_of(core.long_runs(late)).is_empty(), "{hours} h");
+    }
+}
+
+/// A background subagent a running subagent started is not told of while its parent runs (the
+/// parent waits for it); once the parent reports, it is the main agent's to stop, and it is told
+/// at its next mark, not of the one it passed.
+#[test]
+fn a_subagent_of_a_running_subagent_is_not_told() {
+    let parent = "a6996d99c74dd1835";
+    let nested = r#"{"type":"system","subtype":"task_started","task_id":"anest001","tool_use_id":"toolu_01Nest","description":"Nested check","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":2,"parent_task_id":"a6996d99c74dd1835","task_type":"local_agent"}"#;
+    let both = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a6996d99c74dd1835","task_type":"local_agent","description":"Heightmap: 25 frames, summed match"},{"task_id":"anest001","task_type":"local_agent","description":"Nested check","parent_task_id":"a6996d99c74dd1835"}]}"#;
+    let (mut core, at) = fed(&[LEFT_RUNNING[0], nested, both]);
+    let every = Duration::from_secs(55 * 60);
+    assert!(long_runs_of(core.long_runs(at)).is_empty());
+    let told = long_runs_of(core.long_runs(at + every));
+    let ids: Vec<_> = told.iter().flatten().map(|t| t.task_id.as_str()).collect();
+    assert_eq!(ids, [parent]);
+    // The parent reports; the nested one runs on, alone in the list; the turn the CLI then
+    // starts by itself is the next line of another kind, which drops the parent's row.
+    for l in [
+        LEFT_RUNNING[4],
+        LEFT_RUNNING[5],
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"anest001","task_type":"local_agent","description":"Nested check","parent_task_id":"a6996d99c74dd1835"}]}"#,
+        LEFT_RUNNING[7],
+        LEFT_RUNNING[8],
+    ] {
+        core.on_line(l);
+    }
+    let after = at + every + Duration::from_secs(60);
+    assert!(long_runs_of(core.long_runs(after)).is_empty());
+    let told = long_runs_of(core.long_runs(at + 2 * every));
+    let ids: Vec<_> = told.iter().flatten().map(|t| t.task_id.as_str()).collect();
+    assert_eq!(ids, ["anest001"]);
+}
+
+/// A task that ended is not told of, however long it ran.
+#[test]
+fn an_ended_task_is_not_told() {
+    let (mut core, at) = fed(&BACKGROUND_COMMAND);
+    assert!(long_runs_of(core.long_runs(at)).is_empty());
+    core.on_line(r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#);
+    assert!(long_runs_of(core.long_runs(at + Duration::from_secs(55 * 60))).is_empty());
 }
 
 /// SPEC 0.148: a session given the browser runs with `--chrome` and without the tools that

@@ -54,6 +54,7 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::PermissionMode(m) => format!("permission_mode:{}", m.as_str()),
         AdapterEvent::Limits(_) => "limits".into(),
         AdapterEvent::TaskOutput(p) => format!("task_output:{}", p.display()),
+        AdapterEvent::LongRuns { tasks } => format!("long_runs:{}", tasks.len()),
         AdapterEvent::SubagentLeftovers { commands, .. } => {
             format!("subagent_leftovers:{}", commands.len())
         }

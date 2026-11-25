@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::event::{ClarifyAction, ClarifyAnswer, Event};
+use crate::event::{ClarifyAction, ClarifyAnswer, Event, LiveKind};
 
 /// `{id, type, payload}`; `body` supplies `type` and `payload`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -231,6 +231,10 @@ pub enum WorkerFrame {
     /// reported (since SPEC 0.203, §5.4, §8.1); answered with `ack {}`.
     #[serde(rename = "session.subagent_leftovers")]
     SubagentLeftovers(SubagentLeftovers),
+    /// Background commands or subagents of the session's agent that have run for a long time
+    /// (since SPEC 0.244, §5.4, §8.1); answered with `ack {}`.
+    #[serde(rename = "session.long_runs")]
+    LongRuns(LongRuns),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -259,6 +263,28 @@ pub struct LeftoverCommand {
     /// The command's `description` in the runtime's list.
     pub description: String,
     /// Seconds since the command started.
+    pub running_s: u64,
+}
+
+/// `session.long_runs {session_id, tasks}` (since SPEC 0.244, §5.4): the background commands and
+/// subagents of the session's agent that have just run through another `long_run_note` of the
+/// worker (55 minutes unless written). The hub tells the agent with a note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LongRuns {
+    pub session_id: Uuid,
+    pub tasks: Vec<LongRun>,
+}
+
+/// One task of [`LongRuns`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LongRun {
+    /// The runtime's id of the task, which its own tool for stopping a task takes.
+    pub task_id: String,
+    /// [`LiveKind::Agent`] (a subagent) or [`LiveKind::Command`]; no other is sent.
+    pub kind: LiveKind,
+    /// The task's description in the runtime's list.
+    pub description: String,
+    /// Seconds since the task started.
     pub running_s: u64,
 }
 
@@ -1963,6 +1989,7 @@ mod tests {
         "workspace.created",
         "worker.limits",
         "session.subagent_leftovers",
+        "session.long_runs",
         "ack",
         "error",
     ];
@@ -2324,6 +2351,10 @@ mod tests {
             "session.subagent_leftovers",
             include_str!("../examples/wire/worker.session.subagent_leftovers.json"),
         ),
+        (
+            "session.long_runs",
+            include_str!("../examples/wire/worker.session.long_runs.json"),
+        ),
         ("ack", include_str!("../examples/wire/worker.ack.json")),
         (
             "ack",
@@ -2394,6 +2425,7 @@ mod tests {
             WorkerFrame::WorkspaceCreated(_) => "workspace.created",
             WorkerFrame::WorkerLimits(_) => "worker.limits",
             WorkerFrame::SubagentLeftovers(_) => "session.subagent_leftovers",
+            WorkerFrame::LongRuns(_) => "session.long_runs",
             WorkerFrame::Ack(_) => "ack",
             WorkerFrame::Error(_) => "error",
         }

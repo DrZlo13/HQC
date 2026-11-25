@@ -23,6 +23,8 @@
 //! # browser = false                # a session the owner gives it to drives Chrome here
 //! # task_tools = false             # true: give the agent Claude Code's task tools
 //!                                  # (TaskCreate, TaskUpdate, TaskList, TaskGet)
+//! # long_run_note = 3300           # seconds: tell the agent every so long that a background
+//!                                  # command or subagent of its own still runs; 0 = never
 //!
 //! [permissions]                  # optional, see crate::permissions
 //! mode = "ask"                   # "ask" | "auto" | "allow_all": sessions that ask for none
@@ -121,6 +123,8 @@ struct RawConfig {
     browser: bool,
     #[serde(default)]
     task_tools: bool,
+    #[serde(default = "default_long_run_note")]
+    long_run_note: u64,
     #[serde(default)]
     permissions: Option<RawPermissions>,
     #[serde(default)]
@@ -386,8 +390,21 @@ fn default_clone_timeout() -> u64 {
     DEFAULT_CLONE_TIMEOUT.as_secs()
 }
 
+fn default_long_run_note() -> u64 {
+    DEFAULT_LONG_RUN_NOTE.as_secs()
+}
+
 /// How long `git clone` of a new workspace may take, unless `clone_timeout` says otherwise.
 pub const DEFAULT_CLONE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How often the agent is told of a background command or subagent of its own that still runs,
+/// unless `long_run_note` says otherwise (SPEC §14, §8.1). With the 1-hour prompt cache
+/// (`cache_ttl_s` 3600 in `usage`) it is below the hour the cache lives after the agent's last
+/// request, which is never before a watched task started (for one a subagent left: before that
+/// subagent's report started a turn of the agent): the turn of the first note reads the cache,
+/// and each note's turn is a request that renews it for the next. A value of an hour or more
+/// misses it; with the 5-minute cache or on a provider the note's turn misses it at any value.
+pub const DEFAULT_LONG_RUN_NOTE: Duration = Duration::from_secs(55 * 60);
 
 /// Agent processes running at once, unless `max_sessions` says otherwise.
 pub const DEFAULT_MAX_SESSIONS: usize = 8;
@@ -514,6 +531,10 @@ pub struct Config {
     /// 2.1.312 gives the 5.x models none, and the chat has no task list to show (SPEC §14, §8.1,
     /// since 0.223). Off by default.
     pub task_tools: bool,
+    /// How often the agent is told that a background command or subagent of its own still runs,
+    /// from the task's start (SPEC §14, §8.1, since 0.244); `None` (`long_run_note = 0`): never.
+    /// [`DEFAULT_LONG_RUN_NOTE`] unless written.
+    pub long_run_note: Option<Duration>,
     /// `[permissions]`: the worker's allow/deny rules and the ask/auto mode (SPEC §14). A
     /// session runs with its environment's [`Environment::permissions`], built on these.
     pub permissions: Permissions,
@@ -720,6 +741,7 @@ impl Config {
             rbw_bin: PathBuf::from("rbw"),
             browser: raw.browser,
             task_tools: raw.task_tools,
+            long_run_note: (raw.long_run_note > 0).then(|| Duration::from_secs(raw.long_run_note)),
             default_environment: Arc::new(Environment::default_of(&permissions)),
             permissions,
             environments,
@@ -1123,6 +1145,25 @@ mod tests {
             Config::parse(&toml("task_tools = true\n"))
                 .unwrap()
                 .task_tools
+        );
+    }
+
+    /// SPEC 0.244: `long_run_note` is 3300 s unless written, `0` turns the notes off.
+    #[test]
+    fn the_long_run_note_has_a_default_and_can_be_turned_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = |extra: &str| {
+            format!(
+                "hub_url = \"http://127.0.0.1:1/\"\nallowed_roots = [{:?}]\n{extra}",
+                dir.path().display().to_string(),
+            )
+        };
+        let note = |extra: &str| Config::parse(&toml(extra)).unwrap().long_run_note;
+        assert_eq!(note(""), Some(Duration::from_secs(3300)));
+        assert_eq!(note("long_run_note = 0\n"), None);
+        assert_eq!(
+            note("long_run_note = 1200\n"),
+            Some(Duration::from_secs(1200))
         );
     }
 

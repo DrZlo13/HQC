@@ -67,8 +67,9 @@
 //!   stops, and again as it is on every [`AdapterEvent::Heartbeat`]. The output file of a
 //!   background task that ended ([`AdapterEvent::TaskOutput`]) is uploaded and becomes an
 //!   `attachment` of the session. The commands a subagent left running 30 minutes after it
-//!   reported ([`AdapterEvent::SubagentLeftovers`]) go as `session.subagent_leftovers`, not
-//!   once the agent is stopped.
+//!   reported ([`AdapterEvent::SubagentLeftovers`]) go as `session.subagent_leftovers`, and the
+//!   background commands and subagents that have each run through another `long_run_note`
+//!   ([`AdapterEvent::LongRuns`]) as `session.long_runs`, neither once the agent is stopped.
 //! - A tool result with files ([`AdapterEvent::ToolResult`]: its whole text, its images) goes to
 //!   the hub once they are uploaded with `PUT /worker/artifacts`, before the adapter's next
 //!   event (SPEC §8.1).
@@ -124,11 +125,11 @@ use std::path::{Path, PathBuf};
 use hqc_proto::event::{ArtifactKind, EventKind, LiveKind, PeerMode};
 use hqc_proto::frame::{
     error_code, worker_approval, Ack, ClaudeAuthResult, ClaudeLoginDoneResult, ClaudeLoginResult,
-    Envelope, HeldBy, HubFrame, InputNowResult, InputWithdrawnResult, LockedBy, PermissionMode,
-    ProcessState, RequestResult, ResultBody, Runtime, SecretOutcome, SecretPut, SecretPutResult,
-    SessionInput, SessionStart, StartMode, SubagentHistoryResult, SubagentLeftovers, TitleRequest,
-    TitleResult, WireError, WorkerApprovalRequest, WorkerFrame, WorkspaceKeyDeleteResult,
-    WorkspaceKeysResult,
+    Envelope, HeldBy, HubFrame, InputNowResult, InputWithdrawnResult, LockedBy, LongRuns,
+    PermissionMode, ProcessState, RequestResult, ResultBody, Runtime, SecretOutcome, SecretPut,
+    SecretPutResult, SessionInput, SessionStart, StartMode, SubagentHistoryResult,
+    SubagentLeftovers, TitleRequest, TitleResult, WireError, WorkerApprovalRequest, WorkerFrame,
+    WorkspaceKeyDeleteResult, WorkspaceKeysResult,
 };
 
 /// Why `secret.put` and the workspace keys are refused on a worker without them (SPEC 0.147).
@@ -3089,6 +3090,15 @@ impl Session {
                             ended_s,
                             commands,
                         }));
+                }
+            }
+            // As the leftovers: the tasks of a process already stopped stopped with it.
+            AdapterEvent::LongRuns { tasks } => {
+                if self.state != ProcessState::Stopped {
+                    self.link.send(WorkerFrame::LongRuns(LongRuns {
+                        session_id: self.id,
+                        tasks,
+                    }));
                 }
             }
             AdapterEvent::RuntimeSessionId(r) => {

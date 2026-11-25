@@ -272,6 +272,13 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
         } else {
             crate::mcp_servers::names_for(&app.db, s.owner_id, s.project_id).await?
         },
+        // SPEC 0.237: names and hashes; the worker takes them where its environment has
+        // `hub_skills`. Only for the owner's own worker, as the MCP servers.
+        skills: if s.restricted || s.runtime != "claude_code" || worker_owner != Some(s.owner_id) {
+            vec![]
+        } else {
+            crate::skills::refs_for(&app.db, s.owner_id, s.project_id).await?
+        },
     })
 }
 

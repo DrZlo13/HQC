@@ -1038,7 +1038,11 @@ fn plain(status: StatusCode, msg: &'static str) -> Response {
 
 /// The worker of the bearer token; failures count against the address like a WebSocket
 /// login's.
-async fn worker_of(app: &AppState, ip: &str, headers: &HeaderMap) -> ApiResult<db::WorkerRow> {
+pub(crate) async fn worker_of(
+    app: &AppState,
+    ip: &str,
+    headers: &HeaderMap,
+) -> ApiResult<db::WorkerRow> {
     let max_failures = app.config.limits.ws_auth_failures_per_min;
     if app.limiter.exhausted(AUTH_FAILURES, ip, max_failures) {
         return Err(ApiError::TooManyRequests);

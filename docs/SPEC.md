@@ -2994,7 +2994,7 @@ message, a message from another session or a room's post. The message follows th
 quote mark comes out at its right at the finger's height; released past 60 px, the message's first
 two sentences go into the input as Quote puts a selection there, with "…" when its text goes on
 (the Markdown of an answer or of another session's message as its text, a list item or a table row
-a line of its own; the user's message without its `>` lines); released before, nothing. Where
+a line of its own; the user's message without its quote lines); released before, nothing. Where
 there is no input a message does not move; a swipe on a code block or a table that scrolls
 sideways scrolls it, and a touch held half a second before it moves is the browser's (a long press
 selects text). A subagent's history has no swipe.
@@ -3083,7 +3083,7 @@ message, a message from another session or a room's post. The message follows th
 quote mark comes out at its right at the finger's height; released past 60 px, the message's first
 two sentences go into the input as Quote puts a selection there, with "…" when its text goes on
 (the Markdown of an answer or of another session's message as its text, a list item or a table row
-a line of its own; the user's message without its `>` lines); released before, nothing. Where
+a line of its own; the user's message without its quote lines); released before, nothing. Where
 there is no input a message does not move; a swipe on a code block or a table that scrolls
 sideways scrolls it, and a touch held half a second before it moves is the browser's (a long press
 selects text). A subagent's history has no swipe.
@@ -8438,7 +8438,9 @@ they quote. They now show as a quote block in the bubble, and a click on it, as 
 the chat to the quoted text and highlights it: the client looks for it by its letters and digits in
 the session's events before the message (the older history loaded until it is found), then after it,
 and jumps there as to a search hit. A search hit's jump now also takes the block that draws its
-event (a call shown on its permission card), not the last block that starts before it. Client only.
+event (a call shown on its permission card), not the last block that starts before it. A swipe of
+the user's message leaves out only these quote lines too, not every line that starts with `>`
+(a `>>>` line the bubble shows as text is in the swiped quote, so the quote is found). Client only.
 
 ### 0.251 → 0.252 (a message swiped left is quoted)
 §6: on a phone a message was quoted only by selecting its text and pressing Quote. Now a finger

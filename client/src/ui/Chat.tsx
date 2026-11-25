@@ -1421,7 +1421,7 @@ export function withQuote(draft: string, quote: string): string {
 }
 
 /** What a swipe to the left quotes of the message `e`: the first two sentences of its text, the
- *  owner's own without its `>` lines; empty for an event that is no message. */
+ *  owner's own without its quote lines (`QUOTE_LINE`); empty for an event that is no message. */
 export function messageQuote(e: HqcEvent): string {
   switch (e.type) {
     case 'agent.message':

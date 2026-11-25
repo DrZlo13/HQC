@@ -197,12 +197,16 @@ export function useQuoteSelection(scope: RefObject<HTMLElement | null>, enabled:
   return useMemo(() => ({ shown, text: api.text, press: api.press, release: api.release }), [shown, api]);
 }
 
-/** The owner's own message without its `>` lines: a swipe quotes what the owner wrote, not what
- *  they quoted. */
+/** A line of the owner's message that is a quote: what `Quote` writes, `> text` or a bare `>`. The
+ *  bubble draws only these as a quote (cards.tsx); other lines with `>` are text the owner typed. */
+export const QUOTE_LINE = /^>( |$)/;
+
+/** The owner's own message without its quote lines: a swipe quotes what the owner wrote, not what
+ *  they quoted, and an earlier message that quoted a text is not that text's source (quotejump.ts). */
 export function withoutQuoteLines(text: string): string {
   return text
     .split('\n')
-    .filter((l) => !/^\s*>/.test(l))
+    .filter((l) => !QUOTE_LINE.test(l))
     .join('\n');
 }
 

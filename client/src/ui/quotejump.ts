@@ -5,10 +5,8 @@
 import type { HqcEvent } from '../proto';
 import type { Timeline } from '../timeline';
 import { askResult, callArgs, foregroundEnd, hqcTool, peerArgs } from './feed';
-import { LEFT_OUT } from './selection';
+import { LEFT_OUT, withoutQuoteLines } from './selection';
 
-/** A line of the owner's message that is a quote: what `Quote` writes, `> text` or a bare `>`. */
-export const QUOTE_LINE = /^>( |$)/;
 /** The `system` lines the feed draws as text, not through Markdown. */
 const PLAIN_SYSTEM = new Set(['worker_log', 'goal', 'session_created']);
 
@@ -77,12 +75,12 @@ export function eventText(e: HqcEvent, t: Pick<Timeline, 'callFor'>): { text: st
     case 'agent.thinking':
       return plain(e.payload.text);
     case 'user.message':
-      return plain(ownText(e.payload.text));
+      return plain(withoutQuoteLines(e.payload.text));
     // The owner's text instead of a request.
     case 'approval.response':
-      return plain(ownText(e.payload.message ?? ''));
+      return plain(withoutQuoteLines(e.payload.message ?? ''));
     case 'side.question':
-      return plain(ownText(e.payload.text));
+      return plain(withoutQuoteLines(e.payload.text));
     case 'side.answer':
       return md(e.payload.text ?? '');
     case 'system':
@@ -115,15 +113,6 @@ export function eventText(e: HqcEvent, t: Pick<Timeline, 'callFor'>): { text: st
     default:
       return plain('');
   }
-}
-
-/** The owner's text without its quote lines: an earlier message that quoted the same text is not
- *  its source. */
-function ownText(text: string): string {
-  return text
-    .split('\n')
-    .filter((l) => !QUOTE_LINE.test(l))
-    .join('\n');
 }
 
 /** The key an event is compared by: its text, without the marks of Markdown when the feed renders

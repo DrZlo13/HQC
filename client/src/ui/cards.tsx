@@ -37,7 +37,6 @@ import {
   type Block,
   type ToolRow,
 } from './feed';
-import { QUOTE_LINE } from './quotejump';
 import { useAction, useIsPhone, useNow, useRunUp } from './hooks';
 import {
   IconAgent,
@@ -82,7 +81,7 @@ import {
 import { activityOf, elapsed, stats, Stats } from './LiveSubagents';
 import { CodeBlock, CopyButton, Markdown, markdownLine, safeHref } from './Markdown';
 import { asker, CallArgs, PermissionBlock } from './permission';
-import { withoutQuoteLines } from './selection';
+import { QUOTE_LINE, withoutQuoteLines } from './selection';
 import { PeerMessageBlock, ReplyFromBlock, ReplyToBlock, SentBlock } from './relay';
 
 /** The session's model, for the offer under the runtime's reply to a model refusal (SPEC

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { eventPageOf } from '../src/api';
 import { eventText, findQuoteSource, quoteKey, stripMarkdown } from '../src/ui/quotejump';
+import { messageQuote } from '../src/ui/Chat';
 
 const ev = (seq: number, type: string, payload: object) =>
   eventPageOf(
@@ -117,5 +118,13 @@ describe('what the feed shows of an event, and how', () => {
   it('only what `Quote` writes is a quote line of the owner: `> text` and a bare `>`', () => {
     const e = ev(1, 'user.message', { text: '> quoted\n>\n>>> x\n  > y\nmine', artifact_ids: [] });
     expect(eventText(e, none).text).toBe('>>> x\n  > y\nmine');
+  });
+
+  it('a swipe leaves out the same quote lines: a `>>>` line the bubble shows as text stays, and is found', () => {
+    const text = 'Look:\n>>> import foo\nThe error is here. More. And more.';
+    const e = ev(1, 'user.message', { text, artifact_ids: [] });
+    const swiped = messageQuote(e);
+    expect(swiped).toContain('>>> import foo');
+    expect(findQuoteSource([e], none, { full: quoteKey(swiped) })).toBe(1);
   });
 });

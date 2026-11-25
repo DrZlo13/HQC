@@ -93,6 +93,7 @@ nonisolated final class FeedbackEngine: @unchecked Sendable {
     private let supportsHaptics = CHHapticEngine.capabilitiesForHardware().supportsHaptics
     private var haptics: CHHapticEngine?
     private var audio: AVAudioEngine?
+    private var audioSuspended = false
     private var players: [AVAudioPlayerNode] = []
     private var nextPlayer = 0
     private var buffers: [Cue: AVAudioPCMBuffer] = [:]
@@ -106,16 +107,24 @@ nonisolated final class FeedbackEngine: @unchecked Sendable {
     /// Stops the `.ambient` tone engine before the microphone takes the audio session.
     func suspendAudio() {
         queue.sync {
+            audioSuspended = true
             audio?.stop()
             audio = nil
             players = []
         }
     }
 
+    /// Re-enables synthesized cue tones once microphone recording ends.
+    func resumeAudio() {
+        queue.async {
+            self.audioSuspended = false
+        }
+    }
+
     private func perform(_ cue: Cue, sound: Bool, haptic: Bool) {
         let spec = Feedback.spec(cue)
         var latency: TimeInterval = 0
-        if sound, !spec.notes.isEmpty, playSound(cue, spec) {
+        if sound, !audioSuspended, !spec.notes.isEmpty, playSound(cue, spec) {
             latency = AVAudioSession.sharedInstance().outputLatency
         }
         if haptic { playHaptic(spec, delay: latency) }

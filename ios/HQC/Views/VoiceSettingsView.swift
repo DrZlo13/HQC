@@ -149,8 +149,12 @@ private struct VoiceModelSettingsRow: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(model.name)
                     .font(.headline)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                 Text(model.badge)
                     .font(.caption2.weight(.semibold))
+                    .lineLimit(1)
+                    .fixedSize()
                     .padding(.horizontal, 7)
                     .padding(.vertical, 2)
                     .background(Color.accentColor.opacity(0.15), in: .capsule)
@@ -167,11 +171,14 @@ private struct VoiceModelSettingsRow: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 12) {
-                Label(model.languages, systemImage: "globe")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            HStack(spacing: 8) {
+                HStack(spacing: 5) {
+                    Image(systemName: "globe")
+                    Text(model.languages)
+                        .lineLimit(1)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 Spacer()
                 if let bytes = voice.downloadedSizes[model] {
                     Text(voice.formattedSize(bytes))
@@ -224,8 +231,11 @@ private struct VoiceModelSettingsRow: View {
                         voice.download(model, force: true, activateWhenDone: selected)
                         Feedback.play(.tap)
                     } label: {
-                        Label("Update", systemImage: "arrow.clockwise")
-                            .font(.caption.weight(.medium))
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.clockwise")
+                            Text("Update")
+                        }
+                        .font(.caption.weight(.medium))
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -247,8 +257,11 @@ private struct VoiceModelSettingsRow: View {
                         voice.download(model, force: false, activateWhenDone: true)
                         Feedback.play(.tap)
                     } label: {
-                        Label("Download (\(model.approxSize))", systemImage: "arrow.down.circle")
-                            .font(.subheadline.weight(.medium))
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.down.circle")
+                            Text("Download (\(model.approxSize))")
+                        }
+                        .font(.subheadline.weight(.medium))
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
@@ -285,14 +298,18 @@ struct VoiceOnboardingPicker: View {
                     Feedback.play(.select)
                 } label: {
                     VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 8) {
+                        HStack(spacing: 6) {
                             Image(systemName: active ? "checkmark.circle.fill" : "circle")
                                 .foregroundStyle(active ? Color.accentColor : palette.muted)
                             Text(model.name)
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(palette.text)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.85)
                             Text(model.badge)
                                 .font(.caption2.weight(.semibold))
+                                .lineLimit(1)
+                                .fixedSize()
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
                                 .background(Color.accentColor.opacity(0.16), in: .capsule)
@@ -300,6 +317,8 @@ struct VoiceOnboardingPicker: View {
                             Spacer(minLength: 4)
                             Text(ready ? "Ready" : model.approxSize)
                                 .font(.caption2.monospacedDigit())
+                                .lineLimit(1)
+                                .fixedSize()
                                 .foregroundStyle(ready ? .green : palette.text2)
                         }
                         Text(model.summary)

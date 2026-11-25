@@ -20,22 +20,18 @@ final class VoiceRecorder {
     private var startedAt: Date?
     private let buffer = SampleBuffer()
 
-    static var permissionStatus: AVAudioApplication.recordPermission {
+    nonisolated static var permissionStatus: AVAudioApplication.recordPermission {
         AVAudioApplication.shared.recordPermission
     }
 
-    static func ensurePermission() async -> Bool {
+    nonisolated static func ensurePermission() async -> Bool {
         switch AVAudioApplication.shared.recordPermission {
         case .granted:
             return true
         case .denied:
             return false
         case .undetermined:
-            return await withCheckedContinuation { cont in
-                AVAudioApplication.requestRecordPermission { granted in
-                    cont.resume(returning: granted)
-                }
-            }
+            return await AVAudioApplication.requestRecordPermission()
         @unknown default:
             return false
         }
@@ -71,10 +67,13 @@ final class VoiceRecorder {
             throw VoiceError.microphoneDenied
         }
 
-        let sampleBuffer = self.buffer
-        input.installTap(onBus: 0, bufferSize: 1024, format: hwFormat) { pcm, _ in
-            Self.consume(pcm: pcm, converter: converter, targetFormat: targetFormat, into: sampleBuffer)
-        }
+        Self.installTap(
+            on: input,
+            format: hwFormat,
+            converter: converter,
+            targetFormat: targetFormat,
+            into: buffer
+        )
 
         engine.prepare()
         try engine.start()
@@ -129,6 +128,22 @@ final class VoiceRecorder {
         isRecording = false
         level = 0
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        FeedbackEngine.shared.resumeAudio()
+    }
+
+    /// Installed from a `nonisolated` function so Swift 6 does not infer `@MainActor` on the
+    /// Obj-C audio tap closure (which runs on AVFAudio's real-time render thread and would trap
+    /// with `dispatch_assert_queue_fail` if MainActor-isolated).
+    private nonisolated static func installTap(
+        on input: AVAudioInputNode,
+        format: AVAudioFormat,
+        converter: AVAudioConverter,
+        targetFormat: AVAudioFormat,
+        into store: SampleBuffer
+    ) {
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { pcm, _ in
+            consume(pcm: pcm, converter: converter, targetFormat: targetFormat, into: store)
+        }
     }
 
     private nonisolated static func consume(
@@ -137,8 +152,10 @@ final class VoiceRecorder {
         targetFormat: AVAudioFormat,
         into store: SampleBuffer
     ) {
+        guard pcm.frameLength > 0, pcm.format.sampleRate > 0 else { return }
+
         // Compute live RMS from input buffer for visual halo reactivity.
-        if let channel = pcm.floatChannelData?[0], pcm.frameLength > 0 {
+        if let channel = pcm.floatChannelData?[0] {
             let n = Int(pcm.frameLength)
             var sum: Float = 0
             for i in 0..<n {
@@ -153,7 +170,7 @@ final class VoiceRecorder {
         }
 
         let ratio = targetFormat.sampleRate / pcm.format.sampleRate
-        let outFrames = AVAudioFrameCount(max(1, ceil(Double(pcm.frameLength) * ratio)))
+        let outFrames = AVAudioFrameCount(max(1, ceil(Double(pcm.frameLength) * ratio))) + 64
         guard let converted = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outFrames) else { return }
 
         var consumed = false

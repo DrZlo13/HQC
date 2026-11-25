@@ -638,7 +638,7 @@ struct Composer: View {
                     .animation(.spring(duration: 0.35), value: busy && empty)
                     .animation(.spring(duration: 0.3), value: focused)
                 }
-                .opacity(voiceSession.isActive ? 0 : 1)
+                .opacity(voiceSession.isActive ? (voiceSession.isRecording && !voiceSession.isLocked ? 0.001 : 0) : 1)
                 // Keep hit testing enabled on the hidden mic button while holding so its DragGesture survives.
                 .allowsHitTesting(!voiceSession.isActive || (voiceSession.isRecording && !voiceSession.isLocked))
 

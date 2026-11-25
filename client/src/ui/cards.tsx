@@ -37,6 +37,7 @@ import {
   type Block,
   type ToolRow,
 } from './feed';
+import { QUOTE_LINE } from './quotejump';
 import { useAction, useIsPhone, useNow, useRunUp } from './hooks';
 import {
   IconAgent,
@@ -188,7 +189,8 @@ export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActi
 /** `swipe`: the messages in it are quoted by a swipe to the left (swipequote.ts): the chat's own
  *  feed, not the history of a subagent. */
 export function FeedBlocks({ blocks, actions, swipe: swipeOn }: { blocks: Block[]; actions: ChatActions; swipe?: boolean }) {
-  // `data-seq`: the first event of the block, for the jump to a search hit (Chat).
+  // `data-seq`: the first event of the block, for the jump to a search hit and to the source of a
+  // quote (Chat).
   return (
     <>
       {blocks.map((b) => {
@@ -337,6 +339,38 @@ export function blockSeq(b: Block): number | undefined {
     case 'item':
       return b.item.kind === 'event' ? b.item.event.seq : undefined;
   }
+}
+
+/** The index in `blocks` of the block that draws the event `seq`, among its own events (an
+ *  answer's usage, a request's call, the sends and files of a reply, the rows of a group of
+ *  calls); undefined when none does (a hidden event). `question`: the `event_id` of the side
+ *  question when the event is its answer, which is drawn in the question's block. */
+export function drawingBlock(blocks: readonly Block[], seq: number, question?: string): number | undefined {
+  const is = (e: { seq?: number } | undefined) => e?.seq === seq;
+  const i = blocks.findIndex((b) => {
+    switch (b.kind) {
+      case 'agent':
+        return is(b.event) || is(b.usage);
+      case 'approval':
+        return is(b.event) || is(b.call);
+      case 'reply-to':
+        return is(b.event) || is(b.question) || b.files.some(is) || b.sends.some((s) => is(s.call) || is(s.result));
+      case 'sent':
+      case 'subagent':
+        return is(b.call) || is(b.result);
+      case 'reply-from':
+        return is(b.call) || is(b.result);
+      case 'subagent-end':
+        return is(b.end);
+      case 'task':
+        return is(b.event) || b.files.some(is);
+      case 'tools':
+        return b.rows.some((r) => (r.kind === 'call' ? is(r.call) || is(r.result) : is(r.event)));
+      case 'item':
+        return b.item.kind === 'event' && (is(b.item.event) || (question !== undefined && b.item.event.event_id === question));
+    }
+  });
+  return i < 0 ? undefined : i;
 }
 
 function BlockView({ block, actions }: { block: Block; actions: ChatActions }) {
@@ -1099,30 +1133,45 @@ function QuickAddButton({ text, quick }: { text: string; quick: NonNullable<Chat
  *  Markdown; `tail` (the message's buttons) at the end of its last line. Trailing line breaks
  *  are not shown: they would put the buttons lines below the text. */
 function UserText({ text, tail }: { text: string; tail?: ComponentChildren }) {
-  // A run of lines that start with `>` is a quote block, as in Telegram (the lines `Quote` puts
-  // in the input); the blank line a quote is followed by is the block's own margin. The rest is
-  // text as typed.
+  // A run of lines that start with `>` (the lines `Quote` puts in the input) is a quote block,
+  // as in Telegram; the rest is text as typed. A quote is inline, next to the bubble's time, so
+  // the one line break between it and the text beside it is a character of that text: the blank
+  // lines between them are dropped.
   const parts: { quote: boolean; lines: string[] }[] = [];
   for (const line of text.trimEnd().split('\n')) {
-    const quote = /^\s*>/.test(line);
+    const quote = QUOTE_LINE.test(line);
     const last = parts.at(-1);
     if (last && last.quote === quote) last.lines.push(line);
     else parts.push({ quote, lines: [line] });
   }
-  parts.forEach((p, i) => {
-    if (p.quote) return;
-    if (parts[i - 1] && p.lines[0] === '') p.lines.shift();
-    if (parts[i + 1] && p.lines.at(-1) === '') p.lines.pop();
-  });
   return (
     <div class="text msg-text">
-      {parts.map((p) =>
-        p.quote ? (
-          <blockquote class="msg-quote">{p.lines.map((l) => l.replace(/^\s*> ?/, '')).join('\n')}</blockquote>
-        ) : (
-          p.lines.length > 0 && p.lines.join('\n')
-        ),
-      )}
+      {parts.map((p, i) => {
+        if (p.quote) {
+          return (
+            <blockquote
+              class="msg-quote"
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault();
+                e.currentTarget.click();
+              }}
+            >
+              {p.lines.map((l) => l.slice(l.startsWith('> ') ? 2 : 1)).join('\n')}
+            </blockquote>
+          );
+        }
+        const [before, after] = [parts[i - 1], parts[i + 1]];
+        const lines = [...p.lines];
+        // The blank lines next to a quote go; the one line break that stays is added below.
+        while (before && lines.length && !lines[0].trim()) lines.shift();
+        while (after && lines.length && !lines.at(-1)!.trim()) lines.pop();
+        // Only blank lines between two quotes: the line break alone; at an end, nothing.
+        if (!lines.length) return before && after ? '\n' : null;
+        return `${before ? '\n' : ''}${lines.join('\n')}${after ? '\n' : ''}`;
+      })}
       {tail}
     </div>
   );

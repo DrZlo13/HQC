@@ -13,7 +13,7 @@ import { duringText, type Timeline } from '../timeline';
 import { ModelName, isTypedModel, type ModelChoice, modelMenuItems } from './agentSettings';
 import { ArtifactViewer, type ViewedArtifact } from './attachments';
 import { LimitBar, Limits } from './limits';
-import { ActivityLine, FeedBlocks, activityShown, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
+import { ActivityLine, FeedBlocks, activityShown, StreamingMessage, blockSeq, drawingBlock, onlyRequests, type ChatActions } from './cards';
 import { peerMessages } from './relay';
 import { buildFeed } from './feed';
 import { useNow, useSubscription } from './hooks';
@@ -684,9 +684,10 @@ export function Chat({
   const insertText = useRef<((text: string) => void) | null>(null);
   // The jump to an event: a search hit (`focusSeq`, SPEC §15) or the source of a quote the owner
   // clicked (`quoteJump`, SPEC §6). The event is there once `lastSeq` reaches it and the older
-  // history (`olderFrom`) is loaded down to it. The block that holds it is the one that starts
-  // at it, else the last one that starts at or before it (a hidden event's neighbour; an answer
-  // may stand above an earlier input, SPEC §6); the feed renders from there if it did not. A
+  // history (`olderFrom`) is loaded down to it. The block that holds it is the one that draws it
+  // (`drawingBlock`: an event may be drawn inside another's block), else the last one that
+  // starts at or before it (a hidden event's neighbour; an answer may stand above an earlier
+  // input, SPEC §6); the feed renders from there if it did not. A
   // jump is done once, by its identity: a new click on the same quote jumps again.
   const [quoteJump, setQuoteJump] = useState<{ seq: number; quote: QuoteKeys } | null>(null);
   const focusJump = useMemo(() => (focusSeq === undefined ? undefined : { seq: focusSeq, quote: undefined }), [focusSeq]);
@@ -699,23 +700,31 @@ export function Chat({
       void chat.loadOlder(jump.seq, true);
       return;
     }
-    if (jump.seq < (from.current ?? 0)) {
-      let at = 0;
+    // The block that draws the event, else the last that starts at or before it.
+    const event = t.events().find((e) => e.seq === jump.seq);
+    let at = drawingBlock(blocks, jump.seq, event?.type === 'side.answer' ? event.payload.question : undefined);
+    if (at === undefined) {
+      at = 0;
       blocks.forEach((b, i) => {
         if ((blockSeq(b) ?? Infinity) <= jump.seq) at = i;
       });
-      from.current = blockSeq(blocks[at]) ?? 0;
+    }
+    // A block with no `seq` (or none at all) has nothing to scroll to: the jump is done.
+    const seq = blocks[at] && blockSeq(blocks[at]);
+    if (seq === undefined) {
+      jumped.current.add(jump);
+      return;
+    }
+    // Before the first block shown: the feed renders from it, and the effect runs again.
+    if (at < start) {
+      from.current = seq;
       grow((n) => n + 1);
       return;
     }
-    let target = el.querySelector<HTMLElement>(`.feed-block[data-seq="${jump.seq}"]`) ?? undefined;
-    if (!target) {
-      for (const b of el.querySelectorAll<HTMLElement>('.feed-block[data-seq]')) {
-        if (Number(b.dataset.seq) <= jump.seq) target = b;
-      }
-    }
-    if (!target) return;
+    // Done once the block is looked for, found or not: no render comes round again for it.
     jumped.current.add(jump);
+    const target = el.querySelector<HTMLElement>(`.feed-block[data-seq="${seq}"]`);
+    if (!target) return;
     stick.current = false;
     // The quoted text itself when it is in the DOM; else the block, as a search hit.
     if (jump.quote && showQuote(target, el, jump.quote)) return;

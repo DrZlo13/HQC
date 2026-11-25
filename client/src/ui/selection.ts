@@ -46,7 +46,8 @@ function flat(n: Node): string {
     case 'TR':
       return `${inner.replace(/\t$/, '')}\n`;
     default:
-      return BLOCKS.has(n.tagName) ? `\n${inner}\n` : inner;
+      // The owner's quote is inline: the line breaks around it are in the text beside it.
+      return BLOCKS.has(n.tagName) && !n.matches('.msg-quote') ? `\n${inner}\n` : inner;
   }
 }
 

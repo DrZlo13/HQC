@@ -1040,6 +1040,111 @@ describe('the chat on screen', () => {
       expect((hl.set['quote-jump'][0].startContainer.parentElement as HTMLElement).closest('.msg-user')).toBeNull();
     });
 
+    const approvalOf = (seq: number) =>
+      wire(seq, { type: 'approval.request', payload: { request_id: 'r1', tool: 'Bash', description: 'Run Bash', options: [] } });
+    const callOf = (seq: number) =>
+      wire(seq, { type: 'tool.call', payload: { call_id: 'c1', tool: 'Bash', args_preview: JSON.stringify({ command: 'echo quotedcommandtext' }) } });
+
+    it('marks the card of a request when the quoted command is its call, not the block before it', async () => {
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([agent(1, 'something else'), callOf(2), approvalOf(3), owner(4, '> echo quotedcommandtext\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      expect([...root.querySelectorAll<HTMLElement>('.feed-block')].map((b) => b.dataset.seq)).toEqual(['1', '3', '4']);
+      await click(quoteOf());
+      expect(root.querySelector<HTMLElement>('.feed-block.is-found')!.dataset.seq).toBe('3');
+    });
+
+    it('marks the block of a side question when the quoted text is its answer', async () => {
+      Element.prototype.scrollIntoView = () => {};
+      const question = wire(2, { type: 'side.question', payload: { text: 'a side question?' } });
+      const answer = wire(4, { type: 'side.answer', payload: { question: eventId(2), text: 'uniquesideanswer words here' } });
+      const { app } = open([agent(1, 'first'), question, agent(3, 'later'), answer, owner(5, '> uniquesideanswer words here\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      await click(quoteOf());
+      expect(root.querySelector<HTMLElement>('.feed-block.is-found')!.dataset.seq).toBe('2');
+    });
+
+    it('counts a jump to an event no block draws as done, without growing the feed again', async () => {
+      Element.prototype.scrollIntoView = () => {};
+      // A status without an error is hidden: no block draws it.
+      const hidden = wire(2, { type: 'status', payload: { state: 'idle' } });
+      const { app } = open([agent(1, 'first'), hidden, agent(3, 'third')]);
+      await mount(app, 2);
+      await act(async () => app.chat(SID).timeline.changed());
+      await act(async () => app.chat(SID).timeline.changed());
+      expect(root.querySelector<HTMLElement>('.feed-block.is-found')!.dataset.seq).toBe('1');
+    });
+
+    it("highlights the earlier message's own text when that message quoted it too", async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([
+        owner(1, '> some quoted words here\n\nand my own some quoted words here again'),
+        agent(2, 'ok'),
+        owner(3, '> some quoted words here\n\nsecond'),
+      ]);
+      await mount(app);
+      await until(() => root.querySelectorAll('.msg-user .msg-quote').length === 2);
+      await click(quoteOf(1));
+      expect(hl.set['quote-jump']).toHaveLength(1);
+      const range = hl.set['quote-jump'][0];
+      expect(range.toString()).toBe('some quoted words here');
+      expect((range.startContainer.parentElement as HTMLElement).closest('.msg-quote')).toBeNull();
+      expect((range.startContainer.parentElement as HTMLElement).closest('.feed-block')!.getAttribute('data-seq')).toBe('1');
+    });
+
+    it('the quote is a button of the keyboard: Enter on it jumps', async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([agent(1, SOURCE), owner(2, '> Some bold words and a link in text\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      expect(quoteOf().getAttribute('role')).toBe('button');
+      expect(quoteOf().getAttribute('tabindex')).toBe('0');
+      await act(async () => void quoteOf().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })));
+      expect(hl.set['quote-jump'][0].toString()).toBe('Some bold words and a link in text');
+    });
+
+    it('goes on to the second older page when the source is on it, in a history of over 1100 events', async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app, api } = open([...range(1, 19), agent(20, SOURCE), ...range(21, 1148), usage(1149), owner(1150, '> words and a link in text\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      const before = api.eventsBefore.mock.calls.length;
+      await click(quoteOf());
+      await until(() => !!hl.set['quote-jump']);
+      // The first older page (1000 events) does not hold it; the second does: two more calls.
+      expect(api.eventsBefore.mock.calls.length - before).toBeGreaterThanOrEqual(2);
+      expect(app.chat(SID).timeline.olderFrom).toBeLessThanOrEqual(20);
+      expect(hl.set['quote-jump'][0].toString()).toBe('words and a link in text');
+    });
+
+    it('says so when an older page does not load', async () => {
+      stubHighlights();
+      const { app, api } = open([...range(1, 449), usage(450), owner(451, '> words that sit far back\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      api.eventsBefore.mockImplementation(async () => {
+        throw new Error('offline');
+      });
+      await click(quoteOf());
+      await until(() => !!root.querySelector('.notice'));
+      expect(root.querySelector('.notice')!.textContent).toBe('Older history did not load');
+    });
+
+    it('the range of a quote after an emoji and a ligature is exactly the quoted text', async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([agent(1, '🙂 The ﬁnal 🎉 plan: ﬁrst, the words here and there'), owner(2, '> the words here\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      await click(quoteOf());
+      expect(hl.set['quote-jump'][0].toString()).toBe('the words here');
+    });
+
     it('says so when the text is nowhere in the chat', async () => {
       stubHighlights();
       const { app } = open([agent(1, 'something else'), owner(2, '> words that were never said\n\nwhy?')]);

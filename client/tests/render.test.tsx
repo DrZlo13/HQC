@@ -19,6 +19,7 @@ import {
   activityShown,
   StreamingMessage,
   onlyRequests,
+  drawingBlock,
   type ChatActions,
 } from "../src/ui/cards";
 import { CANONICAL_LABELS, formatTime } from "../src/ui/labels";
@@ -4607,7 +4608,7 @@ describe("the feed like the Claude Code tab", () => {
     expect(root.querySelector(".msg-user strong, .msg-user em, .msg-user li, .msg-user code")).toBeNull();
   });
 
-  it("shows a run of '>' lines in the user's message as one quote block, without a blank line around it", () => {
+  it("shows a run of '>' lines in the user's message as one quote block, with one line break around it", () => {
     const t = new Timeline();
     t.apply(
       ev("event.user.message", (e) => {
@@ -4619,11 +4620,104 @@ describe("the feed like the Claude Code tab", () => {
     const text = root.querySelector(".msg-user .msg-text")!;
     // The fourth node is the message's buttons, at the end of its text.
     expect([...text.childNodes].slice(0, 3).map((n) => n.nodeName)).toEqual(["#text", "BLOCKQUOTE", "#text"]);
-    expect(text.childNodes[0].textContent).toBe("before");
+    expect(text.childNodes[0].textContent).toBe("before\n");
     expect((text.childNodes[1] as HTMLElement).className).toBe("msg-quote");
     expect(text.childNodes[1].textContent).toBe("one\ntwo\n\nthree");
-    expect(text.childNodes[2].textContent).toBe("after > not a quote\nlast");
+    expect(text.childNodes[2].textContent).toBe("\nafter > not a quote\nlast");
   });
+
+  it("puts no line break before a quote that starts the message nor after one that ends it", () => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.user.message", (e) => {
+        e.payload.text = "> first\n\nmiddle\n\n> last\n\n";
+        e.payload.artifact_ids = [];
+      }),
+    );
+    show(t);
+    const text = root.querySelector(".msg-user .msg-text")!;
+    expect([...text.childNodes].slice(0, 3).map((n) => n.nodeName)).toEqual(["BLOCKQUOTE", "#text", "BLOCKQUOTE"]);
+    expect(text.childNodes[1].textContent).toBe("\nmiddle\n");
+    // Nothing between the quote and the buttons at the end.
+    expect(text.childNodes[3]?.nodeName).not.toBe("#text");
+  });
+
+  it("is a quote only as `Quote` writes it: '> text' or a bare '>'; '>>> x' and an indented '> x' stay text", () => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.user.message", (e) => {
+        e.payload.text = ">>> x\n  > y\n>z";
+        e.payload.artifact_ids = [];
+      }),
+    );
+    show(t);
+    expect(root.querySelector(".msg-user .msg-quote")).toBeNull();
+    expect(root.querySelector(".msg-user .msg-text")!.textContent).toContain(">>> x\n  > y\n>z");
+  });
+
+  it("a quote is a button of the keyboard: Enter and Space press it, other keys do not", () => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.user.message", (e) => {
+        e.payload.text = "> quoted\n\nwhy";
+        e.payload.artifact_ids = [];
+      }),
+    );
+    show(t);
+    const quote = root.querySelector<HTMLElement>(".msg-user .msg-quote")!;
+    expect(quote.getAttribute("role")).toBe("button");
+    expect(quote.getAttribute("tabindex")).toBe("0");
+    const clicks = vi.fn();
+    quote.addEventListener("click", clicks);
+    const press = (key: string) => {
+      const k = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      quote.dispatchEvent(k);
+      return k.defaultPrevented;
+    };
+    expect(press("Enter")).toBe(true);
+    expect(press(" ")).toBe(true);
+    expect(press("a")).toBe(false);
+    expect(clicks).toHaveBeenCalledTimes(2);
+  });
+
+  it("drawingBlock names the block that draws an event inside another's: a thinking row, a request's call, a reply's question", () => {
+    const mk = (seq: number, type: string, payload: object) =>
+      parseEvent({ session_id: "s", event_id: `0199f3a2-7c10-7000-8000-${String(seq).padStart(12, "0")}`, seq, ts: "2026-10-24T18:00:00Z", author: { kind: "agent", id: "s" }, type, payload });
+    const call = (seq: number, id: string, tool = "Read") => mk(seq, "tool.call", { call_id: id, tool, args_preview: "{}" });
+    const t = new Timeline();
+    t.apply(call(1, "c1"));
+    t.apply(mk(2, "agent.thinking", { text: "hm" }));
+    t.apply(call(3, "c2"));
+    t.apply(call(4, "c3", "Bash"));
+    t.apply(mk(5, "approval.request", { request_id: "r1", tool: "Bash", description: "run", options: [] }));
+    t.apply(mk(6, "agent.message", { text: "between", final: true }));
+    const blocks = buildFeed(t.items(), t);
+    const kinds = blocks.map((b) => b.kind);
+    expect(kinds).toEqual(["tools", "approval", "agent"]);
+    // The thinking row is inside the group of calls that starts at seq 1, the request's call in its card.
+    expect(drawingBlock(blocks, 2)).toBe(0);
+    expect(drawingBlock(blocks, 3)).toBe(0);
+    expect(drawingBlock(blocks, 4)).toBe(1);
+    expect(drawingBlock(blocks, 5)).toBe(1);
+    expect(drawingBlock(blocks, 6)).toBe(2);
+    expect(drawingBlock(blocks, 99)).toBeUndefined();
+    // A reply's question is drawn in the reply's block (as well as in its own).
+    const r = new Timeline();
+    r.apply(mk(10, "peer.message", { from_session_id: "other", text: "what?", mode: "ask", artifact_ids: [] }));
+    r.apply(mk(11, "agent.message", { text: "this", final: true, in_reply_to: r.events()[0].event_id }));
+    const reply = buildFeed(r.items(), r).filter((b) => b.kind === "reply-to");
+    expect(reply).toHaveLength(1);
+    expect(drawingBlock(reply, 10)).toBe(0);
+    expect(drawingBlock(reply, 11)).toBe(0);
+    // A side answer is drawn in its question's block.
+    const q = new Timeline();
+    q.apply(mk(20, "side.question", { text: "q?" }));
+    q.apply(mk(21, "side.answer", { question: q.events()[0].event_id, text: "a" }));
+    const sides = buildFeed(q.items(), q);
+    expect(drawingBlock(sides, 21, q.events()[0].event_id)).toBe(0);
+    expect(drawingBlock(sides, 21)).toBeUndefined();
+  });
+
 });
 
 // An answer the hub took closes the card at once, before the response event comes over the

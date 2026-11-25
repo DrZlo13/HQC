@@ -163,7 +163,7 @@ describe('the text of a clipped selection', () => {
     const got = await quoted(
       [agent(1, 'Intro', 0, true), user(2, 'before\n\n> q one\n> q two\n\nafter')],
       (r) => [textOf(r, 'Intro'), 0],
-      (r) => [textOf(r, 'after'), 5],
+      (r) => [textOf(r, '\nafter'), 6],
     );
     expect(got).toBe('Intro\n\nbefore\nq one\nq two\nafter');
   });

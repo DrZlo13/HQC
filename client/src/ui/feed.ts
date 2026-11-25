@@ -178,7 +178,7 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
           }
           // A subagent that ran in the foreground ends here; a background launch's ends with
           // its notification.
-          if (call && subagentTool(call.payload.tool) && !e.payload.result_preview.startsWith(LAUNCHED)) {
+          if (call && foregroundEnd(call, e)) {
             end(it.key, call, e);
             continue;
           }
@@ -392,6 +392,12 @@ export function subagentState(
 
 /** The start of the CLI's answer for a subagent sent or moved to the background. */
 const LAUNCHED = 'Async agent launched';
+
+/** Whether `result` is the end of a subagent that ran in the foreground (its report, drawn as
+ *  Markdown on the end card); a background launch's result only says it was launched. */
+export function foregroundEnd(call: EventOf<'tool.call'>, result: EventOf<'tool.result'>): boolean {
+  return subagentTool(call.payload.tool) && !result.payload.result_preview.startsWith(LAUNCHED);
+}
 
 /** The `agentId` that the result of a background launch names. Only a launch's: the CLI names
  *  a finished foreground subagent too, and a later SendMessage that continues it ends with the

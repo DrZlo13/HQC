@@ -3,6 +3,7 @@
 // add and edit form, Test, Delete) and the servers a project's settings list. Header values
 // are write-only: a password field, cleared when the form closes, sent only when given.
 
+import { defaultKey, type KeyAction } from '../src/keys';
 import { afterEach, expect, it, vi } from 'vitest';
 import { render } from 'preact';
 import { act } from 'preact/test-utils';
@@ -121,6 +122,10 @@ it('is a section of Settings', async () => {
     newSessionProject: () => undefined,
     webSearch: WEB_SEARCHES[0],
     providers: [],
+    deviceUser: () => undefined,
+    forgetDevice: async () => {},
+    keyFor: (a: KeyAction) => defaultKey(a),
+    setKey: () => {},
   } as unknown as AppState;
   await mount(app, <Settings app={app} />);
   expect($$('h2').map((h) => h.textContent)).toContain('MCP servers');

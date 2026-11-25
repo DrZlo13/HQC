@@ -1,14 +1,14 @@
 // @vitest-environment happy-dom
-// What the device does with its copies of history and attachments (SPEC §6, §12): it drops those
-// of sessions the hub no longer lists, of what was not used for 30 days, and the least recently
-// used beyond 200 MB; it wipes them when `/api/me` refuses (401/403) or the user is another; and
-// Settings has "Forget this device".
+// What the device does with its copies of history and attachments (SPEC §6, §12): it drops those of
+// sessions the hub no longer lists, of what was not used for 30 days, and the least recently used
+// beyond 200 MB; it wipes them when `/api/me` refuses (401/403, or a sign-in proxy's redirect) or
+// the user is another; and Settings has "Forget this device".
 
 import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'preact';
 import { act } from 'preact/test-utils';
-import { ApiError, eventPageOf, type Api } from '../src/api';
+import { Api, ApiError, eventPageOf, type Fetch } from '../src/api';
 import { AppState } from '../src/app';
 import { deviceArtifactCache } from '../src/artifactcache';
 import { deviceHistoryCache, memoryHistoryCache, type HistoryCache } from '../src/historycache';
@@ -234,6 +234,28 @@ describe('who the device keeps copies for', () => {
     localStorage.setItem('hqc-device-user', user);
     const app = new AppState(apiOf(async () => Promise.reject(new ApiError(status, 'no'))), socket);
     await app.init();
+    expect(await has(user)).toEqual([false, false]);
+    expect(localStorage.getItem('hqc-device-user')).toBeNull();
+  });
+
+  // SPEC 0.249: a sign-in proxy (Cloudflare Access, oauth2-proxy) answers a signed-out user with a
+  // redirect to its sign-in page, not 401. Followed, it fails `fetch` as offline and the copies
+  // stayed; `/api/me` is asked with `redirect: 'manual'`, and a redirect is a sign-out.
+  it.each([
+    ['an opaque redirect, as a browser gives it', { type: 'opaqueredirect', status: 0 }],
+    ['a 302, as a fetch outside a browser gives it', { type: 'basic', status: 302 }],
+  ])('wipes both databases when /api/me is answered with %s', async (_, answer) => {
+    const user = `u-redirected-${uid++}`;
+    await seed(user);
+    localStorage.setItem('hqc-device-user', user);
+    const asked: (RequestInit | undefined)[] = [];
+    const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+      asked.push(init);
+      return { ...answer, ok: false, statusText: '', text: async () => '' } as unknown as Response;
+    }) as Fetch;
+    const app = new AppState(new Api('', fetchImpl), socket);
+    await app.init();
+    expect(asked[0]?.redirect).toBe('manual');
     expect(await has(user)).toEqual([false, false]);
     expect(localStorage.getItem('hqc-device-user')).toBeNull();
   });

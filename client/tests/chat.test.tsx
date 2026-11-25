@@ -1945,7 +1945,8 @@ describe('live subagents', () => {
       "Scheduled: Summarize yesterday's commits",
     ]);
     expect(rows()[0][1]).toMatch(/^in 1[12]m \d+s$/);
-    expect(rows()[1][1]).toMatch(/^in 22h \d+m \d+s$/);
+    // 23 h exactly: the same millisecond as the event shows `23h 0m 0s`, any later one `22h 59m …`.
+    expect(rows()[1][1]).toMatch(/^in (23h 0m 0s|22h 59m \d+s)$/);
     expect($('.live-agents-dot')!.classList.contains('live-agents-dot-still')).toBe(true);
     expect($('.live-schedules')).toBeNull();
     const toggles = () => [...root.querySelectorAll<HTMLElement>('.live-agents button.live-agents-opens')];

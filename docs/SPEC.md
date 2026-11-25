@@ -2999,9 +2999,10 @@ there is no input a message does not move; a swipe on a code block or a table th
 sideways scrolls it, and a touch held half a second before it moves is the browser's (a long press
 selects text). A subagent's history has no swipe.
 In the user's message a run of lines `> text` or a bare `>` (what Quote puts in) shows as a quote,
-without the `>`, with a bar on its left (since 0.253; before it the lines showed as typed): one the
-message starts with stands above the time across the bubble, as in Telegram, the time on the line of
-the text after it; one further on stands in the text, one line break apart from it. A click on it
+without the `>`, with a bar on its left (since 0.253; before it the lines showed as typed): those the
+message starts with, blank lines between them too, stand above the time across the bubble, as in
+Telegram, the time on the line of the text after them; one further on stands in the text, one line
+break apart from it. A click on it
 (not one that ends a selection), a tap (pressed on the finger's lift, as a button) or Enter or Space
 on it takes the chat to the text it quotes, as Telegram does. The client looks for the quote's
 letters and digits (lowercased, NFKC; in a source the feed renders as Markdown, its marks, link
@@ -3086,9 +3087,10 @@ there is no input a message does not move; a swipe on a code block or a table th
 sideways scrolls it, and a touch held half a second before it moves is the browser's (a long press
 selects text). A subagent's history has no swipe.
 In the user's message a run of lines `> text` or a bare `>` (what Quote puts in) shows as a quote,
-without the `>`, with a bar on its left (since 0.253; before it the lines showed as typed): one the
-message starts with stands above the time across the bubble, as in Telegram, the time on the line of
-the text after it; one further on stands in the text, one line break apart from it. A click on it
+without the `>`, with a bar on its left (since 0.253; before it the lines showed as typed): those the
+message starts with, blank lines between them too, stand above the time across the bubble, as in
+Telegram, the time on the line of the text after them; one further on stands in the text, one line
+break apart from it. A click on it
 (not one that ends a selection), a tap (pressed on the finger's lift, as a button) or Enter or Space
 on it takes the chat to the text it quotes, as Telegram does. The client looks for the quote's
 letters and digits (lowercased, NFKC; in a source the feed renders as Markdown, its marks, link

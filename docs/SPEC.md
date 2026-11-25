@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.252, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.253, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2994,10 +2994,33 @@ message, a message from another session or a room's post. The message follows th
 quote mark comes out at its right at the finger's height; released past 60 px, the message's first
 two sentences go into the input as Quote puts a selection there, with "…" when its text goes on
 (the Markdown of an answer or of another session's message as its text, a list item or a table row
-a line of its own; the user's message without its `>` lines); released before, nothing. Where
+a line of its own; the user's message without its quote lines); released before, nothing. Where
 there is no input a message does not move; a swipe on a code block or a table that scrolls
 sideways scrolls it, and a touch held half a second before it moves is the browser's (a long press
 selects text). A subagent's history has no swipe.
+In the user's message a run of lines `> text` or a bare `>` (what Quote puts in) shows as a quote,
+without the `>`, with a bar on its left (since 0.253; before it the lines showed as typed): those the
+message starts with, blank lines between them too, stand above the time across the bubble, as in
+Telegram, the time on the line of the text after them; one further on stands in the text, one line
+break apart from it. A click on it
+(not one that ends a selection), a tap (pressed on the finger's lift, as a button) or Enter or Space
+on it takes the chat to the text it quotes, as Telegram does. The client looks for the quote's
+letters and digits (lowercased, NFKC; in a source the feed renders as Markdown, its marks, link
+targets, ordered-list numbers and fence lines left out) in the session's events before the message,
+newest first: agent messages and reasoning, the user's messages, text answers to a request and side
+questions without their own quote lines, messages from other sessions, side answers, the feed's
+notes (a subagent's report, a background task's line, a compaction summary), the text of permission
+and question cards, the arguments and
+results of calls; the whole quote first, else its first paragraph (a quote taken across messages),
+in the loaded events and then in each older page as it comes in, 1000 events a page, until it is
+found; then in the events after the message (an answer quoted while it was being written is stored
+after the quote). The feed renders from the block that draws the source (the block that starts at
+it, else the one that holds it: a call shown on its permission card is that card's), as for a search
+hit, lets go of the bottom, opens a folded reasoning the text is in, scrolls the text to the middle
+and highlights exactly it for 2.4 s (the CSS Custom Highlight API). Where the text is not in the
+page (a reasoning in a folded run of calls) or the browser has no custom highlights, the block is
+marked as a search hit is. Found nowhere: "The quoted text is not in this chat"; an older page that
+did not load: "Older history did not load".
 The input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
 computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input
 takes the caret when the chat opens, once its newest page is in, unless a request waits for an
@@ -3060,10 +3083,33 @@ message, a message from another session or a room's post. The message follows th
 quote mark comes out at its right at the finger's height; released past 60 px, the message's first
 two sentences go into the input as Quote puts a selection there, with "…" when its text goes on
 (the Markdown of an answer or of another session's message as its text, a list item or a table row
-a line of its own; the user's message without its `>` lines); released before, nothing. Where
+a line of its own; the user's message without its quote lines); released before, nothing. Where
 there is no input a message does not move; a swipe on a code block or a table that scrolls
 sideways scrolls it, and a touch held half a second before it moves is the browser's (a long press
 selects text). A subagent's history has no swipe.
+In the user's message a run of lines `> text` or a bare `>` (what Quote puts in) shows as a quote,
+without the `>`, with a bar on its left (since 0.253; before it the lines showed as typed): those the
+message starts with, blank lines between them too, stand above the time across the bubble, as in
+Telegram, the time on the line of the text after them; one further on stands in the text, one line
+break apart from it. A click on it
+(not one that ends a selection), a tap (pressed on the finger's lift, as a button) or Enter or Space
+on it takes the chat to the text it quotes, as Telegram does. The client looks for the quote's
+letters and digits (lowercased, NFKC; in a source the feed renders as Markdown, its marks, link
+targets, ordered-list numbers and fence lines left out) in the session's events before the message,
+newest first: agent messages and reasoning, the user's messages, text answers to a request and side
+questions without their own quote lines, messages from other sessions, side answers, the feed's
+notes (a subagent's report, a background task's line, a compaction summary), the text of permission
+and question cards, the arguments and
+results of calls; the whole quote first, else its first paragraph (a quote taken across messages),
+in the loaded events and then in each older page as it comes in, 1000 events a page, until it is
+found; then in the events after the message (an answer quoted while it was being written is stored
+after the quote). The feed renders from the block that draws the source (the block that starts at
+it, else the one that holds it: a call shown on its permission card is that card's), as for a search
+hit, lets go of the bottom, opens a folded reasoning the text is in, scrolls the text to the middle
+and highlights exactly it for 2.4 s (the CSS Custom Highlight API). Where the text is not in the
+page (a reasoning in a folded run of calls) or the browser has no custom highlights, the block is
+marked as a search hit is. Found nowhere: "The quoted text is not in this chat"; an older page that
+did not load: "Older history did not load".
 The input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
 computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input
 takes the caret when the chat opens, once its newest page is in, unless a request waits
@@ -8385,6 +8431,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.252 → 0.253 (a click on a quote goes to the text it quotes)
+§6: the user's `>` lines (what Quote puts in) showed as typed, with nothing that led back to what
+they quote. They now show as a quote block in the bubble, and a click on it, as in Telegram, takes
+the chat to the quoted text and highlights it: the client looks for it by its letters and digits in
+the session's events before the message (the older history loaded until it is found), then after it,
+and jumps there as to a search hit. A search hit's jump now also takes the block that draws its
+event (a call shown on its permission card), not the last block that starts before it. A swipe of
+the user's message leaves out only these quote lines too, not every line that starts with `>`
+(a `>>>` line the bubble shows as text is in the swiped quote, so the quote is found). Client only.
 
 ### 0.251 → 0.252 (a message swiped left is quoted)
 §6: on a phone a message was quoted only by selecting its text and pressing Quote. Now a finger

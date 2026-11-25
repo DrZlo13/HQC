@@ -12,7 +12,7 @@ const MESSAGE = '.msg-agent, .msg-user, .relay, .thinking';
  *  inside the message is the browser's own text): its time, the head of a message from another
  *  session or of a room post, the peek of a reasoning, the caption bar of a code block, the meta
  *  line and the buttons. */
-const LEFT_OUT = '.msg-time, .relay-head, .room-post-head, .side-question-head, .side-wait, .thinking-peek, .md-code-bar, .meta, .msg-buttons';
+export const LEFT_OUT = '.msg-time, .relay-head, .room-post-head, .side-question-head, .side-wait, .thinking-peek, .md-code-bar, .meta, .msg-buttons';
 const STRUCTURE = new Set(['TABLE', 'THEAD', 'TBODY', 'TR', 'UL', 'OL']);
 /** A line break around these. */
 const BLOCKS = new Set(['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'PRE', 'BLOCKQUOTE', 'DIV', 'UL', 'OL', 'TABLE', 'HR']);
@@ -46,7 +46,9 @@ function flat(n: Node): string {
     case 'TR':
       return `${inner.replace(/\t$/, '')}\n`;
     default:
-      return BLOCKS.has(n.tagName) ? `\n${inner}\n` : inner;
+      // The owner's quote in the middle of a text is inline: the line breaks around it are in the
+      // text beside it; one that starts the message is a block.
+      return BLOCKS.has(n.tagName) && !n.matches('.msg-quote:not(.msg-quote-lead)') ? `\n${inner}\n` : inner;
   }
 }
 
@@ -195,12 +197,16 @@ export function useQuoteSelection(scope: RefObject<HTMLElement | null>, enabled:
   return useMemo(() => ({ shown, text: api.text, press: api.press, release: api.release }), [shown, api]);
 }
 
-/** The owner's own message without its `>` lines: a swipe quotes what the owner wrote, not what
- *  they quoted. */
+/** A line of the owner's message that is a quote: what `Quote` writes, `> text` or a bare `>`. The
+ *  bubble draws only these as a quote (cards.tsx); other lines with `>` are text the owner typed. */
+export const QUOTE_LINE = /^>( |$)/;
+
+/** The owner's own message without its quote lines: a swipe quotes what the owner wrote, not what
+ *  they quoted, and an earlier message that quoted a text is not that text's source (quotejump.ts). */
 export function withoutQuoteLines(text: string): string {
   return text
     .split('\n')
-    .filter((l) => !/^\s*>/.test(l))
+    .filter((l) => !QUOTE_LINE.test(l))
     .join('\n');
 }
 

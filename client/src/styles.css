@@ -3535,6 +3535,30 @@ button.btn-mode-pill.perm-allow-all:hover,
 .msg-bubble > .msg-text {
   display: inline;
 }
+/* A run of `>` lines in the user's text: a quote block, as in Telegram. The pointer cursor: iOS
+   Safari fires a click on a non-interactive element only with one, and a click takes the chat to
+   what the quote quotes (quotejump.ts). */
+.msg-quote {
+  /* Inline, as the text it stands in is (next to the bubble's floated time): a block would wrap
+     a short quote under the time, mid-word. */
+  display: inline-block;
+  vertical-align: top;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 4px 0;
+  padding-left: 8px;
+  border-left: 3px solid var(--accent);
+  color: var(--muted);
+  cursor: pointer;
+  /* Its own: a leading quote stands outside `.msg-text`, whose pre-wrap keeps the line breaks. */
+  white-space: pre-wrap;
+}
+/* A quote that starts the message: a block above the time (the time floats on the line of the
+   text after it). */
+.msg-quote-lead {
+  display: block;
+  margin: 0 0 4px;
+}
 
 .delivery-failed {
   color: var(--danger);
@@ -8058,6 +8082,9 @@ button.ps-look {
 .feed-block.is-found {
   border-radius: 10px;
   animation: found 2.4s ease-out;
+}
+::highlight(quote-jump) {
+  background-color: var(--accent-soft);
 }
 @keyframes found {
   from {

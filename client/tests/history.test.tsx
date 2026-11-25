@@ -757,6 +757,18 @@ describe('the chat on screen', () => {
     expect(api.eventsBefore).toHaveBeenCalledTimes(1);
   });
 
+  it('a search hit in the newest page is marked once the feed is drawn from it, not on the render before', async () => {
+    Element.prototype.scrollIntoView = () => {};
+    const { app } = open([...range(1, 449), usage(450)]);
+    // Not through `mount`: the render that puts the page into the timeline and the one that draws
+    // it from there are two, and the hit must not be counted done on the first.
+    await act(async () => render(<Chat app={app} sessionId={SID} focusSeq={440} />, root));
+    await tick(50);
+    await act(async () => app.setRequests(app.requests));
+    await tick(30);
+    expect(root.querySelector<HTMLElement>('.feed-block.is-found')?.dataset.seq).toBe('440');
+  });
+
   it('loads older history down to the event of an open request', async () => {
     const { app, api } = open([...range(1, 99), wire(100, { type: 'approval.request', payload: { request_id: 'r1', tool: 'Bash', description: 'ls', options: [] } }), ...range(101, 449), usage(450)], {
       requests: [{ request_id: 'r1', seq: 100 }],
@@ -954,5 +966,265 @@ describe('the chat on screen', () => {
     expect(items).not.toHaveBeenCalled();
     await act(async () => t.apply(parsed(451)));
     expect(items).toHaveBeenCalled();
+  });
+
+  describe('a click on a quote of the owner\'s message', () => {
+    const owner = (seq: number, text: string) => wire(seq, { type: 'user.message', payload: { text, artifact_ids: [] }, author: { kind: 'user', id: 'u' } });
+    const agent = (seq: number, text: string) => wire(seq, { payload: { text, final: true } });
+    const click = (el: Element) => act(async () => void el.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    const quoteOf = (n = 0) => root.querySelectorAll('.msg-user .msg-quote')[n]!;
+    /** The custom highlights the page makes: the ranges set under each name, and their removals. */
+    function stubHighlights() {
+      const set: Record<string, Range[]> = {};
+      const removed: string[] = [];
+      vi.stubGlobal('CSS', { highlights: { set: (n: string, h: { ranges: Range[] }) => (set[n] = h.ranges), delete: (n: string) => void removed.push(n) } });
+      vi.stubGlobal('Highlight', class { ranges: Range[]; constructor(...r: Range[]) { this.ranges = r; } });
+      return { set, removed };
+    }
+    afterEach(() => vi.unstubAllGlobals());
+
+    const SOURCE = 'Intro line.\n\nSome **bold** words and a [link](https://x.test/a) in text. Tail.';
+
+    it('highlights exactly the quoted fragment of its source and lets go of the bottom', async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([agent(1, SOURCE), owner(2, '> Some bold words and a link in text\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!root.querySelector('.feed-block'));
+      const scroller = root.querySelector<HTMLElement>('.timeline')!;
+      await click(quoteOf());
+      expect(hl.set['quote-jump']).toHaveLength(1);
+      expect(hl.set['quote-jump'][0].toString()).toBe('Some bold words and a link in text');
+      // Not pulled back to the bottom by a later render.
+      scroller.scrollTop = 100;
+      await act(async () => app.chat(SID).timeline.changed());
+      expect(scroller.scrollTop).toBe(100);
+    });
+
+    it('marks the block of its source when the browser has no custom highlights', async () => {
+      const scrolled: string[] = [];
+      Element.prototype.scrollIntoView = function (this: Element) {
+        scrolled.push((this as HTMLElement).dataset.seq ?? '');
+      } as Element['scrollIntoView'];
+      const { app } = open([agent(1, SOURCE), owner(2, '> Some bold words and a link in text\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!root.querySelector('.feed-block'));
+      await click(quoteOf());
+      expect(root.querySelector<HTMLElement>('.feed-block.is-found')!.dataset.seq).toBe('1');
+      expect(scrolled).toEqual(['1']);
+    });
+
+    it('a second click on the same quote jumps again', async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([agent(1, SOURCE), owner(2, '> Some bold words and a link in text\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!root.querySelector('.feed-block'));
+      await click(quoteOf());
+      delete hl.set['quote-jump'];
+      await click(quoteOf());
+      expect(hl.set['quote-jump']).toHaveLength(1);
+    });
+
+    it('loads older pages until the source is found, then jumps', async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app, api } = open([...range(1, 19), agent(20, SOURCE), ...range(21, 448), owner(449, '> words and a link in text\n\nwhy?'), usage(450)]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      expect(app.chat(SID).timeline.olderFrom).toBeGreaterThan(20);
+      await click(quoteOf());
+      await until(() => !!hl.set['quote-jump']);
+      expect(app.chat(SID).timeline.olderFrom).toBeLessThanOrEqual(20);
+      expect(api.eventsBefore).toHaveBeenCalled();
+      expect(hl.set['quote-jump'][0].toString()).toBe('words and a link in text');
+    });
+
+    it('an earlier message that quoted the same text is not the source', async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([agent(1, SOURCE), owner(2, '> words and a link in text\n\nfirst'), agent(3, 'ok'), owner(4, '> words and a link in text\n\nsecond')]);
+      await mount(app);
+      await until(() => root.querySelectorAll('.msg-user .msg-quote').length === 2);
+      await click(quoteOf(1));
+      expect(hl.set['quote-jump']).toHaveLength(1);
+      // In the agent's message, not in the first quote.
+      expect((hl.set['quote-jump'][0].startContainer.parentElement as HTMLElement).closest('.msg-user')).toBeNull();
+    });
+
+    const approvalOf = (seq: number) =>
+      wire(seq, { type: 'approval.request', payload: { request_id: 'r1', tool: 'Bash', description: 'Run Bash', options: [] } });
+    const callOf = (seq: number) =>
+      wire(seq, { type: 'tool.call', payload: { call_id: 'c1', tool: 'Bash', args_preview: JSON.stringify({ command: 'echo quotedcommandtext' }) } });
+
+    it('marks the card of a request when the quoted command is its call, not the block before it', async () => {
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([agent(1, 'something else'), callOf(2), approvalOf(3), owner(4, '> echo quotedcommandtext\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      expect([...root.querySelectorAll<HTMLElement>('.feed-block')].map((b) => b.dataset.seq)).toEqual(['1', '3', '4']);
+      await click(quoteOf());
+      expect(root.querySelector<HTMLElement>('.feed-block.is-found')!.dataset.seq).toBe('3');
+    });
+
+    it('marks the block of a side question when the quoted text is its answer', async () => {
+      Element.prototype.scrollIntoView = () => {};
+      const question = wire(2, { type: 'side.question', payload: { text: 'a side question?' } });
+      const answer = wire(4, { type: 'side.answer', payload: { question: eventId(2), text: 'uniquesideanswer words here' } });
+      const { app } = open([agent(1, 'first'), question, agent(3, 'later'), answer, owner(5, '> uniquesideanswer words here\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      await click(quoteOf());
+      expect(root.querySelector<HTMLElement>('.feed-block.is-found')!.dataset.seq).toBe('2');
+    });
+
+    it('counts a jump to an event no block draws as done, without growing the feed again', async () => {
+      Element.prototype.scrollIntoView = () => {};
+      // A status without an error is hidden: no block draws it.
+      const hidden = wire(2, { type: 'status', payload: { state: 'idle' } });
+      const { app } = open([agent(1, 'first'), hidden, agent(3, 'third')]);
+      await mount(app, 2);
+      await act(async () => app.chat(SID).timeline.changed());
+      await act(async () => app.chat(SID).timeline.changed());
+      expect(root.querySelector<HTMLElement>('.feed-block.is-found')!.dataset.seq).toBe('1');
+    });
+
+    it("highlights the earlier message's own text when that message quoted it too", async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([
+        owner(1, '> some quoted words here\n\nand my own some quoted words here again'),
+        agent(2, 'ok'),
+        owner(3, '> some quoted words here\n\nsecond'),
+      ]);
+      await mount(app);
+      await until(() => root.querySelectorAll('.msg-user .msg-quote').length === 2);
+      await click(quoteOf(1));
+      expect(hl.set['quote-jump']).toHaveLength(1);
+      const range = hl.set['quote-jump'][0];
+      expect(range.toString()).toBe('some quoted words here');
+      expect((range.startContainer.parentElement as HTMLElement).closest('.msg-quote')).toBeNull();
+      expect((range.startContainer.parentElement as HTMLElement).closest('.feed-block')!.getAttribute('data-seq')).toBe('1');
+    });
+
+    it('the quote is a button of the keyboard: Enter on it jumps', async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([agent(1, SOURCE), owner(2, '> Some bold words and a link in text\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      expect(quoteOf().getAttribute('role')).toBe('button');
+      expect(quoteOf().getAttribute('tabindex')).toBe('0');
+      await act(async () => void quoteOf().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })));
+      expect(hl.set['quote-jump'][0].toString()).toBe('Some bold words and a link in text');
+    });
+
+    it('goes on to the second older page when the source is on it, in a history of over 1100 events', async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app, api } = open([...range(1, 19), agent(20, SOURCE), ...range(21, 1148), usage(1149), owner(1150, '> words and a link in text\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      const before = api.eventsBefore.mock.calls.length;
+      await click(quoteOf());
+      await until(() => !!hl.set['quote-jump']);
+      // The first older page (1000 events) does not hold it; the second does: two more calls.
+      expect(api.eventsBefore.mock.calls.length - before).toBeGreaterThanOrEqual(2);
+      expect(app.chat(SID).timeline.olderFrom).toBeLessThanOrEqual(20);
+      expect(hl.set['quote-jump'][0].toString()).toBe('words and a link in text');
+    });
+
+    it('says so when an older page does not load', async () => {
+      stubHighlights();
+      const { app, api } = open([...range(1, 449), usage(450), owner(451, '> words that sit far back\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      api.eventsBefore.mockImplementation(async () => {
+        throw new Error('offline');
+      });
+      await click(quoteOf());
+      await until(() => !!root.querySelector('.notice'));
+      expect(root.querySelector('.notice')!.textContent).toBe('Older history did not load');
+    });
+
+    it('the range of a quote after an emoji and a ligature is exactly the quoted text', async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([agent(1, '🙂 The ﬁnal 🎉 plan: ﬁrst, the words here and there'), owner(2, '> the words here\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      await click(quoteOf());
+      expect(hl.set['quote-jump'][0].toString()).toBe('the words here');
+    });
+
+    it('says so when the text is nowhere in the chat', async () => {
+      stubHighlights();
+      const { app } = open([agent(1, 'something else'), owner(2, '> words that were never said\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      await click(quoteOf());
+      expect(root.querySelector('.notice')!.textContent).toBe('The quoted text is not in this chat');
+    });
+
+    it('a click that ends a selection does not jump', async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([agent(1, SOURCE), owner(2, '> Some bold words and a link in text\n\nwhy?')]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      const q = quoteOf();
+      const r = document.createRange();
+      r.selectNodeContents(q);
+      document.getSelection()!.removeAllRanges();
+      document.getSelection()!.addRange(r);
+      await click(q);
+      expect(hl.set['quote-jump']).toBeUndefined();
+      expect(root.querySelector('.feed-block.is-found')).toBeNull();
+      document.getSelection()!.removeAllRanges();
+    });
+
+    const tool = (seq: number, type: 'tool.call' | 'tool.result', payload: Record<string, unknown>) => wire(seq, { type, payload });
+
+    it('a quote of the reply to an hqc_ask lands on the block that shows the reply, not on "Sent to"', async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([
+        tool(1, 'tool.call', { call_id: 'c1', tool: 'hqc_ask', args_preview: '{"session":"other/s2","text":"what time is it"}' }),
+        tool(2, 'tool.result', { call_id: 'c1', error: false, result_preview: '{"from":"other/s2","reply":"The purple elephant answer"}' }),
+        owner(3, '> purple elephant answer\n\nwhy?'),
+      ]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      await click(quoteOf());
+      expect(hl.set['quote-jump']).toHaveLength(1);
+      const block = (hl.set['quote-jump'][0].startContainer.parentElement as HTMLElement).closest('.feed-block')!;
+      expect(block.getAttribute('data-seq')).toBe('2');
+      expect(block.querySelector('.relay-head')).not.toBeNull();
+    });
+
+    it("a quote of a foreground subagent's report marks the block of its end, not of its start", async () => {
+      Element.prototype.scrollIntoView = () => {};
+      const { app } = open([
+        tool(1, 'tool.call', { call_id: 'a1', tool: 'Agent', args_preview: '{"description":"Look","prompt":"look around"}' }),
+        tool(2, 'tool.result', { call_id: 'a1', error: false, result_preview: 'The golden report text of the subagent' }),
+        owner(3, '> golden report text\n\nwhy?'),
+      ]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      await click(quoteOf());
+      expect(root.querySelector<HTMLElement>('.feed-block.is-found')!.dataset.seq).toBe('2');
+    });
+
+    it('finds a quote of an answer stored after the message that quotes it', async () => {
+      const hl = stubHighlights();
+      Element.prototype.scrollIntoView = () => {};
+      // Quoted while the answer was being written: its message came in after the quote's.
+      const { app } = open([agent(1, 'something else'), owner(2, '> words and a link in text\n\nwhy?'), agent(3, SOURCE)]);
+      await mount(app);
+      await until(() => !!quoteOf());
+      await click(quoteOf());
+      expect(hl.set['quote-jump']).toHaveLength(1);
+      expect((hl.set['quote-jump'][0].startContainer.parentElement as HTMLElement).closest('.feed-block')!.getAttribute('data-seq')).toBe('3');
+    });
   });
 });

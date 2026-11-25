@@ -2754,13 +2754,17 @@ describe('quick messages', () => {
       area().value = text;
       area().dispatchEvent(new Event('input', { bubbles: true }));
     });
-  /** A chat whose project has `messages`; sending reaches the hub as `api.input`. */
-  async function chat(messages: string[]) {
+  /** The user, with `own` as their own quick messages. */
+  const userWith = (own: string[]) => ({ id: 'u', email: 'a@b.c', personal_project_id: 'p1', theme: 'warm' as const, look: 'spacious' as const, project_sort: 'custom' as const, new_session_project_id: null, quick_messages: own });
+  /** A chat whose project has `messages` and whose user has `own`; sending reaches the hub as
+   *  `api.input`. */
+  async function chat(messages: string[], own: string[] = []) {
     const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+    app.me = userWith(own);
     app.projects.set('p1', { id: 'p1', name: 'hqc', slug: 'hqc', description: '', is_personal: false, color: 'teal', quick_messages: messages, created_at: '2026-10-01T00:00:00Z' });
     // GET /api/projects/{id}, which opening the list asks for: the hub's list, which another
     // device may have changed.
-    Object.assign(api, { input: vi.fn(() => new Promise(() => {})), project: vi.fn(async () => app.project('p1')) });
+    Object.assign(api, { input: vi.fn(() => new Promise(() => {})), project: vi.fn(async () => app.project('p1')), me: vi.fn(async () => app.me) });
     await mount(app);
     return api as unknown as { input: ReturnType<typeof vi.fn>; project: ReturnType<typeof vi.fn> };
   }
@@ -2780,10 +2784,26 @@ describe('quick messages', () => {
     expect(button.getAttribute('aria-controls')).toBe('composer-quick');
     expect(items().map((i) => i.textContent)).toEqual(['Continue', 'Run the tests']);
     expect(items().map((i) => i.getAttribute('title'))).toEqual(MESSAGES);
-    expect($('.quick-edit a')!.textContent).toBe('Edit quick messages');
-    expect($('.quick-edit a')!.getAttribute('href')).toBe('#/p/p1/settings');
+    expect($('.quick-edit')!.textContent).toBe('Edit quick messages: all projects · this project');
+    expect([...root.querySelectorAll('.quick-edit a')].map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
+      ['all projects', '#/settings'],
+      ['this project', '#/p/p1/settings'],
+    ]);
     await open();
     expect($('.quick-popup')).toBeNull();
+  });
+
+  it('lists the user\'s own messages first, then the project\'s, a text in both once at the user\'s place', async () => {
+    await chat(['Continue', 'Run the tests', 'Continue'], ['Merge', 'Continue']);
+    await open();
+    expect(items().map((i) => i.textContent)).toEqual(['Merge', 'Continue', 'Run the tests']);
+  });
+
+  it('shows the user\'s own messages alone in a project that has none', async () => {
+    await chat([], ['Merge']);
+    await open();
+    expect(items().map((i) => i.textContent)).toEqual(['Merge']);
+    expect($('.quick-edit')!.textContent).toBe('Edit quick messages: all projects · this project');
   });
 
   it('sends the exact text of the pressed message and leaves the typed text and the files alone', async () => {
@@ -2842,6 +2862,47 @@ describe('quick messages', () => {
     expect(items().map((i) => i.textContent)).toEqual(['Continue', 'Added on the phone']);
   });
 
+  it('asks the hub for the user too on opening, and shows what another device added when the answer comes', async () => {
+    const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+    app.me = userWith(['Merge']);
+    app.projects.set('p1', { id: 'p1', name: 'hqc', slug: 'hqc', description: '', is_personal: false, color: 'teal', quick_messages: ['Continue'], created_at: '2026-10-01T00:00:00Z' });
+    let answer!: () => void;
+    const me = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          answer = () => resolve(userWith(['Merge', 'Added on the phone']));
+        }),
+    );
+    Object.assign(api, { project: vi.fn(async () => app.project('p1')), me });
+    await mount(app);
+    expect(me).not.toHaveBeenCalled();
+    await open();
+    expect(me).toHaveBeenCalledTimes(1);
+    expect(items().map((i) => i.textContent)).toEqual(['Merge', 'Continue']);
+    await act(async () => answer());
+    expect(items().map((i) => i.textContent)).toEqual(['Merge', 'Added on the phone', 'Continue']);
+  });
+
+  it('takes only the list from the answer: a theme saved while the hub was asked stays', async () => {
+    const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+    app.me = userWith(['Merge']);
+    let answer!: () => void;
+    // The hub's answer was made before the save below, so it still has the old theme.
+    const me = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          answer = () => resolve({ ...userWith(['Merge', 'Added on the phone']), theme: 'warm' as const });
+        }),
+    );
+    Object.assign(api, { me });
+    const asked = app.refreshUserQuickMessages();
+    app.me = { ...app.me, theme: 'graphite' };
+    answer();
+    await asked;
+    expect(app.me.theme).toBe('graphite');
+    expect(app.me.quick_messages).toEqual(['Merge', 'Added on the phone']);
+  });
+
   it('is never open together with the list of completions: each closes the other', async () => {
     const { app, api } = setup('idle', { history: HISTORY.slice(0, 3), commands: ['compact', 'context'] });
     app.projects.set('p1', { id: 'p1', name: 'hqc', slug: 'hqc', description: '', is_personal: false, color: 'teal', quick_messages: MESSAGES, created_at: '2026-10-01T00:00:00Z' });
@@ -2857,12 +2918,15 @@ describe('quick messages', () => {
     expect($('#composer-commands')).not.toBeNull();
   });
 
-  it('with no messages says where to add them, with the same link', async () => {
+  it('with no messages says where to add them, with a link to each place', async () => {
     await chat([]);
     await open();
     expect(items()).toEqual([]);
-    expect($('.quick-edit')!.textContent).toBe('No quick messages yet — add them in project settings');
-    expect($('.quick-edit a')!.getAttribute('href')).toBe('#/p/p1/settings');
+    expect($('.quick-edit')!.textContent).toBe('No quick messages yet — add them in Settings or in project settings');
+    expect([...root.querySelectorAll('.quick-edit a')].map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
+      ['Settings', '#/settings'],
+      ['project settings', '#/p/p1/settings'],
+    ]);
   });
 
   describe('added from a message', () => {
@@ -2899,6 +2963,16 @@ describe('quick messages', () => {
       await vi.waitFor(() => expect(button().getAttribute('aria-label')).toBe('In quick messages'));
       expect(button().disabled).toBe(true);
       expect(button().getAttribute('title')).toBe('In quick messages');
+    });
+
+    it('a text in the user\'s own list is a check', async () => {
+      const { app, api } = setup('idle', { history: HISTORY.slice(0, 3) });
+      app.me = userWith([TEXT]);
+      app.projects.set('p1', { ...PROJECT, quick_messages: [] });
+      Object.assign(api, { project: vi.fn(async () => ({ ...PROJECT, quick_messages: [] })) });
+      await mount(app);
+      expect(button().getAttribute('aria-label')).toBe('In quick messages');
+      expect(button().disabled).toBe(true);
     });
 
     it('a text already in the list is a check', async () => {

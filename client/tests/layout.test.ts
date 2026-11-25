@@ -158,6 +158,12 @@ describe('layout widths', () => {
     expect([pills['height'], pills['border-radius']]).toEqual(['20px', '10px']);
   });
 
+  it("the user's quick messages in Settings stand across the page, as the project settings' section", () => {
+    // The page's body lines its parts up at their own width (`align-items: flex-start`).
+    expect(rule('.page-body')['align-items']).toBe('flex-start');
+    expect(rule('.settings-quick')['align-self']).toBe('stretch');
+  });
+
   it("an option's box keeps its 18px beside a long description, the Other field takes the rest", () => {
     expect(rule('.choice input')['flex']).toBe('none');
     expect(rule('.choice-other .input')['flex']).toBe('1');

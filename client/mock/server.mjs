@@ -107,6 +107,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     look: 'spacious',
     project_sort: 'custom',
     new_session_project_id: null,
+    quick_messages: [],
   };
   const workerId = ex['hub.hello.ack'].payload.worker_id;
   const now = () => new Date().toISOString();
@@ -987,6 +988,13 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (body?.new_session_project_id !== undefined) {
       if (!projects.has(body.new_session_project_id)) throw fail(404, 'not_found', 'unknown project');
       me.new_session_project_id = body.new_session_project_id;
+    }
+    const quick = body?.quick_messages;
+    if (quick !== undefined) {
+      if (quick.length > 100) throw fail(400, 'bad_request', 'more than 100 quick messages');
+      if (quick.some((m) => !m.trim())) throw fail(400, 'bad_request', 'a quick message is blank');
+      if (quick.some((m) => [...m].length > 10000)) throw fail(400, 'bad_request', 'a quick message is longer than 10000 characters');
+      me.quick_messages = quick;
     }
     if (body?.timezone !== undefined) me.timezone = body.timezone;
     return me;

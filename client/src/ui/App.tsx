@@ -227,7 +227,7 @@ export function App({ app }: { app: AppState }) {
         // On a computer "#/" is an empty placeholder, and its arrow is hidden: the project then.
         const from = beforeSettings.current;
         const back = from && (phone || from !== '#/') ? from : app.currentProjectId ? `#/p/${app.currentProjectId}` : '#/';
-        main = <Settings app={app} back={back} />;
+        main = <Settings app={app} back={back} phone={phone} />;
       }
       break;
     case 'enroll':

@@ -312,6 +312,7 @@ pub struct CurrentUser {
     pub look: Look,
     pub project_sort: ProjectSort,
     pub new_session_project_id: Option<Uuid>,
+    pub quick_messages: Vec<String>,
 }
 
 impl FromRequestParts<AppState> for CurrentUser {
@@ -359,6 +360,7 @@ impl FromRequestParts<AppState> for CurrentUser {
             look: Look::parse(&u.look).unwrap_or_default(),
             project_sort: ProjectSort::parse(&u.project_sort).unwrap_or_default(),
             new_session_project_id: u.new_session_project_id,
+            quick_messages: u.quick_messages,
             personal_project_id: u.personal_project_id.ok_or_else(|| {
                 ApiError::Internal(anyhow::anyhow!("user without personal project"))
             })?,

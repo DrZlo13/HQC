@@ -63,7 +63,7 @@ function makeApp(list = LIST) {
   const api = { ...hubApi(), eventsBefore: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, count: 0 })), readCursor: vi.fn(async () => {}) };
   const socket = { onState: () => () => {}, subscribe: vi.fn(() => () => {}) } as unknown as HubSocket;
   const app = new AppState(api as unknown as Api, socket);
-  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null };
+  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null, quick_messages: [] };
   app.projects.set('p0', { id: 'p0', name: 'Personal', slug: 'personal', description: '', is_personal: true, color: 'slate', quick_messages: [], created_at: at(100) });
   app.projects.set('p1', { id: 'p1', name: 'physics-mp', slug: 'physics-mp', description: '', is_personal: false, color: 'blue', quick_messages: [], created_at: at(90) });
   app.currentProjectId = 'p1';

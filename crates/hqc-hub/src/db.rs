@@ -42,6 +42,8 @@ pub struct UserRow {
     pub project_sort: String,
     /// The project a new session is quick-started in (SPEC §3 User); null: not picked.
     pub new_session_project_id: Option<Uuid>,
+    /// The user's own quick messages, shown in every project (SPEC §3 User).
+    pub quick_messages: Vec<String>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]

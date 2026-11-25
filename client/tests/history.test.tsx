@@ -695,7 +695,7 @@ describe('the chat on screen', () => {
     };
     const socket = { onState: () => () => {}, subscribe: () => () => {} } as unknown as HubSocket;
     const app = new AppState(full as unknown as Api, socket, noHistoryCache);
-    app.me = { id: 'u', email: 'a@b.c', personal_project_id: 'p1', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null };
+    app.me = { id: 'u', email: 'a@b.c', personal_project_id: 'p1', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null, quick_messages: [] };
     app.projects.set('p1', { id: 'p1', name: 'hqc', slug: 'hqc', description: '', is_personal: false, color: 'teal', quick_messages: [], created_at: '2026-10-01T00:00:00Z' });
     app.sessions.set(SID, self);
     app.requests = (opts.requests ?? []).map((r) => ({

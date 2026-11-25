@@ -408,6 +408,11 @@ export class Api {
     return parseMe(await this.req('PATCH', '/api/me', { new_session_project_id }));
   }
 
+  /** The user's own quick messages: the whole list replaces the stored one. */
+  async setUserQuickMessages(quick_messages: string[]): Promise<Me> {
+    return parseMe(await this.req('PATCH', '/api/me', { quick_messages }));
+  }
+
   async schedules(sessionId: string): Promise<Schedule[]> {
     return parseScheduleList(await this.req('GET', `/api/schedules?session_id=${enc(sessionId)}`));
   }

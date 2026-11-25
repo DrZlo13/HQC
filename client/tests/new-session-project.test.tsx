@@ -21,7 +21,7 @@ afterEach(() => {
   vi.doUnmock('../src/app');
 });
 
-const ME: Me = { id: 'u', email: 'me@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null };
+const ME: Me = { id: 'u', email: 'me@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null, quick_messages: [] };
 const socket = { onState: () => {}, onRequests: () => {}, onSummary: () => {}, start: () => {} } as unknown as HubSocket;
 const project = (id: string, name: string, more: Partial<Project> = {}): Project => ({
   id,
@@ -68,7 +68,7 @@ it('Settings: the select lists the projects, shows the effective one and a pick 
     me = { ...me, ...body };
     return new Response(JSON.stringify(me), { status: 200, headers: { 'content-type': 'application/json' } });
   };
-  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => [], skills: async () => [] }), socket);
+  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => [], skills: async () => [], me: async () => app.me! }), socket);
   app.me = ME;
   projects(app);
   root = document.createElement('div');
@@ -94,6 +94,47 @@ it('Settings: the select lists the projects, shows the effective one and a pick 
   for (let i = 0; i < 20 && !root.querySelector('.error-text'); i++) await act(() => new Promise((r) => setTimeout(r, 10)));
   expect(root.querySelector('.error-text')!.textContent).toContain('refused');
   expect(app.newSessionProject()!.id).toBe('p1');
+});
+
+it("Settings on a phone: the user's quick messages take the phone look of the project settings' editor", async () => {
+  const fetchHub: typeof fetch = async () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => [], skills: async () => [], me: async () => app.me! }), socket);
+  app.me = { ...ME, quick_messages: ['Merge'] };
+  projects(app);
+  root = document.createElement('div');
+  document.body.appendChild(root);
+  // The rules `.is-phone .quick-row …` reach the list only under an `.is-phone` box.
+  await act(async () => render(<Settings app={app} />, root));
+  expect(root.querySelector('.settings-quick .quick-row')).not.toBeNull();
+  expect(root.querySelector('.is-phone .quick-row')).toBeNull();
+  await act(async () => render(<Settings app={app} phone />, root));
+  expect(root.querySelector('.is-phone .quick-row')).not.toBeNull();
+});
+
+it("Settings: a page that does not know the user adds to the hub's list of the user's quick messages, not to an empty one", async () => {
+  let hub: Me = { ...ME, quick_messages: ['A'] };
+  const sent: unknown[] = [];
+  const fetchHub: typeof fetch = async (_input, init) => {
+    if (init?.method === 'PATCH') {
+      const body = JSON.parse(String(init.body));
+      sent.push(body);
+      hub = { ...hub, ...body };
+    }
+    return new Response(JSON.stringify(hub), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => [], skills: async () => [] }), socket);
+  // `me` stays null, as after a first `/api/me` that failed.
+  projects(app);
+  root = document.createElement('div');
+  document.body.appendChild(root);
+  await act(async () => render(<Settings app={app} />, root));
+  await act(async () => root!.querySelector<HTMLButtonElement>('.settings-quick .btn-quick-add')!.click());
+  const field = root.querySelector<HTMLTextAreaElement>('.settings-quick textarea')!;
+  field.value = 'B';
+  await act(async () => void field.dispatchEvent(new Event('input', { bubbles: true })));
+  await act(async () => root!.querySelector<HTMLButtonElement>('.settings-quick .btn-quick-save')!.click());
+  for (let i = 0; i < 20 && sent.length === 0; i++) await act(() => new Promise((r) => setTimeout(r, 10)));
+  expect(sent).toEqual([{ quick_messages: ['A', 'B'] }]);
 });
 
 it("`openNewSessionInProject` opens the project's new-session window, once `me` has arrived when it has not yet", async () => {

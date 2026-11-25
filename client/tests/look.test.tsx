@@ -24,7 +24,7 @@ afterEach(() => {
   localStorage.clear();
 });
 
-const ME: Me = { id: 'u', email: 'me@example.com', personal_project_id: 'p', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null };
+const ME: Me = { id: 'u', email: 'me@example.com', personal_project_id: 'p', theme: 'warm', look: 'spacious', project_sort: 'custom', new_session_project_id: null, quick_messages: [] };
 const socket = { onState: () => {}, onRequests: () => {}, onSummary: () => {}, start: () => {} } as unknown as HubSocket;
 /** The hub as `init` reaches it: `/api/me` answers `me`, no projects or sessions. */
 const hubApi = (me: Me) =>
@@ -87,8 +87,9 @@ it('Settings has one Look switch next to the theme; a pick goes to the hub as `P
     me = { ...me, ...body };
     return new Response(JSON.stringify(me), { status: 200, headers: { 'content-type': 'application/json' } });
   };
-  // Settings lists the workers, the MCP servers and the skills too; this test is about the look.
-  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => [], skills: async () => [] }), socket);
+  // Settings lists the workers, the MCP servers and the skills too, and reads the user's quick
+  // messages; this test is about the look.
+  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => [], skills: async () => [], me: async () => app.me! }), socket);
   app.me = ME;
   root = document.createElement('div');
   document.body.appendChild(root);

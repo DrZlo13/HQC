@@ -899,8 +899,9 @@ environment = "infra"
 - `remote_unblock` lifts a deny rule only inside `ssh <host> <command>` to that host as written,
   and only in Ask mode, where the worker checks commands itself: the agent's
   `ssh pi@bench.local "apt update && sudo apt upgrade"` then gets a permission card instead of a
-  refusal, while a local `sudo`, another host, `$( )` or backticks, and options such as `-F`,
-  `-J` or `ProxyCommand` stay denied.
+  refusal, while a local `sudo`, another host or user, `$( )` or backticks, braces or globs
+  before the command, and options such as `-F`, `-J`, `-l` or `ProxyCommand` (also after the
+  host) stay denied.
 - `env` values never leave the machine: not in the hub, the logs or `hqc-worker env`. `HQC_*`
   names are refused. A changed `worker.toml` takes effect after a restart of the worker.
 - `hqc-worker env` lists the environments (keys by name) and bindings; `hqc-worker env which

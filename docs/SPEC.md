@@ -7290,13 +7290,15 @@ base_url = "http://192.168.1.229:8082" # must equal the hub's description
   effective `deny` that the adapter's own check does not apply to the command `ssh` sends there,
   so a session setting up a remote machine gets its `sudo` asked about instead of refused. Only
   a simple part `ssh [options] <destination> <command>` counts, with options that run nothing
-  locally (`-4 -6 -A -a -C -q -T -t -v -x`, `-i -l -p` with a value, `-o Key=Value` with
-  `BatchMode`, `ConnectTimeout`, `IdentitiesOnly`, `IdentityFile`, `LogLevel`, `Port`,
-  `ServerAliveCountMax`, `ServerAliveInterval`, `StrictHostKeyChecking`, `User`,
-  `UserKnownHostsFile`); a command the matcher does not understand (a `$( )` or a backtick, also
-  in double quotes, which the local shell would run), another host, any other option (`-F`,
-  `-J`, `ProxyCommand`, `LocalCommand`), the rest of the command line and every other rule keep
-  the deny. The rules stay in the CLI's `--settings` `deny`, which does not look into the
+  locally and keep the listed user (`-4 -6 -A -a -C -q -T -t -v -x`, `-i` with a value, `-p` with
+  digits, `-o Key=Value` with `BatchMode`, `ConnectTimeout`, `IdentitiesOnly`, `IdentityFile`,
+  `LogLevel`, `Port`, `ServerAliveCountMax`, `ServerAliveInterval`, `StrictHostKeyChecking`,
+  `UserKnownHostsFile`), a command whose first word does not start with `-` (OpenSSH reads
+  options after the destination too), and nothing up to that word the shell expands into other
+  words (`$`, braces, glob characters); a command the matcher does not understand (a `$( )` or a
+  backtick, also in double quotes, which the local shell would run), another host, any other
+  option (`-F`, `-J`, `-l`, `ProxyCommand`, `LocalCommand`, `HostName`, `User`), the rest of the
+  command line and every other rule keep the deny. The rules stay in the CLI's `--settings` `deny`, which does not look into the
   arguments of `ssh` (checked on 2.1.328), so in `auto` and `allow_all`, where the adapter's
   check does not run, nothing changes; a rule not in the environment's `deny` or not a Bash
   rule, and a destination that is not `[user@]host`, are config errors. `hqc-worker env` and

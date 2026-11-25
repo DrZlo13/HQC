@@ -671,7 +671,7 @@ fn deny_hit_remote(
 /// `-o Key=Value` keys. `ProxyCommand`, `LocalCommand`, `-F` (a config file that may hold them)
 /// and anything else are not: the part keeps every deny rule.
 const SSH_FLAGS: &[&str] = &["-4", "-6", "-A", "-a", "-C", "-q", "-T", "-t", "-v", "-x"];
-const SSH_VALUE_FLAGS: &[&str] = &["-i", "-l", "-p"];
+const SSH_VALUE_FLAGS: &[&str] = &["-i", "-p"];
 const SSH_OPTION_KEYS: &[&str] = &[
     "batchmode",
     "connecttimeout",
@@ -682,7 +682,6 @@ const SSH_OPTION_KEYS: &[&str] = &[
     "serveralivecountmax",
     "serveraliveinterval",
     "stricthostkeychecking",
-    "user",
     "userknownhostsfile",
 ];
 
@@ -698,9 +697,16 @@ fn valid_ssh_host(h: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@'))
 }
 
+/// Characters the local shell expands into other words or file names: in a word before the
+/// remote command they could make another option (`-p {22,-oProxyCommand=…}`), so such a word
+/// keeps the deny. The words are unquoted, so a quoted one is refused too.
+const SHELL_EXPANDS: &[char] = &['$', '{', '}', '*', '?', '[', ']'];
+
 /// The destination of `ssh [options] <destination> <command…>` as written: only options of
-/// [`SSH_FLAGS`], [`SSH_VALUE_FLAGS`] and `-o Key=Value` with a key of [`SSH_OPTION_KEYS`]
-/// and no space, and a command after it (`ssh host` alone is a login); `None` otherwise.
+/// [`SSH_FLAGS`], [`SSH_VALUE_FLAGS`] (`-p` digits only) and `-o Key=Value` with a key of
+/// [`SSH_OPTION_KEYS`] and no space, and a command after it (`ssh host` alone is a login) whose
+/// first word does not start with `-`, since OpenSSH reads options after the destination too;
+/// nothing up to that word that the shell expands ([`SHELL_EXPANDS`]); `None` otherwise.
 fn ssh_destination(words: &[String]) -> Option<&str> {
     if words.first()? != "ssh" {
         return None;
@@ -714,7 +720,10 @@ fn ssh_destination(words: &[String]) -> Option<&str> {
         if SSH_FLAGS.contains(&w) {
             i += 1;
         } else if SSH_VALUE_FLAGS.contains(&w) {
-            words.get(i + 1)?;
+            let v = words.get(i + 1)?;
+            if w == "-p" && !(!v.is_empty() && v.chars().all(|c| c.is_ascii_digit())) {
+                return None;
+            }
             i += 2;
         } else if w == "-o" {
             let o = words.get(i + 1)?;
@@ -731,7 +740,10 @@ fn ssh_destination(words: &[String]) -> Option<&str> {
         }
     }
     let dest = words.get(i)?;
-    words.get(i + 1)?;
+    let first = words.get(i + 1)?;
+    if first.starts_with('-') || words[..=i + 1].iter().any(|w| w.contains(SHELL_EXPANDS)) {
+        return None;
+    }
     Some(dest)
 }
 
@@ -1568,6 +1580,18 @@ mod tests {
             "ssh -F cfg pi@bench.local 'cd / && sudo ls'",
             "ssh -J jump pi@bench.local 'cd / && sudo ls'",
             "sudo ssh pi@bench.local ls",
+            // OpenSSH reads options after the destination too.
+            "ssh pi@bench.local -o 'ProxyCommand=$(sudo id)' true",
+            "ssh pi@bench.local -o 'ProxyCommand=true; sudo id' true",
+            "ssh pi@bench.local -o HostName=evil.example 'cd / && sudo id'",
+            // Brace expansion makes another option.
+            "ssh -p {22,'-oProxyCommand=$(sudo id)'} pi@bench.local true",
+            "ssh -i {k,'-oProxyCommand=true; sudo id'} pi@bench.local true",
+            "ssh pi@bench.local {'-oProxyCommand=true; sudo id',true}",
+            "ssh -p x22 pi@bench.local 'cd / && sudo id'",
+            // Another user than the one listed.
+            "ssh -l root pi@bench.local 'cd / && sudo id'",
+            "ssh -o User=root pi@bench.local 'cd / && sudo id'",
         ] {
             assert_eq!(denied(c), Some("Bash(sudo:*)"), "{c}");
         }

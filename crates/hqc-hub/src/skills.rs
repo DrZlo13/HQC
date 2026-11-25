@@ -192,8 +192,11 @@ pub fn pack(mut files: Files, given: Option<&str>) -> ApiResult<Packed> {
         let prefix = format!("{top}/");
         files = files
             .into_iter()
-            .map(|(p, v)| (p[prefix.len()..].to_string(), v))
-            .collect();
+            .map(|(p, v)| match p.strip_prefix(&prefix) {
+                Some(rest) => Ok((rest.to_string(), v)),
+                None => Err(bad(format!("{p} is a file and a folder"))),
+            })
+            .collect::<ApiResult<_>>()?;
         fallback = Some(top);
     }
     if files.len() > MAX_SKILL_FILES {
@@ -606,6 +609,10 @@ mod tests {
             (files(&[("SKILL.md", ""), ("a", ""), ("a/b", "")]), "clash"),
             (files(&[("SKILL.md", "---\nname: Bad Name\n---\n")]), "name"),
             (files(&[("SKILL.md", "---\nname: x\n")]), "unclosed"),
+            (
+                files(&[("t", ""), ("t/SKILL.md", "")]),
+                "a file named as the top folder",
+            ),
         ] {
             assert!(pack(f, Some("x")).is_err(), "{why}");
         }

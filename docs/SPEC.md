@@ -8149,12 +8149,23 @@ is not asked, does not see the question or the answer, and does not work on it.
   for those tools while it is active, which a hub could do anyway by answering the card (§2.1).
   Its `hooks` would run shell commands outside all of that, so the hub refuses a skill with a
   `hooks` key in any of its `SKILL.md` files, and the worker, which does not trust the hub for
-  it, refuses it again: a frontmatter is taken only when each of its top-level lines is a plain
-  `key:` (no quotes, `{`, `?` or `<<` merge) and none is `hooks`, and no line of the file at its
-  first column is a `hooks:` key. The worker writes the plugin's manifest itself and the
-  skill's files only under `skills/<name>/` of its own folder, so a skill cannot add a plugin's
-  hooks, MCP servers, agents or commands; it unpacks only relative paths without `..`, no
-  links, with the limits of §6, and checks the archive's sha256.
+  it, refuses it again. The check finds the frontmatter as the CLI does (2.1.328: one BOM
+  stripped, `^---\s*\n` with JavaScript's `\s`, up to the first `---` anywhere), refuses a first
+  line with anything but spaces after `---`, and takes the frontmatter only when no character in
+  it breaks a line or spaces but `\n`, `\r\n`, a space and a tab (a lone CR, U+0085, U+2028,
+  U+FEFF and the like are refused: YAML and JavaScript take some of them for line breaks or
+  spaces, and a security review made a hook run past a looser check with a lone CR and with
+  `---` followed by U+FEFF), each of its top-level lines is a plain `key:` (no quotes, `{`, `?`,
+  `!` tag, `%` directive, `...` or `<<` merge) and none is `hooks`; and no line of the file at its
+  first column is a `hooks:` key. The worker writes the plugin's manifest itself and the skill's
+  files only under `skills/<name>/` of its own folder, so a skill cannot add a plugin's hooks,
+  MCP servers, agents or commands; it unpacks only relative paths without `..`, no links, with
+  the limits of §6, and checks the archive's sha256, also of an archive it kept, on every start.
+  A set's folder name holds the version of the checks, so a stricter check never reuses a folder
+  an older one built. What is accepted: the folders are the worker user's, so an agent of
+  another session on the same worker can change a set its owner's sessions use (add a plugin's
+  hooks to it), as it can change `~/.claude/settings.json`, which the CLI reads too (§14, the
+  boundary between sessions of one worker is soft).
 - `Origin` **[decision]**: a WebSocket upgrade of `/api/ws` without `Origin`, or with an `Origin`
   that does not match the request's `Host`, gets `403`; non-GET `/api/*` requests with a foreign
   `Origin` get `403` (without `Origin` they pass: that is how non-browser clients come). A match

@@ -27,6 +27,9 @@ use crate::inbox::ArtifactClient;
 
 /// An archive is fetched up to this size (its content is capped at [`MAX_SKILL_BYTES`]).
 const MAX_ARCHIVE_BYTES: u64 = 8 * 1024 * 1024;
+/// The version of [`check_archive`] and [`hqc_proto::skills::check_skill_md`]; raised with
+/// every change that refuses more, so that no set built before it is used again.
+const CHECKS: u32 = 2;
 /// Archives and sets not used for this long go at the worker's start.
 pub const UNUSED: Duration = Duration::from_secs(7 * 24 * 3600);
 
@@ -98,10 +101,15 @@ impl HubSkills {
         let path = zip_path(&self.root, &s.sha256);
         if path.is_file() {
             let _ = touch(&path);
-            // Checked when kept; the name is checked against the set's.
-            let name = s.name.clone();
-            return tokio::task::spawn_blocking(move || {
-                check_archive(&std::fs::read(&path)?, &name).map(drop)
+            // Checked again on every use: its hash, and its content by the check of now.
+            let (name, sha) = (s.name.clone(), s.sha256.clone());
+            return tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let data = std::fs::read(&path)?;
+                if hex(&Sha256::digest(&data)) != sha {
+                    let _ = std::fs::remove_file(&path);
+                    bail!("the kept archive is not the one whose sha256 is {sha}");
+                }
+                check_archive(&data, &name).map(drop)
             })
             .await?;
         }
@@ -221,7 +229,10 @@ fn check_archive(data: &[u8], name: &str) -> anyhow::Result<Vec<Entry>> {
 
 /// `sets/<hash>/` with `skills` (their archives in `zips/`), built unless it is there.
 fn build_set(root: &Path, skills: &[SkillRef]) -> anyhow::Result<PathBuf> {
+    // The version of the checks is in the key: a stricter check builds a new folder instead of
+    // reusing one an older check let through.
     let mut key = Sha256::new();
+    key.update(format!("checks {CHECKS}\n"));
     for s in skills {
         key.update(format!("{}:{}\n", s.name, s.sha256));
     }
@@ -372,6 +383,14 @@ pub(crate) mod tests {
                 "nested hooks",
             ),
             (
+                zip_of(&[(
+                    "SKILL.md",
+                    "---\nname: bench\ndescription: d\rhooks: {Stop: []}\n---\n",
+                    0o644,
+                )]),
+                "hooks behind a lone CR",
+            ),
+            (
                 zip_of(&[
                     ("SKILL.md", "", 0o644),
                     ("a", "", 0o644),
@@ -447,6 +466,9 @@ pub(crate) mod tests {
             "fetched once per hash"
         );
         assert!(hs.prepare(id, &refs[1..]).await.is_none());
+        // A kept archive changed since (by an agent of the same user): refused, not used.
+        std::fs::write(zip_path(dir.path(), &sha(&good)), &hooked).unwrap();
+        assert!(hs.prepare(id, &refs[..1]).await.is_none());
 
         // The sweep keeps what is in use and removes what is old.
         sweep(dir.path(), UNUSED);

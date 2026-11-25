@@ -81,8 +81,7 @@ pub struct Frontmatter {
 /// `hooks:` key, whatever a parser takes for the frontmatter.
 pub fn check_skill_md(text: &str) -> Result<Frontmatter, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let lines: Vec<&str> = text.split('\n').map(|l| l.trim_end_matches('\r')).collect();
-    for l in &lines {
+    for l in text.split(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}']) {
         let k = l.trim_start_matches(['"', '\'']).to_ascii_lowercase();
         if let Some(rest) = k.strip_prefix("hooks") {
             if rest
@@ -97,19 +96,53 @@ pub fn check_skill_md(text: &str) -> Result<Frontmatter, String> {
         }
     }
     let mut fm = Frontmatter::default();
-    if lines.first().map(|l| l.trim_end()) != Some("---") {
+    // The frontmatter as Claude Code finds it (2.1.328): one BOM stripped, then
+    // `^---\s*\n([\s\S]*?)---` with JavaScript's `\s`, so it ends at the first `---` anywhere.
+    let Some(after) = text.strip_prefix("---") else {
         return Ok(fm);
+    };
+    let ws = after.len() - after.trim_start_matches(js_space).len();
+    let Some(nl) = after[..ws].rfind('\n') else {
+        // No line break before the first non-space: the CLI sees no frontmatter, but a file
+        // that looks like one is refused rather than guessed at.
+        return Err("the first line of SKILL.md is --- with something after it".into());
+    };
+    if after[..nl]
+        .chars()
+        .any(|c| !matches!(c, ' ' | '\t' | '\r' | '\n'))
+    {
+        return Err("the first line of SKILL.md is --- with something after it".into());
     }
-    let Some(end) = lines
-        .iter()
-        .skip(1)
-        .position(|l| matches!(l.trim_end(), "---" | "..."))
-    else {
+    let body = &after[nl + 1..];
+    let Some(end) = body.find("---") else {
         return Err("the frontmatter of SKILL.md is not closed with ---".into());
     };
+    let region = &body[..end];
+    // Only `\n` (with an optional `\r` before it) breaks a line, and no other control or
+    // space character than a tab, so that every YAML parser sees the lines checked here.
+    let mut chars = region.chars().peekable();
+    while let Some(c) = chars.next() {
+        let ok = match c {
+            '\n' | '\t' | ' ' => true,
+            '\r' => chars.peek() == Some(&'\n'),
+            c => {
+                !c.is_control() && !js_space(c) && !matches!(c, '\u{85}' | '\u{200b}'..='\u{200f}')
+            }
+        };
+        if !ok {
+            return Err(format!(
+                "the frontmatter of SKILL.md has the character U+{:04X}, which is not taken there",
+                c as u32
+            ));
+        }
+    }
+    let lines: Vec<&str> = region
+        .split('\n')
+        .map(|l| l.trim_end_matches('\r'))
+        .collect();
     // (key, value on its line, continuation lines)
     let mut entries: Vec<(String, String, Vec<String>)> = vec![];
-    for (i, l) in lines[1..=end].iter().enumerate() {
+    for (i, l) in lines.iter().enumerate() {
         if l.trim().is_empty() || l.starts_with('#') {
             continue;
         }
@@ -180,6 +213,21 @@ pub fn check_skill_md(text: &str) -> Result<Frontmatter, String> {
         }
     }
     Ok(fm)
+}
+
+/// JavaScript's `\s`: what the CLI's frontmatter pattern takes for a space.
+fn js_space(c: char) -> bool {
+    matches!(
+        c,
+        ' ' | '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | '\u{a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+    )
 }
 
 /// `Read, Bash(git add:*)` → its entries, commas inside parentheses kept.
@@ -280,9 +328,26 @@ mod tests {
             "---\nname: x\n--- \nhooks: {}\n",
             "---\nname: x\n",
             "---\nname:x\n---\n",
+            // A lone CR is a line break to YAML (found in review: the hook ran on 2.1.328).
+            "---\nname: cr\ndescription: d\rhooks: {Stop: []}\n---\nSay ok.\n",
+            // `---` and U+FEFF: JavaScript's `\s` takes it, the CLI parses the frontmatter.
+            "---\u{feff}\nname: x\n\"hooks\": {Stop: []}\n---\n",
+            "---\u{a0}\nname: x\n\"hooks\": {}\n---\n",
+            "---\nname: x\ndescription: d\u{2028}hooks: {}\n---\n",
+            "---\nname: x\ndescription: d\u{85}hooks: {}\n---\n",
+            "---\nname: x\ndescription: d\u{b}x\n---\n",
+            "--- x\nname: x\n---\n",
+            "---\nname: x\n...\n\"hooks\": {}\n---\n",
+            "---\nname: x\n%YAML 1.2\n---\n",
+            "---\nname: x\n!!str hooks: {}\n---\n",
         ] {
             assert!(check_skill_md(bad).is_err(), "{bad:?}");
         }
+        // Blank lines after the opener, CRLF, the frontmatter ending at the first `---` as the
+        // CLI's does, and odd characters in the body are fine.
+        let fm =
+            check_skill_md("---\n\nname: x\r\ndescription: a---\nweird\u{2028}body\n").unwrap();
+        assert_eq!(fm.description.as_deref(), Some("a"));
         // The word in a description or the body is fine.
         assert!(
             check_skill_md("---\ndescription: git hooks: set them up\n---\nUse hooks.\n").is_ok()

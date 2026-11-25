@@ -7,7 +7,7 @@ import { copyText } from '../clipboard';
 import { HEIC_NAME, dataUrl, heicToJpeg } from '../heic';
 import { keyMatches, withKey, type Key } from '../keys';
 import { onBack } from '../nav';
-import { PERMISSION_MODES, type EventOf, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState, type SlashCommand } from '../proto';
+import { PERMISSION_MODES, type EventOf, type HqcEvent, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState, type SlashCommand } from '../proto';
 import { sideQuestionOf, type OutgoingFile } from '../session';
 import { duringText, type Timeline } from '../timeline';
 import { ModelName, isTypedModel, type ModelChoice, modelMenuItems } from './agentSettings';
@@ -42,8 +42,9 @@ import {
 import { AUTO_NEEDS_ANTHROPIC, MODE_LABELS, ROOM_MODE_LABELS, STATE_LABELS, agentsLabel, formatTime, formatTimer, formatTokens, homePath, modeConfirm, modelName, shownModel, spendLabel } from './labels';
 import { hasOpenTasks, LiveSubagents } from './LiveSubagents';
 import { Loading } from './Loading';
-import { CopyButton } from './Markdown';
-import { feedSelectionText, selectedText, useQuoteSelection, type QuoteSelection } from './selection';
+import { CopyButton, markdownText } from './Markdown';
+import { listenForSwipeQuote } from './swipequote';
+import { feedSelectionText, firstSentences, selectedText, useQuoteSelection, withoutQuoteLines, type QuoteSelection } from './selection';
 import { PermissionBlock, SECRET_GIVEN } from './permission';
 import { MoveSession } from './ProjectSettings';
 import { WaitedRequests } from './requests';
@@ -634,6 +635,15 @@ export function Chat({
     o.observe(el);
     return () => o.disconnect();
   }, []);
+  // A message swiped to the left is quoted (swipequote.ts); `actions` is new on every render, the
+  // listener reads the latest.
+  const swiped = useRef((_seq: number) => {});
+  swiped.current = (seq) => {
+    const e = t.events().find((x) => x.seq === seq);
+    const q = e && messageQuote(e);
+    if (q && actions.quote) actions.quote(q);
+  };
+  useEffect(() => (feed.current ? listenForSwipeQuote(feed.current, (seq) => swiped.current(seq)) : undefined), []);
   // The Quote button over the composer takes the text selected in the feed or in a subagent's history (selection.ts).
   const section = useRef<HTMLElement>(null);
   const quoteSelection = useQuoteSelection(section, !!actions.quote);
@@ -1153,10 +1163,10 @@ export function Chat({
               <Loading />
             </div>
           )}
-          <FeedBlocks blocks={start ? blocks.slice(start) : blocks} actions={actions} />
+          <FeedBlocks blocks={start ? blocks.slice(start) : blocks} actions={actions} swipe />
           {requestsOnly && loaded && items.length === 0 && <div class="feed-note">No requests</div>}
           {t.streaming && <StreamingMessage text={t.streaming} />}
-          <FeedBlocks blocks={under} actions={actions} />
+          <FeedBlocks blocks={under} actions={actions} swipe />
           {!system && <WaitedRequests app={app} sessionId={sessionId} />}
         </div>
       </div>
@@ -1345,6 +1355,20 @@ export function withQuote(draft: string, quote: string): string {
     .join('\n');
   const head = draft.trimEnd();
   return `${head ? `${head}\n\n` : ''}${lines}\n\n`;
+}
+
+/** What a swipe to the left quotes of the message `e`: the first two sentences of its text, the
+ *  owner's own without its `>` lines; empty for an event that is no message. */
+export function messageQuote(e: HqcEvent): string {
+  switch (e.type) {
+    case 'agent.message':
+    case 'peer.message':
+      return firstSentences(markdownText(e.payload.text));
+    case 'user.message':
+      return firstSentences(withoutQuoteLines(e.payload.text));
+    default:
+      return '';
+  }
 }
 
 /** The draft with `text` after it, a blank line between them when the draft has text. */

@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { parseEvent, type HqcEvent } from '../src/proto';
 import { Timeline } from '../src/timeline';
 import { ChatItems, StreamingMessage, type ChatActions } from '../src/ui/cards';
-import { Markdown, decodeEntities, markdownLine, parseMarkdown, safeHref } from '../src/ui/Markdown';
+import { Markdown, decodeEntities, markdownLine, markdownText, parseMarkdown, safeHref } from '../src/ui/Markdown';
 import { copyText } from '../src/clipboard';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
@@ -79,6 +79,15 @@ describe('parser', () => {
       ['', ''],
     ];
     for (const [src, line] of cases) expect(markdownLine(src), src).toBe(line);
+  });
+
+  it('gives a text without its marks, its blocks a blank line apart and its lines kept', () => {
+    expect(markdownText('# Done\nThe **tests** pass. See [the log](https://x.y/log).\n\n- one\n- two')).toBe(
+      'Done\n\nThe tests pass. See the log.\n\none\ntwo',
+    );
+    expect(markdownText('a\nb\n\n| x | y |\n|---|---|\n| 1 | 2 |')).toBe('a\nb\n\nx y\n1 2');
+    expect(markdownText('**bold**')).toBe('bold');
+    expect(markdownText('')).toBe('');
   });
 
   it('accepts only absolute http, https and mailto URLs', () => {

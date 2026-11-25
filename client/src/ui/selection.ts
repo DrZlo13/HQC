@@ -194,3 +194,29 @@ export function useQuoteSelection(scope: RefObject<HTMLElement | null>, enabled:
   }, [api, enabled]);
   return useMemo(() => ({ shown, text: api.text, press: api.press, release: api.release }), [shown, api]);
 }
+
+/** The owner's own message without its `>` lines: a swipe quotes what the owner wrote, not what
+ *  they quoted. */
+export function withoutQuoteLines(text: string): string {
+  return text
+    .split('\n')
+    .filter((l) => !/^\s*>/.test(l))
+    .join('\n');
+}
+
+/** The first two sentences of `text` (a blank line between paragraphs is no sentence), with
+ *  "…" when more follows: after a space when the head ends in a sentence mark. */
+export function firstSentences(text: string): string {
+  // A third sentence only says that more follows: the rest of a long text is not segmented.
+  const sentences: Intl.SegmentData[] = [];
+  for (const s of new Intl.Segmenter(undefined, { granularity: 'sentence' }).segment(text)) {
+    if (!s.segment.trim()) continue;
+    sentences.push(s);
+    if (sentences.length === 3) break;
+  }
+  if (!sentences.length) return '';
+  const last = sentences[Math.min(2, sentences.length) - 1];
+  const head = text.slice(sentences[0].index, last.index + last.segment.length).trim();
+  if (sentences.length <= 2) return head;
+  return /[.!?…]$/.test(head) ? `${head} …` : `${head}…`;
+}

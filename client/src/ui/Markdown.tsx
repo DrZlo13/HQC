@@ -88,9 +88,22 @@ export function markdownLine(src: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+/** Markdown `src` as plain text, its blocks apart by a blank line (a heading is a sentence of its
+ *  own for a segmenter); the text itself when it does not parse. */
+export function markdownText(src: string): string {
+  try {
+    return parseMarkdown(src)
+      .map((tok) => plain([tok], ' ').trim())
+      .filter(Boolean)
+      .join('\n\n');
+  } catch {
+    return src;
+  }
+}
+
 /** The words of `tokens` without their marks (a link and an image by their text, a task
  *  without its checkbox), joined by `sep`: a space between blocks, nothing between the pieces
- *  of one line. */
+ *  of one line. A line break, a list item and a table row stay lines. */
 function plain(tokens: Token[] | undefined, sep: string): string {
   return (tokens ?? [])
     .map((tok): string => {
@@ -103,13 +116,13 @@ function plain(tokens: Token[] | undefined, sep: string): string {
         case 'checkbox':
           return '';
         case 'br':
-          return ' ';
+          return '\n';
         case 'list':
-          return t.items.map((it) => plain(it.tokens, ' ')).join(' ');
+          return t.items.map((it) => plain(it.tokens, ' ')).join('\n');
         case 'blockquote':
           return plain(t.tokens, ' ');
         case 'table':
-          return [t.header, ...t.rows].flat().map((c) => plain(c.tokens, '')).join(' ');
+          return [t.header, ...t.rows].map((row) => row.map((c) => plain(c.tokens, '')).join(' ')).join('\n');
         case 'code':
         case 'codespan':
         case 'html':

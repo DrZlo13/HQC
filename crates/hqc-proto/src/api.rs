@@ -306,6 +306,57 @@ pub struct McpServerList {
     pub servers: Vec<McpServer>,
 }
 
+/// A skill the owner keeps on the hub (SPEC 0.237, iteration 8): `GET /api/skills`. The
+/// content is the hub's normalized archive, whose sha256 sessions get in `session.start.skills`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Skill {
+    pub id: Uuid,
+    /// The folder the agents' CLI names it by: `hqc:<name>`, `/<name>`.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Its frontmatter's `allowed-tools`.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    pub sha256: String,
+    /// Unpacked, in bytes.
+    pub size: u64,
+    pub files: u32,
+    /// Every project of the owner gets it; else `project_ids`.
+    pub all_projects: bool,
+    pub project_ids: Vec<Uuid>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillList {
+    pub skills: Vec<Skill>,
+}
+
+/// A file of a skill: `GET /api/skills/{id}/files`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillFile {
+    pub path: String,
+    pub size: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub executable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillFiles {
+    pub files: Vec<SkillFile>,
+}
+
+/// `PATCH /api/skills/{id}`: an absent field stays as it is.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all_projects: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_ids: Option<Vec<Uuid>>,
+}
+
 /// One header of a server, as the owner gives it; the value is write-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

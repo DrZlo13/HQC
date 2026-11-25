@@ -10,6 +10,7 @@ pub mod frame;
 pub mod lookalike;
 pub mod mcp;
 pub mod rules;
+pub mod skills;
 
 /// Worker <-> hub protocol version (SPEC §5.1). Bump on any incompatible change.
 pub const PROTOCOL_VERSION: u32 = 1;

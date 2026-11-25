@@ -261,6 +261,8 @@ pub struct Supervisor {
     factory: Arc<dyn AdapterFactory>,
     link: HubLink,
     artifacts: ArtifactClient,
+    /// The hub's skills, fetched and put into plugin folders (SPEC 0.237).
+    skills: Arc<crate::hub_skills::HubSkills>,
     sessions: HashMap<Uuid, SessionHandle>,
     shutdown_timeout: Duration,
     /// One permit per running agent process (`max_sessions`).
@@ -424,6 +426,10 @@ impl Supervisor {
         let (outcomes_tx, outcomes_rx) = mpsc::unbounded_channel();
         Self {
             workspaces: crate::workspaces::Workspaces::new(cfg.clone(), created, link.clone()),
+            skills: Arc::new(crate::hub_skills::HubSkills::new(
+                cfg.skills_root.clone(),
+                artifacts.clone(),
+            )),
             artifacts,
             slots: Arc::new(Semaphore::new(cfg.max_sessions)),
             titler: Arc::new(crate::title::Titler::from_config(&cfg)),
@@ -1235,6 +1241,7 @@ impl Supervisor {
             events_open: true,
             link: self.link.clone(),
             artifacts: self.artifacts.clone(),
+            skills: self.skills.clone(),
             roots: self.cfg.allowed_roots.clone(),
             mirror: self.mirror.clone(),
             idle_timeout: self.cfg.idle_timeout,
@@ -1420,6 +1427,7 @@ struct Session {
     events_open: bool,
     link: HubLink,
     artifacts: ArtifactClient,
+    skills: Arc<crate::hub_skills::HubSkills>,
     /// `allowed_roots` of the worker config: `.hqc/` is added to a git exclude file only
     /// inside them (SPEC §14).
     roots: Vec<std::path::PathBuf>,
@@ -3396,8 +3404,16 @@ impl Session {
         // `mode: resume` from the hub, or this process ran the agent before (kill, idle
         // timeout, crash). The Claude Code adapter checks for the transcript either way.
         let mode = self.start_mode();
+        // SPEC 0.245: the hub's skills as they are now, in a plugin folder; those that could
+        // not be had are left out of this start.
+        let (skill_dir, skills) = match self.skills.prepare(self.id, &self.spec.skills).await {
+            Some((dir, have)) => (Some(dir), have),
+            None => (None, vec![]),
+        };
         let mut spec = StartSpec {
             permission_mode: mode,
+            skill_dir,
+            skills,
             ..self.spec.clone()
         };
         // A provider key kept in Vaultwarden is read at every start, into this copy only: a key

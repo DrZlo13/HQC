@@ -190,6 +190,8 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         browser: false,
         browser_refused: None,
         mcp_servers: vec![],
+        skills: vec![],
+        skill_dir: None,
         fork: None,
     }
 }
@@ -13136,4 +13138,50 @@ async fn the_hubs_mcp_servers_are_relays_under_their_own_names() {
         !cmd.args.iter().any(|a| a.contains("mcp__github")),
         "not allowed outright"
     );
+}
+
+/// SPEC 0.237: the hub's skills come as the plugin folder the supervisor built, with a
+/// same-named skill of the machine hidden; without a folder, neither flag.
+#[tokio::test]
+async fn the_hubs_skills_are_a_plugin_dir_and_hide_the_machines_copy() {
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let mut s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+    s.skills = vec![
+        hqc_proto::skills::SkillRef {
+            name: "bench".into(),
+            sha256: "a".repeat(64),
+        },
+        hqc_proto::skills::SkillRef {
+            name: "wiki".into(),
+            sha256: "b".repeat(64),
+        },
+    ];
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx.clone());
+    a.start(&s).await.unwrap();
+    let cmd = claude.commands()[0].clone();
+    assert!(
+        !cmd.args.iter().any(|a| a == "--plugin-dir"),
+        "no folder, no plugin"
+    );
+    let i = cmd.args.iter().position(|a| a == "--settings").unwrap();
+    let settings: serde_json::Value = serde_json::from_str(&cmd.args[i + 1]).unwrap();
+    assert!(settings.get("skillOverrides").is_none());
+
+    s.skill_dir = Some("/home/u/.hqc/hub-skills/sets/abc".into());
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let cmd = claude.commands()[1].clone();
+    let i = cmd.args.iter().position(|a| a == "--plugin-dir").unwrap();
+    assert_eq!(cmd.args[i + 1], "/home/u/.hqc/hub-skills/sets/abc");
+    let i = cmd.args.iter().position(|a| a == "--settings").unwrap();
+    let settings: serde_json::Value = serde_json::from_str(&cmd.args[i + 1]).unwrap();
+    assert_eq!(
+        settings["skillOverrides"],
+        json!({"bench": "off", "wiki": "off"})
+    );
+    assert!(settings["permissions"].is_object(), "the rules stay");
 }

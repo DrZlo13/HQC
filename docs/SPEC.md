@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.251, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.252, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2988,6 +2988,16 @@ Mac, Ctrl+' and Ctrl+E elsewhere: the first quotes the selection as the button d
 is an input), the second searches it as "Search in …" does, in a new tab; they take a selection
 that starts in the feed or in a subagent's history; without one the key is the browser's. The
 button's tooltip and the menu's Quote and Search name the keys in use.
+On a touch screen a finger that swipes a message of the chat's feed left quotes it, as Telegram
+does (since 0.252): the agent's answer (one to another session's question too), the user's own
+message, a message from another session or a room's post. The message follows the finger and a
+quote mark comes out at its right at the finger's height; released past 60 px, the message's first
+two sentences go into the input as Quote puts a selection there, with "…" when its text goes on
+(the Markdown of an answer or of another session's message as its text, a list item or a table row
+a line of its own; the user's message without its `>` lines); released before, nothing. Where
+there is no input a message does not move; a swipe on a code block or a table that scrolls
+sideways scrolls it, and a touch held half a second before it moves is the browser's (a long press
+selects text). A subagent's history has no swipe.
 The input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
 computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input
 takes the caret when the chat opens, once its newest page is in, unless a request waits for an
@@ -3043,10 +3053,20 @@ Keys for the same (since 0.238; set in Settings ▸ Keys since 0.242), by defaul
 Mac, Ctrl+' and Ctrl+E elsewhere: the first quotes the selection as the button does (where there
 is an input), the second searches it as "Search in …" does, in a new tab; they take a selection
 that starts in the feed or in a subagent's history; without one the key is the browser's. The
-button's tooltip and the menu's Quote and Search name the keys in use. The input is one
-row: the paperclip, the field growing with its lines up to 200 px, send; on a computer its
-placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input takes the
-caret when the chat opens, once its newest page is in, unless a request waits
+button's tooltip and the menu's Quote and Search name the keys in use.
+On a touch screen a finger that swipes a message of the chat's feed left quotes it, as Telegram
+does (since 0.252): the agent's answer (one to another session's question too), the user's own
+message, a message from another session or a room's post. The message follows the finger and a
+quote mark comes out at its right at the finger's height; released past 60 px, the message's first
+two sentences go into the input as Quote puts a selection there, with "…" when its text goes on
+(the Markdown of an answer or of another session's message as its text, a list item or a table row
+a line of its own; the user's message without its `>` lines); released before, nothing. Where
+there is no input a message does not move; a swipe on a code block or a table that scrolls
+sideways scrolls it, and a touch held half a second before it moves is the browser's (a long press
+selects text). A subagent's history has no swipe.
+The input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
+computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input
+takes the caret when the chat opens, once its newest page is in, unless a request waits
 for an answer (an open approval in the feed, or the session `waiting`), another field has the
 focus, or a menu or the slid-out column is open; on a phone only when the chat replaces a new
 session's window. An open chat stays at its bottom while its images load: only a scroll up lets
@@ -8365,6 +8385,11 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.251 → 0.252 (a message swiped left is quoted)
+§6: on a phone a message was quoted only by selecting its text and pressing Quote. Now a finger
+that swipes a message left quotes its first two sentences, as Telegram does; the message follows
+the finger, and a release past 60 px quotes it. Client only.
 
 ### 0.250 → 0.251 (a message taken into a turn the runtime began by itself joined it)
 §17.2: while Claude Code ran a turn it began by itself (after a background task's notice), the

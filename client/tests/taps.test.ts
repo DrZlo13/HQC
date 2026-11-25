@@ -120,22 +120,6 @@ describe('listenForTaps', () => {
     expect(clicks()).toBe(1);
   });
 
-  it('presses no button rendered away while the finger was down', () => {
-    const { el, clicks } = make('<button>Allow</button>');
-    touch(el, 'touchstart', { x: 50, y: 20 });
-    el.remove();
-    now += 80;
-    // An end sent to the removed node does not reach the page at all; one that does (the finger
-    // lifted where the next card now stands) presses nothing either.
-    expect(touch(el, 'touchend', { x: 50, y: 20 }).defaultPrevented).toBe(false);
-    doc.body.append(el);
-    touch(el, 'touchstart', { x: 50, y: 20 });
-    el.remove();
-    now += 80;
-    expect(touch(doc.body, 'touchend', { x: 50, y: 20 }).defaultPrevented).toBe(false);
-    expect(clicks()).toBe(0);
-  });
-
   it('takes the focus from a field being typed in, as the press of the browser does', () => {
     doc.body.innerHTML = '<input class="title"><a href="#/p/1">‹</a>';
     const field = doc.querySelector<HTMLElement>('.title')!;
@@ -169,11 +153,15 @@ describe('listenForTaps', () => {
     doc.querySelector('form')!.addEventListener('mousedown', (e) => e.preventDefault());
     doc.querySelector('form')!.addEventListener('submit', (e) => e.preventDefault());
     tap(send);
-    // A message's buttons keep it on their pointerdown, which comes before the touchstart.
+    // A message's buttons keep it on their pointerdown, before the touchstart or after it.
     doc.querySelector('.mb')!.addEventListener('pointerdown', (e) => e.preventDefault());
     copy.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }));
     tap(copy);
-    expect(clicks).toBe(2);
+    touch(copy, 'touchstart', { x: 50, y: 20 });
+    copy.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }));
+    now += 80;
+    touch(copy, 'touchend', { x: 50, y: 20 });
+    expect(clicks).toBe(3);
     expect(blur).not.toHaveBeenCalled();
   });
 

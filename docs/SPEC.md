@@ -1113,6 +1113,18 @@ MCP calls (worker → hub → worker):
   no address and no header, so the CLI names its tools `mcp__<name>__<tool>` as with a direct
   connection and none is allowed outright; a change reaches the agent at its next start; absent —
   none;
+  `skills` (since 0.237) — `[{name, sha256}]`, the owner's skills the session's project gets
+  (§6 `/api/skills`), on the same terms as `mcp_servers` (not for a restricted session, another
+  runtime than Claude Code or a worker that is not the owner's); the worker takes them only in
+  an environment with `hub_skills = true` (§14), for an unrestricted session of its owner, valid
+  names (`[a-z0-9][a-z0-9_-]{0,63}`) and hashes (64 hex digits) only, one per name. Before each
+  start of the agent it fetches an archive it does not have with `GET /worker/skills/{sha256}`
+  and its token (the hub answers only a skill of the worker's owner, else `404`), checks its
+  sha256 and its content as the hub does (§20) and keeps it in `$HQC_HOME/hub-skills/zips/`,
+  then gives the agent the plugin folder of the set (§8.1). A skill it cannot fetch or that fails
+  a check is left out of that start and logged, the others stay; archives and folders unused
+  for 7 days are removed when the worker starts; a change reaches the agent at its next start;
+  absent — none;
   `allow_rules` (since 0.52, T48) — hqc's allow rules of the
   session's workspace (§3 Workspace), absent when none; the worker keeps the latest list per
   canonical workspace, shared by its sessions there, and drops a rule that is not valid hqc
@@ -1975,6 +1987,23 @@ the rest is marked "later"):
   the section "MCP servers" in Settings (the list with status and tools, add and edit with
   headers or OAuth, Test, Sign in, Sign out, Delete) and the servers a project gets in its
   settings (T66).
+  Skills (since 0.237, `docs/ITERATION-8.md`): `GET /api/skills` ({skills: [...]}), `POST
+  /api/skills`, `PATCH/DELETE /api/skills/{id}`, `GET /api/skills/{id}/files` ({files: [{path,
+  size, executable?}]}), the owner's only. A skill: {id, name, description?, allowed_tools[],
+  sha256, size (unpacked bytes), files, all_projects, project_ids[], updated_at}. `POST` is
+  multipart: one `zip` part, or `file` parts whose file names are the paths inside the skill, and
+  an optional `name`; `SKILL.md` at the top or under one top folder; `__MACOSX/`, `.git/` and
+  `.DS_Store` dropped. The name is the frontmatter's `name`, else the top folder's, else `name`;
+  a name the owner has already replaces that skill's content and keeps its projects (`200`), a
+  new one is `201` for all projects. Limits: an upload of 8 MiB, 4 MiB and 500 files unpacked, a
+  path of 200 bytes, 100 skills (`409 too_many_skills`); over the size `413`. A `SKILL.md` with
+  `hooks` is `422 skill_hooks`; a path out of the skill, a link, a bad name or a frontmatter the
+  hub cannot read for sure (§20) `400`. The hub keeps an archive it writes itself (paths sorted,
+  fixed times, mode `0755` for an executable entry of a `.zip`, else `0644`), whose sha256 is the
+  skill's hash: the same files give the same hash. `PATCH` takes {all_projects?, project_ids?}.
+  The client shows the section "Skills" in Settings (upload a folder or a `.zip`, the list with
+  each skill's description, size, files and `allowed-tools`, the projects, delete) and the skills
+  a project gets in its settings.
   `POST /api/sessions/{id}/secrets` (since 0.147, §14) {kind, name, value?, vault?, vault_field?,
   passphrase?, remember?, request_id?} (unknown fields: `422`; one of `value` and `vault` exactly,
   else `400`; `vault` since 0.216 — a Vaultwarden entry the worker reads itself, §5.3, only on a
@@ -4560,7 +4589,8 @@ worker's responsibility, not the adapter's (§17.2).
 The process `claude -p --output-format stream-json --input-format stream-json
 --include-partial-messages --replay-user-messages --permission-prompts host
 --permission-prompt-tool stdio --thinking-display summarized [--strict-mcp-config] --mcp-config '<json>'
---allowedTools mcp__hqc [--disallowedTools <rules…>] [--settings '<json: the environment's rules, crossSessionInbound?>']
+--allowedTools mcp__hqc [--disallowedTools <rules…>] [--settings '<json: the environment's rules, crossSessionInbound?, skillOverrides?>']
+[--plugin-dir <the hub's skills>]
 (--setting-sources user,local | --setting-sources user,project,local | --restricted)
 --permission-mode <"ask" mode | auto>
 [--append-system-prompt <text>] --session-id <uuid>` for a new session
@@ -4609,7 +4639,19 @@ flag fails every session start. Checked on 2.1.300: `--resume` continues the sam
 jsonl file. `--strict-mcp-config` disables MCP servers from `~/.claude.json`
 and the project's `.mcp.json`; they can be allowed only through the environment (§14,
 `allow_local_mcp`: since 0.56 such a session runs without the flag, the hqc server still comes
-in `--mcp-config`). `--settings` carries the effective rules of the session's environment
+in `--mcp-config`). Since 0.237 the skills of the hub (§5.3 `session.start.skills`, §14
+`hub_skills`) come as a plugin folder the worker builds, `--plugin-dir
+$HQC_HOME/hub-skills/sets/<hash of the set>`: `.claude-plugin/plugin.json` `{"name": "hqc"}`
+written by the worker and `skills/<name>/` unpacked from each archive, nothing of the hub's
+elsewhere in it. The CLI lists such a skill as `hqc:<name>` in `system/init`, and `/<name>` and
+`Skill("<name>")` find it without the prefix when the name is unique (checked on 2.1.312 and
+2.1.328); `--settings` gets `"skillOverrides": {"<name>": "off"}` for each, which hides a
+same-named skill of `~/.claude/skills` (or of the repository with `project_settings`): the hub's
+copy wins, `/<name>` typed in full then answers that the machine's skill is off, and the chat's
+`/` menu offers `hqc:<name>` for `<name>`. Checked on 2.1.328: a skill's `allowed-tools` lets
+its tools run without a card while it is active but not past the worker's `deny`, and a
+`` !`command` `` in `SKILL.md` goes through the same permission check; only a skill's `hooks`
+would run outside them, and such a skill is refused (§20). `--settings` carries the effective rules of the session's environment
 (§14: `[permissions]` merged with the environment's; since 0.84 with `allow_subagent_messages`
 also `crossSessionInbound`, below), and the adapter's own policy (deny
 before asking, `policy_hint`) reads the same merged lists. In the process env: `MCP_TOOL_TIMEOUT` (§7.1): milliseconds, default
@@ -7199,6 +7241,7 @@ ssh_keys = ["infra_ed25519"]          # keys of the worker's store, $HQC_HOME/ke
 allow_local_mcp = false
 project_settings = false
 hub_mcp = false                       # true: the owner's remote MCP servers from the hub (0.235)
+hub_skills = false                    # true: the owner's skills from the hub (0.237)
 [environments.infra.permissions]
 unblock = ["Bash(ssh:*)"]             # lift worker-wide deny rules here only
 allow = ["Bash(ssh debian@192.168.1.20:*)"]
@@ -7256,6 +7299,12 @@ base_url = "http://192.168.1.229:8082" # must equal the hub's description
   `default` is still read when a session of the bound workspace runs in it. A restricted
   session (§8.4) still gets `--restricted`. Kept on the worker like `ssh_keys`: not in `hello`,
   `hqc-worker env` shows it. **Claude Code only**, ACP agents ignore it; default false;
+- `hub_skills` (since 0.237): the sessions get the skills the hub keeps for their project
+  (§5.3 `session.start.skills`), as the plugin `hqc` (`--plugin-dir`, §8.1), the hub's copy
+  hiding a same-named skill of the machine. Turning it on trusts the hub with instructions and
+  scripts the agent runs, within the worker's `deny` and the session's mode; a skill with
+  `hooks` is never taken (§20). Worker-local like `hub_mcp`, not in `hello`; **Claude Code
+  only**; default false;
 - `launch`: `process` (the only value in the first version; `os-user` and `container`
   are reserved).
 
@@ -8093,6 +8142,19 @@ is not asked, does not see the question or the answer, and does not work on it.
   connection goes to that address, and redirects are not followed. A relay request needs the
   session token of a session the sending worker runs; a server answers only sessions of the
   projects its owner gave it to.
+- Skills from the hub (since 0.237): a skill is instructions and scripts the agent follows and
+  runs, so a hub (or whoever uploads to it as the owner) that gives one to a project steers that
+  project's agents on every worker with `hub_skills`, within the worker's `deny`, its
+  `--disallowedTools` and the session's mode, as input can. Its `allowed-tools` lift the card
+  for those tools while it is active, which a hub could do anyway by answering the card (§2.1).
+  Its `hooks` would run shell commands outside all of that, so the hub refuses a skill with a
+  `hooks` key in any of its `SKILL.md` files, and the worker, which does not trust the hub for
+  it, refuses it again: a frontmatter is taken only when each of its top-level lines is a plain
+  `key:` (no quotes, `{`, `?` or `<<` merge) and none is `hooks`, and no line of the file at its
+  first column is a `hooks:` key. The worker writes the plugin's manifest itself and the
+  skill's files only under `skills/<name>/` of its own folder, so a skill cannot add a plugin's
+  hooks, MCP servers, agents or commands; it unpacks only relative paths without `..`, no
+  links, with the limits of §6, and checks the archive's sha256.
 - `Origin` **[decision]**: a WebSocket upgrade of `/api/ws` without `Origin`, or with an `Origin`
   that does not match the request's `Host`, gets `403`; non-GET `/api/*` requests with a foreign
   `Origin` get `403` (without `Origin` they pass: that is how non-browser clients come). A match

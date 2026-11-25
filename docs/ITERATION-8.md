@@ -111,7 +111,7 @@ Acceptance: the common checks. Worker tests:
 
 ## T68. Skills on the hub
 
-Sections: §3, §5.3, §6, §20.
+Sections: §5.3, §6, §20.
 - Migration `0058_skills`: `skills` (owner, name, description, allowed_tools, sha256, size,
   files, the archive, all projects or not) and `skill_projects`.
 - REST, owner only:

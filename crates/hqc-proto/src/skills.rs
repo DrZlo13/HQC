@@ -146,7 +146,14 @@ pub fn check_skill_md(text: &str) -> Result<Frontmatter, String> {
         if l.trim().is_empty() || l.starts_with('#') {
             continue;
         }
-        if l.starts_with([' ', '\t', '-']) {
+        // A tab at the start is an error to YAML, which a lax parser might read otherwise.
+        if l.starts_with('\t') {
+            return Err(format!(
+                "frontmatter line {} starts with a tab: indent with spaces",
+                i + 2
+            ));
+        }
+        if l.starts_with([' ', '-']) {
             match entries.last_mut() {
                 Some(e) => e.2.push(l.trim().to_string()),
                 None => return Err(format!("frontmatter line {}: no key before it", i + 2)),
@@ -340,6 +347,8 @@ mod tests {
             "---\nname: x\n...\n\"hooks\": {}\n---\n",
             "---\nname: x\n%YAML 1.2\n---\n",
             "---\nname: x\n!!str hooks: {}\n---\n",
+            "---\nname: x\n\thooks: {Stop: []}\n---\n",
+            "---\nname: x\ndescription: >\n\tlong\n---\n",
         ] {
             assert!(check_skill_md(bad).is_err(), "{bad:?}");
         }

@@ -8155,7 +8155,7 @@ is not asked, does not see the question or the answer, and does not work on it.
   it breaks a line or spaces but `\n`, `\r\n`, a space and a tab (a lone CR, U+0085, U+2028,
   U+FEFF and the like are refused: YAML and JavaScript take some of them for line breaks or
   spaces, and a security review made a hook run past a looser check with a lone CR and with
-  `---` followed by U+FEFF), each of its top-level lines is a plain `key:` (no quotes, `{`, `?`,
+  `---` followed by U+FEFF), no line of it starts with a tab, each of its top-level lines is a plain `key:` (no quotes, `{`, `?`,
   `!` tag, `%` directive, `...` or `<<` merge) and none is `hooks`; and no line of the file at its
   first column is a `hooks:` key. The worker writes the plugin's manifest itself and the skill's
   files only under `skills/<name>/` of its own folder, so a skill cannot add a plugin's hooks,

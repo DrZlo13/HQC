@@ -29,7 +29,7 @@ use crate::inbox::ArtifactClient;
 const MAX_ARCHIVE_BYTES: u64 = 8 * 1024 * 1024;
 /// The version of [`check_archive`] and [`hqc_proto::skills::check_skill_md`]; raised with
 /// every change that refuses more, so that no set built before it is used again.
-const CHECKS: u32 = 2;
+const CHECKS: u32 = 3;
 /// Archives and sets not used for this long go at the worker's start.
 pub const UNUSED: Duration = Duration::from_secs(7 * 24 * 3600);
 

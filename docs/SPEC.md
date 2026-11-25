@@ -8286,7 +8286,7 @@ migration. §5.4: such a worker sends `vault_fields: true`; one before 0.243 wou
 takes `vault_field`, only for a worker that sends it (else `409 unavailable`).
 
 ### 0.241 → 0.242 (every key in Settings; the macOS app keeps only its global shortcut)
-§6, the Settings page: the keys of the client — Quote and Search of selected text (0.236), the
+§6, the Settings page: the keys of the client — Quote and Search of selected text (0.238), the
 project search, the session column — were fixed, and the macOS app had its own shortcuts in its
 own Settings for a new session, archiving the open session, the previous and the next session and
 project, Back and Forward, which it ran by clicking the page and which a browser did not have. Now

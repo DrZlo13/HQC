@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.262, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.263, 2026-11-26. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -3051,7 +3051,14 @@ page (a reasoning in a folded run of calls) or the browser has no custom highlig
 marked as a search hit is. Found nowhere: "The quoted text is not in this chat"; an older page that
 did not load: "Older history did not load".
 The input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
-computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input
+computer its placeholder says "Enter to send, Shift+Enter for a new line". Since 0.263, on a
+computer ArrowUp in the empty input (no text, no files, no list of commands or quick messages
+open) puts in the owner's previous message of the session, as a shell's history: the texts of
+`user.message` with `human` and of the messages not stored yet, newest first, not their files;
+more ArrowUp go to older ones, ArrowDown back to newer ones and to the empty input, the caret at
+the end (in a message of several lines the keys first move the caret to its first or last line).
+A recalled message is not the draft until it is edited, and then it is an ordinary one; nothing is
+sent. On a computer the input
 takes the caret when the chat opens, once its newest page is in, unless a request waits for an
 answer (an open approval in the feed, or the session `waiting`), another field has the focus, or a
 menu or the slid-out column is open; on a phone only when the chat replaces a new session's window.
@@ -3140,7 +3147,14 @@ page (a reasoning in a folded run of calls) or the browser has no custom highlig
 marked as a search hit is. Found nowhere: "The quoted text is not in this chat"; an older page that
 did not load: "Older history did not load".
 The input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
-computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input
+computer its placeholder says "Enter to send, Shift+Enter for a new line". Since 0.263, on a
+computer ArrowUp in the empty input (no text, no files, no list of commands or quick messages
+open) puts in the owner's previous message of the session, as a shell's history: the texts of
+`user.message` with `human` and of the messages not stored yet, newest first, not their files;
+more ArrowUp go to older ones, ArrowDown back to newer ones and to the empty input, the caret at
+the end (in a message of several lines the keys first move the caret to its first or last line).
+A recalled message is not the draft until it is edited, and then it is an ordinary one; nothing is
+sent. On a computer the input
 takes the caret when the chat opens, once its newest page is in, unless a request waits
 for an answer (an open approval in the feed, or the session `waiting`), another field has the
 focus, or a menu or the slid-out column is open; on a phone only when the chat replaces a new
@@ -8559,6 +8573,12 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.262 → 0.263 (ArrowUp recalls the owner's messages)
+§6, the client's input: on a computer ArrowUp in the empty input puts in the owner's previous
+message of the session (`human` `user.message` and messages not stored yet, newest first, text
+only), ArrowUp again goes older, ArrowDown newer and back to the empty input; not with a list of
+the composer open; a recalled message becomes the draft only when edited; nothing is sent.
 
 ### 0.256 → 0.262 (iteration 9 planned: MCP servers on the machine)
 §19: a new iteration 9, MCP servers that run on the machine, declared per environment in

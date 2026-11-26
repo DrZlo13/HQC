@@ -398,6 +398,8 @@ export function Chat({
     return { items, blocks: buildFeed(items, t) };
   }, [t, t.revision, loaded, requestsOnly]);
   const items = built.items;
+  // What ArrowUp in the empty field brings back: what the owner typed in this session, newest first.
+  const recall = useMemo(() => ownMessages(t), [t, t.revision]);
   const blocks = [...built.blocks];
   // While the agent's text is being written, the inputs that came meanwhile and the messages
   // not stored yet stand under it (SPEC §6), and so does the thinking being written.
@@ -1346,6 +1348,7 @@ export function Chat({
         <Composer
           initial={app.draft(sessionId)}
           onDraft={(text) => app.setDraft(sessionId, text)}
+          recall={recall}
           autoFocus={focusInput}
           insertQuote={insertQuote}
           insertText={insertText}
@@ -2075,6 +2078,7 @@ export function Composer({
   insertText,
   initial = '',
   onDraft,
+  recall = [],
   autoFocus = false,
   wait,
   giveSecret,
@@ -2108,6 +2112,10 @@ export function Composer({
   /** The text not sent last time (a draft), and where every change of it goes. */
   initial?: string;
   onDraft?: (text: string) => void;
+  /** The owner's own messages of the session, newest first: ArrowUp in the empty field puts them
+   *  in one by one (as a shell's history), ArrowDown goes back to newer ones and to the empty
+   *  field. Not on a phone. */
+  recall?: string[];
   /** The caret in the field when it is shown with this set, or when this turns on. */
   autoFocus?: boolean;
   /** Sending waits for this (a new session being created): send is disabled with it as its
@@ -2129,10 +2137,13 @@ export function Composer({
   };
 }) {
   const [text, setText] = useState(initial);
+  // Where ArrowUp went in `recall`, while the field shows that message unchanged.
+  const walk = useRef<number | null>(null);
   const typed = useRef(false);
   useEffect(() => {
-    // Not the draft it opened with: that one is kept already.
-    if (typed.current) onDraft?.(text);
+    // Not the draft it opened with: that one is kept already. Nor a message recalled and not
+    // edited: the draft stays the empty one the walk began at.
+    if (typed.current && walk.current === null) onDraft?.(text);
     typed.current = true;
   }, [text]);
   const area = useRef<HTMLTextAreaElement>(null);
@@ -2216,6 +2227,8 @@ export function Composer({
     };
   }, [quickOpen]);
   const edit = (t: string) => {
+    // Typing makes a recalled message an ordinary draft.
+    walk.current = null;
     // In the same update as the text: a key right after typing moves from the first match.
     setPick(0);
     setText(t);
@@ -2237,6 +2250,7 @@ export function Composer({
   const submit = () => {
     if (!canSend) return;
     const sent = text.trim();
+    walk.current = null;
     const refused = onSend(sent);
     setText('');
     area.current?.focus();
@@ -2344,6 +2358,31 @@ export function Composer({
             e.preventDefault();
             e.stopPropagation();
             setClosedAt(text);
+            return;
+          }
+        }
+        if (
+          (e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
+          !coarse &&
+          !quickOpen &&
+          !e.isComposing &&
+          !(e.shiftKey || e.altKey || e.ctrlKey || e.metaKey)
+        ) {
+          const el = e.currentTarget as HTMLTextAreaElement;
+          const at = walk.current;
+          const up = e.key === 'ArrowUp';
+          // A recalled message of several lines: the keys move the caret through its lines, and
+          // walk on from its first line up or its last line down.
+          const edge = up ? !text.slice(0, el.selectionStart).includes('\n') : !text.slice(el.selectionEnd).includes('\n');
+          const next = at === null ? (up && text === '' && files.length === 0 && reading === 0 ? 0 : null) : edge ? at + (up ? 1 : -1) : null;
+          if (next !== null && next < recall.length) {
+            e.preventDefault();
+            walk.current = next < 0 ? null : next;
+            caretToEnd.current = true;
+            const t = next < 0 ? '' : recall[next];
+            // A recalled `/command` does not open the commands' list: the keys keep walking.
+            setClosedAt(t);
+            setText(t);
             return;
           }
         }
@@ -2491,6 +2530,14 @@ export function Composer({
       </form>
     </div>
   );
+}
+
+/** The texts the owner typed in the session (`human`, SPEC §4), stored or not yet, newest first. */
+function ownMessages(t: Timeline): string[] {
+  const out: string[] = [];
+  for (const e of t.events()) if (e.type === 'user.message' && e.payload.human && e.payload.text.trim()) out.push(e.payload.text);
+  for (const it of t.items()) if (it.kind === 'pending' && it.pending.text.trim()) out.push(it.pending.text);
+  return out.reverse();
 }
 
 /** Index of the first block to render: the first that starts at or after `from`. Blocks

@@ -816,3 +816,36 @@ async fn a_refused_registration_says_its_status_and_type() {
     );
     hub.finish().await;
 }
+
+/// SPEC 0.262 (iteration 9): the MCP servers a worker's `hello` names per environment are listed
+/// read-only beside the hub's, by name, worker and environment; a name that is not one is not.
+#[tokio::test]
+async fn the_workers_local_servers_are_listed() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("drzlo-mac").await;
+    let mut w = FakeWorker::connect(&hub, &token)
+        .await
+        .expect("worker connect");
+    w.hello_with(
+        WS_PATH,
+        uuid::Uuid::new_v4(),
+        json!({"environments": [
+            "default",
+            {"name": "firmware", "mcp_servers": ["figma-dev", "figma"]},
+            {"name": "infra", "mcp_servers": ["kicad", "Not A Name"]}
+        ]}),
+    )
+    .await;
+    let worker_id = w.worker_id.clone();
+    let (s, v) = hub.get("/api/mcp/servers").await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["servers"], json!([]));
+    assert_eq!(
+        v["local"],
+        json!([
+            {"name": "figma", "worker_id": worker_id, "worker_name": "drzlo-mac", "environment": "firmware"},
+            {"name": "figma-dev", "worker_id": worker_id, "worker_name": "drzlo-mac", "environment": "firmware"},
+            {"name": "kicad", "worker_id": worker_id, "worker_name": "drzlo-mac", "environment": "infra"},
+        ])
+    );
+}

@@ -43,7 +43,9 @@ import {
   type ModelProvider,
   parseModelProvider,
   type McpServer,
+  type McpServerList,
   parseMcpServer,
+  parseLocalMcpServer,
   type Skill,
   type SkillFile,
   parseSkill,
@@ -867,11 +869,15 @@ export class Api {
     };
   }
 
-  /** The owner's remote MCP servers (SPEC 0.235). */
-  async mcpServers(): Promise<McpServer[]> {
-    const data = (await this.req('GET', '/api/mcp/servers')) as { servers?: unknown };
+  /** The owner's remote MCP servers (SPEC 0.235) and, since 0.262, the servers its workers'
+   *  `worker.toml` declare (`local`; a hub without them: none). */
+  async mcpServers(): Promise<McpServerList> {
+    const data = (await this.req('GET', '/api/mcp/servers')) as { servers?: unknown; local?: unknown };
     if (!Array.isArray(data?.servers)) throw new ApiError(500, 'mcp servers: expected a list');
-    return data.servers.map(parseMcpServer);
+    return {
+      servers: data.servers.map(parseMcpServer),
+      local: Array.isArray(data.local) ? data.local.map(parseLocalMcpServer) : [],
+    };
   }
 
   async createMcpServer(f: McpServerFields): Promise<McpServer> {

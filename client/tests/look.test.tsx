@@ -89,7 +89,7 @@ it('Settings has one Look switch next to the theme; a pick goes to the hub as `P
   };
   // Settings lists the workers, the MCP servers and the skills too, and reads the user's quick
   // messages; this test is about the look.
-  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => [], skills: async () => [], me: async () => app.me! }), socket);
+  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => ({ servers: [], local: [] }), skills: async () => [], me: async () => app.me! }), socket);
   app.me = ME;
   root = document.createElement('div');
   document.body.appendChild(root);

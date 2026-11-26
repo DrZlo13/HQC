@@ -11,6 +11,7 @@
     "environments": [
       {
         "name": "infra",
+        "mcp_servers": ["figma"],
         "permissions": {
           "unblock": ["Bash(ssh:*)"],
           "allow": ["Bash(ssh debian@192.168.1.20:*)"],

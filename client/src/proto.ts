@@ -1685,6 +1685,31 @@ export interface McpServer {
 
 export const MCP_STATUSES = ['ok', 'failing', 'sign_in'] as const;
 
+/** An MCP server a worker's `worker.toml` declares for one of its environments (SPEC 0.262,
+ *  iteration 9): read-only here, as `GET /api/mcp/servers` `local[]` lists it. */
+export interface LocalMcpServer {
+  name: string;
+  worker_id: Uuid;
+  worker_name: string;
+  environment: string;
+}
+
+export function parseLocalMcpServer(v: unknown): LocalMcpServer {
+  const o = obj(v, 'local mcp server');
+  return {
+    name: str(o, 'name'),
+    worker_id: str(o, 'worker_id'),
+    worker_name: str(o, 'worker_name'),
+    environment: str(o, 'environment'),
+  };
+}
+
+/** `GET /api/mcp/servers`: the hub's servers and (SPEC 0.262) those of the owner's machines. */
+export interface McpServerList {
+  servers: McpServer[];
+  local: LocalMcpServer[];
+}
+
 export function parseMcpServer(v: unknown): McpServer {
   const o = obj(v, 'mcp server');
   return {

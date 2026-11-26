@@ -1393,6 +1393,10 @@ pub struct EnvironmentInfo {
     pub name: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_local_mcp: bool,
+    /// The names of its `[environments.<name>.mcp_servers.*]` (SPEC 0.262, iteration 9): the
+    /// MCP servers of the machine its sessions get. Never a command, a URL or a value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<String>,
     #[serde(default)]
     pub permissions: EnvPermissions,
 }
@@ -1424,6 +1428,8 @@ enum EnvironmentWire {
         #[serde(default)]
         allow_local_mcp: bool,
         #[serde(default)]
+        mcp_servers: Vec<String>,
+        #[serde(default)]
         permissions: EnvPermissions,
     },
 }
@@ -1438,10 +1444,12 @@ impl From<EnvironmentWire> for EnvironmentInfo {
             EnvironmentWire::Full {
                 name,
                 allow_local_mcp,
+                mcp_servers,
                 permissions,
             } => Self {
                 name,
                 allow_local_mcp,
+                mcp_servers,
                 permissions,
             },
         }
@@ -2504,6 +2512,20 @@ mod tests {
                 ..EnvironmentInfo::default()
             }]
         );
+    }
+
+    /// SPEC 0.262: an environment names its local MCP servers; an older worker names none.
+    #[test]
+    fn hello_environments_name_their_mcp_servers() {
+        let e: Vec<EnvironmentInfo> = serde_json::from_value(json!([
+            {"name": "fw", "mcp_servers": ["figma", "figma-dev"]},
+            {"name": "old"}
+        ]))
+        .unwrap();
+        assert_eq!(e[0].mcp_servers, ["figma", "figma-dev"]);
+        assert!(e[1].mcp_servers.is_empty());
+        let back = serde_json::to_value(&e[1]).unwrap();
+        assert!(back.get("mcp_servers").is_none(), "{back}");
     }
 
     /// T45: the clone frame carries its kind, and its outcome is a path or an error.

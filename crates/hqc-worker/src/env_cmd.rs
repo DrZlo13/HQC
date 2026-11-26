@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::Context;
 use hqc_proto::frame::{rule_source, DEFAULT_ENVIRONMENT};
 
-use crate::config::{Config, Environment};
+use crate::config::{Config, Environment, LocalMcpTransport, McpValue};
 use crate::ssh::Store;
 
 fn vars(out: &mut String, e: &Environment) {
@@ -25,6 +25,78 @@ fn vars(out: &mut String, e: &Environment) {
         );
     }
 }
+
+/// A value of a local MCP server as `hqc-worker env` shows it: never the value itself.
+fn shown(v: &McpValue) -> String {
+    match v {
+        McpValue::Plain(_) => "***".into(),
+        McpValue::Vault(r) => match &r.field {
+            Some(f) => format!("<Vaultwarden {}, field {f}>", r.entry),
+            None => format!("<Vaultwarden {}>", r.entry),
+        },
+    }
+}
+
+/// `[environments.<name>.mcp_servers.*]` (iteration 9), without values.
+fn servers(out: &mut String, e: &Environment) {
+    if e.mcp_servers.is_empty() {
+        let _ = writeln!(out, "    mcp_servers: none");
+        return;
+    }
+    let _ = writeln!(out, "    mcp_servers:");
+    for s in &e.mcp_servers {
+        let pin = if s.pin {
+            "tools pinned"
+        } else {
+            "pin = false: tools not pinned"
+        };
+        match &s.transport {
+            LocalMcpTransport::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            } => {
+                let mut line = format!("      {}: stdio {command}", s.name);
+                for a in args {
+                    line.push(' ');
+                    line.push_str(a);
+                }
+                let _ = writeln!(out, "{line} ({pin})");
+                if !env.is_empty() {
+                    let vars: Vec<String> = env
+                        .iter()
+                        .map(|(k, v)| format!("{k}={}", shown(v)))
+                        .collect();
+                    let _ = writeln!(out, "        env: {}", vars.join(" "));
+                }
+                let _ = writeln!(
+                    out,
+                    "        runs in: {}",
+                    cwd.as_ref()
+                        .map_or("the session's working folder".into(), |c| {
+                            c.display().to_string()
+                        })
+                );
+            }
+            LocalMcpTransport::Http { url, headers } => {
+                let _ = writeln!(out, "      {}: http {url} ({pin})", s.name);
+                if !headers.is_empty() {
+                    let h: Vec<String> = headers
+                        .iter()
+                        .map(|(k, v)| format!("{k}: {}", shown(v)))
+                        .collect();
+                    let _ = writeln!(out, "        headers: {}", h.join(", "));
+                }
+            }
+        }
+    }
+}
+
+/// The warning of an environment with `allow_local_mcp` (iteration 9).
+const ALLOW_LOCAL_MCP_WARNING: &str = "every MCP server this machine's Claude Code knows, the \
+     account's claude.ai connectors (mail, drive, calendar...) included; name the servers in \
+     [environments.<name>.mcp_servers] instead";
 
 fn list(out: &mut String, label: &str, rules: &[String]) {
     if !rules.is_empty() {
@@ -51,7 +123,12 @@ pub fn summary(cfg: &Config) -> String {
             let _ = writeln!(out, "  {}:", e.name);
         }
         vars(&mut out, e);
-        let _ = writeln!(out, "    allow_local_mcp: {}", e.allow_local_mcp);
+        if e.allow_local_mcp {
+            let _ = writeln!(out, "    allow_local_mcp: true: {ALLOW_LOCAL_MCP_WARNING}");
+        } else {
+            let _ = writeln!(out, "    allow_local_mcp: false");
+        }
+        servers(&mut out, e);
         let _ = writeln!(out, "    project_settings: {}", e.project_settings);
         let _ = writeln!(out, "    hub_mcp: {}", e.hub_mcp);
         let _ = writeln!(out, "    hub_skills: {}", e.hub_skills);
@@ -162,15 +239,18 @@ pub fn which(cfg: &Config, path: &Path) -> anyhow::Result<String> {
             k.name, k.fingerprint
         );
     }
-    let _ = writeln!(
-        out,
-        "    local MCP servers: {}",
-        if e.allow_local_mcp {
-            "allowed"
-        } else {
-            "off (--strict-mcp-config)"
-        }
-    );
+    if e.allow_local_mcp {
+        let _ = writeln!(
+            out,
+            "    the machine's MCP servers: all (allow_local_mcp, no --strict-mcp-config): {ALLOW_LOCAL_MCP_WARNING}"
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "    the machine's MCP servers: only those of mcp_servers (--strict-mcp-config)"
+        );
+    }
+    servers(&mut out, &e);
     let _ = writeln!(
         out,
         "    project settings: {}",
@@ -330,6 +410,53 @@ environment = "infra"
 
     /// A permissions table under another environment's name makes an environment no folder
     /// runs in; the listing says so.
+    #[test]
+    fn local_mcp_servers_are_listed_without_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let c = Config::parse(&format!(
+            "hub_url = \"https://h\"\nallowed_roots = [\"{r}\"]\n\
+             [environments.firmware]\nallow_local_mcp = true\n\
+             [environments.firmware.mcp_servers.figma]\ncommand = \"npx\"\n\
+             args = [\"-y\", \"figma-developer-mcp\", \"--stdio\"]\n\
+             env = {{ FIGMA_API_KEY = {{ vault = \"figma token\" }}, PLAIN = \"s3cret-value\" }}\n\
+             [environments.firmware.mcp_servers.figma-dev]\ntype = \"http\"\n\
+             url = \"http://127.0.0.1:3845/mcp\"\npin = false\n\
+             headers = {{ Authorization = \"Bearer s3cret-header\" }}\n\
+             [[env_bindings]]\npath = \"{r}\"\nenvironment = \"firmware\"\n",
+            r = root.display()
+        ))
+        .unwrap();
+        for out in [summary(&c), which(&c, &root).unwrap()] {
+            assert!(
+                out.contains("figma: stdio npx -y figma-developer-mcp --stdio (tools pinned)"),
+                "{out}"
+            );
+            assert!(
+                out.contains("env: FIGMA_API_KEY=<Vaultwarden figma token> PLAIN=***"),
+                "{out}"
+            );
+            assert!(
+                out.contains("runs in: the session's working folder"),
+                "{out}"
+            );
+            assert!(
+                out.contains(
+                    "figma-dev: http http://127.0.0.1:3845/mcp (pin = false: tools not pinned)"
+                ),
+                "{out}"
+            );
+            assert!(out.contains("headers: Authorization: ***"), "{out}");
+            assert!(out.contains("claude.ai connectors"), "{out}");
+            assert!(!out.contains("s3cret"), "{out}");
+        }
+        assert!(summary(
+            &Config::parse("hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n[environments.x]\n")
+                .unwrap()
+        )
+        .contains("mcp_servers: none"));
+    }
+
     #[test]
     fn unbound_environment_is_marked() {
         let cfg = Config::parse(

@@ -21,6 +21,8 @@
 
 pub mod attach;
 pub mod daemon;
+pub mod local;
+pub mod pins;
 pub mod procs;
 pub mod publish;
 pub mod server;
@@ -78,6 +80,16 @@ pub enum ToDaemon {
         #[serde(default)]
         params: Value,
     },
+    /// The launcher of the session's local MCP server `server` (iteration 9) asks for its
+    /// resolved spec ([`local::LocalSpec`]), answered with [`FromDaemon::Result`].
+    Local { id: u64, server: String },
+    /// The launcher's server failed (`code` [`local::MCP_SERVER_FAILED`] or
+    /// [`local::MCP_TOOLS_CHANGED`]); the daemon puts a `system` line into the chat.
+    LocalFailed {
+        server: String,
+        code: String,
+        detail: String,
+    },
 }
 
 /// What the daemon answers.
@@ -122,6 +134,8 @@ struct Tokens {
     turn: Option<Uuid>,
     /// The hub's remote MCP servers the agent was started with (SPEC 0.235).
     upstreams: Vec<String>,
+    /// The machine's MCP servers the agent was started with (iteration 9).
+    local: Option<crate::config::LocalMcp>,
 }
 
 /// What the daemon knows of a session's agent process.
@@ -159,6 +173,7 @@ impl McpCalls {
                 pid: AgentPid::Starting,
                 turn: None,
                 upstreams: vec![],
+                local: None,
             },
         );
     }
@@ -168,6 +183,21 @@ impl McpCalls {
         if let Some(t) = self.lock().sessions.get_mut(&session_id) {
             t.upstreams = names;
         }
+    }
+
+    /// The machine's MCP servers the session's agent was started with (iteration 9).
+    pub fn set_local(&self, session_id: Uuid, local: Option<crate::config::LocalMcp>) {
+        if let Some(t) = self.lock().sessions.get_mut(&session_id) {
+            t.local = local;
+        }
+    }
+
+    /// The machine's MCP servers of the session's running agent.
+    pub fn local(&self, session_id: Uuid) -> Option<crate::config::LocalMcp> {
+        self.lock()
+            .sessions
+            .get(&session_id)
+            .and_then(|t| t.local.clone())
     }
 
     /// The session's agent was started with the hub's MCP server `name`.

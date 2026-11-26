@@ -304,6 +304,19 @@ pub struct McpSignIn {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpServerList {
     pub servers: Vec<McpServer>,
+    /// The MCP servers of the owner's workers (SPEC 0.262, iteration 9), by name, as their last
+    /// `hello` named them per environment: kept in `worker.toml`, shown read-only.
+    #[serde(default)]
+    pub local: Vec<LocalMcpServer>,
+}
+
+/// An MCP server a worker's `worker.toml` declares for one of its environments (SPEC 0.262).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalMcpServer {
+    pub name: String,
+    pub worker_id: Uuid,
+    pub worker_name: String,
+    pub environment: String,
 }
 
 /// A skill the owner keeps on the hub (SPEC 0.245, iteration 8): `GET /api/skills`. The

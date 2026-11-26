@@ -43,8 +43,9 @@ async fn try_put_icon(
         .file_name(name.to_string())
         .mime_str(mime)
         .unwrap();
-    let r = hub
-        .http
+    // A client of its own: the hub may close the connection before it reads the whole upload,
+    // and a pooled connection left so broke the test's next request now and then.
+    let r = reqwest::Client::new()
         .put(format!("{}/api/projects/{pid}/icon", hub.base))
         .multipart(reqwest::multipart::Form::new().part("file", part))
         .send()

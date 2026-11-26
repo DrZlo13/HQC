@@ -823,7 +823,9 @@ async fn a_refused_registration_says_its_status_and_type() {
 async fn the_workers_local_servers_are_listed() {
     let hub = TestHub::start().await;
     let (_, token) = hub.enroll("drzlo-mac").await;
-    let mut w = FakeWorker::connect(&hub, &token).await.expect("worker connect");
+    let mut w = FakeWorker::connect(&hub, &token)
+        .await
+        .expect("worker connect");
     w.hello_with(
         WS_PATH,
         uuid::Uuid::new_v4(),

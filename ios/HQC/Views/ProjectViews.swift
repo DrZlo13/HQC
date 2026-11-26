@@ -3,6 +3,7 @@ import SwiftUI
 /// The projects, the personal one first, then favorites, then by name.
 struct ProjectsView: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.denseUI) private var dense
     @State private var creating = false
     @State private var editMode: EditMode = .inactive
     /// Every project's live sessions instead of the projects (the title's menu).
@@ -14,13 +15,15 @@ struct ProjectsView: View {
         List {
             if !app.projectsLoaded && app.projects.isEmpty {
                 ForEach(0..<4, id: \.self) { i in
-                    SkeletonRow(icon: 44, widths: [0.45 - Double(i % 2) * 0.12, 0.7])
+                    SkeletonRow(icon: dense ? 22 : 44, widths: [0.45 - Double(i % 2) * 0.12, 0.7])
                 }
             }
             ForEach(sorted) { project in
                 NavigationLink(value: Route.project(project)) {
                     ProjectRow(project: project, unread: unread(project))
                 }
+                .listRowInsets(dense ? EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12) : nil)
+                .listRowBackground(dense ? Color.clear : nil)
                 .swipeActions(edge: .leading) {
                     Button(project.favorite_at == nil ? "Favorite" : "Unfavorite",
                            systemImage: project.favorite_at == nil ? "star" : "star.slash") {
@@ -34,12 +37,15 @@ struct ProjectsView: View {
             }
             .onMove { app.moveProjects(from: $0, to: $1) }
         }
+        .denseListStyle(dense)
+        .environment(\.defaultMinListRowHeight, dense ? 32 : 44)
         .overlay {
             if showsLive {
                 LiveSessionsList().paletteBackground()
             }
         }
         .navigationTitle(showsLive ? "Live sessions" : "Projects")
+        .navigationBarTitleDisplayMode(dense ? .inline : .automatic)
         .toolbarTitleMenu {
             Picker("Show", selection: $showsLive) {
                 Label("Projects", systemImage: "square.grid.2x2").tag(false)
@@ -82,6 +88,16 @@ struct ProjectsView: View {
     }
 }
 
+private extension View {
+    @ViewBuilder func denseListStyle(_ dense: Bool) -> some View {
+        if dense {
+            self.listStyle(.plain)
+        } else {
+            self.listStyle(.insetGrouped)
+        }
+    }
+}
+
 struct ProjectTile: View {
     let project: Project
     var size: CGFloat = 40
@@ -104,40 +120,68 @@ struct ProjectTile: View {
 struct ProjectRow: View {
     @Environment(AppModel.self) private var app
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     let project: Project
     var unread = 0
 
     var body: some View {
-        HStack(spacing: 12) {
-            ProjectBadge(project: project)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(project.displayName).font(.headline)
-                    if project.favorite_at != nil {
-                        Image(systemName: "star.fill").font(.caption2).foregroundStyle(.yellow)
-                    }
+        if dense {
+            HStack(spacing: 9) {
+                ProjectBadge(project: project, size: 22)
+                Text(project.displayName)
+                    .font(.system(size: 14.5, weight: unread > 0 ? .semibold : .regular))
+                    .lineLimit(1)
+                if project.favorite_at != nil {
+                    Image(systemName: "star.fill").font(.system(size: 9)).foregroundStyle(.yellow)
                 }
+                Spacer(minLength: 4)
                 if app.projectWorking(project.id) {
-                    let agents = app.projectAgents(project.id)
-                    Text("\(agents) agent\(agents == 1 ? "" : "s") · \(Int(app.projectRate(project.id))) tokens/s")
-                        .font(.subheadline.monospacedDigit())
+                    Text("\(Int(app.projectRate(project.id))) tok/s")
+                        .font(.caption2.monospacedDigit())
                         .foregroundStyle(palette.text2)
                         .contentTransition(.numericText())
-                } else if let d = project.description, !d.isEmpty {
-                    Text(d).font(.subheadline).foregroundStyle(palette.muted).lineLimit(1)
+                }
+                if unread > 0 {
+                    Text("\(unread)")
+                        .font(.system(size: 10.5, weight: .bold).monospacedDigit())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(.tint, in: .capsule)
+                        .foregroundStyle(.white)
                 }
             }
-            Spacer()
-            if unread > 0 {
-                Text("\(unread)")
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(.tint, in: .capsule)
-                    .foregroundStyle(.white)
+        } else {
+            HStack(spacing: 12) {
+                ProjectBadge(project: project)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(project.displayName).font(.headline)
+                        if project.favorite_at != nil {
+                            Image(systemName: "star.fill").font(.caption2).foregroundStyle(.yellow)
+                        }
+                    }
+                    if app.projectWorking(project.id) {
+                        let agents = app.projectAgents(project.id)
+                        Text("\(agents) agent\(agents == 1 ? "" : "s") · \(Int(app.projectRate(project.id))) tokens/s")
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(palette.text2)
+                            .contentTransition(.numericText())
+                    } else if let d = project.description, !d.isEmpty {
+                        Text(d).font(.subheadline).foregroundStyle(palette.muted).lineLimit(1)
+                    }
+                }
+                Spacer()
+                if unread > 0 {
+                    Text("\(unread)")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(.tint, in: .capsule)
+                        .foregroundStyle(.white)
+                }
             }
+            .padding(.vertical, 4)
         }
-        .padding(.vertical, 4)
     }
 }
 
@@ -163,6 +207,7 @@ struct ConnectionBanner: View {
 struct SessionListView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.denseUI) private var dense
     let project: Project
     @State private var sessions: [SessionInfo] = []
     @State private var loading = true
@@ -194,18 +239,22 @@ struct SessionListView: View {
         List {
             ForEach(groups) { g in
                 Section {
-                    ForEach(g.items) { s in row(s) }
-                        .onMove(perform: mode == .custom && !showArchived ? { from, to in reorder(g.items, from, to) } : nil)
+                    ForEach(g.items) { s in
+                        row(s)
+                            .listRowInsets(dense ? EdgeInsets(top: 3, leading: 12, bottom: 3, trailing: 12) : nil)
+                    }
+                    .onMove(perform: mode == .custom && !showArchived ? { from, to in reorder(g.items, from, to) } : nil)
                 } header: {
                     if let label = g.label {
                         Text(label)
-                            .font(.footnote.weight(.semibold))
+                            .font(dense ? .system(size: 11, weight: .semibold) : .footnote.weight(.semibold))
                             .foregroundStyle(g.id == "wait" ? .orange : .secondary)
                     }
                 }
             }
         }
         .navigationTitle(showArchived ? "Archived" : current.displayName)
+        .navigationBarTitleDisplayMode(dense ? .inline : .automatic)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
@@ -269,6 +318,8 @@ struct SessionListView: View {
             }
         }
         .listStyle(.plain)
+        .listSectionSpacing(dense ? 2 : 12)
+        .environment(\.defaultMinListRowHeight, dense ? 30 : 44)
         .paletteBackground(app.isRegular ? \.side : \.bg)
         .environment(\.editMode, $editMode)
         .refreshable { await load() }
@@ -341,14 +392,15 @@ struct SessionListView: View {
                         }
                         .buttonStyle(.plain)
                         .listRowBackground(
-                            app.selectedSessionID == s.id
-                                ? RoundedRectangle(cornerRadius: 10).fill(current.tint.opacity(0.22)).padding(.horizontal, 6)
-                                : nil
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(app.selectedSessionID == s.id ? current.tint.opacity(0.22) : .clear)
+                                .padding(.horizontal, 6)
                         )
                     } else {
                         NavigationLink(value: Route.session(id: s.id, title: s.title)) {
                             SessionRow(session: s, summary: app.summary(s.id), waiting: !app.requests(for: s.id).isEmpty)
                         }
+                        .listRowBackground(Color.clear)
                     }
                 }
                 .swipeActions {
@@ -409,6 +461,7 @@ enum ProjectSheet: String, Identifiable {
 }
 
 struct SessionRow: View {
+    @Environment(\.denseUI) private var dense
     let session: SessionInfo
     let summary: SessionSummary?
     let waiting: Bool
@@ -417,62 +470,100 @@ struct SessionRow: View {
     private var unread: Int { summary?.unread ?? session.unread }
 
     var body: some View {
-        HStack(spacing: 12) {
-            StateDot(state: state)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    if session.isRoom {
-                        Image(systemName: "person.3.fill").font(.caption).foregroundStyle(.secondary)
-                    }
-                    if session.system {
-                        Image(systemName: "desktopcomputer").font(.caption).foregroundStyle(.secondary)
-                    }
-                    Text(summary?.title ?? session.title)
-                        .font(unread > 0 ? .body.weight(.semibold) : .body)
-                        .lineLimit(1)
-                    if session.favorite_at != nil {
-                        Image(systemName: "star.fill").font(.caption2).foregroundStyle(.yellow)
-                    }
+        if dense {
+            // Single-line compact row matching the web client's `list-compact` (30 px, state in the dot).
+            HStack(spacing: 8) {
+                StateDot(state: state, size: 7)
+                if session.isRoom {
+                    Image(systemName: "person.3.fill").font(.system(size: 10)).foregroundStyle(.secondary)
                 }
-                HStack(spacing: 6) {
-                    Text(session.paused_at != nil ? "Paused"
-                         : state == .locked_vscode ? (session.held_by.map { "Open in \($0.holder)" } ?? state.label)
-                         : state.label).lineLimit(1).fixedSize()
-                    if let n = summary?.subagents, n > 0 {
-                        Text("· \(n) subagent\(n == 1 ? "" : "s")")
-                    }
-                    if state.isBusy, let r = summary?.output_per_s, r > 0 {
-                        Text("· \(Int(r)) tok/s").monospacedDigit()
-                    }
-                    if let date = HubEvent.parseDate(session.updated_at) {
-                        Text("· \(date, format: .relative(presentation: .named))")
-                    }
+                if session.system {
+                    Image(systemName: "desktopcomputer").font(.system(size: 10)).foregroundStyle(.secondary)
                 }
-                .lineLimit(1)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                Text(summary?.title ?? session.title)
+                    .font(.system(size: 14, weight: unread > 0 ? .semibold : .regular))
+                    .lineLimit(1)
+                if session.favorite_at != nil {
+                    Image(systemName: "star.fill").font(.system(size: 9)).foregroundStyle(.yellow)
+                }
+                Spacer(minLength: 4)
+                if state.isBusy, let r = summary?.output_per_s, r > 0 {
+                    Text("\(Int(r)) tok/s")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                } else if let n = summary?.subagents, n > 0 {
+                    Text("\(n) sub")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                if unread > 0 {
+                    Text("\(unread)")
+                        .font(.system(size: 10.5, weight: .bold).monospacedDigit())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(.tint, in: .capsule)
+                        .foregroundStyle(.white)
+                }
             }
-            Spacer()
-            if unread > 0 {
-                Text("\(unread)")
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(.tint, in: .capsule)
-                    .foregroundStyle(.white)
+        } else {
+            HStack(spacing: 12) {
+                StateDot(state: state)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        if session.isRoom {
+                            Image(systemName: "person.3.fill").font(.caption).foregroundStyle(.secondary)
+                        }
+                        if session.system {
+                            Image(systemName: "desktopcomputer").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Text(summary?.title ?? session.title)
+                            .font(unread > 0 ? .body.weight(.semibold) : .body)
+                            .lineLimit(1)
+                        if session.favorite_at != nil {
+                            Image(systemName: "star.fill").font(.caption2).foregroundStyle(.yellow)
+                        }
+                    }
+                    HStack(spacing: 6) {
+                        Text(session.paused_at != nil ? "Paused"
+                             : state == .locked_vscode ? (session.held_by.map { "Open in \($0.holder)" } ?? state.label)
+                             : state.label).lineLimit(1).fixedSize()
+                        if let n = summary?.subagents, n > 0 {
+                            Text("· \(n) subagent\(n == 1 ? "" : "s")")
+                        }
+                        if state.isBusy, let r = summary?.output_per_s, r > 0 {
+                            Text("· \(Int(r)) tok/s").monospacedDigit()
+                        }
+                        if let date = HubEvent.parseDate(session.updated_at) {
+                            Text("· \(date, format: .relative(presentation: .named))")
+                        }
+                    }
+                    .lineLimit(1)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if unread > 0 {
+                    Text("\(unread)")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(.tint, in: .capsule)
+                        .foregroundStyle(.white)
+                }
             }
+            .padding(.vertical, 2)
         }
-        .padding(.vertical, 2)
     }
 }
 
 struct StateDot: View {
     let state: SessionState
+    var size: CGFloat = 9
 
     var body: some View {
         Circle()
             .fill(state.color)
-            .frame(width: 9, height: 9)
+            .frame(width: size, height: size)
             .overlay {
                 if state.isBusy {
                     Circle().stroke(state.color.opacity(0.5), lineWidth: 2)

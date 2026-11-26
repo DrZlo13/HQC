@@ -13,6 +13,7 @@ struct ComposerField: UIViewRepresentable {
     var placeholder: String
     var textColor: UIColor
     var placeholderColor: UIColor
+    var dense = false
     var maxLines = 8
     let onItems: ([NSItemProvider]) -> Void
 
@@ -22,10 +23,8 @@ struct ComposerField: UIViewRepresentable {
     func makeUIView(context: Context) -> PastingTextView {
         let v = PastingTextView()
         v.delegate = context.coordinator
-        v.font = .preferredFont(forTextStyle: .body)
-        v.adjustsFontForContentSizeCategory = true
+        v.applyDensity(dense)
         v.backgroundColor = .clear
-        v.textContainerInset = UIEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
         v.textContainer.lineFragmentPadding = 4
         v.isScrollEnabled = false
         v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -42,6 +41,7 @@ struct ComposerField: UIViewRepresentable {
             v.text = text
             v.placeholder.isHidden = !text.isEmpty
         }
+        v.applyDensity(dense)
         v.textColor = textColor
         v.placeholder.textColor = placeholderColor
         v.onItems = { onItems($0) }
@@ -88,17 +88,34 @@ struct ComposerField: UIViewRepresentable {
 final class PastingTextView: UITextView {
     var onItems: (([NSItemProvider]) -> Void)?
     let placeholder = UILabel()
+    private var placeholderTop: NSLayoutConstraint?
+    private var currentDense: Bool?
 
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
-        placeholder.font = .preferredFont(forTextStyle: .body)
-        placeholder.adjustsFontForContentSizeCategory = true
         placeholder.translatesAutoresizingMaskIntoConstraints = false
         addSubview(placeholder)
+        let top = placeholder.topAnchor.constraint(equalTo: topAnchor, constant: 8)
+        placeholderTop = top
         NSLayoutConstraint.activate([
             placeholder.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            placeholder.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            top,
         ])
+        applyDensity(false)
+    }
+
+    func applyDensity(_ dense: Bool) {
+        guard currentDense != dense else { return }
+        currentDense = dense
+        let f = dense ? UIFont.systemFont(ofSize: 14.5) : UIFont.preferredFont(forTextStyle: .body)
+        font = f
+        adjustsFontForContentSizeCategory = !dense
+        placeholder.font = f
+        placeholder.adjustsFontForContentSizeCategory = !dense
+        let vPad: CGFloat = dense ? 6 : 8
+        textContainerInset = UIEdgeInsets(top: vPad, left: 10, bottom: vPad, right: 10)
+        placeholderTop?.constant = vPad
+        invalidateIntrinsicContentSize()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }

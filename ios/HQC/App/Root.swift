@@ -74,6 +74,7 @@ struct MainTabs: View {
 struct DesktopLayout: View {
     @Environment(AppModel.self) private var app
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     @State private var visibility: NavigationSplitViewVisibility = .all
     @State private var fold: CGFloat?
     @State private var sheet: DesktopSheet?
@@ -112,9 +113,9 @@ struct DesktopLayout: View {
             .animation(.snappy(duration: 0.25), value: pane)
             // The rail's color runs to the screen's bottom edge, under the home indicator.
             .background(alignment: .leading) {
-                palette.rail.frame(width: 64).ignoresSafeArea()
+                palette.rail.frame(width: dense ? 52 : 64).ignoresSafeArea()
             }
-            .navigationSplitViewColumnWidth(fold.map { max(300, $0) } ?? 380)
+            .navigationSplitViewColumnWidth(fold.map { max(300, $0) } ?? (dense ? 330 : 380))
             .paletteBackground(\.side)
             .toolbar(removing: .sidebarToggle)
         } detail: {
@@ -181,24 +182,28 @@ enum DesktopSheet: String, Identifiable {
 struct ProjectRail: View {
     @Environment(AppModel.self) private var app
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     @Binding var sheet: DesktopSheet?
     @Binding var pane: SidebarPane
     @State private var settingsFor: Project?
 
+    private var tileSize: CGFloat { dense ? 32 : 40 }
+    private var railWidth: CGFloat { dense ? 52 : 64 }
+
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: dense ? 6 : 10) {
             railButton("magnifyingglass", "Search", active: pane == .search) { toggle(.search) }
                 .keyboardShortcut("f", modifiers: .command)
             railButton("hand.raised", "Requests", badge: app.requests.count, active: pane == .requests) {
                 toggle(.requests)
             }
             railButton("bolt.horizontal", "Live sessions", active: pane == .live) { toggle(.live) }
-            Rectangle().fill(palette.border.opacity(0.6)).frame(width: 28, height: 0.5)
+            Rectangle().fill(palette.border.opacity(0.6)).frame(width: dense ? 22 : 28, height: 0.5)
             ScrollView(showsIndicators: false) {
-                VStack(spacing: 10) {
+                VStack(spacing: dense ? 6 : 10) {
                     if !app.projectsLoaded && app.projects.isEmpty {
                         ForEach(0..<3, id: \.self) { _ in
-                            SkeletonBlock(cornerRadius: 11).frame(width: 40, height: 40)
+                            SkeletonBlock(cornerRadius: 9).frame(width: tileSize, height: tileSize)
                         }
                     }
                     ForEach(app.sortedProjects) { p in
@@ -208,11 +213,11 @@ struct ProjectRail: View {
                             app.selectedProjectID = p.id
                             pane = .sessions
                         } label: {
-                            ProjectBadge(project: p, size: 40)
+                            ProjectBadge(project: p, size: tileSize)
                                 .overlay(alignment: .topTrailing) {
                                     let unread = app.unread(project: p.id)
                                     if unread > 0 {
-                                        Circle().fill(Color(hex: 0x5B8DEF)).frame(width: 10, height: 10)
+                                        Circle().fill(Color(hex: 0x5B8DEF)).frame(width: dense ? 8 : 10, height: dense ? 8 : 10)
                                             .overlay(Circle().stroke(palette.rail, lineWidth: 2))
                                     }
                                 }
@@ -220,8 +225,8 @@ struct ProjectRail: View {
                         .buttonStyle(.plain)
                         .overlay(alignment: .leading) {
                             Capsule().fill(palette.text)
-                                .frame(width: 3, height: selected ? 24 : 0)
-                                .offset(x: -9)
+                                .frame(width: 3, height: selected ? (dense ? 18 : 24) : 0)
+                                .offset(x: dense ? -7 : -9)
                                 .animation(.snappy, value: selected)
                         }
                         .accessibilityLabel(p.displayName)
@@ -254,8 +259,8 @@ struct ProjectRail: View {
             railButton("plus", "New project") { sheet = .newProject }
             railButton("gearshape", "Settings") { sheet = .settings }
         }
-        .padding(.vertical, 10)
-        .frame(width: 64)
+        .padding(.vertical, dense ? 6 : 10)
+        .frame(width: railWidth)
         .background(palette.rail.ignoresSafeArea())
         .sheet(item: $settingsFor) { p in ProjectSettingsSheet(project: p) }
     }
@@ -270,10 +275,10 @@ struct ProjectRail: View {
                             action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 16, weight: .medium))
+                .font(.system(size: dense ? 14 : 16, weight: .medium))
                 .foregroundStyle(active ? palette.text : palette.text2)
-                .frame(width: 40, height: 40)
-                .background(active ? palette.text.opacity(0.12) : .clear, in: .rect(cornerRadius: 10))
+                .frame(width: dense ? 34 : 40, height: dense ? 34 : 40)
+                .background(active ? palette.text.opacity(0.12) : .clear, in: .rect(cornerRadius: dense ? 8 : 10))
                 .contentShape(.rect)
                 .overlay(alignment: .topTrailing) {
                     if badge > 0 {

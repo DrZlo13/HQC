@@ -4,19 +4,22 @@ import SwiftUI
 /// answer them here without opening each chat.
 struct RequestsView: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.denseUI) private var dense
     @State private var error: String?
 
     var body: some View {
         ScrollView {
-            LazyVStack(spacing: 16) {
+            LazyVStack(spacing: dense ? 10 : 16) {
                 ForEach(app.requests) { request in
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: dense ? 5 : 8) {
                         RequestHeaderLink(request: request) {
                             HStack(spacing: 6) {
                                 if let p = app.project(forAddress: request.address) {
-                                    ProjectTile(project: p, size: 20)
+                                    ProjectTile(project: p, size: dense ? 17 : 20)
                                 }
-                                Text(request.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                                Text(request.title)
+                                    .font(dense ? .footnote.weight(.semibold) : .subheadline.weight(.semibold))
+                                    .lineLimit(1)
                                 if let w = request.worker_name {
                                     Text("· \(w)").font(.caption).foregroundStyle(.secondary)
                                 }
@@ -57,10 +60,11 @@ struct RequestsView: View {
                     .transition(.asymmetric(insertion: .opacity, removal: .scale(scale: 0.9).combined(with: .opacity)))
                 }
             }
-            .padding(16)
+            .padding(dense ? 10 : 16)
             .animation(.spring, value: app.requests.map(\.id))
         }
         .navigationTitle("Requests")
+        .navigationBarTitleDisplayMode(dense ? .inline : .automatic)
         .paletteBackground(app.isRegular ? \.side : \.bg)
         .refreshable { await app.refresh() }
         .overlay {
@@ -129,8 +133,12 @@ struct SettingsView: View {
                     }
                 }
             }
-            Section("Appearance") {
+            Section {
                 Toggle("Match system light and dark", isOn: Bindable(app).followSystem)
+                Toggle(isOn: Bindable(app).denseUI) {
+                    Label("Dense UI (vvzvlad mode)", systemImage: "rectangle.compress.vertical")
+                }
+                .onChange(of: app.denseUI) { _, _ in Feedback.play(.tap) }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 10)], spacing: 10) {
                     ForEach(app.followSystem ? ThemeName.allCases.filter { !$0.isLight } : ThemeName.allCases) { t in
                         ThemeSwatch(theme: t, selected: app.followSystem ? app.theme.family == t.family : app.theme == t) {
@@ -139,6 +147,10 @@ struct SettingsView: View {
                     }
                 }
                 .padding(.vertical, 4)
+            } header: {
+                Text("Appearance")
+            } footer: {
+                Text("Dense UI tightens lists, typography, message bubbles, and controls to fit more on screen—closer to the web view's compact layout.")
             }
             Section {
                 Toggle(isOn: $haptics) {

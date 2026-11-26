@@ -64,16 +64,18 @@ struct EventTime: View {
 struct UserBubble: View {
     @Environment(\.palette) private var palette
     @Environment(\.chatActions) private var actions
+    @Environment(\.denseUI) private var dense
     let event: HubEvent
 
     var body: some View {
         HStack {
-            Spacer(minLength: 60)
-            VStack(alignment: .trailing, spacing: 6) {
+            Spacer(minLength: dense ? 36 : 60)
+            VStack(alignment: .trailing, spacing: dense ? 4 : 6) {
                 let ids = event.payload["artifact_ids"]?.stringArray ?? []
                 if !event.text.isEmpty {
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: dense ? 7 : 10) {
                         Text(event.text)
+                            .font(dense ? .system(size: 14) : .body)
                             .foregroundStyle(palette.text)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
@@ -83,10 +85,10 @@ struct UserBubble: View {
                 if !ids.isEmpty { ArtifactStrip(ids: ids, alignment: .trailing) }
                 delivery
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(palette.surface, in: .rect(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(palette.border.opacity(0.7)))
+            .padding(.horizontal, dense ? 10 : 14)
+            .padding(.vertical, dense ? 6 : 10)
+            .background(palette.surface, in: .rect(cornerRadius: dense ? 11 : 14))
+            .overlay(RoundedRectangle(cornerRadius: dense ? 11 : 14).strokeBorder(palette.border.opacity(0.7)))
             .fixedSize(horizontal: false, vertical: true)
             .contextMenu {
                 if let quote = actions.quote, !event.text.isEmpty {
@@ -120,13 +122,15 @@ struct UserBubble: View {
 /// A message from another session: the relay color, as the web client marks it.
 struct PeerCard: View {
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     @Environment(AppModel.self) private var app
     let event: HubEvent
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: dense ? 5 : 8) {
             HStack(spacing: 6) {
                 Image(systemName: event.payload["mode"]?.string == "ask" ? "arrow.down.left.circle.fill" : "arrow.triangle.branch")
+                    .font(dense ? .caption : .body)
                     .foregroundStyle(palette.relay)
                 Text(event.payload["mode"]?.string == "ask" ? "Question from" : "From")
                     .font(.caption.weight(.semibold))
@@ -154,25 +158,26 @@ struct PeerCard: View {
             let ids = event.payload["artifact_ids"]?.stringArray ?? []
             if !ids.isEmpty { ArtifactStrip(ids: ids) }
         }
-        .padding(12)
-        .background(palette.relay.opacity(0.08), in: .rect(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(palette.relay.opacity(0.32)))
+        .padding(dense ? 8 : 12)
+        .background(palette.relay.opacity(0.08), in: .rect(cornerRadius: dense ? 9 : 12))
+        .overlay(RoundedRectangle(cornerRadius: dense ? 9 : 12).strokeBorder(palette.relay.opacity(0.32)))
     }
 }
 
 struct AgentMessage: View {
     @Environment(\.palette) private var palette
     @Environment(\.chatActions) private var actions
+    @Environment(\.denseUI) private var dense
     let event: HubEvent
     @Environment(\.openURL) private var openURL
     @State private var quoting = false
     @State private var searching = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: dense ? 3 : 6) {
             MarkdownText(event.text)
                 .opacity(event.payload["interrupted"]?.bool == true ? 0.55 : 1)
-            HStack(spacing: 12) {
+            HStack(spacing: dense ? 8 : 12) {
                 if event.payload["interrupted"]?.bool == true {
                     Text("interrupted").font(.caption2).foregroundStyle(palette.muted)
                 }
@@ -182,7 +187,10 @@ struct AgentMessage: View {
                         quote(Quoting.firstSentences(event.text))
                         Feedback.play(.tap)
                     } label: {
-                        Image(systemName: "text.quote").font(.caption).frame(width: 22, height: 22).contentShape(.rect)
+                        Image(systemName: "text.quote")
+                            .font(dense ? .caption2 : .caption)
+                            .frame(width: dense ? 18 : 22, height: dense ? 18 : 22)
+                            .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(palette.muted)
@@ -190,7 +198,7 @@ struct AgentMessage: View {
                 }
                 CopyButton(text: event.text, label: "Copy answer")
                 ShareLink(item: event.text) {
-                    Image(systemName: "square.and.arrow.up").font(.caption)
+                    Image(systemName: "square.and.arrow.up").font(dense ? .caption2 : .caption)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(palette.muted)
@@ -222,6 +230,7 @@ struct AgentMessage: View {
 /// Copies the text, then shows a check for a moment, as the Claude app's copy button does.
 struct CopyButton: View {
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     let text: String
     var label = "Copy"
     @State private var copied = false
@@ -237,9 +246,9 @@ struct CopyButton: View {
             }
         } label: {
             Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                .font(.caption)
+                .font(dense ? .caption2 : .caption)
                 .contentTransition(.symbolEffect(.replace))
-                .frame(width: 22, height: 22)
+                .frame(width: dense ? 18 : 22, height: dense ? 18 : 22)
                 .contentShape(.rect)
         }
         .buttonStyle(.plain)
@@ -252,14 +261,15 @@ struct CopyButton: View {
 /// `1.2k → 340 tokens · cache 9k · $0.012`, under the answer a turn ended with.
 struct UsageLine: View {
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     let event: HubEvent
 
     var body: some View {
         Text(line)
-            .font(.caption2.monospacedDigit())
+            .font(dense ? .system(size: 10).monospacedDigit() : .caption2.monospacedDigit())
             .foregroundStyle(palette.muted)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, -6)
+            .padding(.top, dense ? -2 : -6)
     }
 
     private var line: String {
@@ -278,6 +288,7 @@ struct UsageLine: View {
 /// `› Thinking · the first line`, dimmed and in italics; it opens to all of it.
 struct ThinkingView: View {
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     @AppStorage(ChatViewMode.key) private var mode = ChatViewMode.regular
     let text: String
     let live: Bool
@@ -289,11 +300,11 @@ struct ThinkingView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: dense ? 3 : 6) {
             Button {
                 withAnimation(.snappy) { expanded.toggle() }
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: dense ? 4 : 6) {
                     Image(systemName: "chevron.right")
                         .font(.caption2.weight(.semibold))
                         .rotationEffect(.degrees(expanded ? 90 : 0))
@@ -306,7 +317,7 @@ struct ThinkingView: View {
                     }
                     Spacer(minLength: 0)
                 }
-                .font(.footnote)
+                .font(dense ? .system(size: 12) : .footnote)
                 .foregroundStyle(palette.muted)
                 .shimmering(live)
                 .contentShape(.rect)
@@ -314,11 +325,11 @@ struct ThinkingView: View {
             .buttonStyle(.plain)
             if expanded {
                 Text(text)
-                    .font(.footnote)
+                    .font(dense ? .system(size: 12) : .footnote)
                     .italic()
                     .foregroundStyle(palette.muted)
                     .textSelection(.enabled)
-                    .padding(.leading, 16)
+                    .padding(.leading, dense ? 12 : 16)
                     .transition(.opacity)
             }
         }
@@ -329,6 +340,7 @@ struct ThinkingView: View {
 /// opens to a row per call, each opening to its arguments and output.
 struct ToolGroup: View {
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     @AppStorage(ChatViewMode.key) private var mode = ChatViewMode.regular
     let calls: [ToolCallItem]
     @State private var tapped: Bool?
@@ -342,11 +354,11 @@ struct ToolGroup: View {
     private var seconds: Double { calls.compactMap(\.durationMs).reduce(0, +) / 1000 }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: dense ? 2 : 4) {
             Button {
                 withAnimation(.snappy) { expanded.toggle() }
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: dense ? 4 : 6) {
                     Image(systemName: "chevron.right")
                         .font(.caption2.weight(.semibold))
                         .rotationEffect(.degrees(expanded ? 90 : 0))
@@ -357,13 +369,13 @@ struct ToolGroup: View {
                         Image(systemName: "xmark").font(.caption2.weight(.bold)).foregroundStyle(palette.danger)
                     }
                     Text(summary)
-                        .font(.footnote)
+                        .font(dense ? .system(size: 12) : .footnote)
                         .foregroundStyle(palette.muted)
                         .lineLimit(1)
                     if let last = calls.last {
                         let result = ToolText.resultLine(last)
                         Text(ToolText.callLine(last) + (result.isEmpty ? "" : "  ·  " + result))
-                            .font(.footnote.monospaced())
+                            .font(dense ? .system(size: 11.5, design: .monospaced) : .footnote.monospaced())
                             .foregroundStyle(palette.text2.opacity(0.85))
                             .lineLimit(1)
                     }
@@ -374,10 +386,10 @@ struct ToolGroup: View {
             .buttonStyle(.plain)
 
             if expanded {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: dense ? 1 : 2) {
                     ForEach(calls) { ToolCallRow(item: $0) }
                 }
-                .padding(.leading, 14)
+                .padding(.leading, dense ? 10 : 14)
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
@@ -394,6 +406,7 @@ struct ToolGroup: View {
 struct ToolCallRow: View {
     @Environment(\.palette) private var palette
     @Environment(\.chatActions) private var actions
+    @Environment(\.denseUI) private var dense
     @AppStorage(ChatViewMode.key) private var mode = ChatViewMode.regular
     let item: ToolCallItem
     @State private var tapped: Bool?
@@ -403,13 +416,13 @@ struct ToolCallRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: dense ? 3 : 6) {
             Button {
                 withAnimation(.snappy) { open.toggle() }
             } label: {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: dense ? 6 : 8) {
                     Text(attributedLine)
-                        .font(.footnote.monospaced())
+                        .font(dense ? .system(size: 11.5, design: .monospaced) : .footnote.monospaced())
                         .lineLimit(open ? nil : 1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     if let ms = item.durationMs {
@@ -435,13 +448,13 @@ struct ToolCallRow: View {
                         Image(systemName: "xmark").font(.caption2.weight(.bold)).foregroundStyle(palette.danger)
                     }
                 }
-                .padding(.vertical, 4)
+                .padding(.vertical, dense ? 1.5 : 4)
                 .contentShape(.rect)
             }
             .buttonStyle(.plain)
 
             if open {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: dense ? 4 : 8) {
                     if !item.argsPreview.isEmpty {
                         CodeBlock(text: ToolText.pretty(item.argsPreview))
                     }
@@ -455,7 +468,7 @@ struct ToolCallRow: View {
                     let images = item.result?.payload["artifact_ids"]?.stringArray ?? []
                     if !images.isEmpty { ArtifactStrip(ids: images) }
                 }
-                .padding(.bottom, 6)
+                .padding(.bottom, dense ? 3 : 6)
             }
         }
     }
@@ -548,20 +561,21 @@ enum ToolText {
 
 struct CodeBlock: View {
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     let text: String
     var tint: Color?
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             Text(text.count > 6000 ? String(text.prefix(6000)) + "\n…" : text)
-                .font(.caption.monospaced())
+                .font(dense ? .system(size: 11.5, design: .monospaced) : .caption.monospaced())
                 .foregroundStyle(tint ?? palette.text2)
                 .textSelection(.enabled)
-                .padding(10)
+                .padding(dense ? 6 : 10)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(palette.code, in: .rect(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(palette.border.opacity(0.6)))
+        .background(palette.code, in: .rect(cornerRadius: dense ? 6 : 8))
+        .overlay(RoundedRectangle(cornerRadius: dense ? 6 : 8).strokeBorder(palette.border.opacity(0.6)))
     }
 }
 
@@ -587,6 +601,7 @@ struct NoteRow: View {
 struct ApprovalCard: View {
     @Environment(\.palette) private var palette
     @Environment(\.chatActions) private var actions
+    @Environment(\.denseUI) private var dense
     let event: HubEvent
     let open: Bool
     let onAnswer: (ApprovalOption) async -> Void
@@ -611,18 +626,19 @@ struct ApprovalCard: View {
     }
 
     private var permission: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: dense ? 6 : 10) {
+            HStack(spacing: dense ? 6 : 8) {
                 Image(systemName: open ? "hand.raised.fill" : "checkmark.seal")
+                    .font(dense ? .footnote : .body)
                     .foregroundStyle(open ? palette.waiting : palette.muted)
                 Text(open ? "Allow \(tool)?" : "\(tool): answered")
-                    .font(.subheadline.weight(.semibold))
+                    .font(dense ? .footnote.weight(.semibold) : .subheadline.weight(.semibold))
                     .foregroundStyle(palette.text)
                 Spacer()
                 EventTime(event: event)
             }
             if let reason = event.payload["reason"]?.string, !reason.isEmpty {
-                Text(reason).font(.footnote).foregroundStyle(palette.text2)
+                Text(reason).font(dense ? .caption : .footnote).foregroundStyle(palette.text2)
             }
             let body = event.payload["args_preview"].map { ToolText.pretty($0.string ?? "") }
                 ?? event.payload["description"]?.string ?? ""
@@ -635,9 +651,9 @@ struct ApprovalCard: View {
                 }
             }
         }
-        .padding(14)
-        .background(open ? palette.permissionBG : palette.surface.opacity(0.5), in: .rect(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(open ? palette.permissionBorder : palette.border.opacity(0.5)))
+        .padding(dense ? 9 : 14)
+        .background(open ? palette.permissionBG : palette.surface.opacity(0.5), in: .rect(cornerRadius: dense ? 10 : 14))
+        .overlay(RoundedRectangle(cornerRadius: dense ? 10 : 14).strokeBorder(open ? palette.permissionBorder : palette.border.opacity(0.5)))
         .opacity(open ? 1 : 0.75)
     }
 }
@@ -743,6 +759,7 @@ private struct PressScale: ButtonStyle {
 /// The agent's questions (Claude Code's AskUserQuestion), with an "Other" answer per question.
 struct ClarifyCard: View {
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     let event: HubEvent
     let open: Bool
     let onAnswer: ([String: Any]) async -> Void
@@ -758,29 +775,30 @@ struct ClarifyCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: dense ? 8 : 14) {
             HStack {
                 Label(open ? "The agent asks" : "Answered",
                       systemImage: open ? "questionmark.bubble.fill" : "checkmark.bubble")
-                    .font(.subheadline.weight(.semibold))
+                    .font(dense ? .footnote.weight(.semibold) : .subheadline.weight(.semibold))
                     .foregroundStyle(open ? Color.accentColor : palette.muted)
                 Spacer()
                 EventTime(event: event)
             }
             ForEach(questions) { q in
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: dense ? 5 : 8) {
                     if let h = q.header, !h.isEmpty {
                         Text(h.uppercased()).font(.caption2.weight(.bold)).foregroundStyle(palette.muted)
                     }
-                    Text(q.text).font(.body.weight(.medium)).foregroundStyle(palette.text)
+                    Text(q.text).font(dense ? .system(size: 14, weight: .medium) : .body.weight(.medium)).foregroundStyle(palette.text)
                     if open {
                         ForEach(Array(q.options.enumerated()), id: \.offset) { i, option in
                             optionRow(q, option, description: i < q.descriptions.count ? q.descriptions[i] : "")
                         }
                         TextField("Other answer", text: Binding(
                             get: { other[q.id] ?? "" }, set: { other[q.id] = $0 }))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
+                            .font(dense ? .system(size: 14) : .body)
+                            .padding(.horizontal, dense ? 8 : 12)
+                            .padding(.vertical, dense ? 5 : 8)
                             .background(palette.code, in: .rect(cornerRadius: 8))
                             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(palette.border))
                     }
@@ -797,12 +815,13 @@ struct ClarifyCard: View {
                     Text("Answer").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(dense ? .small : .regular)
                 .disabled(busy || !questions.allSatisfy(answered))
             }
         }
-        .padding(14)
-        .background(Color.accentColor.opacity(open ? 0.07 : 0.03), in: .rect(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.accentColor.opacity(open ? 0.35 : 0.12)))
+        .padding(dense ? 9 : 14)
+        .background(Color.accentColor.opacity(open ? 0.07 : 0.03), in: .rect(cornerRadius: dense ? 10 : 14))
+        .overlay(RoundedRectangle(cornerRadius: dense ? 10 : 14).strokeBorder(Color.accentColor.opacity(open ? 0.35 : 0.12)))
     }
 
     private func optionRow(_ q: ClarifyQuestion, _ option: String, description: String) -> some View {

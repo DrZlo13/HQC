@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct ChatView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.denseUI) private var dense
     @State private var model: ChatModel
     @State private var draft = ""
     @State private var attachments: [PendingAttachment] = []
@@ -47,10 +48,11 @@ struct ChatView: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 14) {
+            LazyVStack(alignment: .leading, spacing: dense ? 6 : 14) {
                 if model.hasOlder {
                     Button("Load earlier messages") { Task { await model.loadOlder() } }
                         .buttonStyle(.glass)
+                        .controlSize(dense ? .small : .regular)
                         .frame(maxWidth: .infinity)
                 }
                 ForEach(model.items) { item in
@@ -72,8 +74,8 @@ struct ChatView: View {
                     EmptyChat(canType: canType)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .padding(.horizontal, dense ? 10 : 16)
+            .padding(.vertical, dense ? 6 : 12)
             .frame(maxWidth: 780)
             .frame(maxWidth: .infinity)
         }
@@ -474,8 +476,11 @@ struct Composer: View {
     @Environment(AppModel.self) private var app
     @Environment(\.palette) private var palette
     @Environment(\.horizontalSizeClass) private var width
+    @Environment(\.denseUI) private var dense
     /// The height of the field on one line, and the size of the buttons beside it.
     static let control: CGFloat = 36
+    static let denseControl: CGFloat = 32
+    private var controlSize: CGFloat { dense ? Self.denseControl : Self.control }
     @Binding var text: String
     @Binding var attachments: [PendingAttachment]
     let busy: Bool
@@ -539,8 +544,8 @@ struct Composer: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             ZStack(alignment: .bottom) {
-                GlassEffectContainer(spacing: 8) {
-                    HStack(alignment: .bottom, spacing: 8) {
+                GlassEffectContainer(spacing: dense ? 6 : 8) {
+                    HStack(alignment: .bottom, spacing: dense ? 6 : 8) {
                         Menu {
                             Button("Photos", systemImage: "photo.on.rectangle") { pickingPhotos = true }
                             Button("Files", systemImage: "folder") { pickingFiles = true }
@@ -559,9 +564,9 @@ struct Composer: View {
                             }
                         } label: {
                             Image(systemName: "plus")
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(.system(size: dense ? 13.5 : 15, weight: .semibold))
                                 .foregroundStyle(palette.text)
-                                .frame(width: Self.control, height: Self.control)
+                                .frame(width: controlSize, height: controlSize)
                                 .glassEffect(.regular.interactive(), in: .circle)
                         }
                         .glassEffectID("attach", in: glass)
@@ -575,9 +580,9 @@ struct Composer: View {
                                 Feedback.play(.tap)
                             } label: {
                                 Image(systemName: "keyboard.chevron.compact.down")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .font(.system(size: dense ? 13 : 14, weight: .semibold))
                                     .foregroundStyle(palette.text)
-                                    .frame(width: Self.control, height: Self.control)
+                                    .frame(width: controlSize, height: controlSize)
                                     .glassEffect(.regular.interactive(), in: .circle)
                             }
                             .buttonStyle(.plain)
@@ -589,12 +594,13 @@ struct Composer: View {
 
                         ComposerField(text: $text, focused: $focused, placeholder: "Message",
                                       textColor: UIColor(palette.text),
-                                      placeholderColor: UIColor(palette.muted)) { items in
+                                      placeholderColor: UIColor(palette.muted),
+                                      dense: dense) { items in
                             for item in items { Task { await addPasted(item) } }
                             Feedback.play(.tap)
                         }
-                        .frame(minHeight: Self.control)
-                            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: Self.control / 2))
+                        .frame(minHeight: controlSize)
+                            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: controlSize / 2))
                             .glassEffectID("field", in: glass)
 
                         if voice.showsMicButton && !micReplacesSend {
@@ -616,9 +622,9 @@ struct Composer: View {
                         } else if busy && empty && attachments.isEmpty {
                             Button(action: onStop) {
                                 Image(systemName: "stop.fill")
-                                    .font(.system(size: 13, weight: .bold))
+                                    .font(.system(size: dense ? 12 : 13, weight: .bold))
                                     .foregroundStyle(.white)
-                                    .frame(width: Self.control, height: Self.control)
+                                    .frame(width: controlSize, height: controlSize)
                                     .background(Color.red.gradient, in: .circle)
                             }
                             .buttonStyle(.plain)
@@ -630,11 +636,11 @@ struct Composer: View {
                                     if uploading {
                                         ProgressView().controlSize(.small).tint(.white)
                                     } else {
-                                        Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold))
+                                        Image(systemName: "arrow.up").font(.system(size: dense ? 13.5 : 15, weight: .bold))
                                     }
                                 }
                                 .foregroundStyle(.white)
-                                .frame(width: Self.control, height: Self.control)
+                                .frame(width: controlSize, height: controlSize)
                                 .background(canSend ? Color.accentColor : palette.muted.opacity(0.35), in: .circle)
                             }
                             .buttonStyle(.plain)
@@ -665,10 +671,10 @@ struct Composer: View {
                 VoiceFloatingOverlay(session: voiceSession, micCenter: micCenter)
             }
             .animation(.spring(response: 0.25, dampingFraction: 0.80), value: voiceSession.phase)
-            .padding(.horizontal, 12)
+            .padding(.horizontal, dense ? 8 : 12)
         }
-        .padding(.bottom, 8)
-        .padding(.top, 4)
+        .padding(.bottom, dense ? 4 : 8)
+        .padding(.top, dense ? 2 : 4)
         .onDisappear { if voiceSession.isActive { voiceSession.cancelRecording() } }
         .onChange(of: focusTrigger) { _, _ in focused = true }
         .photosPicker(isPresented: $pickingPhotos, selection: $photoItems, maxSelectionCount: 10, matching: .images)

@@ -62,6 +62,10 @@ final class AppModel {
     var followSystem: Bool = UserDefaults.standard.object(forKey: "followSystem") as? Bool ?? true {
         didSet { UserDefaults.standard.set(followSystem, forKey: "followSystem") }
     }
+    /// Compact, high-density layout ("vvzvlad mode"), kept on this device.
+    var denseUI: Bool = UserDefaults.standard.bool(forKey: "denseUI") {
+        didSet { UserDefaults.standard.set(denseUI, forKey: "denseUI") }
+    }
 
     func effectiveTheme(systemIsDark: Bool) -> ThemeName {
         followSystem ? theme.variant(light: !systemIsDark) : theme

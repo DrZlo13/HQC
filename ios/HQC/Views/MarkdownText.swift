@@ -7,6 +7,7 @@ import WebKit
 /// inline (`$…$`, `\(…\)`), typeset with the bundled KaTeX.
 struct MarkdownText: View {
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     private let blocks: [MDBlock]
 
     init(_ source: String) {
@@ -14,11 +15,13 @@ struct MarkdownText: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: dense ? 5 : 10) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 MDBlockView(block: block)
             }
         }
+        .font(dense ? .system(size: 14) : .body)
+        .lineSpacing(dense ? 1.2 : 2)
         .textSelection(.enabled)
         .foregroundStyle(palette.text)
     }
@@ -255,19 +258,24 @@ enum MDParser {
 
 struct MDBlockView: View {
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     let block: MDBlock
 
     var body: some View {
         switch block {
         case .heading(let level, let text):
-            Text(MDInline.render(text, palette: palette))
-                .font(level == 1 ? .title2.weight(.bold) : level == 2 ? .title3.weight(.semibold) : .headline)
-                .padding(.top, level <= 2 ? 6 : 2)
+            Text(MDInline.render(text, palette: palette, dense: dense))
+                .font(dense
+                      ? (level == 1 ? .system(size: 17, weight: .bold)
+                         : level == 2 ? .system(size: 15.5, weight: .semibold)
+                         : .system(size: 14.5, weight: .semibold))
+                      : (level == 1 ? .title2.weight(.bold) : level == 2 ? .title3.weight(.semibold) : .headline))
+                .padding(.top, dense ? (level <= 2 ? 3 : 1) : (level <= 2 ? 6 : 2))
         case .paragraph(let text):
             if MDParser.hasInlineMath(text) {
                 MathView(source: text, display: false)
             } else {
-                Text(MDInline.render(text, palette: palette))
+                Text(MDInline.render(text, palette: palette, dense: dense))
                     .fixedSize(horizontal: false, vertical: true)
             }
         case .code(let lang, let text):
@@ -275,44 +283,44 @@ struct MDBlockView: View {
         case .math(let tex):
             MathView(source: tex, display: true)
         case .quote(let inner):
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: dense ? 4 : 8) {
                 ForEach(Array(inner.enumerated()), id: \.offset) { _, b in MDBlockView(block: b) }
             }
             .foregroundStyle(palette.text2)
-            .padding(.leading, 12)
+            .padding(.leading, dense ? 8 : 12)
             .overlay(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 1.5).fill(palette.border).frame(width: 3)
+                RoundedRectangle(cornerRadius: 1.5).fill(palette.border).frame(width: dense ? 2.5 : 3)
             }
         case .list(let items):
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: dense ? 2.5 : 5) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: dense ? 6 : 8) {
                         if let done = item.task {
                             Image(systemName: done ? "checkmark.square.fill" : "square")
                                 .foregroundStyle(done ? Color.accentColor : palette.muted)
-                                .font(.callout)
+                                .font(dense ? .footnote : .callout)
                         } else {
                             Text(item.depth > 0 && item.marker == "•" ? "◦" : item.marker)
                                 .foregroundStyle(palette.muted)
                                 .monospacedDigit()
-                                .frame(minWidth: 14, alignment: .trailing)
+                                .frame(minWidth: dense ? 11 : 14, alignment: .trailing)
                         }
                         if MDParser.hasInlineMath(item.text) {
                             MathView(source: item.text, display: false)
                         } else {
-                            Text(MDInline.render(item.text, palette: palette))
+                            Text(MDInline.render(item.text, palette: palette, dense: dense))
                                 .strikethrough(item.task == true, color: palette.muted)
                                 .foregroundStyle(item.task == true ? palette.muted : palette.text)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    .padding(.leading, CGFloat(item.depth) * 18)
+                    .padding(.leading, CGFloat(item.depth) * (dense ? 12 : 18))
                 }
             }
         case .table(let header, let align, let rows):
             MDTableView(header: header, align: align, rows: rows)
         case .rule:
-            Rectangle().fill(palette.border).frame(height: 1).padding(.vertical, 4)
+            Rectangle().fill(palette.border).frame(height: 1).padding(.vertical, dense ? 2 : 4)
         }
     }
 }
@@ -320,13 +328,13 @@ struct MDBlockView: View {
 enum MDInline {
     /// Inline Markdown (bold, italic, strikethrough, code, links) with the web client's look:
     /// code in the monospaced face on the code background, links in the accent color.
-    static func render(_ s: String, palette: Palette) -> AttributedString {
+    static func render(_ s: String, palette: Palette, dense: Bool = false) -> AttributedString {
         let opts = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace, failurePolicy: .returnPartiallyParsedIfPossible)
         var a = (try? AttributedString(markdown: s, options: opts)) ?? AttributedString(s)
         for run in a.runs {
             if let intent = run.inlinePresentationIntent, intent.contains(.code) {
-                a[run.range].font = .system(.callout, design: .monospaced)
+                a[run.range].font = dense ? .system(size: 12.5, design: .monospaced) : .system(.callout, design: .monospaced)
                 a[run.range].foregroundColor = palette.text2
                 a[run.range].backgroundColor = palette.code
             }
@@ -348,6 +356,7 @@ enum MDInline {
 /// A fenced code block: the language and a copy button above, the code scrolling sideways.
 struct CodeBlockView: View {
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     let language: String
     let code: String
     @State private var copied = false
@@ -356,7 +365,7 @@ struct CodeBlockView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text(language.isEmpty ? "code" : language)
-                    .font(.caption.monospaced())
+                    .font(dense ? .caption2.monospaced() : .caption.monospaced())
                     .foregroundStyle(palette.muted)
                 Spacer()
                 Button {
@@ -369,32 +378,33 @@ struct CodeBlockView: View {
                     }
                 } label: {
                     Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
-                        .font(.caption)
+                        .font(dense ? .caption2 : .caption)
                         .labelStyle(.titleAndIcon)
                         .contentTransition(.symbolEffect(.replace))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(palette.muted)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
+            .padding(.horizontal, dense ? 8 : 12)
+            .padding(.vertical, dense ? 4 : 7)
             Rectangle().fill(palette.border).frame(height: 1)
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
-                    .font(.system(.footnote, design: .monospaced))
+                    .font(dense ? .system(size: 12, design: .monospaced) : .system(.footnote, design: .monospaced))
                     .foregroundStyle(palette.text)
-                    .padding(12)
+                    .padding(dense ? 8 : 12)
                     .textSelection(.enabled)
             }
         }
-        .background(palette.code, in: .rect(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(palette.border))
+        .background(palette.code, in: .rect(cornerRadius: dense ? 7 : 10))
+        .overlay(RoundedRectangle(cornerRadius: dense ? 7 : 10).strokeBorder(palette.border))
     }
 }
 
 /// A GFM table with its header, borders and column alignment, scrolling sideways when wide.
 struct MDTableView: View {
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     let header: [String]
     let align: [MDAlign]
     let rows: [[String]]
@@ -404,14 +414,14 @@ struct MDTableView: View {
             Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
                     ForEach(Array(header.enumerated()), id: \.offset) { i, h in
-                        cell(h, column: i).font(.subheadline.weight(.semibold))
+                        cell(h, column: i).font(dense ? .system(size: 12.5, weight: .semibold) : .subheadline.weight(.semibold))
                     }
                 }
                 .background(palette.surface)
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                     GridRow {
                         ForEach(Array(row.enumerated()), id: \.offset) { i, c in
-                            cell(c, column: i).font(.subheadline)
+                            cell(c, column: i).font(dense ? .system(size: 12.5) : .subheadline)
                         }
                     }
                 }
@@ -423,12 +433,12 @@ struct MDTableView: View {
 
     private func cell(_ s: String, column i: Int) -> some View {
         let a = i < align.count ? align[i] : .leading
-        return Text(MDInline.render(s, palette: palette))
-            .frame(minWidth: 44, maxWidth: 280,
+        return Text(MDInline.render(s, palette: palette, dense: dense))
+            .frame(minWidth: dense ? 36 : 44, maxWidth: 280,
                    alignment: a == .center ? .center : a == .trailing ? .trailing : .leading)
             .multilineTextAlignment(a == .center ? .center : a == .trailing ? .trailing : .leading)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.horizontal, dense ? 6 : 10)
+            .padding(.vertical, dense ? 4 : 7)
             .gridColumnAlignment(a == .center ? .center : a == .trailing ? .trailing : .leading)
             .border(palette.border, width: 0.5)
     }
@@ -438,6 +448,7 @@ struct MDTableView: View {
 /// formula, or a paragraph with inline math (its other Markdown as HTML).
 struct MathView: View {
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     let source: String
     let display: Bool
     @State private var height: CGFloat = 24
@@ -461,7 +472,7 @@ struct MathView: View {
         <!doctype html><html><head><meta name=viewport content="width=device-width,initial-scale=1,maximum-scale=1">
         <link rel=stylesheet href="katex.min.css"><script src="katex.min.js"></script>
         <style>html,body{margin:0;padding:0;background:transparent;color:\(color);
-        font:-apple-system-body;font-family:-apple-system,system-ui;-webkit-text-size-adjust:100%}
+        font:\(dense ? "14px/1.4" : "-apple-system-body");font-family:-apple-system,system-ui;-webkit-text-size-adjust:100%}
         .display{overflow-x:auto;overflow-y:hidden;padding:2px 0}
         code{font-family:ui-monospace,Menlo,monospace;font-size:.9em;background:\(code);padding:1px 4px;border-radius:4px}
         .katex{font-size:1.08em}</style>

@@ -60,11 +60,12 @@ struct ProjectBadge: View {
     var body: some View {
         let rate = app.projectRate(project.id)
         let working = app.projectWorking(project.id)
+        let ringPad: CGFloat = size <= 26 ? 2 : 4
         ProjectTile(project: project, size: size)
-            .padding(4)
+            .padding(ringPad)
             .overlay {
                 if working {
-                    RunRing(rate: rate, cornerRadius: size * 0.28 + 4)
+                    RunRing(rate: rate, cornerRadius: size * 0.28 + ringPad, lineWidth: size <= 26 ? 1.5 : 2)
                         .transition(.opacity)
                 }
             }

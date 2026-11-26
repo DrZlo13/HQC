@@ -73,10 +73,20 @@ private struct PaletteKey: EnvironmentKey {
     static let defaultValue = Palette.of(.warm)
 }
 
+private struct DenseUIKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 extension EnvironmentValues {
     var palette: Palette {
         get { self[PaletteKey.self] }
         set { self[PaletteKey.self] = newValue }
+    }
+
+    /// Compact, high-density layout ("vvzvlad mode") modeled on the web client's `list-compact`.
+    var denseUI: Bool {
+        get { self[DenseUIKey.self] }
+        set { self[DenseUIKey.self] = newValue }
     }
 }
 
@@ -90,6 +100,7 @@ struct Themed: ViewModifier {
         let palette = Palette.of(theme)
         content
             .environment(\.palette, palette)
+            .environment(\.denseUI, app.denseUI)
             .preferredColorScheme(app.followSystem ? nil : (palette.light ? .light : .dark))
             .tint(Color(hex: 0x3FB8A8))
     }

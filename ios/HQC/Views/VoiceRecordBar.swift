@@ -235,10 +235,12 @@ final class VoiceSession {
 /// Telegram-style recording & transcribing pill that replaces the composer row while active.
 struct VoiceRecordingPill: View {
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     let session: VoiceSession
     let onFinish: () -> Void
 
     @State private var dotPulse = false
+    private var control: CGFloat { dense ? Composer.denseControl : Composer.control }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -290,9 +292,9 @@ struct VoiceRecordingPill: View {
                 if locked {
                     Button(action: onFinish) {
                         Image(systemName: "arrow.up")
-                            .font(.system(size: 15, weight: .bold))
+                            .font(.system(size: dense ? 13.5 : 15, weight: .bold))
                             .foregroundStyle(.white)
-                            .frame(width: Composer.control, height: Composer.control)
+                            .frame(width: control, height: control)
                             .background(Color.accentColor.gradient, in: .circle)
                     }
                     .buttonStyle(.plain)
@@ -301,7 +303,7 @@ struct VoiceRecordingPill: View {
                 } else {
                     // Leave breathing room on the right for the expanding mic orb centered on the mic button.
                     Color.clear
-                        .frame(width: Composer.control + 16, height: Composer.control)
+                        .frame(width: control + 16, height: control)
                 }
 
             case .transcribing:
@@ -329,7 +331,7 @@ struct VoiceRecordingPill: View {
         }
         .padding(.leading, 14)
         .padding(.trailing, session.isLocked || session.phase == .transcribing ? 4 : 8)
-        .frame(minHeight: Composer.control + 6)
+        .frame(minHeight: control + 6)
         .glassEffect(.regular, in: .capsule)
     }
 }
@@ -431,18 +433,20 @@ struct VoiceFloatingOverlay: View {
 /// Hold-to-talk microphone button for the composer bar.
 struct VoiceMicButton: View {
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
     let session: VoiceSession
     /// Prominent accent style when standing in for the primary action button; glass style beside Send/Stop.
     let prominent: Bool
     let onTranscript: (String) -> Void
 
     @State private var pressed = false
+    private var size: CGFloat { dense ? Composer.denseControl : Composer.control }
 
     var body: some View {
         Image(systemName: "mic.fill")
-            .font(.system(size: 15, weight: .semibold))
+            .font(.system(size: dense ? 13.5 : 15, weight: .semibold))
             .foregroundStyle(prominent ? Color.accentColor : palette.text)
-            .frame(width: Composer.control, height: Composer.control)
+            .frame(width: size, height: size)
             .glassEffect(.regular.interactive(), in: .circle)
             .opacity(session.isActive ? 0.001 : 1)
             .contentShape(.circle)

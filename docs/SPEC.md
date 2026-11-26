@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.262, 2026-11-26. Status: the architecture agreed after six reviews and a survey of
+Version 0.263, 2026-11-26. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -8361,6 +8361,9 @@ is not asked, does not see the question or the answer, and does not work on it.
   libsecret and DPAPI later.
 - Client: TypeScript, responsive web, PWA; Tauri on the same code later. iOS: Swift and SwiftUI
   (`ios/`, since 0.257), the same REST API and `/api/ws`, no hub change.
+  In Settings → Appearance, “Dense UI (vvzvlad mode)” applies a compact layout immediately
+  to project and session lists, Requests, the chat feed and composer, and the sidebar.
+  It defaults to off and is saved on the device independently of the web client's Look setting.
 - Shared crates: `hqc-proto` (event and frame schema, versioned),
   `hqc-claude-jsonl` (transcript parser), adapters as separate crates.
 
@@ -8640,6 +8643,10 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.262 → 0.263 (dense layout for iOS)
+
+§18: iOS gains an optional dense layout, saved on the device.
 
 ### 0.261 → 0.262 (iteration 9 planned: MCP servers on the machine)
 §19: a new iteration 9, MCP servers that run on the machine, declared per environment in

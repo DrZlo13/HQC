@@ -493,6 +493,7 @@ struct MoveSessionSheet: View {
 struct LiveSessionsList: View {
     @Environment(AppModel.self) private var app
     @Environment(\.palette) private var palette
+    @Environment(\.denseUI) private var dense
 
     private var groups: [(String, [SessionSummary])] {
         let all = app.summaries.values.sorted { $0.last_seq > $1.last_seq }
@@ -511,40 +512,71 @@ struct LiveSessionsList: View {
                             Feedback.play(.select)
                             app.open(sessionID: s.session_id, title: s.title)
                         } label: {
-                            HStack(spacing: 12) {
-                                if let p = app.project(s.project_id) { ProjectTile(project: p, size: 30) }
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(s.title).font(.body).lineLimit(1)
-                                    HStack(spacing: 6) {
-                                        StateDot(state: s.state)
-                                        Text(s.state.label)
-                                        if let r = s.output_per_s, s.state.isBusy, r > 0 {
-                                            Text("· \(Int(r)) tokens/s").monospacedDigit()
-                                        }
+                            if dense {
+                                HStack(spacing: 8) {
+                                    if let p = app.project(s.project_id) { ProjectTile(project: p, size: 20) }
+                                    StateDot(state: s.state, size: 7)
+                                    Text(s.title)
+                                        .font(.system(size: 14, weight: s.unread > 0 ? .semibold : .regular))
+                                        .lineLimit(1)
+                                    Spacer(minLength: 4)
+                                    if let r = s.output_per_s, s.state.isBusy, r > 0 {
+                                        Text("\(Int(r)) tok/s")
+                                            .font(.system(size: 11).monospacedDigit())
+                                            .foregroundStyle(palette.muted)
                                     }
-                                    .font(.caption)
-                                    .foregroundStyle(palette.muted)
+                                    if s.unread > 0 {
+                                        Text("\(s.unread)")
+                                            .font(.system(size: 10.5, weight: .bold).monospacedDigit())
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 1)
+                                            .background(.tint, in: .capsule)
+                                            .foregroundStyle(.white)
+                                    }
                                 }
-                                Spacer()
-                                if s.unread > 0 {
-                                    Text("\(s.unread)")
-                                        .font(.caption2.bold())
-                                        .padding(.horizontal, 7)
-                                        .padding(.vertical, 2)
-                                        .background(.tint, in: .capsule)
-                                        .foregroundStyle(.white)
+                                .contentShape(.rect)
+                            } else {
+                                HStack(spacing: 12) {
+                                    if let p = app.project(s.project_id) { ProjectTile(project: p, size: 30) }
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(s.title).font(.body).lineLimit(1)
+                                        HStack(spacing: 6) {
+                                            StateDot(state: s.state)
+                                            Text(s.state.label)
+                                            if let r = s.output_per_s, s.state.isBusy, r > 0 {
+                                                Text("· \(Int(r)) tokens/s").monospacedDigit()
+                                            }
+                                        }
+                                        .font(.caption)
+                                        .foregroundStyle(palette.muted)
+                                    }
+                                    Spacer()
+                                    if s.unread > 0 {
+                                        Text("\(s.unread)")
+                                            .font(.caption2.bold())
+                                            .padding(.horizontal, 7)
+                                            .padding(.vertical, 2)
+                                            .background(.tint, in: .capsule)
+                                            .foregroundStyle(.white)
+                                    }
                                 }
+                                .contentShape(.rect)
                             }
-                            .contentShape(.rect)
                         }
                         .buttonStyle(.plain)
+                        .listRowInsets(dense ? EdgeInsets(top: 3, leading: 12, bottom: 3, trailing: 12) : nil)
+                        .listRowBackground(Color.clear)
                     }
                 } header: {
-                    Text(name).foregroundStyle(name == "Needs you" ? .orange : .secondary)
+                    Text(name)
+                        .font(dense ? .system(size: 11, weight: .semibold) : .footnote.weight(.semibold))
+                        .foregroundStyle(name == "Needs you" ? .orange : .secondary)
                 }
             }
         }
         .listStyle(.plain)
+        .listSectionSpacing(dense ? 2 : 12)
+        .environment(\.defaultMinListRowHeight, dense ? 30 : 44)
         .overlay {
             if groups.isEmpty {
                 ContentUnavailableView("All quiet", systemImage: "moon.zzz",

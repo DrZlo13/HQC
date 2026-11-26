@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.261, 2026-11-26. Status: the architecture agreed after six reviews and a survey of
+Version 0.262, 2026-11-26. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -220,9 +220,9 @@ and the two differ.
 `protocol_version`, `boot_id` (from the last `hello`, §5.2), `capabilities` (`claude_code: {version, sessions_registry?, moves?, login?}`, `acp_agents[{name,
 version, load_session, resume, image, isolation}]` — the result of each agent's `initialize`
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
-`environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?, remote_unblock? (0.246)}}`,
+`environments[]` (since 0.56 `{name, allow_local_mcp?, mcp_servers? (0.262), permissions {unblock?, allow?, deny?, remote_unblock? (0.246)}}`,
 never the values of `env`; `default` is implied), `env_bindings[]` (`{path, environment}`; the
-Hermes profile in iteration 9),
+Hermes profile in iteration 10),
 `allow_foreign_sessions`, `idle_timeout`, `system_session_id` (§10.2), `machine_hash` (since 0.23:
 the machine fingerprint from enrollment and the last `hello`, §5.1; not part of the API worker object),
 `session_secrets` (since 0.147, hub migration `0044`: its `worker.toml` has `session_secrets = true`,
@@ -675,6 +675,8 @@ the client renders only them. The "source" column is the component that produces
 | `model_refusal` | worker (adapter) | since 0.179: the model refused and no other model answered; `text` is the runtime's, or "<model> refused to answer" and the API's explanation (§8.1) |
 | `model_not_switched` | worker (adapter) | since 0.179: the runtime refused a switch to the model the user chose (since 0.195 also the model it was started with, Claude Code's `model_restriction`, §8.1); `text` gives its reason and the model it kept, `model` that model, which the hub makes the session's model (`agent.model`) when it is a name hqc takes from the user (§6, §8.1) |
 | `mcp_not_connected` | worker (adapter) | since 0.179: MCP servers of the agent that are not connected and not turned off; `text` "MCP servers not connected: <name> (<status>), …", given when that list changes (§8.1) |
+| `mcp_server_failed` | worker | since 0.262: a local MCP server of the session's environment (§14 `mcp_servers`) could not start: a missing program or folder, a value Vaultwarden did not give, its pins unreadable; `text` "The MCP server <name> of this machine could not start: <why>", never a value; the agent goes on without its tools |
+| `mcp_tools_changed` | worker | since 0.262: a pinned local MCP server's tools differ from the pin (§14), so the agent gets none of them; `text` "The MCP server <name> is off: its tools changed since they were approved (added …; removed …; changed …). Check the change on the worker's machine and approve it there with `hqc-worker mcp approve <env>/<name>`"; given at every start until approved |
 | `plugin_errors` | worker (adapter) | since 0.179: plugins of the runtime that did not load in full; `text` "Plugin errors: <plugin>: <message>; …", given when that list changes (§8.1) |
 | `agent_start_failed` | hub | the agent failed to start 3 times in a row (or non-retryably); `pending` inputs became `failed` (§5.2) |
 | `input_rejected` | hub | the worker rejected an input other than as a failed start; the input became `failed` (§5.2) |
@@ -1559,8 +1561,9 @@ MCP calls (worker → hub → worker):
   (`secret.put.vault_field`): an older worker ignores the field and would give the password, so
   the hub offers the field, and `reads_vault` on a card, only to a worker that sends it.
   `environments` (since 0.56, T43) — the environments of the local config (§14) as `{name,
-  allow_local_mcp?, permissions {unblock?, allow?, deny?, remote_unblock?}}`, without `default` and never with the
-  values (or the names) of `env`; a plain string, as workers before 0.56 send, reads as an
+  allow_local_mcp?, mcp_servers?, permissions {unblock?, allow?, deny?, remote_unblock?}}`, without `default` and never with the
+  values (or the names) of `env`; `mcp_servers` (since 0.262) the names of its local MCP
+  servers (§14), never a command, URL, header or value, absent when none; a plain string, as workers before 0.56 send, reads as an
   environment without rules. `env_bindings` — `{path, environment}`, the path canonical when it
   existed at the worker's start (`worker.hello.json`). The hub keeps both on the worker and sets
   each workspace's `environment` from the bindings (§3 Workspace).
@@ -2008,6 +2011,13 @@ the rest is marked "later"):
   the section "MCP servers" in Settings (the list with status and tools, add and edit with
   headers or OAuth, Test, Sign in, Sign out, Delete) and the servers a project gets in its
   settings (T66).
+  Since 0.262 (iteration 9) `GET /api/mcp/servers` also has `local[{name, worker_id,
+  worker_name, environment}]`: the servers each of the owner's workers (not revoked) declares in
+  `worker.toml` (§14 `mcp_servers`), from the environments of its last `hello`, sorted by name,
+  worker and environment. They are read-only: the hub cannot add, change or start one, and
+  routes nothing by them (a session runs where its workspace is). Settings → MCP servers lists
+  them under "On machines" with a line on declaring one in `worker.toml`, and a project's
+  settings show those of the workers its workspaces are on.
   Skills (since 0.245, `docs/ITERATION-8.md`): `GET /api/skills` ({skills: [...]}), `POST
   /api/skills`, `PATCH/DELETE /api/skills/{id}`, `GET /api/skills/{id}/files` ({files: [{path,
   size, executable?}]}), the owner's only. A skill: {id, name, description?, allowed_tools[],
@@ -3688,7 +3698,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
 - `hqc_attach(path?, content?, name?, kind?, caption?)` — upload a file as an artifact
   to the current session; `path` for runtimes with a file system, `content` for the bare model.
   Since 0.34 (T31) the worker's MCP server lists `hqc_attach(path, name?, kind?, caption?)`;
-  `content` comes with the bare model (iteration 9) and is refused until then
+  `content` comes with the bare model (iteration 10) and is refused until then
   (`invalid_args`). The worker daemon does the file part itself, trusting neither the hub nor
   the agent's path (§2.1): `path` is absolute or relative to the session's working directory;
   its canonical form (symlinks resolved) must lie inside the session's workspace and inside
@@ -3706,7 +3716,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   live_attach.rs`): the event lands between the call's `tool.call` and `tool.result`.
 - `hqc_send(text, session?)` — a message to another session without waiting for a reply;
   without `session`, to the owner's personal assistant session. Since 0.35 (T32): `session`
-  is required until the personal session exists (iteration 9); the result is `{to,
+  is required until the personal session exists (iteration 10); the result is `{to,
   delivery}`, `to` — the target's address, `delivery` — `queued` (the input queue, the
   target wakes on sends; by default since 0.55) or `buffered` (the send buffer, §7.1); since 0.47 (T42) also
   `with_reply`: the send goes back with the reply to the target's open ask (§7.1). Since 0.54
@@ -3760,7 +3770,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   cap of its chain (§7.1), and so does the spawned session's first turn. `project` — a slug or an id
   of the owner's project; `workspace` — an id, a label or a path of a workspace of that
   project (else `not_found`), absent — the project's `default_workspace_id` (none:
-  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 9 (else
+  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 10 (else
   `invalid_args`); `model` absent — the calling session's model (a cheap spawner does not
   start an expensive agent by default), present — checked as in §6. `prompt` (not blank)
   becomes a `peer.message` with `mode: send` from the calling session in the new session's
@@ -4113,7 +4123,7 @@ to it (`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}`
 server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
 Codes added in 0.35: `timeout` (no reply in time), `limit_exceeded` (a chain limit, §7.1),
 `worker_restart` (the asking worker restarted; never seen by the agent, whose call died).
-Until grants (iteration 10) every tool works only on the calling session's owner's own
+Until grants (iteration 11) every tool works only on the calling session's owner's own
 projects and sessions; anything else is `not_found`.
 
 ### 7.1 Semantics of send and ask **[decision]**
@@ -4781,7 +4791,13 @@ flag fails every session start. Checked on 2.1.300: `--resume` continues the sam
 jsonl file. `--strict-mcp-config` disables MCP servers from `~/.claude.json`
 and the project's `.mcp.json`; they can be allowed only through the environment (§14,
 `allow_local_mcp`: since 0.56 such a session runs without the flag, the hqc server still comes
-in `--mcp-config`). Since 0.245 the skills of the hub (§5.3 `session.start.skills`, §14
+in `--mcp-config`; checked on 2.1.328: without the flag the agent gets every server the
+machine's CLI knows, the account's `claude.ai` connectors included). Since 0.262 (iteration 9)
+an environment's `mcp_servers` (§14) come in `--mcp-config` next to `hqc` and the hub's relays,
+each under its own name as the launcher `<worker binary> mcp --socket <socket> --local <name>`
+with the session token in its `env`, and `--strict-mcp-config` stays: the launcher gets the
+server's resolved command, environment or headers from the daemon (§7.2), so none of their
+values is on the CLI's command line. Since 0.245 the skills of the hub (§5.3 `session.start.skills`, §14
 `hub_skills`) come as a plugin folder the worker builds, `--plugin-dir
 $HQC_HOME/hub-skills/sets/<hash of the set>`: `.claude-plugin/plugin.json` `{"name": "hqc"}`
 written by the worker and `skills/<name>/` unpacked from each archive, nothing of the hub's
@@ -7235,7 +7251,7 @@ from the `fs.list_dirs` tree or its path is typed in, the worker checks it with 
 the hub stores the canonical path. Since 0.64, when the folder is missing (`400
 path_not_found`) the form offers "Create the folder and add" in place of "Add" (until the path
 or the worker changes), which sends `create: true`. Only the worker's owner can add a workspace to a worker (until
-the sharing of iteration 10 a worker has no other users), so there is no confirmation through the
+the sharing of iteration 11 a worker has no other users), so there is no confirmation through the
 service session yet; if the worker is offline, the workspace is not created. Since 0.58 (T45)
 `clone`: the client gives the URL, the parent folder and a name, the hub checks the parent and
 stores the workspace `creating`, the worker checks the new path itself and clones into it in its
@@ -7294,7 +7310,7 @@ The worker's local config is the only source of truth for:
   old file is ignored with a warning in the log at start;
 - `environments{}` — named environments (`[environments.<name>]`, below; since 0.56, T43);
 - `env_bindings[]` — records `{path, environment, hermes_profile?, foreign_profile?}`
-  (`[[env_bindings]]`; the profiles are iteration 9). A binding is looked up **by the workspace
+  (`[[env_bindings]]`; the profiles are iteration 10). A binding is looked up **by the workspace
   path** (not by the session's `cwd`), canonical (symlinks resolved; the binding's own path is
   resolved again at every lookup, so a binding through a symlink names its target); the longest
   binding that equals or contains the path wins, compared by path components (`/a/b` does not
@@ -7384,6 +7400,14 @@ allow_local_mcp = false
 project_settings = false
 hub_mcp = false                       # true: the owner's remote MCP servers from the hub (0.235)
 hub_skills = false                    # true: the owner's skills from the hub (0.245)
+[environments.infra.mcp_servers.figma]   # since 0.262: an MCP server of this machine
+command = "npx"
+args = ["-y", "figma-developer-mcp@0.6.4", "--stdio"]
+env = { FIGMA_API_KEY = { vault = "figma token" } }   # or a plain value
+# pin = false                         # its tools are pinned unless this says otherwise
+[environments.infra.mcp_servers.figma-dev]
+type = "http"
+url = "http://127.0.0.1:3845/mcp"
 [environments.infra.permissions]
 unblock = ["Bash(ssh:*)"]             # lift worker-wide deny rules here only
 allow = ["Bash(ssh debian@192.168.1.20:*)"]
@@ -7445,7 +7469,59 @@ base_url = "http://192.168.1.229:8082" # must equal the hub's description
   only boundary is the absence of keys;
 - `allow_local_mcp`: allow MCP servers from the machine (Claude Code: without
   `--strict-mcp-config`, the hqc server stays; Hermes: without
-  `HERMES_ACP_SKIP_CONFIGURED_MCP`); default false;
+  `HERMES_ACP_SKIP_CONFIGURED_MCP`); default false. Since 0.262: this is every server the
+  machine's CLI knows, the account's `claude.ai` connectors (mail, drive, calendar…) included
+  (checked on 2.1.328); `hqc-worker env` says so, and `mcp_servers` below gives one server
+  without the rest;
+- `mcp_servers` (since 0.262, iteration 9): `[environments.<name>.mcp_servers.<server>]`, the
+  MCP servers of this machine the environment's agents get, for an unrestricted Claude Code
+  session of the worker's owner (the terms of `hub_mcp`); `default` has none. `type` is `stdio`
+  (the default: `command` absolute or a name looked up in the worker's `PATH`, `args`, `env`,
+  `cwd` absolute) or `http` (Streamable HTTP: `url` http(s) without credentials, `headers`); a
+  value of `env` or `headers` is a string or `{ vault = "<entry>", field? }`, read with `rbw` at
+  every start of the server as a provider's `api_key` is; `pin` (default true) below. A name is
+  that of a hub server (§7.3: 1 to 32 of `a-z 0-9 - _`, not `hqc`); an unknown field, a stdio
+  field on an http server or the other way round, a relative command path or `cwd`, an `HQC_*`
+  variable and a header value with a line break are config errors at load; a missing program
+  or an unreadable value fails only that server, at its start. The tools are
+  `mcp__<server>__<tool>` and go through the worker's `deny` and the permission cards as any
+  MCP tool; a hub server of the same name is left out of the session (the machine wins, logged).
+  The worker never reads `~/.claude.json` or a repository's `.mcp.json` for them. The CLI gets
+  each as the launcher `hqc-worker mcp --local <name>` (§8.1), which authenticates on the
+  daemon's socket as the hqc server does and asks for the server's spec, which the daemon
+  resolves then (its Vaultwarden values read). The daemon also checks that the peer runs the
+  worker's own binary: a guard against accidents, not a boundary. The values stay off every
+  command line, `hello`, log, file and the transcript; but an agent of the same OS user can still
+  read what a server it can talk to was given (the server's process environment, the socket with
+  the token from the CLI's command line, `rbw` itself), as it can an environment's `env` or a
+  provider's key: a real boundary needs another OS user (`launch = os-user`). A `stdio` program
+  runs in the session's working folder (or `cwd`) with the child allowlist of §8.1 without
+  `CLAUDE_*` and `ANTHROPIC_*`, then its `env`, and nothing else (not the session token, not the
+  environment's `env`); an `http` server gets every message as a `POST` with its headers,
+  `Mcp-Session-Id` and `MCP-Protocol-Version` once named, no redirect followed, and the optional
+  `GET` stream of server requests is not opened. The values are in no `hello`, log, file or
+  error. **Pinning** (from MCPProxy): the launcher holds the server's answer to `initialize`,
+  tells the server `notifications/initialized` itself (the CLI's own is then dropped), reads the
+  whole `tools/list` (every page), and checks the SHA-256 of the server's name and
+  `instructions` (which reach the agent's system prompt) and the tools' names, descriptions and
+  input schemas (sorted by name, compact JSON with sorted keys) against `$HQC_HOME/mcp-pins.json`
+  (0600) under `<environment>/<server>`, all before the CLI gets any of it: none, it is
+  recorded; the same, the CLI gets the `initialize` answer, its `tools/list` is answered with
+  exactly those fields of the checked list and a `tools/call` of another name is refused;
+  another, it is kept as pending beside the pin, the CLI gets errors (its `initialize` too), the
+  launcher exits and the chat gets `system mcp_tools_changed` naming the tools added, removed and
+  changed (and a changed name or instructions) and the command
+  `hqc-worker mcp approve <env>/<server>`, which shows the change on the machine (the
+  instructions, every new or changed description and schema) and, once the owner agrees, makes
+  it the pin; until then every start fails the same way. A pinned server's answer reaches the
+  CLI only for a request of the CLI the launcher forwarded and is still open: an answer to an id
+  the launcher answers itself (`tools/list`), one it never forwarded or a second one is dropped,
+  so the server cannot answer the CLI's `tools/list` in the launcher's place. `hqc-worker mcp pins` lists the pins and those waiting. A
+  `notifications/tools/list_changed` is checked the same way before the CLI hears of it.
+  `pin = false` passes everything through unchecked (a server whose package moves on its own,
+  `uvx` or `npx` without a version). A server that cannot start (a missing program, a value
+  Vaultwarden did not give, a missing `cwd`) gets `system mcp_server_failed` saying why.
+  `hello` names the servers (§5.3), never their commands or values;
 - `project_settings` (since 0.83): Claude Code reads the project setting source too,
   `--setting-sources user,project,local` instead of `user,local` (§8.1): the repository's
   `CLAUDE.md` and `.claude/settings.json` (and, per Claude Code's documentation, the skills,
@@ -7655,7 +7731,7 @@ it finds commands, their output and word forms and puts the best match first:
 - **Configuration `hqc`.** A copy of `russian` whose Latin words go to an English and the rest
   to a Russian Snowball stemmer, both without stop words, so every word stays searchable and
   "переезд" finds "переезда", "deploy" finds "deployed".
-- **Whose.** Until grants (iteration 10): the user's (the calling session's owner's) sessions,
+- **Whose.** Until grants (iteration 11): the user's (the calling session's owner's) sessions,
   archived ones included and marked `archived: true`, the workers' service sessions left out and
   (since 0.172) of a room's agents' sessions their inputs from the room, which the room has
   (§7.1.1); since 0.175, for an agent of a room (`hqc_search_history`, §7) also the room and
@@ -8304,7 +8380,7 @@ is not asked, does not see the question or the answer, and does not work on it.
    a session started in VS Code (live test `live_takeover`; checked by hand through the UI on a phone on 2026-10-25).
    Closed on 2026-10-25.
 3. hqc MCP: attach, send, ask, spawn, list, search, schedule; `mcp.call` frames;
-   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 10).
+   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 11).
    Tasks: `docs/ITERATION-3.md`. Criterion checked by hand on the production hub on 2026-10-31.
    Closed on 2026-10-31.
 4. Workspaces: ~~clone~~ (0.58, T45), ~~worktree~~ (0.60, T46), ~~ephemeral~~ (0.61, T47). Environments and bindings on the worker. Moved
@@ -8333,12 +8409,20 @@ is not asked, does not see the question or the answer, and does not work on it.
    `hqc:<name>` (and `/<name>`) on every worker; the hub's copy wins over a same-named skill of
    the machine; a skill with `hooks` is refused by the hub and the worker; only an environment
    with `hub_skills = true` takes them (§14). Tasks: `docs/ITERATION-8.md`.
-9. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
+9. MCP servers on the machine (planned, the rest of #59): `[environments.<name>.mcp_servers]`
+   of `worker.toml` declares the `stdio` and local `http` servers an environment's agents get,
+   each by name next to `hqc` and the hub's relays, with `--strict-mcp-config` kept, so no
+   server of `~/.claude.json` and no `claude.ai` connector comes with them; secrets are read
+   from Vaultwarden at every start through a launcher of the worker, never on a command line;
+   the launcher pins a hash of each server's tools (unless the server says `pin = false`), and a
+   changed list fails the server until the owner approves it on the machine; `hello` names them for Settings. The hub cannot add or start one (§2.1). Tasks:
+   `docs/ITERATION-9.md`.
+10. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
    worker; the bare model; the personal assistant session (moved from 3: its default runtime is
    the bare model, §8.3), until then `hqc_send` needs `session`.
-10. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
+11. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
    (0.38, T35, with `hqc_schedule`).
-11. Tauri, native notifications, several agents in one session.
+12. Tauri, native notifications, several agents in one session.
 
 ## 20. Hosting and security
 
@@ -8556,6 +8640,31 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.261 → 0.262 (iteration 9 planned: MCP servers on the machine)
+§19: a new iteration 9, MCP servers that run on the machine, declared per environment in
+`worker.toml` (the rest of #59); the generic ACP adapter becomes iteration 10, sharing 11, Tauri
+12, and the references to them follow. Plan: `docs/ITERATION-9.md`. Found on 2.1.328:
+`allow_local_mcp` gives the agent every server the machine's CLI knows, the account's `claude.ai`
+connectors included; `--strict-mcp-config` gives none of them. 0.257–0.261 are left to the iOS
+client (#171).
+
+Implemented (T70–T71a): §14 `mcp_servers` per environment, checked at load, listed by
+`hqc-worker env` and `env which` without values, with a warning on `allow_local_mcp`; §8.1 the
+launcher `hqc-worker mcp --local <name>` in `--mcp-config`, `--strict-mcp-config` kept; the
+daemon gives a server's spec (Vaultwarden values read then) to a peer running the worker's
+binary (a guard against accidents, not a boundary against an agent of the same OS user); a
+stdio program gets the child allowlist without `CLAUDE_*`/`ANTHROPIC_*` plus its own
+`env`; `http` is relayed with its headers, no redirect followed; the tools pinned in
+`$HQC_HOME/mcp-pins.json` with the server's name and instructions unless `pin = false`, the
+CLI's `initialize` answer held until checked, an answer of the server passed on only for a request
+the launcher forwarded (security review), `hqc-worker mcp approve` and `mcp pins`; §4
+`system mcp_server_failed` and `mcp_tools_changed`.
+
+Implemented (T72, T73): §5.3 `hello.environments[].mcp_servers` (names only), kept by the hub
+with the worker's environments (no migration: the column is the JSON of `hello`); §6
+`GET /api/mcp/servers` `local[]`; the client's Settings → MCP servers "On machines" and the
+project settings' local servers.
 
 ### 0.260 → 0.261 (native client sign-in behind an OIDC proxy)
 §6, §20: `GET /api/native/login` and `POST /worker/native/token` now work in OIDC mode

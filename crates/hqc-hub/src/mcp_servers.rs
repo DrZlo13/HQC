@@ -1301,7 +1301,36 @@ pub async fn list(
     for r in &rows {
         servers.push(to_api(&app.db, r).await?);
     }
-    Ok(Json(McpServerList { servers }))
+    let local = local_servers(&crate::db::workers_of(&app.db, user.id).await?);
+    Ok(Json(McpServerList { servers, local }))
+}
+
+/// The MCP servers the workers' `hello` named per environment (SPEC 0.262), by name, then
+/// worker and environment. A worker's `environments` is its last `hello`'s copy; an entry it
+/// cannot read is skipped.
+pub fn local_servers(workers: &[crate::db::WorkerRow]) -> Vec<hqc_proto::api::LocalMcpServer> {
+    let mut out = vec![];
+    for w in workers {
+        let envs: Vec<hqc_proto::frame::EnvironmentInfo> =
+            serde_json::from_value(w.environments.clone()).unwrap_or_default();
+        for e in envs {
+            for name in e.mcp_servers {
+                if !hqc_proto::mcp::valid_server_name(&name) {
+                    continue;
+                }
+                out.push(hqc_proto::api::LocalMcpServer {
+                    name,
+                    worker_id: w.id,
+                    worker_name: w.name.clone(),
+                    environment: e.name.clone(),
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        (&a.name, &a.worker_name, &a.environment).cmp(&(&b.name, &b.worker_name, &b.environment))
+    });
+    out
 }
 
 /// `POST /api/mcp/servers`: `name` and `url` required.

@@ -95,7 +95,7 @@ async function fillNew(name = 'fresh', url = 'https://kicad.example/mcp') {
 
 it('lists the servers with their statuses, tools and projects', async () => {
   const unknown = { ...NEW, project_ids: [] };
-  await mount(stubApp({ mcpServers: vi.fn(async () => [GITHUB, KICAD, unknown]) }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [GITHUB, KICAD, unknown], local: [] })) }));
   const [gh, kc, fr] = rows();
   expect(gh.querySelector('.mcp-status')!.textContent).toBe('ok');
   expect(gh.textContent).toContain('get_me, create_issue');
@@ -115,7 +115,7 @@ it('lists the servers with their statuses, tools and projects', async () => {
 
 it('is a section of Settings', async () => {
   const app = {
-    ...stubApp({ mcpServers: vi.fn(async () => [GITHUB]), workers: vi.fn(async () => []) }),
+    ...stubApp({ mcpServers: vi.fn(async () => ({ servers: [GITHUB], local: [] })), workers: vi.fn(async () => []) }),
     me: { email: 'me@example.com' },
     theme: () => 'warm',
     lookName: () => 'spacious',
@@ -137,7 +137,7 @@ it('checks the name, the URL and the timeout before sending', async () => {
   const createMcpServer = vi.fn(async () => {
     throw new ApiError(400, 'refused');
   });
-  await mount(stubApp({ mcpServers: vi.fn(async () => []), createMcpServer }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [], local: [] })), createMcpServer }));
   await click($('.btn-add-mcp'));
   expect(input('mcp_timeout').value).toBe('300');
   expect(input('mcp_all_projects').checked).toBe(true);
@@ -170,7 +170,7 @@ it('checks the name, the URL and the timeout before sending', async () => {
 
 it('sends the headers of a new server and clears the values once saved', async () => {
   const createMcpServer = vi.fn(async (_: McpServerFields) => NEW);
-  await mount(stubApp({ mcpServers: vi.fn(async () => [GITHUB]), createMcpServer }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [GITHUB], local: [] })), createMcpServer }));
   await fillNew();
   await type(input('mcp_timeout'), '900');
   const value = input('mcp_header_value');
@@ -212,7 +212,7 @@ it('sends no headers for a new server without them, and keeps the form when the 
   const createMcpServer = vi.fn(async () => {
     throw new ApiError(409, 'you have a server named "fresh"', 'name_taken');
   });
-  await mount(stubApp({ mcpServers: vi.fn(async () => []), createMcpServer }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [], local: [] })), createMcpServer }));
   await fillNew();
   await save();
   expect(createMcpServer.mock.calls[0]).toEqual([
@@ -226,7 +226,7 @@ it('says what to do when the hub has no HQC_MCP_KEY', async () => {
   const createMcpServer = vi.fn(async () => {
     throw new ApiError(422, 'no key', 'mcp_key_missing');
   });
-  await mount(stubApp({ mcpServers: vi.fn(async () => []), createMcpServer }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [], local: [] })), createMcpServer }));
   await fillNew();
   await type(input('mcp_header_name'), 'Authorization');
   await type(input('mcp_header_value'), 'Bearer s3cret');
@@ -244,7 +244,7 @@ it('says what to do when the hub has no HQC_MCP_KEY', async () => {
 
 it('an edit that leaves the headers alone sends no headers', async () => {
   const updateMcpServer = vi.fn(async (_: string, f: McpServerFields) => ({ ...KICAD, ...f }) as McpServer);
-  await mount(stubApp({ mcpServers: vi.fn(async () => [GITHUB, KICAD]), updateMcpServer }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [GITHUB, KICAD], local: [] })), updateMcpServer }));
   await click(rows()[0].querySelector('.btn-edit-mcp'));
   // The names of the kept headers, no value field.
   expect($('.mcp-headers-kept')!.textContent).toContain('Kept: Authorization');
@@ -268,7 +268,7 @@ it('an edit that leaves the headers alone sends no headers', async () => {
 
 it('"Replace headers" sends all of them again', async () => {
   const updateMcpServer = vi.fn(async (_: string, f: McpServerFields) => ({ ...GITHUB, header_names: f.headers!.map((h) => h.name) }));
-  await mount(stubApp({ mcpServers: vi.fn(async () => [GITHUB]), updateMcpServer }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [GITHUB], local: [] })), updateMcpServer }));
   await click($('.btn-edit-mcp'));
   await click($('.btn-replace-headers'));
   // The kept names to fill in again, the values empty.
@@ -294,7 +294,7 @@ it('"Replace headers" sends all of them again', async () => {
 
 it('deletes a server after a confirmation', async () => {
   const deleteMcpServer = vi.fn(async () => {});
-  await mount(stubApp({ mcpServers: vi.fn(async () => [GITHUB, KICAD]), deleteMcpServer }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [GITHUB, KICAD], local: [] })), deleteMcpServer }));
   vi.stubGlobal('confirm', () => false);
   await click(rows()[1].querySelector('.btn-delete-mcp'));
   expect(deleteMcpServer).not.toHaveBeenCalled();
@@ -309,7 +309,7 @@ it('deletes a server after a confirmation', async () => {
 
 it('"Test" shows the fresh status and tools', async () => {
   const testMcpServer = vi.fn(async () => ({ ...KICAD, status: 'ok' as const, last_error: undefined, tools: ['open_board'] }));
-  await mount(stubApp({ mcpServers: vi.fn(async () => [KICAD]), testMcpServer }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [KICAD], local: [] })), testMcpServer }));
   expect(rows()[0].querySelector('.mcp-status')!.textContent).toBe('failing');
   await click($('.btn-test-mcp'));
   expect(testMcpServer).toHaveBeenCalledWith('s2');
@@ -320,7 +320,7 @@ it('"Test" shows the fresh status and tools', async () => {
 });
 
 it("a project's settings list the servers it gets", async () => {
-  const app = stubApp({ mcpServers: vi.fn(async () => [GITHUB, KICAD, NEW]) });
+  const app = stubApp({ mcpServers: vi.fn(async () => ({ servers: [GITHUB, KICAD, NEW], local: [] })) });
   await mount(app, <ProjectMcpServers app={app} projectId="p1" />);
   expect($('h2')!.textContent).toBe('MCP servers');
   expect(rows().map((r) => r.querySelector('.mcp-name')!.textContent)).toEqual(['github', 'kicad']);
@@ -335,9 +335,47 @@ it("a project's settings list the servers it gets", async () => {
   render(null, root);
 
   // A project no server is given to.
-  const other = stubApp({ mcpServers: vi.fn(async () => [KICAD]) });
+  const other = stubApp({ mcpServers: vi.fn(async () => ({ servers: [KICAD], local: [] })) });
   await mount(other, <ProjectMcpServers app={other} projectId="p2" />);
   expect($('.empty-inline')!.textContent).toBe('None for this project.');
+});
+
+const LOCAL = [
+  { name: 'figma', worker_id: 'w1', worker_name: 'drzlo-mac', environment: 'firmware' },
+  { name: 'kicad', worker_id: 'w2', worker_name: 'home-mac', environment: 'infra' },
+];
+
+it('lists the servers of the machines read-only, with how to declare one', async () => {
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [GITHUB], local: LOCAL })) }));
+  expect(rows()).toHaveLength(1);
+  const local = $$('.mcp-local-row');
+  expect(local.map((r) => r.textContent)).toEqual(['figma · drzlo-mac · env firmware', 'kicad · home-mac · env infra']);
+  expect($('.mcp-local h3')!.textContent).toBe('On machines');
+  expect($('.mcp-local')!.textContent).toContain('[environments.<name>.mcp_servers.<server>]');
+  expect($('.mcp-local')!.querySelectorAll('button')).toHaveLength(0);
+});
+
+it('says so when no machine has a server', async () => {
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [], local: [] })) }));
+  expect($('.mcp-local .empty-inline')!.textContent).toBe('None.');
+});
+
+it("a project's settings list the machines' servers of its folders", async () => {
+  const app = {
+    ...stubApp({ mcpServers: vi.fn(async () => ({ servers: [], local: LOCAL })) }),
+    workspaces: new Map([
+      ['p1', [{ id: 'ws1', worker_id: 'w1', environment: 'firmware' }]],
+      ['p2', [{ id: 'ws2', worker_id: 'w2', environment: 'default' }]],
+    ]),
+  } as unknown as AppState;
+  await mount(app, <ProjectMcpServers app={app} projectId="p1" />);
+  expect($$('.mcp-local-row').map((r) => r.textContent)).toEqual(['figma · drzlo-mac · env firmware']);
+  expect($('.empty-inline')).toBeNull();
+  render(null, root);
+  // Another environment of the same worker gets none, and with no hub server either the
+  // section is not there.
+  await mount(app, <ProjectMcpServers app={app} projectId="p2" />);
+  expect($('.mcp-project-servers')).toBeNull();
 });
 
 it('an OAuth server: no headers sent, Sign in opens the page the hub gives, Sign out forgets it', async () => {
@@ -355,7 +393,7 @@ it('an OAuth server: no headers sent, Sign in opens the page the hub gives, Sign
     signed_in: false,
   };
   const api: Partial<Api> = {
-    mcpServers: vi.fn(async () => [oauth]),
+    mcpServers: vi.fn(async () => ({ servers: [oauth], local: [] })),
     signInMcpServer: vi.fn(async () => 'https://linear.app/oauth/authorize?x=1'),
     signOutMcpServer: vi.fn(async () => {}),
   };
@@ -389,7 +427,7 @@ const authSelect = () => $<HTMLSelectElement>('select[name="mcp_auth"]')!;
 
 it('the URL is the first field, and a pasted one fills the name and the OAuth sign-in', async () => {
   const probeMcp = vi.fn(async () => ({ name: 'linear', auth: 'oauth' as const }));
-  await mount(stubApp({ mcpServers: vi.fn(async () => []), probeMcp }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [], local: [] })), probeMcp }));
   await click($('.btn-add-mcp'));
   expect($$<HTMLInputElement>('.mcp-form input')[0].name).toBe('mcp_url');
   await paste(input('mcp_url'), 'https://mcp.linear.app/mcp');
@@ -410,7 +448,7 @@ it('a server that needs a token gets an Authorization row; one that needs none, 
   const probeMcp = vi.fn(async (url: string) =>
     url.includes('githubcopilot') ? { name: 'githubcopilot', auth: 'token' as const } : { name: 'kicad', auth: 'none' as const },
   );
-  await mount(stubApp({ mcpServers: vi.fn(async () => []), probeMcp }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [], local: [] })), probeMcp }));
   await click($('.btn-add-mcp'));
   await paste(input('mcp_url'), 'https://api.githubcopilot.com/mcp/');
   expect(probeLine()).toBe('Needs a token');
@@ -430,7 +468,7 @@ it('a server that needs a token gets an Authorization row; one that needs none, 
 
 it('never overwrites a field the owner edited, and checks a URL only once', async () => {
   const probeMcp = vi.fn(async () => ({ name: 'linear', auth: 'oauth' as const }));
-  await mount(stubApp({ mcpServers: vi.fn(async () => []), probeMcp }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [], local: [] })), probeMcp }));
   await click($('.btn-add-mcp'));
   await type(input('mcp_name'), 'mine');
   await act(async () => {
@@ -450,7 +488,7 @@ it('a typed URL is checked once typing settles; an error shows under it', async 
   const probeMcp = vi.fn(async () => {
     throw new ApiError(400, 'url: https only');
   });
-  await mount(stubApp({ mcpServers: vi.fn(async () => []), probeMcp }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [], local: [] })), probeMcp }));
   await click($('.btn-add-mcp'));
   await type(input('mcp_url'), 'https://kicad.example/mc');
   await type(input('mcp_url'), 'https://kicad.example/mcp');
@@ -467,7 +505,7 @@ it('a typed URL is checked once typing settles; an error shows under it', async 
 
 it('an edit counts every field as edited', async () => {
   const probeMcp = vi.fn(async () => ({ name: 'linear', auth: 'oauth' as const }));
-  await mount(stubApp({ mcpServers: vi.fn(async () => [GITHUB]), probeMcp }));
+  await mount(stubApp({ mcpServers: vi.fn(async () => ({ servers: [GITHUB], local: [] })), probeMcp }));
   await click($('.btn-edit-mcp'));
   // Its own URL is not checked.
   await act(async () => void input('mcp_url').dispatchEvent(new Event('blur')));

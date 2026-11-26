@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { ApiError, type McpHeader, type McpProbe, type McpServerFields } from '../api';
 import type { AppState } from '../app';
-import type { McpServer } from '../proto';
+import type { LocalMcpServer, McpServer, McpServerList, Workspace } from '../proto';
 import { projectName } from './Appearance';
 import { useUrlProbe } from './urlprobe';
 
@@ -74,8 +74,46 @@ export function serversOf(list: McpServer[], projectId: string): McpServer[] {
 }
 
 /** The servers from the hub; a stub without the call or a failure: none (the page still shows). */
-function loadServers(app: AppState): Promise<McpServer[]> {
+function loadServers(app: AppState): Promise<McpServerList> {
   return Promise.resolve().then(() => app.api.mcpServers());
+}
+
+/** The machines' servers the agents of a project's workspaces get (SPEC 0.262): those of each
+ *  workspace's worker in the workspace's environment, once each. */
+export function localServersOf(local: LocalMcpServer[], workspaces: Workspace[]): LocalMcpServer[] {
+  return local.filter((l) => workspaces.some((w) => w.worker_id === l.worker_id && w.environment === l.environment));
+}
+
+/** How a server is declared on a machine, for the line under "On machines". */
+const LOCAL_HOWTO = '[environments.<name>.mcp_servers.<server>]';
+
+/** "On machines": the servers of the owner's workers' `worker.toml`, read-only (SPEC 0.262). */
+function LocalServers({ local }: { local: LocalMcpServer[] }) {
+  return (
+    <div class="mcp-local">
+      <h3>On machines</h3>
+      <p class="muted">
+        MCP servers that run on a worker, given to the sessions of one of its environments. They are declared on that machine,
+        in worker.toml under <span class="mono">{LOCAL_HOWTO}</span>, and cannot be changed here; their tools are pinned, and a
+        change waits for <span class="mono">hqc-worker mcp approve</span> there.
+      </p>
+      {local.length === 0 ? (
+        <p class="empty-inline">None.</p>
+      ) : (
+        <ul class="plain-list mcp-local-list">
+          {local.map((l) => (
+            <li key={`${l.worker_id}/${l.environment}/${l.name}`} class="mcp-local-row">
+              <span class="mcp-name mono">{l.name}</span>
+              <span class="mcp-meta">
+                {' '}
+                · {l.worker_name} · env {l.environment}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 function nameOfProject(app: AppState, id: string): string {
@@ -106,16 +144,23 @@ function Tools({ tools }: { tools: string[] }) {
 
 export function McpServersSection({ app }: { app: AppState }) {
   const [servers, setServers] = useState<McpServer[] | null>(null);
+  const [local, setLocal] = useState<LocalMcpServer[]>([]);
   // The server being edited: its id, `new` for one being added, or none.
   const [editing, setEditing] = useState<string | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    loadServers(app).then(setServers, (e) => {
-      setServers([]);
-      if (e instanceof ApiError) setError(e.message);
-    });
+    loadServers(app).then(
+      (l) => {
+        setServers(l.servers);
+        setLocal(l.local);
+      },
+      (e) => {
+        setServers([]);
+        if (e instanceof ApiError) setError(e.message);
+      },
+    );
   }, [app]);
 
   const put = (s: McpServer) =>
@@ -255,6 +300,7 @@ export function McpServersSection({ app }: { app: AppState }) {
         </button>
       )}
       {error && <div class="error-text mcp-section-error">{error}</div>}
+      <LocalServers local={local} />
     </>
   );
 }
@@ -586,12 +632,14 @@ function McpServerForm({
 /** A project's settings: the MCP servers its agents get, read-only (they are edited in
  *  Settings → MCP servers). Nothing at all when the owner has none. */
 export function ProjectMcpServers({ app, projectId }: { app: AppState; projectId: string }) {
-  const [servers, setServers] = useState<McpServer[] | null>(null);
+  const [list, setList] = useState<McpServerList | null>(null);
   useEffect(() => {
-    loadServers(app).then(setServers, () => setServers(null));
+    loadServers(app).then(setList, () => setList(null));
   }, [app]);
-  if (!servers || servers.length === 0) return null;
-  const mine = serversOf(servers, projectId);
+  const workspaces = app.workspaces?.get(projectId) ?? [];
+  const machines = list ? localServersOf(list.local, workspaces) : [];
+  if (!list || (list.servers.length === 0 && machines.length === 0)) return null;
+  const mine = serversOf(list.servers, projectId);
   return (
     <section class="ps-section mcp-project-servers" aria-labelledby="ps-mcp">
       <h2 id="ps-mcp">MCP servers</h2>
@@ -600,7 +648,7 @@ export function ProjectMcpServers({ app, projectId }: { app: AppState; projectId
         <a href="#/settings">Settings → MCP servers</a>.
       </p>
       {mine.length === 0 ? (
-        <p class="empty-inline">None for this project.</p>
+        machines.length === 0 && <p class="empty-inline">None for this project.</p>
       ) : (
         mine.map((s) => (
           <div key={s.id} class="mcp-row ps-card">
@@ -613,6 +661,20 @@ export function ProjectMcpServers({ app, projectId }: { app: AppState; projectId
             <Tools tools={s.tools} />
           </div>
         ))
+      )}
+      {machines.length > 0 && (
+        <>
+          <p class="ps-text">On the machines of this project’s folders, declared in their worker.toml:</p>
+          {machines.map((l) => (
+            <div key={`${l.worker_id}/${l.environment}/${l.name}`} class="mcp-local-row ps-card">
+              <span class="mcp-name mono">{l.name}</span>
+              <span class="mcp-meta">
+                {' '}
+                · {l.worker_name} · env {l.environment}
+              </span>
+            </div>
+          ))}
+        </>
       )}
     </section>
   );

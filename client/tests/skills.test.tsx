@@ -109,7 +109,7 @@ it('lists the skills with their size, files, allowed tools and projects', async 
 
 it('is a section of Settings, after MCP servers', async () => {
   const app = {
-    ...stubApp({ skills: vi.fn(async () => [BENCH]), mcpServers: vi.fn(async () => []), workers: vi.fn(async () => []) }),
+    ...stubApp({ skills: vi.fn(async () => [BENCH]), mcpServers: vi.fn(async () => ({ servers: [], local: [] })), workers: vi.fn(async () => []) }),
     me: { email: 'me@example.com' },
     theme: () => 'warm',
     lookName: () => 'spacious',

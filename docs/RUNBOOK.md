@@ -950,7 +950,8 @@ environment and bind the folder to it:
 [environments.infra]
 env = { GITHUB_TOKEN = "..." }        # variables for the agent, on top of the allowlist below
 ssh_keys = ["infra_ed25519"]          # keys of the store $HQC_HOME/keys/ (below)
-allow_local_mcp = false               # true: the machine's MCP servers too (hqc's stays)
+allow_local_mcp = false               # true: EVERY MCP server of this machine's CLI, claude.ai connectors
+                                      # (mail, drive, calendar...) included; use mcp_servers below instead
 hub_mcp = false                       # true: the owner's remote MCP servers from the hub (SPEC 0.235)
 project_settings = false              # true: the repository's CLAUDE.md, .claude/settings.json too
 [environments.infra.permissions]
@@ -989,6 +990,50 @@ environment = "infra"
   effective rules with their sources. An environment no binding names is marked there ("no
   binding names it") and logged as a warning at start: check the table names, a
   `[environments.x.permissions]` under `[environments.y]` makes a separate environment `x`.
+
+**MCP servers of the machine** (SPEC §14 `mcp_servers`, iteration 9). To give the agents of one
+environment a server that runs here (KiCad, Fusion 360, Framelink for Figma, Figma's Dev Mode),
+declare it in that environment; no other session gets it, and nothing else of the machine's
+Claude Code comes with it (no `~/.claude.json` server, no `claude.ai` connector):
+
+```toml
+[environments.firmware.mcp_servers.figma]
+command = "npx"                                   # absolute, or found in the worker's PATH
+args = ["-y", "figma-developer-mcp@0.6.4", "--stdio"]
+env = { FIGMA_API_KEY = { vault = "figma token" } }   # or a plain value; `field = "..."` optional
+# cwd = "/abs/folder"                             # default: the session's working folder
+# pin = false                                     # see below
+
+[environments.firmware.mcp_servers.figma-dev]
+type = "http"
+url = "http://127.0.0.1:3845/mcp"
+# headers = { Authorization = { vault = "dev token" } }
+```
+
+- Restart the worker after editing (SIGUSR1); a mistake in the table stops it with the reason.
+  `hqc-worker env` and `env which <folder>` list the servers, values as `***` or the Vaultwarden
+  entry's name.
+- Only an unrestricted Claude Code session of the worker's owner gets them. The tools are
+  `mcp__figma__*` and ask for permission like any tool (the deny list applies). A hub server of
+  the same name (Settings → MCP servers) is replaced by the machine's.
+- Values from Vaultwarden are read with `rbw` each time a session's CLI starts the server (as a
+  provider's key); they go into the program's environment or the HTTP headers, never onto a
+  command line, into `hello`, a log, a file or the transcript. The program gets PATH, HOME, USER,
+  LANG and the like, then its `env`; not the worker's or Claude Code's variables.
+- This keeps the token out of sight, not out of reach: the agent runs as the same OS user, so it
+  can still read what a server it can talk to was given (the running server's environment, or
+  `rbw get` itself), as it can an environment's `env` or a provider's key. A real boundary needs
+  another OS user.
+- **Pinning.** The first start records the server's name and instructions and its tools (names,
+  descriptions, input schemas) in `~/.hqc/mcp-pins.json`. When an update changes them, the server is off in every session
+  and the chat says `The MCP server figma is off: its tools changed ... hqc-worker mcp approve
+  firmware/figma`. On this machine run that command: it prints every new or changed
+  description and schema (read them: that is where a prompt injection would be) and asks
+  before pinning. `hqc-worker mcp pins` lists the pins and the servers waiting. For a server
+  that updates itself on purpose (`uvx`/`npx` without a version) put `pin = false` in its table.
+- A server that cannot start (program missing, `rbw` locked or the entry missing) puts
+  `The MCP server <name> of this machine could not start: <why>` into the chat; the session
+  goes on without it.
 
 **ssh keys of an environment** (SPEC §14, T44). A session gets no ssh-agent unless its folder's
 environment has `ssh_keys`: the user's own agent (`SSH_AUTH_SOCK` of the worker) is never passed,

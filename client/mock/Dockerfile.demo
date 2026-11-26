@@ -1,0 +1,13 @@
+# The public demo hub for the iOS app's App Review (RUNBOOK §1.11): the mock hub in demo mode.
+# It runs no agent and holds nothing: every project, session and answer is made up, and it
+# starts over with fresh state every MOCK_RESET_HOURS.
+#   docker build -f client/mock/Dockerfile.demo -t hqc-demo .
+FROM node:22-alpine
+WORKDIR /demo
+RUN npm install --omit=dev --no-audit --no-fund ws@8.22.0
+COPY crates/hqc-proto/examples/wire crates/hqc-proto/examples/wire
+COPY client/mock/server.mjs client/mock/server.mjs
+ENV MOCK_DEMO=1 MOCK_HOST=0.0.0.0 MOCK_PORT=8080 MOCK_RESET_HOURS=6
+USER node
+EXPOSE 8080
+CMD ["node", "client/mock/server.mjs"]

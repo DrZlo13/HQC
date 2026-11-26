@@ -34,9 +34,16 @@ pub struct Inner {
     pub workers: WorkerRegistry,
     pub bus: broadcast::Sender<Arc<Notice>>,
     pub push: Arc<dyn PushSender>,
+    /// Apple push to the native iOS client (SPEC §16), when `HQC_APNS_*` is set.
+    pub apns: Option<Arc<dyn crate::apns::ApnsSender>>,
+    /// One-time codes of the native client's sign-in, until exchanged ([`crate::native`]).
+    pub native_codes: Mutex<HashMap<String, crate::native::NativeCode>>,
     /// `(user_id, session_id)` -> number of client WebSockets subscribed (SPEC §16: no push
     /// while the user is watching the session).
     pub watchers: Mutex<HashMap<(Uuid, Uuid), usize>>,
+    /// The same, counting only the iOS app's sockets (`/api/ws?client=ios`, SPEC §16): APNs
+    /// is held back only while the app itself shows the session.
+    pub ios_watchers: Mutex<HashMap<(Uuid, Uuid), usize>>,
     /// Per-address limits of `/worker/*` (SPEC §20).
     pub limiter: RateLimiter,
     /// Token lookups of `/worker/ws` in flight (SPEC §20).
@@ -164,6 +171,23 @@ pub enum Notice {
 
 impl AppState {
     pub fn new(db: PgPool, config: Config, push: Arc<dyn PushSender>) -> Self {
+        let apns = match crate::apns::from_config(&config) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!(error = %e, "HQC_APNS_*: Apple push disabled");
+                None
+            }
+        };
+        Self::with_apns(db, config, push, apns)
+    }
+
+    /// As [`AppState::new`] with the Apple push sender given (tests pass a fake).
+    pub fn with_apns(
+        db: PgPool,
+        config: Config,
+        push: Arc<dyn PushSender>,
+        apns: Option<Arc<dyn crate::apns::ApnsSender>>,
+    ) -> Self {
         let auth = Auth::from_config(&config.auth);
         let (bus, _) = broadcast::channel(1024);
         AppState(Arc::new(Inner {
@@ -172,7 +196,10 @@ impl AppState {
             workers: WorkerRegistry::default(),
             bus,
             push,
+            apns,
+            native_codes: Mutex::new(HashMap::new()),
             watchers: Mutex::new(HashMap::new()),
+            ios_watchers: Mutex::new(HashMap::new()),
             limiter: RateLimiter::default(),
             ws_auth: Arc::new(Semaphore::new(config.limits.ws_auth_concurrency)),
             turn_activity: Mutex::new(HashMap::new()),
@@ -463,16 +490,32 @@ impl AppState {
             .is_some_and(|n| *n > 0)
     }
 
-    pub fn watch(&self, user: Uuid, session: Uuid, on: bool) {
-        let mut w = self.watchers.lock().unwrap();
-        let n = w.entry((user, session)).or_insert(0);
-        if on {
-            *n += 1;
-        } else {
-            *n = n.saturating_sub(1);
-            if *n == 0 {
-                w.remove(&(user, session));
+    /// An iOS app of the user has the session open now (SPEC §16).
+    pub fn is_watching_on_ios(&self, user: Uuid, session: Uuid) -> bool {
+        self.ios_watchers
+            .lock()
+            .unwrap()
+            .get(&(user, session))
+            .is_some_and(|n| *n > 0)
+    }
+
+    /// A socket subscribes to (`on`) or leaves a session; `ios`: the iOS app's socket.
+    pub fn watch(&self, user: Uuid, session: Uuid, on: bool, ios: bool) {
+        let count = |m: &Mutex<HashMap<(Uuid, Uuid), usize>>| {
+            let mut w = m.lock().unwrap();
+            let n = w.entry((user, session)).or_insert(0);
+            if on {
+                *n += 1;
+            } else {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    w.remove(&(user, session));
+                }
             }
+        };
+        count(&self.watchers);
+        if ios {
+            count(&self.ios_watchers);
         }
     }
 }

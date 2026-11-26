@@ -52,6 +52,8 @@ const BACKFILL_PAGE: i64 = 500;
 pub struct WsQuery {
     /// `raw` asks for the compressed stream; any other value or none, text frames.
     deflate: Option<String>,
+    /// `ios` marks the iOS app's socket: its subscriptions hold back APNs (SPEC §16).
+    client: Option<String>,
 }
 
 pub async fn handler(
@@ -62,10 +64,11 @@ pub async fn handler(
 ) -> Response {
     let deflate = (query.deflate.as_deref() == Some("raw"))
         .then(|| Compress::new(Compression::new(2), false));
+    let ios = query.client.as_deref() == Some("ios");
     // Origin was checked by `security::guard` (SPEC §20).
     ws.max_message_size(MAX_WS_MESSAGE)
         .max_frame_size(MAX_WS_MESSAGE)
-        .on_upgrade(move |socket| run(app, user, socket, deflate))
+        .on_upgrade(move |socket| run(app, user, socket, deflate, ios))
 }
 
 struct Client {
@@ -81,6 +84,8 @@ struct Client {
     /// The connection's one compression stream (raw DEFLATE, no zlib header), when the client
     /// asked for `?deflate=raw`.
     deflate: Option<Compress>,
+    /// The iOS app's socket (`?client=ios`).
+    ios: bool,
 }
 
 /// Compresses one frame into the connection's stream and ends it with a sync flush, so the
@@ -106,7 +111,13 @@ fn deflate_frame(z: &mut Compress, json: &str) -> Result<Vec<u8>, flate2::Compre
     }
 }
 
-async fn run(app: AppState, user: CurrentUser, socket: WebSocket, deflate: Option<Compress>) {
+async fn run(
+    app: AppState,
+    user: CurrentUser,
+    socket: WebSocket,
+    deflate: Option<Compress>,
+    ios: bool,
+) {
     let mut rx = app.bus.subscribe();
     let mut ping = tokio::time::interval(app.config.timing.heartbeat);
     ping.tick().await;
@@ -118,6 +129,7 @@ async fn run(app: AppState, user: CurrentUser, socket: WebSocket, deflate: Optio
         live_from: HashMap::new(),
         summary: false,
         deflate,
+        ios,
     };
     loop {
         let ok = tokio::select! {
@@ -138,7 +150,7 @@ async fn run(app: AppState, user: CurrentUser, socket: WebSocket, deflate: Optio
         }
     }
     for sid in c.subs.keys() {
-        app.watch(c.user.id, *sid, false);
+        app.watch(c.user.id, *sid, false, c.ios);
     }
 }
 
@@ -201,7 +213,7 @@ impl Client {
                 }
                 let after = i64::try_from(after_seq.unwrap_or(0)).unwrap_or(i64::MAX);
                 if self.subs.insert(session_id, after).is_none() {
-                    self.app.watch(self.user.id, session_id, true);
+                    self.app.watch(self.user.id, session_id, true, self.ios);
                 }
                 if !self.backfill(session_id).await {
                     return false;
@@ -235,7 +247,7 @@ impl Client {
             ClientFrame::Unsubscribe { session_id } => {
                 self.live_from.remove(&session_id);
                 if self.subs.remove(&session_id).is_some() {
-                    self.app.watch(self.user.id, session_id, false);
+                    self.app.watch(self.user.id, session_id, false, self.ios);
                 }
                 true
             }

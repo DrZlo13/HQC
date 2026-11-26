@@ -14,6 +14,7 @@ use axum::{
 use sqlx::PgPool;
 
 pub mod api;
+pub mod apns;
 pub mod app;
 pub mod artifacts;
 pub mod auth;
@@ -32,6 +33,7 @@ pub mod mcp;
 pub mod mcp_servers;
 pub mod mirror;
 pub mod moves;
+pub mod native;
 pub mod pause;
 pub mod peers;
 pub mod providers;
@@ -219,6 +221,15 @@ pub fn router(app: AppState) -> Router {
         .route("/api/sessions/{id}/fork", post(api::fork_session))
         .route("/api/push/vapid", get(api::vapid))
         .route(
+            "/api/push/apns",
+            get(api::apns_status)
+                .post(api::apns_register)
+                .delete(api::apns_unregister),
+        )
+        .route("/api/native/login", get(native::login))
+        .route("/worker/native/token", post(native::token))
+        .route("/worker/push/relay", post(apns::relay))
+        .route(
             "/api/push/subscribe",
             post(api::push_subscribe).delete(api::push_unsubscribe),
         )
@@ -273,7 +284,20 @@ pub fn service(
 /// so before the hub serves anything, it finds the moves and the publications the previous
 /// process left ([`moves::left_on_start`], [`publish::left_on_start`]).
 pub async fn start(db: PgPool, config: Config, push: Arc<dyn push::PushSender>) -> AppState {
-    let app = AppState::new(db, config, push);
+    run(AppState::new(db, config, push)).await
+}
+
+/// As [`start`] with the Apple push sender given (tests record instead of sending).
+pub async fn start_with_apns(
+    db: PgPool,
+    config: Config,
+    push: Arc<dyn push::PushSender>,
+    apns: Option<Arc<dyn apns::ApnsSender>>,
+) -> AppState {
+    run(AppState::with_apns(db, config, push, apns)).await
+}
+
+async fn run(app: AppState) -> AppState {
     moves::left_on_start(&app).await;
     publish::left_on_start(&app).await;
     tokio::spawn(requests::expiry_loop(app.clone()));

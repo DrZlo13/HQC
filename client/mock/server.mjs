@@ -6,6 +6,9 @@
 //
 //   node mock/server.mjs            # listens on MOCK_PORT (default 8787)
 //   MOCK_SPEED=0.2 node mock/...    # scales all scenario delays
+//   MOCK_DEMO=1 MOCK_HOST=0.0.0.0   # the public demo hub for the iOS app's App Review: also
+//                                   # uploads, rooms, schedules, requests, usage limits, a body
+//                                   # limit, and MOCK_RESET_HOURS restarts it with fresh state
 //
 // Scenario of a turn: status running -> agent.delta stream -> agent.message (final: false)
 // -> tool.call/tool.result (Read) -> tool.call (Bash) -> approval.request, wait for the
@@ -20,6 +23,7 @@
 // is `409 system_session`.
 
 import { createServer } from 'node:http';
+import { deflateSync } from 'node:zlib';
 import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -95,13 +99,13 @@ export function loadExamples(dir = WIRE) {
   return out;
 }
 
-export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
+export async function startMock({ port = 0, speed = 1, log = () => {}, demo = false, host = '127.0.0.1' } = {}) {
   const ex = loadExamples();
   const userId = ex['event.user.message'].author.id;
   const me = {
     id: userId,
-    email: 'dev@localhost',
-    display_name: 'Dev',
+    email: demo ? 'demo@hqc.drewnja.xyz' : 'dev@localhost',
+    display_name: demo ? 'Demo' : 'Dev',
     personal_project_id: '0199f3a2-7c10-7000-8000-0000000000d1',
     theme: 'warm',
     look: 'spacious',
@@ -223,6 +227,8 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       last_seq: s.last_seq,
       last_read_seq: s.read_seq,
       ...(s.held_by && !s.holder_hidden ? { held_by: s.held_by } : {}),
+      ...(s.rate ? { output_per_s: s.rate } : {}),
+      ...(s.liveAgents ? { subagents: s.liveAgents } : {}),
       ...modes(s),
     };
   }
@@ -312,6 +318,9 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       ...(s.held_by && !s.holder_hidden ? { held_by: s.held_by } : {}),
       // As if a process of the session had reported them (T27): `/` completes them.
       commands: MOCK_COMMANDS,
+      ...(s.room_mode ? { room_mode: s.room_mode } : {}),
+      ...(s.room_id ? { room_id: s.room_id } : {}),
+      ...(s.paused_at ? { paused_at: s.paused_at } : {}),
       ...modes(s),
     };
   }
@@ -373,6 +382,20 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     }));
   }
   newSession('Empty session');
+  // The demo's tour (MOCK_DEMO=1): any message runs through everything an agent does.
+  if (demo) {
+    const t = newSession('Start here: a full agent tour');
+    t.tour = true;
+    store(t, mk(t, 'event.agent.message', {
+      text: 'Send me any message, for example "fix the login bug", and I will walk through everything an agent does here: '
+        + 'thinking, a question for you, reading and editing files, a subagent at work, a command that needs your permission, '
+        + 'a screenshot, a picture and a final answer with a table, code and maths.',
+      final: true, in_reply_to: undefined,
+    }, {
+      // A moment after the others, so the tour heads the list, which is newest first.
+      ts: new Date(Date.now() + 2000).toISOString(),
+    }));
+  }
 
   // The service session of home-mac (SPEC §10.2): no workspace, no agent, no input.
   {
@@ -453,6 +476,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   }
 
   async function turn(s, input, t) {
+    if (s.tour) return tourTurn(s, input, t);
     const askClarify = /question|clarify|вопрос/i.test(input.payload.text);
     // SPEC 0.147: the agent asks for a secret with hqc_secret; the owner gives it in the card.
     const askSecret = /\bsecret\b|password|парол/i.test(input.payload.text) && !/HQC_SECRETS/.test(input.payload.text);
@@ -534,6 +558,138 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     await stream(s, t, final);
     store(s, mk(s, 'event.agent.message', { text: final, final: true, in_reply_to: input.event_id }));
     store(s, mk(s, 'event.usage'));
+  }
+
+
+  /** The tour's turn: every kind of step an agent takes, one after another. */
+  const TOUR_ANSWER = `## Done: the login bug is fixed
+
+The session token was compared before it was decoded, so every token with a \`+\` in it failed.
+
+| Step | Result |
+|:-----|:------:|
+| Reproduced the bug | ✓ |
+| Fixed \`check_token\` | ✓ |
+| Tests | **42 passed** |
+| Screenshot | attached |
+
+\`\`\`rust
+pub fn check_token(raw: &str) -> bool {
+    let token = urlencoding::decode(raw).unwrap_or_default();
+    constant_time_eq(token.as_bytes(), STORED.as_bytes())
+}
+\`\`\`
+
+The comparison runs in constant time, $O(n)$ in the token's length $n$, so its duration leaks nothing:
+$$t(n) = c \\cdot n, \\quad \\text{for every token of length } n.$$
+
+- [x] Fix and test
+- [x] Screenshot of the login page
+- [ ] Deploy (say the word)`;
+
+  async function tourTurn(s, input, t) {
+    const rate = (n) => {
+      s.rate = n;
+      sendTo(s.id, mk(s, 'event.tokens.rate', { output_per_s: n }));
+      pushSummary(s);
+    };
+    const tool = async (name, args, result, ms = 500, extra = {}) => {
+      const call_id = `toolu_${randomUUID().slice(0, 8)}`;
+      store(s, mk(s, 'event.tool.call', { call_id, tool: name, args_preview: JSON.stringify(args) }));
+      await step(t, ms);
+      store(s, mk(s, 'event.tool.result', {
+        call_id, result_preview: result, error: false, duration_ms: ms, error_text: undefined, artifact_id: undefined, ...extra,
+      }));
+      return call_id;
+    };
+    status(s, 'running');
+    rate(38);
+    // 1. Thinking, streamed, then kept.
+    const thought = `The user wrote "${input.payload.text.slice(0, 80)}". Before touching code I should ask which part matters most, then reproduce, fix, test and report.`;
+    for (const chunk of thought.match(/\S+\s*/g) ?? []) {
+      sendTo(s.id, mk(s, 'event.agent.delta', { text: chunk, thinking: true }));
+      await step(t, 60);
+    }
+    store(s, mk(s, 'event.agent.thinking', { text: thought }));
+    await step(t, 300);
+    // 2. A question for the user.
+    const asked = await request(s, t, 'clarify', mk(s, 'event.clarify.request', {
+      request_id: `req-${randomUUID().slice(0, 8)}`,
+      questions: [
+        { id: 'focus', text: 'Where should I start?', header: 'Focus', options: ['The login page', 'The API'], option_descriptions: ['What users see first', 'Where the token is checked'] },
+        { id: 'checks', text: 'Which checks should I run after the fix?', header: 'Checks', options: ['Unit tests', 'Lint', 'Screenshot'], multi: true },
+      ],
+    }));
+    if (asked.cancel) return;
+    status(s, 'running');
+    rate(46);
+    const picked = Object.values(asked.answers).flat().join(', ') || 'the defaults';
+    const intro = `Thanks, going with ${picked}. First I'll find where the token is checked.`;
+    await stream(s, t, intro);
+    store(s, mk(s, 'event.agent.message', { text: intro, final: false, in_reply_to: input.event_id }));
+    // 3. Reading and searching.
+    await tool('Glob', { pattern: 'src/**/*.rs' }, 'src/main.rs\nsrc/auth.rs\nsrc/session.rs\nsrc/routes/login.rs', 300);
+    await tool('Grep', { pattern: 'check_token', path: 'src' }, 'src/auth.rs:41:pub fn check_token(raw: &str) -> bool {\nsrc/routes/login.rs:18:    if !check_token(&cookie) {', 350);
+    await tool('Read', { file_path: 'src/auth.rs' }, '41  pub fn check_token(raw: &str) -> bool {\n42      raw == STORED\n43  }', 250);
+    // 4. A subagent at work, shown live above the input, then its report.
+    const task_id = `a${randomUUID().slice(0, 12)}`;
+    const taskCall = `toolu_${randomUUID().slice(0, 8)}`;
+    store(s, mk(s, 'event.tool.call', { call_id: taskCall, tool: 'Task', args_preview: JSON.stringify({ description: 'Reproduce the login failure', subagent_type: 'general-purpose' }) }));
+    const steps = ['Starting the dev server', 'Logging in with a token containing +', 'Reading the server log', 'Writing a failing test'];
+    s.liveAgents = 1;
+    for (const [i, what] of steps.entries()) {
+      sendTo(s.id, mk(s, 'event.subagents.live', { agents: [{
+        task_id, description: 'Reproduce the login failure', activity: what,
+        total_tokens: 3200 * (i + 1), tool_uses: 3 * (i + 1), duration_ms: 1500 * (i + 1), kind: 'agent', stoppable: true,
+      }] }));
+      pushSummary(s);
+      await step(t, 900);
+    }
+    s.liveAgents = 0;
+    sendTo(s.id, mk(s, 'event.subagents.live', { agents: [] }));
+    store(s, mk(s, 'event.system', {
+      text: 'Agent "Reproduce the login failure" completed', code: 'task_notification', call_id: taskCall,
+      status: 'completed', task_id, usage: { total_tokens: 12800, tool_uses: 12, duration_ms: 6000 },
+    }));
+    store(s, mk(s, 'event.tool.result', {
+      call_id: taskCall, result_preview: 'Reproduced: a token with "+" is rejected; the cookie arrives URL-encoded. Failing test: auth::tests::plus_in_token.',
+      error: false, duration_ms: 6000, error_text: undefined, artifact_id: undefined,
+    }));
+    // 5. Editing.
+    await tool('Edit', { file_path: 'src/auth.rs', old_string: 'raw == STORED', new_string: 'constant_time_eq(urlencoding::decode(raw)...)' },
+      '--- src/auth.rs\n+++ src/auth.rs\n@@ -41,3 +41,4 @@\n pub fn check_token(raw: &str) -> bool {\n-    raw == STORED\n+    let token = urlencoding::decode(raw).unwrap_or_default();\n+    constant_time_eq(token.as_bytes(), STORED.as_bytes())\n }', 400);
+    rate(52);
+    // 6. A command that needs permission.
+    const bash = `toolu_${randomUUID().slice(0, 8)}`;
+    store(s, mk(s, 'event.tool.call', { call_id: bash, tool: 'Bash', args_preview: JSON.stringify({ command: 'cargo test', description: 'Run the tests' }) }));
+    const allowed = await request(s, t, 'approval', mk(s, 'event.approval.request', {
+      request_id: `req-${randomUUID().slice(0, 8)}`, tool: 'Bash', description: 'cargo test',
+      expires_at: new Date(Date.now() + 3600_000).toISOString(),
+    }));
+    if (allowed.cancel) return;
+    status(s, 'running');
+    const opt = ex['event.approval.request'].payload.options.find((o) => o.id === allowed.option_id);
+    const denied = opt?.canonical?.startsWith('deny');
+    if (denied) {
+      store(s, mk(s, 'event.tool.result', { call_id: bash, result_preview: '', error: true, error_text: 'Denied by user', duration_ms: 0, artifact_id: undefined }));
+    } else {
+      await step(t, 1200);
+      store(s, mk(s, 'event.tool.result', {
+        call_id: bash, result_preview: 'running 42 tests\n..........................................\ntest result: ok. 42 passed; 0 failed', error: false, duration_ms: 4210, error_text: undefined, artifact_id: undefined,
+      }));
+    }
+    // 7. A screenshot from the browser, and a picture attached.
+    await tool('mcp__browser__screenshot', { url: 'http://localhost:3000/login' }, 'Screenshot of the login page\n[image]', 600,
+      { artifact_ids: ['0199f3a2-7c10-7000-8000-0000000000f3'] });
+    store(s, mk(s, 'event.attachment', { artifact_id: randomUUID(), kind: 'image', name: 'login-after-fix.png', caption: 'The login page after the fix' }));
+    // 8. The final answer: Markdown, a table, code and maths, then the turn's usage.
+    rate(61);
+    const final = denied ? 'OK, I did not run the tests. The fix is in src/auth.rs; run `cargo test` when you are ready.' : TOUR_ANSWER;
+    await stream(s, t, final);
+    store(s, mk(s, 'event.agent.message', { text: final, final: true, in_reply_to: input.event_id }));
+    store(s, mk(s, 'event.usage', { input_tokens: 18400, output_tokens: 2310, cache_read: 52000, cost_usd: 0.0874 }));
+    s.rate = 0;
+    sendTo(s.id, mk(s, 'event.tokens.rate', { output_per_s: 0 }));
   }
 
   /** Stores a request event and waits for its answer or cancellation. */
@@ -1625,10 +1781,13 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     return { last_read_seq: s.read_seq };
   });
   route('GET', '/api/artifacts/:id/url', (p) => ({ url: `/api/mock/artifacts/${p.id}` }));
-  route('GET', '/api/mock/artifacts/:id', (p) => ({ artifact_id: p.id, note: 'mock artifact' }));
+  route('GET', '/api/mock/artifacts/:id', (p) => {
+    const a = demo ? demoArtifact(p.id) : undefined;
+    return a ? { [RAW]: { type: a.mime, data: a.bytes } } : { artifact_id: p.id, note: 'mock artifact' };
+  });
   // Workers as the hub lists them (SPEC §6): `revoked` only with `include_revoked=1`.
   const allWorkers = () =>
-    [{ id: workerId, name: 'home-mac', os: 'macos', status: 'online', session_secrets: true, browser: true, capabilities: { claude_code: { version: '2.1.322', login: true } } }, ...enrolled].map((w) =>
+    [{ id: workerId, name: 'home-mac', os: 'macos', status: 'online', session_secrets: true, browser: true, capabilities: { claude_code: { version: '2.1.322', login: true } }, ...(demo ? { limits: demoLimits() } : {}) }, ...enrolled].map((w) =>
       revoked.has(w.id) ? { ...w, status: 'revoked', revoked_at: new Date().toISOString() } : w,
     );
   route('GET', '/api/workers', (_, __, q) => ({
@@ -1748,6 +1907,208 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     return withStatus(201, { id: randomUUID() });
   });
 
+
+  // ---- the public demo (MOCK_DEMO=1): what the iOS app calls beyond the web client's tests ----
+
+  /** Uploaded files, newest last, at most DEMO_STORE bytes in all (the oldest go first). */
+  const artifacts = new Map();
+  const DEMO_STORE = 64 * 1024 * 1024;
+  const DEMO_UPLOAD = 8 * 1024 * 1024;
+  /** A picture for the example attachment: a soft gradient, drawn here so no file is needed. */
+  const demoPng = (() => {
+    const w = 480, h = 300;
+    const rows = Buffer.alloc((w * 3 + 1) * h);
+    for (let y = 0; y < h; y++) {
+      rows[y * (w * 3 + 1)] = 0;
+      for (let x = 0; x < w; x++) {
+        const o = y * (w * 3 + 1) + 1 + x * 3;
+        rows[o] = 40 + Math.round(120 * x / w);
+        rows[o + 1] = 60 + Math.round(90 * y / h);
+        rows[o + 2] = 150 + Math.round(80 * (1 - x / w));
+      }
+    }
+    const crcTable = Array.from({ length: 256 }, (_, n) => {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      return c >>> 0;
+    });
+    const crc = (buf) => {
+      let c = 0xffffffff;
+      for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8);
+      return (c ^ 0xffffffff) >>> 0;
+    };
+    const chunk = (type, data) => {
+      const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+      const td = Buffer.concat([Buffer.from(type), data]);
+      const c = Buffer.alloc(4); c.writeUInt32BE(crc(td));
+      return Buffer.concat([len, td, c]);
+    };
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+    return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr),
+      chunk('IDAT', deflateSync(rows)), chunk('IEND', Buffer.alloc(0))]);
+  })();
+  function demoArtifact(id) {
+    if (artifacts.has(id)) return artifacts.get(id);
+    // The examples' attachments (a screenshot) have no upload behind them: a picture stands in.
+    return { id, kind: 'image', name: 'screen.png', mime: 'image/png', size: demoPng.length, bytes: demoPng };
+  }
+  function demoLimits() {
+    const t0 = Math.floor(Date.now() / 1000);
+    return {
+      five_hour: { utilization: 0.42, resets_at: t0 - (t0 % 3600) + 2 * 3600 },
+      seven_day: { utilization: 0.18, resets_at: t0 - (t0 % 86400) + 4 * 86400 },
+      status: 'allowed',
+      reported_at: now(),
+    };
+  }
+  const schedules = new Map();
+  const rules = new Map();
+  if (demo) {
+    route('GET', '/api/push/apns', () => ({ enabled: false }));
+    route('POST', '/api/push/apns', () => withStatus(201, { id: randomUUID() }));
+    route('DELETE', '/api/push/apns', () => withStatus(204));
+    // Every open request of the user, as GET /api/requests and the `requests` frame have them.
+    const openRequests = () => [...sessions.values()].filter((s) => s.open && !s.archived).map((s) => ({
+      session_id: s.id, request_id: s.open.request_id, kind: s.open.kind,
+      address: `personal/${s.slug}`, title: s.title, worker_name: 'home-mac', event: s.open.event,
+    }));
+    route('GET', '/api/requests', () => ({ requests: openRequests() }));
+    let lastRequests = '';
+    setInterval(() => {
+      const list = openRequests();
+      const key = list.map((r) => r.request_id).join(',');
+      if (key === lastRequests) return;
+      lastRequests = key;
+      const data = JSON.stringify({ type: 'requests', requests: list });
+      for (const c of clients) if (c.summary) c.ws.send(data);
+    }, 1000).unref();
+    // Uploads (multipart, one file): kept in memory.
+    route('POST', '/api/artifacts', (_, body) => {
+      if (!Buffer.isBuffer(body)) throw fail(400, 'bad_request', 'multipart/form-data with a file expected');
+      if (body.length > DEMO_UPLOAD) throw fail(413, 'too_large', 'at most 8 MB in the demo');
+      const text = body.toString('latin1');
+      const head = text.indexOf('\r\n\r\n');
+      const boundary = text.slice(0, text.indexOf('\r\n'));
+      const end = text.lastIndexOf(`\r\n${boundary}`);
+      if (head < 0 || end <= head) throw fail(400, 'bad_request', 'no file part');
+      const headers = text.slice(0, head);
+      const name = /filename="([^"]*)"/.exec(headers)?.[1] || 'file';
+      const mime = /content-type:\s*([^\r\n]+)/i.exec(headers)?.[1]?.trim() || 'application/octet-stream';
+      const bytes = body.subarray(head + 4, end);
+      const a = { id: randomUUID(), kind: mime.startsWith('image/') ? 'image' : 'file', name, mime, size: bytes.length, bytes };
+      artifacts.set(a.id, a);
+      let total = [...artifacts.values()].reduce((n, x) => n + x.size, 0);
+      for (const [id, x] of artifacts) {
+        if (total <= DEMO_STORE) break;
+        artifacts.delete(id);
+        total -= x.size;
+      }
+      const { bytes: _bytes, ...meta } = a;
+      return withStatus(201, meta);
+    });
+    route('GET', '/api/artifacts/:id', (p) => {
+      const { bytes: _bytes, ...meta } = demoArtifact(p.id);
+      return meta;
+    });
+    // Schedules (SPEC §11): kept, listed and switched; the demo never fires them.
+    route('GET', '/api/schedules', (_, __, q) => ({
+      schedules: [...schedules.values()].filter((x) => !q.get('session_id') || x.session_id === q.get('session_id')),
+    }));
+    route('POST', '/api/schedules', (_, body) => {
+      sessionOr404(body?.session_id);
+      if (!String(body?.message ?? '').trim()) throw fail(400, 'bad_request', 'message must not be blank');
+      if (!body.cron && !body.at) throw fail(400, 'bad_request', 'cron or at is needed');
+      const x = {
+        id: randomUUID(), session_id: body.session_id, message: body.message, timezone: body.timezone ?? 'UTC',
+        enabled: true, catch_up: false, created_at: now(),
+        ...(body.cron ? { cron: body.cron, next_run: new Date(Date.now() + 3600_000).toISOString() } : { at: body.at, next_run: body.at }),
+      };
+      schedules.set(x.id, x);
+      return withStatus(201, x);
+    });
+    route('PATCH', '/api/schedules/:id', (p, body) => {
+      const x = schedules.get(p.id);
+      if (!x) throw fail(404, 'not_found', 'unknown schedule');
+      if (typeof body?.enabled === 'boolean') x.enabled = body.enabled;
+      return x;
+    });
+    route('DELETE', '/api/schedules/:id', (p) => {
+      schedules.delete(p.id);
+      return withStatus(204);
+    });
+    // Session actions the web client's tests do not use.
+    route('POST', '/api/sessions/:id/pause', (p) => {
+      const s = sessionOr404(p.id);
+      s.paused_at = now();
+      pushSummary(s);
+      return info(s);
+    });
+    route('POST', '/api/sessions/:id/resume', (p) => {
+      const s = sessionOr404(p.id);
+      delete s.paused_at;
+      pushSummary(s);
+      return info(s);
+    });
+    route('POST', '/api/sessions/:id/restart', (p) => {
+      const s = sessionOr404(p.id);
+      store(s, mk(s, 'event.system', { text: 'The agent was restarted.', code: 'restarted' }));
+      return withStatus(204);
+    });
+    route('POST', '/api/sessions/:id/tasks/:tid/stop', () => withStatus(204));
+    route('POST', '/api/sessions/:id/background', () => withStatus(204));
+    route('GET', '/api/sessions/:id/subagents/:tid/history', () => ({ events: [], truncated: false }));
+    route('POST', '/api/sessions/:id/fork', (p, body) => {
+      const src = sessionOr404(p.id);
+      const s = newSession(`${src.title} (fork)`, randomUUID(), { project_id: src.project_id, workspace_id: src.workspace_id });
+      const at = src.events.findIndex((e) => e.event_id === body?.event_id);
+      for (const e of src.events.slice(1, at < 0 ? undefined : at)) {
+        if (['user.message', 'agent.message', 'agent.thinking', 'tool.call', 'tool.result', 'usage'].includes(e.type)) {
+          store(s, { ...structuredClone(e), event_id: randomUUID(), session_id: s.id });
+        }
+      }
+      return withStatus(201, info(s));
+    });
+    // Rooms (SPEC §7.2): the room and one member session per agent, which answer as any session.
+    route('POST', '/api/projects/:pid/rooms', (p, body) => {
+      projectOr404(p.pid);
+      const agents = Array.isArray(body?.agents) ? body.agents.slice(0, 6) : [];
+      if (!agents.length) throw fail(400, 'bad_request', 'a room needs agents');
+      const room = newSession(String(body?.title || 'Room'), randomUUID(), { project_id: p.pid });
+      room.room_mode = body?.mode === 'council' ? 'council' : 'conversation';
+      agents.forEach((a, i) => {
+        const m = newSession(String(a?.name || `Agent ${i + 1}`), randomUUID(), { project_id: p.pid });
+        m.room_id = room.id;
+        if (a?.model) m.model = a.model;
+      });
+      pushSummary(room);
+      return withStatus(201, info(room));
+    });
+    // A folder's own allow rules and the worker's view of them (T48).
+    route('GET', '/api/workspaces/:id/rules', (p) => ({ rules: rules.get(p.id) ?? [] }));
+    route('POST', '/api/workspaces/:id/rules', (p, body) => {
+      const list = rules.get(p.id) ?? [];
+      for (const r of body?.rules ?? []) {
+        if (!list.some((x) => x.rule === r)) list.unshift({ id: randomUUID(), rule: String(r), created_at: now() });
+      }
+      rules.set(p.id, list);
+      return { rules: list };
+    });
+    route('DELETE', '/api/workspaces/:id/rules/:rid', (p) => {
+      rules.set(p.id, (rules.get(p.id) ?? []).filter((x) => x.id !== p.rid));
+      return withStatus(204);
+    });
+    route('GET', '/api/workspaces/:id/permissions', (p, _, q) => {
+      const hqc = (rules.get(p.id) ?? []).map((x) => x.rule);
+      const cmd = q.get('command');
+      return {
+        mode: 'ask', allow_auto: true, hqc,
+        sources: [{ source: '/Users/home-mac/.hqc/worker.toml', allow: ['Read', 'Glob', 'Grep', 'Bash(git status:*)'], deny: ['Bash(sudo:*)', 'Bash(rm -rf /*)'], ask: [] }],
+        ...(cmd ? { check: { verdict: /^git status/.test(cmd) ? 'allow' : /^sudo/.test(cmd) ? 'deny' : 'ask', parts: 1, uncovered: 0, suggestions: [] } } : {}),
+      };
+    });
+  }
+
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://mock');
     const r = routes.find((x) => x.method === req.method && x.re.test(url.pathname));
@@ -1759,7 +2120,13 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     let body;
     try {
       const chunks = [];
-      for await (const c of req) chunks.push(c);
+      let size = 0;
+      for await (const c of req) {
+        size += c.length;
+        // A public demo reads no body past what an upload may be.
+        if (demo && size > 9 * 1024 * 1024) throw fail(413, 'too_large', 'request too large');
+        chunks.push(c);
+      }
       const raw = Buffer.concat(chunks);
       const multipart = String(req.headers['content-type'] ?? '').startsWith('multipart/');
       body = !chunks.length ? undefined : multipart ? raw : JSON.parse(raw.toString('utf8'));
@@ -1824,8 +2191,8 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     });
   });
 
-  // Loopback only: the mock has no authentication.
-  await new Promise((r) => server.listen(port, '127.0.0.1', r));
+  // Loopback unless asked: the mock has no authentication (the public demo holds nothing).
+  await new Promise((r) => server.listen(port, host, r));
   const actual = server.address().port;
   return {
     port: actual,
@@ -1873,6 +2240,11 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.MOCK_PORT ?? 8787);
   const speed = Number(process.env.MOCK_SPEED ?? 1);
-  const m = await startMock({ port, speed, log: (l) => console.log(`[mock] ${l}`) });
-  console.log(`[mock] hub on ${m.url}`);
+  const demo = process.env.MOCK_DEMO === '1';
+  const host = process.env.MOCK_HOST ?? '127.0.0.1';
+  const m = await startMock({ port, speed, demo, host, log: (l) => console.log(`[mock] ${l}`) });
+  console.log(`[mock] hub on ${m.url}${demo ? ' (demo)' : ''}`);
+  // The demo starts over with fresh state now and then: exit, and the container restarts it.
+  const resetHours = Number(process.env.MOCK_RESET_HOURS ?? 0);
+  if (resetHours > 0) setTimeout(() => process.exit(0), resetHours * 3600_000).unref?.();
 }

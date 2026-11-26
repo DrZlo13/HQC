@@ -218,21 +218,29 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
             }
         }
         for u in users {
-            if app.is_watching(u, session_id) {
-                continue;
-            }
-            if u == session_owner && !waiting.is_empty() {
+            // Web Push waits while any client shows the session; APNs only while the iOS app
+            // itself does (SPEC §16): a web tab left open must not keep the phone quiet.
+            let chained = u == session_owner && !waiting.is_empty();
+            let seen = |on_ios: bool| {
+                let watching = |sid| {
+                    if on_ios {
+                        app.is_watching_on_ios(u, sid)
+                    } else {
+                        app.is_watching(u, sid)
+                    }
+                };
                 // Watching a waiting session shows the request there (SPEC §10.1).
-                if waiting.iter().any(|w| app.is_watching(u, w.session_id)) {
-                    continue;
-                }
-                let top = waiting.last().map(|w| w.session_id);
-                let mut p = payload.clone();
-                p["open_session_id"] = serde_json::json!(top);
-                send_to_user(&app, u, &p).await;
+                watching(session_id) || (chained && waiting.iter().any(|w| watching(w.session_id)))
+            };
+            let (web, apns) = (!seen(false), !seen(true));
+            if !web && !apns {
                 continue;
             }
-            send_to_user(&app, u, &payload).await;
+            let mut p = payload.clone();
+            if chained {
+                p["open_session_id"] = serde_json::json!(waiting.last().map(|w| w.session_id));
+            }
+            send_to_user(&app, u, &p, web, apns).await;
         }
     });
 }
@@ -281,10 +289,16 @@ pub fn message(s: &SessionRow, row: &EventRow, request_id: Option<&str>, body: S
     serde_json::to_value(m).unwrap_or_default()
 }
 
-async fn send_to_user(app: &AppState, user: Uuid, payload: &Value) {
-    if app.push.public_key().is_none() {
-        return;
+async fn send_to_user(app: &AppState, user: Uuid, payload: &Value, web: bool, apns: bool) {
+    if web && app.push.public_key().is_some() {
+        send_web(app, user, payload).await;
     }
+    if let (true, Some(sender)) = (apns, &app.apns) {
+        send_apns(app, sender.as_ref(), user, payload).await;
+    }
+}
+
+async fn send_web(app: &AppState, user: Uuid, payload: &Value) {
     let subs = match db::push_subs_of(&app.db, user).await {
         Ok(s) => s,
         Err(e) => {
@@ -301,6 +315,38 @@ async fn send_to_user(app: &AppState, user: Uuid, payload: &Value) {
                 let _ = db::delete_push_sub(&app.db, None, &sub.endpoint).await;
             }
             Err(PushError::Other(e)) => tracing::warn!(%user, error = %e, "push failed"),
+        }
+    }
+}
+
+/// The same notice over APNs to the user's iOS devices (SPEC §16).
+async fn send_apns(
+    app: &AppState,
+    apns: &dyn crate::apns::ApnsSender,
+    user: Uuid,
+    payload: &Value,
+) {
+    let devices = match db::apns_devices_of(&app.db, user).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!(error = %e, "APNs devices query");
+            return;
+        }
+    };
+    if devices.is_empty() {
+        return;
+    }
+    let collapse = crate::apns::collapse_id(payload["tag"].as_str().unwrap_or_default());
+    for d in devices {
+        // Sealed for each device with its own key, where it has one (SPEC 0.259).
+        let bytes = crate::apns::payload(payload, d.notice_key.as_deref());
+        match apns.send(&d.token, d.sandbox, &collapse, &bytes).await {
+            Ok(()) => tracing::debug!(%user, "APNs push sent"),
+            Err(PushError::Gone) => {
+                tracing::info!(%user, "APNs device gone, deleting");
+                let _ = db::delete_apns_device(&app.db, None, &d.token).await;
+            }
+            Err(PushError::Other(e)) => tracing::warn!(%user, error = %e, "APNs push failed"),
         }
     }
 }

@@ -60,6 +60,31 @@ impl PushSender for RecordingPush {
     }
 }
 
+/// Records Apple pushes instead of sending them: (device token, sandbox, collapse id, payload).
+#[derive(Default)]
+pub struct RecordingApns {
+    pub sent: Mutex<Vec<(String, bool, String, Value)>>,
+}
+
+impl hqc_hub::apns::ApnsSender for RecordingApns {
+    fn send<'a>(
+        &'a self,
+        device_token: &'a str,
+        sandbox: bool,
+        collapse_id: &'a str,
+        payload: &'a [u8],
+    ) -> BoxFuture<'a, Result<(), PushError>> {
+        let v: Value = serde_json::from_slice(payload).unwrap();
+        self.sent.lock().unwrap().push((
+            device_token.to_string(),
+            sandbox,
+            collapse_id.to_string(),
+            v,
+        ));
+        Box::pin(async { Ok(()) })
+    }
+}
+
 /// Serves `app` on a free local port; its address.
 async fn serve(app: &AppState) -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -75,6 +100,7 @@ pub struct TestHub {
     pub ws_base: String,
     pub http: reqwest::Client,
     pub push: Arc<RecordingPush>,
+    pub apns: Arc<RecordingApns>,
     pub email: String,
     /// `boot_id` of [`FakeWorker::online`].
     pub boot_id: Uuid,
@@ -266,6 +292,9 @@ impl TestHub {
             listen: "127.0.0.1:0".into(),
             auth,
             vapid: None,
+            apns: None,
+            apns_relay_url: None,
+            apns_relay_serve: false,
             client_dir: None,
             timing,
             limits,
@@ -280,7 +309,8 @@ impl TestHub {
         configure(&mut config);
         std::fs::create_dir_all(&config.artifacts.dir).unwrap();
         let push = Arc::new(RecordingPush::default());
-        let app = hqc_hub::start(pool, config, push.clone()).await;
+        let apns = Arc::new(RecordingApns::default());
+        let app = hqc_hub::start_with_apns(pool, config, push.clone(), Some(apns.clone())).await;
         let addr = serve(&app).await;
         TestHub {
             app,
@@ -288,6 +318,7 @@ impl TestHub {
             ws_base: format!("ws://{addr}"),
             http: reqwest::Client::new(),
             push,
+            apns,
             email,
             boot_id: Uuid::new_v4(),
             schema,
@@ -300,7 +331,14 @@ impl TestHub {
     /// beside it; close its workers first, and finish only the new one.
     pub async fn restart(&self) -> TestHub {
         let push = Arc::new(RecordingPush::default());
-        let app = hqc_hub::start(self.app.db.clone(), self.app.config.clone(), push.clone()).await;
+        let apns = Arc::new(RecordingApns::default());
+        let app = hqc_hub::start_with_apns(
+            self.app.db.clone(),
+            self.app.config.clone(),
+            push.clone(),
+            Some(apns.clone()),
+        )
+        .await;
         let addr = serve(&app).await;
         TestHub {
             app,
@@ -308,6 +346,7 @@ impl TestHub {
             ws_base: format!("ws://{addr}"),
             http: reqwest::Client::new(),
             push,
+            apns,
             email: self.email.clone(),
             boot_id: self.boot_id,
             schema: self.schema.clone(),
@@ -1010,12 +1049,28 @@ impl FakeClient {
         Self::connect_origin(hub, jwt, Some(&hub.base)).await
     }
 
+    /// The iOS app's socket (`/api/ws?client=ios`, SPEC §16), with the hub's `Origin`.
+    pub async fn connect_ios(hub: &TestHub) -> Self {
+        Self::connect_path(hub, "/api/ws?client=ios", None, Some(&hub.base))
+            .await
+            .unwrap()
+    }
+
     pub async fn connect_origin(
         hub: &TestHub,
         jwt: Option<&str>,
         origin: Option<&str>,
     ) -> Result<Self, String> {
-        let mut req = format!("{}/api/ws", hub.ws_base)
+        Self::connect_path(hub, "/api/ws", jwt, origin).await
+    }
+
+    async fn connect_path(
+        hub: &TestHub,
+        path: &str,
+        jwt: Option<&str>,
+        origin: Option<&str>,
+    ) -> Result<Self, String> {
+        let mut req = format!("{}{path}", hub.ws_base)
             .into_client_request()
             .unwrap();
         if let Some(t) = jwt {

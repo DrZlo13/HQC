@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.262, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.263, 2026-11-26. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -50,7 +50,8 @@ outbound only, over WebSocket. Inside: a native Claude Code adapter, a generic A
 for Hermes and any agent from the ACP registry, the hqc MCP server, the VS Code session mirror,
 workspace operations, a local config with restrictions and environments.
 
-**Client** — a web app, later Tauri and mobile. Talks only to the hub.
+**Client** — a web app; a native iOS app (`ios/`, since 0.257) over the same API; later Tauri.
+Talks only to the hub.
 
 Deployment: the hub sits in the home DMZ behind Cloudflare Tunnel. People sign in through
 Cloudflare Access (SSO), workers through a separate route with their own tokens (§6, §20).
@@ -598,6 +599,13 @@ hub carries out at once every such row closed without a `result` that carries th
 `allowed_by`, as a `move` does (a publication needs no worker); the result goes to the worker
 when it is connected, or after its `hello`. A publication done before the stop answers from its
 `attachment` with the link the artifact has then.
+
+### ApnsDevice
+Since 0.258 (§16): a user's iOS device that takes notices over APNs: `id`, `user_id`,
+`token` (the APNs device token in hex, unique), `sandbox` (a development build), `created_at`,
+`updated_at`. Written by `POST /api/push/apns`, deleted by `DELETE` or when APNs says the
+token is gone (hub migration `0059`). Since 0.259 also `notice_key`, the 32-byte AES key the
+device made for its notices (absent for an app that registered before; migration `0060`).
 
 ### ScheduledMessage
 `owner_id`, `session_id` or (`project_id`, `workspace_id`, template), `cron` or `at`,
@@ -2445,6 +2453,36 @@ the rest is marked "later"):
   body itself: §16. `endpoint`: only `https://` on push service hosts (§20), otherwise `400`;
   at most 10 subscriptions per user (`409 push_limit`); someone else's `endpoint`: `409
   conflict`, not a takeover; a repeated request for one's own subscription updates it.
+- `/api/push/apns` (since 0.258, §16): Apple push to the native iOS client. `GET` →
+  `{enabled}` (the hub has `HQC_APNS_*`); `POST {token, sandbox?, key?}` stores the device token the
+  app got from iOS (hex, 64 to 200 characters, kept in lower case; `sandbox: true` for a
+  development build, sent through APNs' sandbox host; since 0.259 `key`: the device's notice
+  key, 32 bytes in base64, `400` otherwise; a later `POST` replaces it) → `201 {id}`; `400` for
+  another token;
+  the limit and the rules of a push subscription apply (`409 push_limit`, someone else's token
+  `409 conflict`); `DELETE {token}` → `204`, the device takes no more notices.
+- Native client sign-in (since 0.258, `crates/hqc-hub/src/native.rs`; OIDC mode since 0.261):
+  the iOS app cannot read the session cookies of the system browser, and identity providers such
+  as Google refuse a login page embedded in an app. The app opens
+  `GET /api/native/login?challenge=<base64url SHA-256 of a verifier>&state=<s>` in the system
+  browser (`ASWebAuthenticationSession`); like every `/api/*` route it is behind Cloudflare
+  Access or the OIDC reverse proxy, so the person signs in there first. The hub keeps the
+  credential that gets requests past the front proxy under a random one-time code for 120 s and
+  answers `302 hqc-app://signed-in?code=<code>&state=<s>` (a fixed scheme: the route redirects
+  nowhere else; `challenge` must be 43 base64url characters, `state` 8 to 128 of
+  `[A-Za-z0-9._-]`, else `400`; at most 256 codes wait, the oldest goes first). The app then
+  posts `{code, verifier}` to `POST /worker/native/token`, outside auth as every `/worker/*`
+  (§20), and gets the credential: in Access mode `{token, cookie}` (the verified Access JWT and
+  `CF_Authorization=<jwt>`, keeping `token` for older clients); in OIDC mode `{cookie}` (all
+  `Cookie` headers the proxy forwarded on `/api/native/login`, joined with `"; "`, capped at
+  64 KB, else `400`), or `{bearer}` (the verified OIDC ID token) when no cookies were forwarded;
+  in dev mode `{token: ""}` (every request is let in). The code is taken out on the first
+  exchange, also one whose verifier does not match (`400 bad_code`, as for an unknown or expired
+  code), so the credential never travels in a URL and another app that catches the redirect
+  cannot use it. The app sends the stored cookies (or bearer token) on every request and on the
+  WebSocket upgrade, and merges `Set-Cookie` headers returned by the hub's host into its stored
+  cookies so OIDC proxy cookie refreshes (such as oauth2-proxy's `OAUTH2_PROXY_COOKIE_REFRESH`
+  with Traefik `addAuthCookiesToResponse`, RUNBOOK §1.9) keep the session alive.
 - `/api/schedules` (since 0.38, T35; §3 ScheduledMessage, §16): `GET
   /api/schedules?session_id=` → `{schedules[]}` (`api.schedules.json`; without `session_id`:
   all of the user's), the next due first, finished ones last; `POST /api/schedules`
@@ -3341,7 +3379,7 @@ client fetches the session object when it opens an idle chat without `command_in
 from a list among them) and shows, after each command's name in the list, its argument hint
 and then its description, muted, in the same line.
 
-WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 1 MiB; since 0.230 the query `?deflate=raw` asks for compression, below): the client sends `subscribe {session_id, after_seq}` and receives
+WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 1 MiB; since 0.230 the query `?deflate=raw` asks for compression, below; since 0.260 the iOS app connects with `client=ios`, which only decides whom Apple push waits for, §16): the client sends `subscribe {session_id, after_seq}` and receives
 events with `seq > after_seq`, then the live stream; `agent.delta` has no `seq`. Since 0.72
 the answer being written comes right after those events, before `subscribed`, as one
 `agent.delta` with its text so far, and the stream carries only the deltas after it. Since 0.161
@@ -7787,6 +7825,45 @@ pushes nothing; the agent's post in the room, a `peer.message` there, pushes wit
 `session_id`, so the click opens the room, the room's title and the body "<agent's title>:
 <text>".
 
+Since 0.258 the same notices also go over APNs to the user's iOS devices (`/api/push/apns`,
+§6), when the hub has a token-based APNs key (`HQC_APNS_KEY` or `HQC_APNS_KEY_FILE`,
+`HQC_APNS_KEY_ID`, `HQC_APNS_TEAM_ID`, `HQC_APNS_TOPIC` = the app's bundle id; all or none;
+RUNBOOK §1.10): to the same users. Since 0.260 APNs has its own rule: it is skipped only while one
+of the user's iOS app sockets (`/api/ws?client=ios`) subscribes to the session (or, for a request
+others wait on, to a session of the chain), whatever web clients show it, so a web tab left open
+on a session no longer keeps the phone quiet; Web Push keeps the rule of any live subscription.
+The app closes its socket when it goes to the background and opens it again, resubscribing from
+the last `seq`, when it returns, so a phone in a pocket is told. The APNs
+payload carries `aps.alert` `{title, body}` from the push body (the body cut until the payload
+fits 4 KB), `aps.thread-id` the session, `aps.category` `APPROVAL`, `QUESTION` or `MESSAGE`,
+and `session_id`, `open_session_id?`, `type`, `request_id?` and, for an approval, its
+`options[{id, canonical, label}]` (at most 6), so the app answers an approval from the
+notification's "Allow once" (the `once` option, else `session`) and "Deny" (`deny`) buttons
+without opening, and a tap opens `open_session_id` or `session_id`; `apns-collapse-id` is
+the push body's `tag` (its SHA-256 in hex when longer than 64 bytes). APNs answering `410`,
+`BadDeviceToken`, `Unregistered` or `DeviceTokenNotForTopic` deletes the device, as a gone Web
+Push subscription is deleted.
+
+Since 0.259 a device that registered a `key` gets its notices sealed end to end. The hub puts
+what the payload above says (`title`, `body`, `category`, `session_id`, `open_session_id?`,
+`type`, `request_id?`, `options?`) into a JSON object, seals it with AES-256-GCM under the
+device's key and a random 12-byte nonce, and sends
+`{aps: {alert: {title: "hqc", body: "New notice. Open hqc to read it."}, sound, "mutable-content": 1}, enc, v: 1}`,
+`enc` being base64 of nonce ‖ ciphertext ‖ 16-byte tag. Apple and a relay see only that generic
+alert and the device token. The app's notification extension opens `enc` with the key, which
+the app keeps in a keychain group shared with the extension, and shows the notice as before,
+its category, thread and fields restored; if it cannot, the generic alert shows. The text is
+cut, as above, until the sealed payload fits 4 KB.
+
+A hub without a key sends through another hub that has one (`HQC_APNS_RELAY_URL`, the
+published app's publisher at `https://hqc.drewnja.xyz`): `POST <relay>/worker/push/relay
+{token, sandbox, collapse_id, payload}` with the APNs payload above. The relay
+(`HQC_APNS_RELAY=1`, only with its own key) sends an alert notice only (an object with
+`aps.alert`, at most 4 KB) to a token in the APNs form, at most 120 a minute from one address,
+and answers `{result: "sent"}` or `{result: "gone"}` (the hub then deletes the device);
+`400 no_relay` from a hub that does not relay. A key and a relay URL together keep the hub
+from starting.
+
 Push body (JSON, `hqc_proto::api::PushMessage`, example `examples/wire/api.push.json`):
 `{session_id, type, title?, body?, tag?, payload?}`, where `type` is the event type and
 `payload` is the §4 event itself as stored. The hub sets `title` (the session title), `body`
@@ -8282,7 +8359,11 @@ is not asked, does not see the question or the answer, and does not work on it.
   Rust SDK), **[verify]** that it is current. Secure store for the worker token: Keychain
   on macOS (ssh keys of environments are 0600 files, §14); on Linux and Windows in the first version the worker token is a 0600 file (§5.1),
   libsecret and DPAPI later.
-- Client: TypeScript, responsive web, PWA; Tauri on the same code later.
+- Client: TypeScript, responsive web, PWA; Tauri on the same code later. iOS: Swift and SwiftUI
+  (`ios/`, since 0.257), the same REST API and `/api/ws`, no hub change.
+  In Settings → Appearance, “Dense UI (vvzvlad mode)” applies a compact layout immediately
+  to project and session lists, Requests, the chat feed and composer, and the sidebar.
+  It defaults to off and is saved on the device independently of the web client's Look setting.
 - Shared crates: `hqc-proto` (event and frame schema, versioned),
   `hqc-claude-jsonl` (transcript parser), adapters as separate crates.
 
@@ -8352,6 +8433,9 @@ is not asked, does not see the question or the answer, and does not work on it.
   it); `/api/*` is behind Cloudflare Access with JWT verification (in OIDC mode, behind the
   proxy's sign-in, the hub verifying the provider's ID token, §6); `/worker/*` is outside
   Access, worker tokens only, rate limit on enroll;
+  `/worker/native/token` (since 0.258, §6) is there too: it gives the Access or OIDC proxy
+  credential only for a one-time code with its verifier, and shares the rate limit of enroll; so is
+  `/worker/push/relay` (§16), on a hub that relays, limited per address;
   `artifacts.<hub-domain>` is public, signed links with a TTL only; the publication domain
   (`HQC_PUBLISH_BASE`, since 0.209) is public too, published files only (§12).
 - The hub's dev mode (`HQC_DEV=1`, no Access) is allowed only on a loopback
@@ -8560,7 +8644,11 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
-### 0.256 → 0.262 (iteration 9 planned: MCP servers on the machine)
+### 0.262 → 0.263 (dense layout for iOS)
+
+§18: iOS gains an optional dense layout, saved on the device.
+
+### 0.261 → 0.262 (iteration 9 planned: MCP servers on the machine)
 §19: a new iteration 9, MCP servers that run on the machine, declared per environment in
 `worker.toml` (the rest of #59); the generic ACP adapter becomes iteration 10, sharing 11, Tauri
 12, and the references to them follow. Plan: `docs/ITERATION-9.md`. Found on 2.1.328:
@@ -8584,6 +8672,51 @@ Implemented (T72, T73): §5.3 `hello.environments[].mcp_servers` (names only), k
 with the worker's environments (no migration: the column is the JSON of `hello`); §6
 `GET /api/mcp/servers` `local[]`; the client's Settings → MCP servers "On machines" and the
 project settings' local servers.
+
+### 0.260 → 0.261 (native client sign-in behind an OIDC proxy)
+§6, §20: `GET /api/native/login` and `POST /worker/native/token` now work in OIDC mode
+(`HQC_OIDC_*`, e.g. Traefik + oauth2-proxy + Keycloak, RUNBOOK §1.9) instead of answering
+`400 not_access`. After `CurrentUser` verifies the OIDC ID token, the hub stores the forwarded
+`Cookie` header (capped at 64 KB) under the one-time PKCE code and returns `{cookie}` (or
+`{bearer}` when no cookies were forwarded); Access mode returns `{token, cookie}` so older
+iOS builds keep working. The iOS app stores the cookies (or bearer token) in Keychain and
+absorbs `Set-Cookie` headers from the hub's responses so proxy cookie refreshes keep it signed
+in.
+
+### 0.259 → 0.260 (Apple push whoever else shows the session)
+§16, §6: APNs is skipped only while the user's iOS app (its socket `/api/ws?client=ios`) shows
+the session, not while any client does: a web tab left open on a session kept every notice of it
+from the phone. The app closes its socket in the background. Web Push is unchanged.
+
+### 0.258 → 0.259 (Apple push notices sealed end to end)
+§16, §6, §3: the iOS app makes a 32-byte key for its notices and registers it with
+`POST /api/push/apns {key}`; the hub seals each notice to that device with AES-256-GCM and sends
+Apple, and a relay, a generic alert with `mutable-content`, the content in `enc`. The app's
+notification extension opens it on the device. Hub migration `0060` (`apns_devices.notice_key`);
+an app that registered no key gets its notices in the clear as before.
+
+### 0.257 → 0.258 (the iOS client signs in through the browser and gets Apple push)
+§6: `GET /api/native/login` and `POST /worker/native/token`, the native client's sign-in
+through the system browser with a one-time code and a verifier, so identity providers that
+refuse an embedded login page (Google) work; `/api/push/apns` for the client's device token.
+§16: the notices of Web Push also go over APNs (`HQC_APNS_*`), with the approval's options so
+the app answers it from the notification; a hub without a key sends through another hub's relay
+(`HQC_APNS_RELAY_URL`, `POST /worker/push/relay`, served with `HQC_APNS_RELAY=1`). §20: `/worker/native/token` outside Access. §3: the
+table `apns_devices` (hub migration `0059`). The iOS client also gains attachments (upload and
+preview), rooms, schedules, search, workers with enrollment and Claude Code's sign-in,
+workspaces with a folder browser, and the session controls of the web client (rename, model,
+pause, restart, favorite, archive, delete), all over the existing API.
+
+### 0.256 → 0.257 (a native iOS client)
+§2, §18: a native iOS client in `ios/` (Swift, SwiftUI, iOS 26) besides the web client. It uses
+only what §6 already gives the web client: `GET /api/me`, `/api/projects`, a project's
+sessions and workspaces, `GET /api/requests`, a session's events by `before_seq`, `POST /input`
+with `client_op_id`, `/stop`, `/retry`, `/archive`, `PATCH` of `permission_mode`, the answer to a
+request, `PUT /read_cursor`, and `/api/ws` with `subscribe_summary` and `subscribe` from the last
+`seq` on every reconnect. Behind Access it signs in through the login page in a web view and
+sends the `CF_Authorization` cookie with each request; on the WebSocket upgrade it sends
+`Origin` as the hub's origin, which §20 checks (a native client has no Origin of its own). No
+hub, worker or protocol change.
 
 ### 0.255 → 0.256 (a worker restart: waited for, and told to the agent)
 #220: a worker restarted for an update killed a session's background subagents, and nothing told
@@ -9132,6 +9265,7 @@ call of a read fits in 15 s.
 the owner confirms or changes, or switches to typing the value; `POST
 /api/sessions/{id}/secrets` takes `vault` in place of `value`, and the feed line names the entry.
 §5.3: `secret.put.vault`; §5.4: `hello.capabilities.vault`, so no hub migration.
+
 ### 0.214 → 0.215 (.git and .hqc are never published; the card names secrets first)
 §7, §20: the card of a publication could understate what goes public: it named the first 50
 files that are not hidden, so an `id_rsa` or a `credentials.json` past them was only in "and N

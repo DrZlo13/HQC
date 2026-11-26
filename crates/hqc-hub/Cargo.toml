@@ -19,12 +19,14 @@ chrono.workspace = true
 axum = { version = "0.8", features = ["ws", "multipart"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "uuid", "chrono", "json"] }
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2"] }
 web-push = { version = "0.11", default-features = false }
 sha2 = "0.10"
 hmac = "0.12"
 rand = "0.8"
 base64 = "0.22"
+# End-to-end encrypted Apple push notices (SPEC 0.259).
+aes-gcm = "0.10"
 futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
 # The hub cron (SPEC §16): 5-field cron patterns and IANA time zones.

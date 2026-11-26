@@ -6397,6 +6397,28 @@ fn a_task_end_carries_its_usage_and_output() {
     );
 }
 
+/// #220: a task `stopped` that this process did not see start died with an earlier process; the
+/// CLI's `duration_ms` then runs to its notice after `--resume` (18 min for 10), so the line has
+/// no usage. One this process saw start keeps it.
+#[test]
+fn a_task_stopped_before_this_process_has_no_usage() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let stream = r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_A1","status":"stopped","summary":"Background agent \"Review\" didn't finish before the previous session ended","usage":{"total_tokens":9000,"tool_uses":3,"duration_ms":1085000}}
+{"type":"system","subtype":"task_started","task_id":"a2","tool_use_id":"toolu_A2","description":"Check","task_type":"local_agent","is_backgrounded":true}
+{"type":"system","subtype":"task_notification","task_id":"a2","tool_use_id":"toolu_A2","status":"stopped","summary":"Stopped.","usage":{"total_tokens":100,"tool_uses":1,"duration_ms":5000}}"#;
+    let usages: Vec<Option<u64>> = play(&mut core, stream)
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(Event {
+                kind: EventKind::System { usage, code, .. },
+                ..
+            })) if code == "task_notification" => Some(usage.map(|u| u.duration_ms)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(usages, [None, Some(5000)]);
+}
+
 /// A task the CLI keeps out of the transcript (`skip_transcript: true`; 2.1.312 sends it so for
 /// its own tasks, with `ambient: true`) is no activity: no line, no output.
 #[test]

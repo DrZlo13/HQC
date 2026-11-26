@@ -737,7 +737,11 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     return s;
   };
   const mcpList = () => [...mcpServers.values()].sort((a, b) => a.name.localeCompare(b.name));
-  route('GET', '/api/mcp/servers', () => ({ servers: mcpList() }));
+  // SPEC 0.262: the servers a worker's worker.toml declares, read-only.
+  route('GET', '/api/mcp/servers', () => ({
+    servers: mcpList(),
+    local: [{ name: 'figma', worker_id: 'w-drzlo-mac', worker_name: 'drzlo-mac', environment: 'firmware' }],
+  }));
   route('POST', '/api/mcp/servers', (_, body) => {
     if (typeof body?.name !== 'string' || typeof body?.url !== 'string') throw fail(400, 'bad_request', 'name and url are needed');
     if (mcpServers.size >= 50) throw fail(409, 'too_many_servers', 'at most 50 servers');

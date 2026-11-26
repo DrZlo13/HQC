@@ -68,7 +68,7 @@ it('Settings: the select lists the projects, shows the effective one and a pick 
     me = { ...me, ...body };
     return new Response(JSON.stringify(me), { status: 200, headers: { 'content-type': 'application/json' } });
   };
-  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => [], skills: async () => [], me: async () => app.me! }), socket);
+  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => ({ servers: [], local: [] }), skills: async () => [], me: async () => app.me! }), socket);
   app.me = ME;
   projects(app);
   root = document.createElement('div');
@@ -98,7 +98,7 @@ it('Settings: the select lists the projects, shows the effective one and a pick 
 
 it("Settings on a phone: the user's quick messages take the phone look of the project settings' editor", async () => {
   const fetchHub: typeof fetch = async () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
-  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => [], skills: async () => [], me: async () => app.me! }), socket);
+  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => ({ servers: [], local: [] }), skills: async () => [], me: async () => app.me! }), socket);
   app.me = { ...ME, quick_messages: ['Merge'] };
   projects(app);
   root = document.createElement('div');
@@ -122,7 +122,7 @@ it("Settings: a page that does not know the user adds to the hub's list of the u
     }
     return new Response(JSON.stringify(hub), { status: 200, headers: { 'content-type': 'application/json' } });
   };
-  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => [], skills: async () => [] }), socket);
+  const app = new AppState(Object.assign(new Api('', fetchHub), { workers: async () => [], mcpServers: async () => ({ servers: [], local: [] }), skills: async () => [] }), socket);
   // `me` stays null, as after a first `/api/me` that failed.
   projects(app);
   root = document.createElement('div');

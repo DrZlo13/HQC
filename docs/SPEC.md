@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.263, 2026-11-26. Status: the architecture agreed after six reviews and a survey of
+Version 0.264, 2026-11-26. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2760,7 +2760,9 @@ place of the screen: the browser's or the phone's back gesture after an arrow ne
 the screen the arrow closed. Each entry keeps in its `history.state` the address it was opened
 from. A press on a button of the composer (send, attach, remove a file) leaves the focus in the
 field: a phone keeps its keyboard, and the composer does not grow under the tap by the home
-indicator's room before the click lands.
+indicator's room before the click lands. Since 0.264 Send on a phone then takes the focus from the
+field as the message leaves it: the keyboard goes down and the chat shows the answer. Enter, and
+Send on a computer, leave the caret in the field.
 
 Keys to move around (since 0.242; before, the macOS app's own shortcuts did this by clicking
 the page), each set in Settings ▸ Keys; the default on a Mac, then elsewhere: New session (⌘N,
@@ -2875,7 +2877,9 @@ first input; until the chat is there
 the input sends nothing more ("Starting…") and the chips are off, while what is typed and
 attached meanwhile stays; the draft row stands for the new session in the list. Once the chat's
 first page is in, the address becomes `#/s/<session>` and the session's chat replaces the
-window: the message in its feed, the text and files not sent in its input, the caret there. A
+window: the message in its feed, the text and files not sent in its input, the caret there (on a
+phone, since 0.264, only when the window's input held it: Send there took it away, and it stays
+away unless the user went back to the input to type on). A
 create the hub refuses keeps the window, the message back in the input with its files and the
 reason above it. Left unsent, the draft is gone; left while the session is being created, the
 session stays in the list with what was typed meanwhile as its draft, or, refused, the list says
@@ -3061,7 +3065,8 @@ A recalled message is not the draft until it is edited, and then it is an ordina
 sent. On a computer the input
 takes the caret when the chat opens, once its newest page is in, unless a request waits for an
 answer (an open approval in the feed, or the session `waiting`), another field has the focus, or a
-menu or the slid-out column is open; on a phone only when the chat replaces a new session's window.
+menu or the slid-out column is open; on a phone only when the chat replaces a new session's window
+whose input held it (since 0.264).
 An open chat stays at its bottom while its images load: only a scroll up lets go of the bottom, and
 a move up while the feed's scroll range changed is the browser's, not a scroll up (since 0.164),
 unless it comes in the user's own scroll up (since 0.198).
@@ -3158,9 +3163,10 @@ sent. On a computer the input
 takes the caret when the chat opens, once its newest page is in, unless a request waits
 for an answer (an open approval in the feed, or the session `waiting`), another field has the
 focus, or a menu or the slid-out column is open; on a phone only when the chat replaces a new
-session's window. An open chat stays at its bottom while its images load: only a scroll up lets
-go of the bottom, and a move up while the feed's scroll range changed is the browser's, not a
-scroll up (since 0.164), unless it comes in the user's own scroll up (since 0.198). The user's own
+session's window whose input held it (since 0.264). An open chat stays at its bottom while its
+images load: only a scroll up lets go of the bottom, and a move up while the feed's scroll range
+changed is the browser's, not a scroll up (since 0.164), unless it comes in the user's own scroll
+up (since 0.198). The user's own
 scroll of the feed is a wheel or trackpad, a finger, or the main button pressed on the feed's own
 element (its scrollbar, its padding and the margins beside the column) while they are down, or a
 scrolling key outside a field, and it goes on while scroll events follow within 400 ms of the last
@@ -8573,6 +8579,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.263 → 0.264 (a phone's Send puts the keyboard down)
+§6: a press on a button of the composer keeps the focus in the field, and on a phone the keyboard
+stayed up over the chat after every message. Send on a phone now takes the focus from the field
+as the message leaves it; Enter and Send on a computer keep it. The chat that replaces a new
+session's window took the caret back in every case, and on a phone the keyboard came up again;
+on a phone it takes the caret now only when the window's input held it as the session was
+created; a computer's chat takes it as before. Client only.
 
 ### 0.262 → 0.263 (ArrowUp recalls the owner's messages)
 §6, the client's input: on a computer ArrowUp in the empty input puts in the owner's previous

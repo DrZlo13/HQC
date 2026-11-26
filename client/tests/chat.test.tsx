@@ -2647,6 +2647,23 @@ describe('composer', () => {
     // The field itself takes the press as always.
     expect(press(area)).toBe(false);
   });
+
+  it("a phone's Send takes the focus from the field (the keyboard goes down), a computer's keeps it", async () => {
+    for (const phone of [true, false]) {
+      const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
+      await mount(app, phone);
+      const area = $('.composer textarea') as HTMLTextAreaElement;
+      await act(() => {
+        area.value = 'deploy';
+        area.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      area.focus();
+      await act(async () => void ($('.composer .btn-send') as HTMLButtonElement).click());
+      expect(area.value).toBe('');
+      expect(document.activeElement === area).toBe(!phone);
+      render(null, root);
+    }
+  });
 });
 
 // SPEC 0.232: `/btw <question>` and `/side <question>` in the composer ask the agent a side

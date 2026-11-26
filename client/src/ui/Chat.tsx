@@ -113,17 +113,17 @@ export function Chat({
   const [viewing, setViewing] = useState<ViewedArtifact | null>(null);
   const peerMessage = useMemo(() => peerMessages(app.api), [app]);
   // A new session's window that just became this chat hands over, once, the files attached
-  // there and not sent, and the caret in the input.
+  // there and not sent, and whether its input held the caret.
   const [handed] = useState(() => app.takeHandover(sessionId));
   const [files, setFiles] = useState<OutgoingFile[]>(handed?.files ?? []);
   // Files picked and not read yet: a HEIC libheif decodes takes a second or more, and a message
   // sent meanwhile would go without it.
   const [reading, setReading] = useState(0);
   // The caret goes to the input once, as the chat opens: on a computer, as in the VS Code tab,
-  // unless a request waits for an answer; on a phone only from a new session's window (the
-  // keyboard would cover the chat). An input shown later (after a sheet, a lock) leaves the
-  // focus where it is.
-  const caret = useRef(!!handed || !phone);
+  // unless a request waits for an answer; on a phone only from a new session's window whose
+  // input still held it (the keyboard would cover the chat; Send there takes it away). An input
+  // shown later (after a sheet, a lock) leaves the focus where it is.
+  const caret = useRef(!phone || !!handed?.caret);
   const [dragging, setDragging] = useState(false);
   const addFiles = (list: FileList | File[] | null | undefined) => {
     const picked = [...(list ?? [])];
@@ -2247,13 +2247,17 @@ export function Composer({
     setClosedAt(null);
     area.current?.focus();
   };
-  const submit = () => {
+  /** `pressed`: sent by the Send button, not by Enter. */
+  const submit = (pressed = false) => {
     if (!canSend) return;
     const sent = text.trim();
     walk.current = null;
     const refused = onSend(sent);
     setText('');
-    area.current?.focus();
+    // A phone's Send takes the focus from the field, and the keyboard goes down to show the
+    // chat; Enter, and Send on a computer, leave the caret for the next message.
+    if (phone && pressed) area.current?.blur();
+    else area.current?.focus();
     refused?.catch(() => {
       // What was typed since stays, after the text that came back.
       caretToEnd.current = true;
@@ -2404,12 +2408,13 @@ export function Composer({
         // A press on a button of the composer (send, attach, remove a file) leaves the focus in
         // the field: on a phone the field losing it drops the keyboard and the composer grows by
         // the home indicator's room at once, and the tap's click then lands under the button.
+        // Send on a phone takes the focus itself, once the message is sent (`submit`).
         onMouseDown={(e) => {
           if ((e.target as Element).closest('button')) e.preventDefault();
         }}
         onSubmit={(e) => {
           e.preventDefault();
-          submit();
+          submit(true);
         }}
       >
         {popup && (

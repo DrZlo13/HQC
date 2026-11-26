@@ -144,6 +144,7 @@ export function NewChatWindow({
   const [input, setInput] = useState({ text: '', n: 0 });
   const typed = useRef('');
   const left = useRef(false);
+  const box = useRef<HTMLElement>(null);
   useEffect(
     () => () => {
       left.current = true;
@@ -171,7 +172,11 @@ export function NewChatWindow({
         app.setDraft(s.id, typed.current);
         return;
       }
-      app.handOver(s.id, typed.current, filesNow.current);
+      // Whether the window's input holds the caret: on a phone the chat takes it only then (Send
+      // there took it away, and the keyboard went down); a computer's chat takes it anyway.
+      const at = box.current?.ownerDocument.activeElement;
+      const caret = !!at && at.classList.contains('composer-input') && !!box.current?.contains(at);
+      app.handOver(s.id, typed.current, filesNow.current, caret);
       replaceHash(`#/s/${s.id}`);
     } catch (e) {
       const reason = (e as Error).message;
@@ -226,6 +231,7 @@ export function NewChatWindow({
 
   return (
     <section
+      ref={box}
       class={`chat chat-new ${dragging ? 'chat-dragging' : ''} ${phone ? 'chat-phone' : ''}`}
       onDragOver={(e) => {
         if (!e.dataTransfer?.types.includes('Files')) return;

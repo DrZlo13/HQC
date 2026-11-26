@@ -877,6 +877,11 @@ impl Proxy<'_> {
             let _ = self.cli.send(m);
             return true;
         }
+        if m.get("method").is_some() && (m.get("result").is_some() || m.get("error").is_some()) {
+            // Neither a request nor an answer: it could pass for the answer to a held id.
+            eprintln!("hqc-worker mcp --local: a message of the server with both a method and a result or error dropped");
+            return true;
+        }
         if let Some(method) = m.get("method").and_then(Value::as_str) {
             if method == "notifications/tools/list_changed" && m.get("id").is_none() {
                 // Checked before the CLI hears of it.

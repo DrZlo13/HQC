@@ -219,7 +219,7 @@ and the two differ.
 `protocol_version`, `boot_id` (from the last `hello`, §5.2), `capabilities` (`claude_code: {version, sessions_registry?, moves?, login?}`, `acp_agents[{name,
 version, load_session, resume, image, isolation}]` — the result of each agent's `initialize`
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
-`environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?, remote_unblock? (0.246)}}`,
+`environments[]` (since 0.56 `{name, allow_local_mcp?, mcp_servers? (0.262), permissions {unblock?, allow?, deny?, remote_unblock? (0.246)}}`,
 never the values of `env`; `default` is implied), `env_bindings[]` (`{path, environment}`; the
 Hermes profile in iteration 10),
 `allow_foreign_sessions`, `idle_timeout`, `system_session_id` (§10.2), `machine_hash` (since 0.23:
@@ -1553,8 +1553,9 @@ MCP calls (worker → hub → worker):
   (`secret.put.vault_field`): an older worker ignores the field and would give the password, so
   the hub offers the field, and `reads_vault` on a card, only to a worker that sends it.
   `environments` (since 0.56, T43) — the environments of the local config (§14) as `{name,
-  allow_local_mcp?, permissions {unblock?, allow?, deny?, remote_unblock?}}`, without `default` and never with the
-  values (or the names) of `env`; a plain string, as workers before 0.56 send, reads as an
+  allow_local_mcp?, mcp_servers?, permissions {unblock?, allow?, deny?, remote_unblock?}}`, without `default` and never with the
+  values (or the names) of `env`; `mcp_servers` (since 0.262) the names of its local MCP
+  servers (§14), never a command, URL, header or value, absent when none; a plain string, as workers before 0.56 send, reads as an
   environment without rules. `env_bindings` — `{path, environment}`, the path canonical when it
   existed at the worker's start (`worker.hello.json`). The hub keeps both on the worker and sets
   each workspace's `environment` from the bindings (§3 Workspace).
@@ -2002,6 +2003,13 @@ the rest is marked "later"):
   the section "MCP servers" in Settings (the list with status and tools, add and edit with
   headers or OAuth, Test, Sign in, Sign out, Delete) and the servers a project gets in its
   settings (T66).
+  Since 0.262 (iteration 9) `GET /api/mcp/servers` also has `local[{name, worker_id,
+  worker_name, environment}]`: the servers each of the owner's workers (not revoked) declares in
+  `worker.toml` (§14 `mcp_servers`), from the environments of its last `hello`, sorted by name,
+  worker and environment. They are read-only: the hub cannot add, change or start one, and
+  routes nothing by them (a session runs where its workspace is). Settings → MCP servers lists
+  them under "On machines" with a line on declaring one in `worker.toml`, and a project's
+  settings show those of the workers its workspaces are on.
   Skills (since 0.245, `docs/ITERATION-8.md`): `GET /api/skills` ({skills: [...]}), `POST
   /api/skills`, `PATCH/DELETE /api/skills/{id}`, `GET /api/skills/{id}/files` ({files: [{path,
   size, executable?}]}), the owner's only. A skill: {id, name, description?, allowed_tools[],
@@ -8558,6 +8566,11 @@ binary; a stdio program gets the child allowlist without `CLAUDE_*`/`ANTHROPIC_*
 `env`; `http` is relayed with its headers, no redirect followed; the tools pinned in
 `$HQC_HOME/mcp-pins.json` unless `pin = false`, `hqc-worker mcp approve` and `mcp pins`; §4
 `system mcp_server_failed` and `mcp_tools_changed`.
+
+Implemented (T72, T73): §5.3 `hello.environments[].mcp_servers` (names only), kept by the hub
+with the worker's environments (no migration: the column is the JSON of `hello`); §6
+`GET /api/mcp/servers` `local[]`; the client's Settings → MCP servers "On machines" and the
+project settings' local servers.
 
 ### 0.255 → 0.256 (a worker restart: waited for, and told to the agent)
 #220: a worker restarted for an update killed a session's background subagents, and nothing told

@@ -338,6 +338,7 @@ impl Environment {
         EnvironmentInfo {
             name: self.name.clone(),
             allow_local_mcp: self.allow_local_mcp,
+            mcp_servers: self.mcp_servers.iter().map(|s| s.name.clone()).collect(),
             permissions: self.rules.clone(),
         }
     }

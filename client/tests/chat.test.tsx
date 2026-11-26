@@ -4412,6 +4412,104 @@ describe('draft', () => {
   });
 });
 
+describe('ArrowUp recalls the own messages', () => {
+  const area = () => $('.composer-input') as HTMLTextAreaElement;
+  const type = (text: string) =>
+    act(() => {
+      area().value = text;
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  const key = async (k: string, init: KeyboardEventInit = {}) => {
+    const e = new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init });
+    await act(() => {
+      area().dispatchEvent(e);
+    });
+    return e.defaultPrevented;
+  };
+  const said = (seq: number, text: string, patch: (e: any) => void = (e) => (e.payload.human = true)) =>
+    ev('event.user.message', seq, (e) => {
+      e.payload.text = text;
+      e.payload.artifact_ids = [];
+      delete e.payload.human;
+      patch(e);
+    });
+  const OWN = [
+    said(1, 'first'),
+    ev('event.agent.message', 2),
+    // A schedule's run and a note of the hub are not the owner's typing.
+    said(3, 'from a schedule', () => {}),
+    said(4, 'second\nof two lines'),
+    said(5, 'third'),
+    said(6, 'the hub restarted', () => {}),
+  ];
+
+  it("walks back through the owner's typed messages, newest first, and forward to the empty field", async () => {
+    const { app } = setup('idle', { history: OWN });
+    await mount(app);
+    app.chat('s1').timeline.addPending('op1', 'not stored yet');
+    await act(() => {});
+    expect(await key('ArrowUp')).toBe(true);
+    expect(area().value).toBe('not stored yet');
+    expect(area().selectionStart).toBe('not stored yet'.length);
+    await key('ArrowUp');
+    expect(area().value).toBe('third');
+    await key('ArrowUp');
+    expect(area().value).toBe('second\nof two lines');
+    // The caret at the end of a message of two lines: ArrowUp moves it to the first line, as
+    // always; from there it walks on.
+    expect(await key('ArrowUp')).toBe(false);
+    area().setSelectionRange(0, 0);
+    await key('ArrowUp');
+    expect(area().value).toBe('first');
+    // The oldest: nothing further.
+    expect(await key('ArrowUp')).toBe(false);
+    expect(area().value).toBe('first');
+    await key('ArrowDown');
+    expect(area().value).toBe('second\nof two lines');
+    await key('ArrowDown');
+    await key('ArrowDown');
+    expect(area().value).toBe('not stored yet');
+    await key('ArrowDown');
+    expect(area().value).toBe('');
+    // At the empty field ArrowDown is the field's own.
+    expect(await key('ArrowDown')).toBe(false);
+    // Nothing was sent, and the draft stayed empty.
+    expect(app.draft('s1')).toBe('');
+  });
+
+  it('a recalled message edited is an ordinary draft; ArrowUp then is the field\'s own', async () => {
+    const { app } = setup('idle', { history: OWN });
+    await mount(app);
+    await key('ArrowUp');
+    expect(area().value).toBe('third');
+    await type('third, again');
+    expect(app.draft('s1')).toBe('third, again');
+    expect(await key('ArrowUp')).toBe(false);
+    expect(await key('ArrowDown')).toBe(false);
+    expect(area().value).toBe('third, again');
+  });
+
+  it('only from an empty field and without modifiers', async () => {
+    const { app } = setup('idle', { history: OWN });
+    await mount(app);
+    await type('typed');
+    expect(await key('ArrowUp')).toBe(false);
+    expect(area().value).toBe('typed');
+    await type('');
+    expect(await key('ArrowUp', { shiftKey: true })).toBe(false);
+    expect(area().value).toBe('');
+  });
+
+  it('leaves ArrowUp to the commands\' list while it is open', async () => {
+    const { app } = setup('idle', { history: OWN, commands: ['compact', 'clear'] });
+    await mount(app);
+    await type('/c');
+    expect($('.cmd-popup')).not.toBeNull();
+    await key('ArrowUp');
+    expect(area().value).toBe('/c');
+  });
+});
+
 describe('Quote', () => {
   const area = () => $('.composer-input') as HTMLTextAreaElement;
   /** The text node of the feed (or of `scope`) that reads `text`. */

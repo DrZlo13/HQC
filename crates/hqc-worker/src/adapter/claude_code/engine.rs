@@ -3783,10 +3783,17 @@ impl Core {
     /// line carries the task's `tool_use_id` (the notification's, else that of its
     /// `task_started`, [`Core::task_calls`]) as `call_id`, and the notification's `status`,
     /// `task_id` and `usage`; its `output_file` follows it as [`AdapterEvent::TaskOutput`].
-    /// One with `skip_transcript: true` gives no line.
+    /// One with `skip_transcript: true` gives no line. A task `stopped` that this process did
+    /// not see start died with an earlier process (a worker restart): its `usage` counts up to
+    /// the notice, not to the end, so the line has none (#220).
     fn on_task_ended(&mut self, v: &Value) -> Vec<Action> {
         let id = v["task_id"].as_str();
         let started = id.and_then(|id| self.task_calls.remove(id));
+        let usage = if v["status"] == "stopped" && started.is_none() {
+            None
+        } else {
+            task_usage(&v["usage"])
+        };
         // A subagent that ended asks nothing any more: its requests still open are cancelled
         // here, whichever comes first, this or the main turn's `result`.
         let mut out = match id {
@@ -3832,7 +3839,7 @@ impl Core {
                 status: v["status"].as_str().map(str::to_owned),
                 task_id: id.map(str::to_owned),
                 from_session_id: None,
-                usage: task_usage(&v["usage"]),
+                usage,
                 fork: None,
                 compaction: None,
                 model: None,

@@ -246,7 +246,7 @@ export class AppState {
   phoneView: PhoneView = 'projects';
   /** What a new session's window hands to the chat that replaces it, taken once
    *  (`takeHandover`). */
-  private handover: { id: string; files: OutgoingFile[] } | null = null;
+  private handover: { id: string; files: OutgoingFile[]; caret: boolean } | null = null;
   private readonly listeners = new Set<() => void>();
   private readonly drafts = loadDrafts();
   private refreshing: Promise<void> | null = null;
@@ -1359,14 +1359,15 @@ export class AppState {
   }
 
   /** A new session's window gives its place to the chat of session `id`: what is typed there
-   *  and not sent becomes the chat's draft, and the chat takes `files` and the caret. */
-  handOver(id: string, text: string, files: OutgoingFile[]): void {
+   *  and not sent becomes the chat's draft, and the chat takes `files`, and, on a phone, the
+   *  caret only when the window's input held it (`caret`); a computer's chat takes it anyway. */
+  handOver(id: string, text: string, files: OutgoingFile[], caret: boolean): void {
     this.setDraft(id, text);
-    this.handover = { id, files };
+    this.handover = { id, files, caret };
   }
 
   /** What was handed over to chat `id`, once; nothing for another chat. */
-  takeHandover(id: string): { files: OutgoingFile[] } | undefined {
+  takeHandover(id: string): { files: OutgoingFile[]; caret: boolean } | undefined {
     const h = this.handover;
     if (h?.id !== id) return undefined;
     this.handover = null;

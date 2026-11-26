@@ -3550,6 +3550,40 @@ describe('a new session', () => {
     expect(document.activeElement).toBe(chatInput());
   });
 
+  it("on a phone Send takes the caret away and the chat does not hand it back, unless the user went back to type", async () => {
+    windowWidth(390);
+    const phoneChatInput = () => root.querySelector<HTMLTextAreaElement>('.chat:not(.chat-new) .composer-input');
+    // Sent and left alone: the keyboard stays down in the chat.
+    const { app } = draftApp();
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    await act(async () => input().focus());
+    await typeMessage('Hello there');
+    await sendMessage();
+    await settle();
+    expect(location.hash).toBe('#/s/fresh');
+    expect(phoneChatInput()).not.toBeNull();
+    expect(document.activeElement).not.toBe(phoneChatInput());
+    render(null, root);
+    location.hash = '';
+    // Typing on while it is created: the caret goes on to the chat.
+    let create!: (s: SessionInfo) => void;
+    const { app: slow } = draftApp(() => new Promise((r) => (create = r)));
+    location.hash = '#/p/p1/new';
+    await mount(<App app={slow} />);
+    await settle();
+    await typeMessage('Hello there');
+    await sendMessage();
+    expect(document.activeElement).not.toBe(input());
+    await act(async () => input().focus());
+    await typeMessage('and one more');
+    await act(async () => create(created()));
+    await settle();
+    expect(location.hash).toBe('#/s/fresh');
+    expect(document.activeElement).toBe(phoneChatInput());
+  });
+
   it('the caret is handed once: the input shown again in the same chat (after a lock) does not take it', async () => {
     const { app } = draftApp();
     location.hash = '#/p/p1/new';

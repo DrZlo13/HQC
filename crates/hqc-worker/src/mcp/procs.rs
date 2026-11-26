@@ -35,6 +35,42 @@ pub fn parent(_pid: u32) -> Option<u32> {
     None
 }
 
+/// The executable `pid` runs; `None` if it is gone or cannot be read.
+#[cfg(target_os = "macos")]
+pub fn executable(pid: u32) -> Option<std::path::PathBuf> {
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = unsafe {
+        libc::proc_pidpath(
+            pid as libc::c_int,
+            buf.as_mut_ptr().cast(),
+            buf.len() as u32,
+        )
+    };
+    if n <= 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    use std::os::unix::ffi::OsStringExt;
+    Some(std::ffi::OsString::from_vec(buf).into())
+}
+
+/// The executable `pid` runs; `None` if it is gone or cannot be read.
+#[cfg(target_os = "linux")]
+pub fn executable(pid: u32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn executable(_pid: u32) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// `pid` runs `program` (both canonical when they can be).
+pub fn runs(pid: u32, program: &std::path::Path) -> bool {
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    executable(pid).is_some_and(|e| canon(&e) == canon(program))
+}
+
 /// Longest chain of parents walked from a peer to its agent.
 const MAX_DEPTH: usize = 32;
 
@@ -74,5 +110,12 @@ mod tests {
         assert!(!descends_from(me, 1), "launchd / init is never walked into");
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn executables() {
+        let me = std::env::current_exe().unwrap();
+        assert!(runs(std::process::id(), &me));
+        assert!(!runs(std::process::id(), std::path::Path::new("/bin/sh")));
     }
 }

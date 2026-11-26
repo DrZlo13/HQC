@@ -37,20 +37,43 @@ enum Cmd {
     /// Run the daemon (SPEC §2).
     Run,
     /// Serve the hqc MCP server over stdio for one session (SPEC §7.2); spawned by runtimes,
-    /// with the session token in `HQC_SESSION_TOKEN`.
+    /// with the session token in `HQC_SESSION_TOKEN`. `approve` and `pins` manage the pins of
+    /// the local MCP servers' tools.
+    #[command(args_conflicts_with_subcommands = true)]
     Mcp {
+        #[command(subcommand)]
+        cmd: Option<McpCmd>,
         /// The daemon's socket; `$HQC_HOME/mcp.sock` by default.
         #[arg(long)]
         socket: Option<std::path::PathBuf>,
         /// Relay the hub's remote MCP server of this name instead (SPEC 0.235).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "local")]
         upstream: Option<String>,
+        /// Run the local MCP server of this name of the session's environment instead
+        /// (`[environments.<env>.mcp_servers.<name>]` of worker.toml).
+        #[arg(long)]
+        local: Option<String>,
     },
     /// List the environments and bindings of worker.toml (SPEC §14); edit them there.
     Env {
         #[command(subcommand)]
         cmd: Option<EnvCmd>,
     },
+}
+
+#[derive(Subcommand)]
+enum McpCmd {
+    /// Show how the tools of a local MCP server changed since they were pinned, and pin the
+    /// new ones, so that its sessions get the server again.
+    Approve {
+        /// `<environment>/<server>`, as the chat's line and `hqc-worker mcp pins` name it.
+        server: String,
+        /// Pin without asking.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// The pinned local MCP servers and those whose tools changed.
+    Pins,
 }
 
 #[derive(Subcommand)]
@@ -128,12 +151,41 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Run => run(logs).await,
-        Cmd::Mcp { socket, upstream } => {
+        Cmd::Mcp { cmd: Some(cmd), .. } => {
+            let path = config::hqc_home()?.join(hqc_worker::mcp::pins::FILE);
+            match cmd {
+                McpCmd::Pins => print!("{}", hqc_worker::mcp::pins::list(&path)?),
+                McpCmd::Approve { server, yes } => approve(&path, &server, yes)?,
+            }
+            Ok(())
+        }
+        Cmd::Mcp {
+            cmd: None,
+            socket,
+            upstream,
+            local,
+        } => {
             let socket = match socket {
                 Some(s) => s,
                 None => hqc_worker::mcp::socket_path(&config::hqc_home()?),
             };
             let token = std::env::var(hqc_worker::mcp::TOKEN_ENV).ok();
+            if let Some(name) = local {
+                let r = hqc_worker::mcp::local::run(
+                    &socket,
+                    token,
+                    &name,
+                    tokio::io::stdin(),
+                    tokio::io::stdout(),
+                )
+                .await;
+                // The read of stdin blocks a thread the runtime would wait for at its end: a
+                // launcher that stops before the CLI closes its stdin (a failed pin) exits now.
+                if let Err(e) = &r {
+                    eprintln!("hqc-worker mcp --local {name}: {e:#}");
+                }
+                std::process::exit(i32::from(r.is_err()));
+            }
             let mut server = hqc_worker::mcp::server::McpServer::new(token, socket);
             if let Some(name) = upstream {
                 server = server.with_upstream(name);
@@ -156,6 +208,32 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// `hqc-worker mcp approve <env>/<server>`: shows the change and pins it once the owner agrees.
+fn approve(path: &std::path::Path, key: &str, yes: bool) -> anyhow::Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let Some((change, sha256)) = hqc_worker::mcp::pins::pending(path, key)? else {
+        println!("{key}: its tools have not changed since they were pinned; nothing to approve");
+        return Ok(());
+    };
+    println!("The tools of {key} changed since they were pinned: {change}");
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!("not pinned: run it in a terminal to answer, or pass --yes");
+        }
+        print!("Pin these tools, so that agents get them? [y/N] ");
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().lock().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            println!("not pinned: the server stays off");
+            return Ok(());
+        }
+    }
+    hqc_worker::mcp::pins::approve(path, key, &sha256)?;
+    println!("pinned: the next start of {key} in a session gets these tools");
+    Ok(())
 }
 
 async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {

@@ -328,11 +328,17 @@ impl McpLaunch {
     /// `<program> mcp --socket <socket> --upstream <name>` with the same token: the CLI names
     /// their tools `mcp__<name>__<tool>`, as with a direct connection, and the address and the
     /// server's token stay on the hub.
+    ///
+    /// `local` (iteration 9): the machine's MCP servers of the session's environment, each as
+    /// the launcher `<program> mcp --socket <socket> --local <name>`, which gets the server's
+    /// command, environment and headers from the daemon: none of their values is on the CLI's
+    /// command line. A hub server of the same name is not in `upstreams` (the machine wins).
     pub fn config(
         &self,
         token: &crate::token::Secret,
         secret_tools: bool,
         upstreams: &[String],
+        local: &[String],
     ) -> String {
         let mut env = serde_json::json!({ (crate::mcp::TOKEN_ENV): token.expose() });
         if secret_tools {
@@ -351,6 +357,14 @@ impl McpLaunch {
                 "type": "stdio",
                 "command": self.program,
                 "args": ["mcp", "--socket", self.socket, "--upstream", name],
+                "env": { (crate::mcp::TOKEN_ENV): token.expose() },
+            });
+        }
+        for name in local {
+            servers[name] = serde_json::json!({
+                "type": "stdio",
+                "command": self.program,
+                "args": ["mcp", "--socket", self.socket, "--local", name],
                 "env": { (crate::mcp::TOKEN_ENV): token.expose() },
             });
         }
@@ -382,6 +396,11 @@ impl ClaudeCodeAdapters {
     pub fn with_mcp(mut self, mcp: McpLaunch) -> Self {
         Arc::make_mut(&mut self.opts).mcp = Some(mcp);
         self
+    }
+
+    /// The program of `--mcp-config` (iteration 9: the launchers of the local servers too).
+    pub fn mcp_program(&self) -> Option<PathBuf> {
+        self.opts.mcp.as_ref().map(|m| m.program.clone())
     }
 
     /// The registry of own transcript records, for the mirror.
@@ -810,7 +829,16 @@ impl ClaudeCodeAdapter {
         if let Some(m) = &self.opts.mcp {
             args.extend([
                 "--mcp-config".into(),
-                m.config(&spec.session_token, secrets.is_some(), &spec.mcp_servers),
+                m.config(
+                    &spec.session_token,
+                    secrets.is_some(),
+                    &spec.mcp_servers,
+                    &spec
+                        .local_mcp
+                        .as_ref()
+                        .map(|l| l.names())
+                        .unwrap_or_default(),
+                ),
             ]);
         }
         args.extend(["--allowedTools".into(), "mcp__hqc".into()]);

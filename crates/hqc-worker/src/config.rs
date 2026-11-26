@@ -36,7 +36,8 @@
 //! [environments.infra]           # T43: what sessions in the bound folders run with
 //! env = { GITHUB_TOKEN = "..." } # variables on top of the child allowlist
 //! ssh_keys = ["infra_ed25519"]   # T44: keys of $HQC_HOME/keys/, an ssh-agent per process
-//! allow_local_mcp = false        # true: the machine's MCP servers too (no --strict-mcp-config)
+//! allow_local_mcp = false        # true: every MCP server the machine's CLI knows, claude.ai
+//!                                # connectors included (no --strict-mcp-config); prefer mcp_servers
 //! project_settings = false       # true: the repository's CLAUDE.md and .claude/settings.json too
 //! hub_mcp = false                # true: the remote MCP servers the hub keeps (SPEC 0.235)
 //! hub_skills = false             # true: the skills the hub keeps (SPEC 0.245)
@@ -44,6 +45,18 @@
 //! unblock = ["Bash(ssh:*)"]      # rules of the worker's deny lifted here only
 //! allow = ["Bash(ssh debian@192.168.1.20:*)"]
 //! deny = ["Bash(git push:*)"]    # added to the worker's deny
+//!
+//! [environments.infra.mcp_servers.figma]   # iteration 9: an MCP server of this machine
+//! command = "npx"                # absolute, or looked up in PATH; runs in the session's folder
+//! args = ["-y", "figma-developer-mcp@0.6.4", "--stdio"]
+//! env = { FIGMA_API_KEY = { vault = "figma token" } }   # plain, or read from Vaultwarden at every start
+//! # cwd = "/abs/folder"          # instead of the session's working folder
+//! # pin = false                  # true by default: a changed tools/list fails the server until
+//!                                # `hqc-worker mcp approve infra/figma`
+//! [environments.infra.mcp_servers.figma-dev]
+//! type = "http"                  # Streamable HTTP
+//! url = "http://127.0.0.1:3845/mcp"
+//! # headers = { Authorization = { vault = "dev token" } }
 //!
 //! [[env_bindings]]               # the longest path that contains the workspace wins
 //! path = "/Users/me/work/lab/infra"
@@ -181,6 +194,41 @@ struct RawEnvironment {
     hub_skills: bool,
     #[serde(default)]
     permissions: RawEnvPermissions,
+    #[serde(default)]
+    mcp_servers: BTreeMap<String, RawMcpServer>,
+}
+
+/// `[environments.<name>.mcp_servers.<server>]` (SPEC §14, iteration 9).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMcpServer {
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    env: Option<BTreeMap<String, RawValue>>,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    headers: Option<BTreeMap<String, RawValue>>,
+    #[serde(default = "default_true")]
+    pin: bool,
+}
+
+/// A value of a local MCP server's `env` or `headers`: as written, or a Vaultwarden entry.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(
+    untagged,
+    expecting = "a value, or a table { vault = \"<entry>\", field = \"<field>\" }"
+)]
+enum RawValue {
+    Value(String),
+    Vault(RawVaultKey),
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -246,6 +294,9 @@ pub struct Environment {
     /// The sessions get the skills the hub keeps for their project, in a plugin folder the
     /// worker builds (`--plugin-dir`, SPEC 0.245); worker-local, not in `hello`.
     pub hub_skills: bool,
+    /// `[environments.<name>.mcp_servers.*]` by name (iteration 9): the MCP servers of this
+    /// machine its sessions get, each through the launcher `hqc-worker mcp --local <name>`.
+    pub mcp_servers: Vec<Arc<LocalMcpServer>>,
     /// `[environments.<name>.permissions]` as written.
     pub rules: EnvPermissions,
     /// What its sessions run with ([`Permissions::for_environment`]).
@@ -263,6 +314,7 @@ impl Environment {
             project_settings: false,
             hub_mcp: false,
             hub_skills: false,
+            mcp_servers: vec![],
             rules: EnvPermissions::default(),
             permissions: permissions.clone(),
         }
@@ -348,16 +400,7 @@ fn parse_environment(
         bail!("{name:?} is not an environment name (letters, digits, _ - .)");
     }
     for (k, v) in &raw.env {
-        // Letters, digits and `_`, not starting with a digit; never the worker's own.
-        if k.is_empty()
-            || k.starts_with(|c: char| c.is_ascii_digit())
-            || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
-            bail!("env: {k:?} is not a variable name (letters, digits and _)");
-        }
-        if k.starts_with("HQC_") {
-            bail!("env: {k}: HQC_* variables are the worker's own");
-        }
+        check_var_name(k)?;
         if k == crate::ssh::SSH_AUTH_SOCK {
             bail!("env: {k}: the worker sets it for an environment with ssh_keys only");
         }
@@ -370,6 +413,15 @@ fn parse_environment(
             "ssh_keys: {k:?} is not a key name (letters, digits, _ - ., not starting with . or -)"
         );
     }
+    let mcp_servers = raw
+        .mcp_servers
+        .into_iter()
+        .map(|(n, s)| {
+            parse_mcp_server(&n, s)
+                .map(Arc::new)
+                .with_context(|| format!("mcp_servers.{n}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let rules = EnvPermissions {
         unblock: raw.permissions.unblock,
         allow: raw.permissions.allow,
@@ -384,8 +436,133 @@ fn parse_environment(
         project_settings: raw.project_settings,
         hub_mcp: raw.hub_mcp,
         hub_skills: raw.hub_skills,
+        mcp_servers,
         permissions: worker.for_environment(&rules)?,
         rules,
+    })
+}
+
+/// A variable name of an `env` table: letters, digits and `_`, not starting with a digit,
+/// never the worker's own `HQC_*`.
+fn check_var_name(k: &str) -> anyhow::Result<()> {
+    if k.is_empty()
+        || k.starts_with(|c: char| c.is_ascii_digit())
+        || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        bail!("env: {k:?} is not a variable name (letters, digits and _)");
+    }
+    if k.starts_with("HQC_") {
+        bail!("env: {k}: HQC_* variables are the worker's own");
+    }
+    Ok(())
+}
+
+fn parse_value(what: &str, raw: RawValue) -> anyhow::Result<McpValue> {
+    match raw {
+        RawValue::Value(v) => {
+            if v.contains('\0') {
+                bail!("{what}: the value contains a NUL character");
+            }
+            Ok(McpValue::Plain(Secret::new(v)))
+        }
+        RawValue::Vault(v) => {
+            hqc_proto::frame::check_vault_entry(&v.vault)
+                .map_err(|e| anyhow::anyhow!("{what}: {e}"))?;
+            if let Some(f) = &v.field {
+                hqc_proto::frame::check_vault_field(f)
+                    .map_err(|e| anyhow::anyhow!("{what}: {e}"))?;
+            }
+            Ok(McpValue::Vault(VaultRef {
+                entry: v.vault,
+                field: v.field,
+            }))
+        }
+    }
+}
+
+/// `[environments.<env>.mcp_servers.<name>]`: checked at load, so a mistake stops the worker
+/// rather than a session; a program that is missing fails only its server, at the start.
+fn parse_mcp_server(name: &str, raw: RawMcpServer) -> anyhow::Result<LocalMcpServer> {
+    if !hqc_proto::mcp::valid_server_name(name) {
+        bail!(
+            "{name:?} is not a server name: 1 to {} of a-z, 0-9, - and _, not hqc",
+            hqc_proto::mcp::MAX_SERVER_NAME
+        );
+    }
+    let transport = match raw.kind.as_deref().unwrap_or("stdio") {
+        "stdio" => {
+            if raw.url.is_some() || raw.headers.is_some() {
+                bail!("url and headers are for type = \"http\"");
+            }
+            let command = raw.command.context("a stdio server needs command")?;
+            if command.is_empty() || command.contains('\0') {
+                bail!("command is empty");
+            }
+            if command.contains('/') && !Path::new(&command).is_absolute() {
+                bail!(
+                    "command {command:?} is an absolute path or a program name looked up in PATH"
+                );
+            }
+            let args = raw.args.unwrap_or_default();
+            if args.iter().any(|a| a.contains('\0')) {
+                bail!("args: an argument contains a NUL character");
+            }
+            let mut env = Vec::new();
+            for (k, v) in raw.env.unwrap_or_default() {
+                check_var_name(&k)?;
+                env.push((k.clone(), parse_value(&format!("env.{k}"), v)?));
+            }
+            let cwd = match raw.cwd {
+                Some(c) if !c.is_absolute() => {
+                    bail!("cwd {} is not an absolute path", c.display())
+                }
+                c => c,
+            };
+            LocalMcpTransport::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            }
+        }
+        "http" => {
+            if raw.command.is_some() || raw.args.is_some() || raw.env.is_some() || raw.cwd.is_some()
+            {
+                bail!("command, args, env and cwd are for a stdio server");
+            }
+            let url = raw.url.context("an http server needs url")?;
+            let u = reqwest::Url::parse(&url).with_context(|| format!("url {url:?}"))?;
+            if !matches!(u.scheme(), "http" | "https") {
+                bail!("url must be http:// or https://");
+            }
+            if !u.username().is_empty() || u.password().is_some() {
+                bail!("url must not carry credentials: put them in headers");
+            }
+            let mut headers = Vec::new();
+            for (k, v) in raw.headers.unwrap_or_default() {
+                if k.is_empty()
+                    || !k
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+                {
+                    bail!("headers: {k:?} is not a header name");
+                }
+                let v = parse_value(&format!("headers.{k}"), v)?;
+                if let McpValue::Plain(p) = &v {
+                    if p.expose().contains(['\r', '\n']) {
+                        bail!("headers.{k}: the value contains a line break");
+                    }
+                }
+                headers.push((k, v));
+            }
+            LocalMcpTransport::Http { url, headers }
+        }
+        other => bail!("type {other:?} is \"stdio\" or \"http\""),
+    };
+    Ok(LocalMcpServer {
+        name: name.into(),
+        pin: raw.pin,
+        transport,
     })
 }
 
@@ -470,6 +647,59 @@ pub struct AllowedProvider {
 pub struct VaultRef {
     pub entry: String,
     pub field: Option<String>,
+}
+
+/// A value of a local MCP server's `env` or `headers` (iteration 9): `Debug` never prints a
+/// plain one, and a Vaultwarden one is read at every start of the server.
+#[derive(Debug, Clone, PartialEq)]
+pub enum McpValue {
+    Plain(Secret),
+    Vault(VaultRef),
+}
+
+/// An MCP server of this machine an environment gives its sessions (`[environments.<env>.
+/// mcp_servers.<name>]`, iteration 9). Neither the hub nor the agent can add or change one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalMcpServer {
+    pub name: String,
+    /// Its tools are pinned ([`crate::mcp::pins`]); `pin = false` turns that off.
+    pub pin: bool,
+    pub transport: LocalMcpTransport,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LocalMcpTransport {
+    /// A program the launcher starts, in the session's working folder unless `cwd` says
+    /// otherwise; `command` is absolute or looked up in `PATH`.
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        env: Vec<(String, McpValue)>,
+        cwd: Option<PathBuf>,
+    },
+    /// A Streamable HTTP server the launcher relays to, adding `headers`.
+    Http {
+        url: String,
+        headers: Vec<(String, McpValue)>,
+    },
+}
+
+/// The local MCP servers a session gets ([`StartSpec::local_mcp`]): its environment's, with
+/// what the launcher needs to resolve and pin them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalMcp {
+    pub environment: String,
+    pub servers: Vec<Arc<LocalMcpServer>>,
+    /// The `rbw` the `{ vault = ... }` values are read with ([`Config::rbw_bin`]).
+    pub rbw: PathBuf,
+    /// `$HQC_HOME/mcp-pins.json`.
+    pub pins: PathBuf,
+}
+
+impl LocalMcp {
+    pub fn names(&self) -> Vec<String> {
+        self.servers.iter().map(|s| s.name.clone()).collect()
+    }
 }
 
 /// A [`VaultRef`] with the `rbw` that reads it ([`Config::rbw_bin`]).
@@ -567,6 +797,8 @@ pub struct Config {
     pub providers: Vec<AllowedProvider>,
     /// `$HQC_HOME/secrets` and `$HQC_HOME/workspace-keys` (SPEC 0.147).
     pub secrets: crate::secrets::Stores,
+    /// The pins of the local MCP servers' tools: `$HQC_HOME/mcp-pins.json` (iteration 9).
+    pub mcp_pins: PathBuf,
 }
 
 /// What a session that may have secrets gets (SPEC §14, since 0.147): the stores, the keys
@@ -633,6 +865,10 @@ pub struct StartSpec {
     /// environment with `hub_mcp`, for an unrestricted Claude Code session of the worker's
     /// owner, and only valid names.
     pub mcp_servers: Vec<String>,
+    /// The MCP servers of this machine the session's environment names (iteration 9), on the
+    /// same terms as [`Self::mcp_servers`] but decided by `worker.toml` alone; a server of the
+    /// hub of the same name is left out of [`Self::mcp_servers`]. `None`: none.
+    pub local_mcp: Option<LocalMcp>,
     /// `session.start.skills` as this worker takes them (SPEC 0.245): only in an environment
     /// with `hub_skills`, for an unrestricted Claude Code session of the worker's owner, valid
     /// names and hashes, one per name.
@@ -774,6 +1010,7 @@ impl Config {
             skills_root: home.join("hub-skills"),
             ssh: crate::ssh::Store::in_home(&home),
             secrets: crate::secrets::Stores::in_home(&home),
+            mcp_pins: home.join(crate::mcp::pins::FILE),
             providers,
         })
     }
@@ -843,8 +1080,20 @@ impl Config {
                     .map(|_| self.secrets.workspace(&ws)),
                 rbw: self.vault.then(|| self.rbw_bin.clone()),
             });
+        // Iteration 9: the machine's own servers, for the owner's unrestricted Claude Code
+        // session, as the hub's are.
+        let local_mcp = (!environment.mcp_servers.is_empty()
+            && s.owner_is_worker_owner
+            && !s.restricted
+            && s.runtime == Runtime::ClaudeCode)
+            .then(|| LocalMcp {
+                environment: environment.name.clone(),
+                servers: environment.mcp_servers.clone(),
+                rbw: self.rbw_bin.clone(),
+                pins: self.mcp_pins.clone(),
+            });
         // SPEC 0.235: the hub's MCP servers, only where `worker.toml` takes them.
-        let mcp_servers = if s.mcp_servers.is_empty() {
+        let mut mcp_servers = if s.mcp_servers.is_empty() {
             vec![]
         } else if !environment.hub_mcp
             || !s.owner_is_worker_owner
@@ -869,6 +1118,24 @@ impl Config {
             names.dedup();
             names
         };
+        // A server of the machine wins over the hub's of the same name (iteration 9).
+        if let Some(l) = &local_mcp {
+            let local = l.names();
+            let shadowed: Vec<String> = mcp_servers
+                .iter()
+                .filter(|n| local.contains(n))
+                .cloned()
+                .collect();
+            if !shadowed.is_empty() {
+                tracing::info!(
+                    session_id = %s.session_id,
+                    servers = ?shadowed,
+                    environment = %l.environment,
+                    "the hub's MCP servers of these names left out: the environment has its own"
+                );
+                mcp_servers.retain(|n| !local.contains(n));
+            }
+        }
         // SPEC 0.245: the hub's skills, only where `worker.toml` takes them.
         let skills = if s.skills.is_empty() {
             vec![]
@@ -927,6 +1194,7 @@ impl Config {
             browser,
             browser_refused,
             mcp_servers,
+            local_mcp,
             skills,
             skill_dir: None,
         })
@@ -1907,6 +2175,150 @@ environment = "mcp"
         assert!(start("off", true, false).is_empty(), "no hub_mcp");
         assert!(start("on", true, true).is_empty(), "restricted");
         assert!(start("on", false, false).is_empty(), "not the owner's");
+    }
+
+    /// Iteration 9: `[environments.<env>.mcp_servers.<name>]`, checked at load.
+    #[test]
+    fn local_mcp_servers_are_parsed_and_checked() {
+        let parse = |servers: &str| {
+            Config::parse(&format!(
+                "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n[environments.fw]\n{servers}"
+            ))
+        };
+        let c = parse(
+            "[environments.fw.mcp_servers.figma]\ncommand = \"npx\"\nargs = [\"-y\", \"figma-developer-mcp\"]\n\
+             env = { FIGMA_API_KEY = { vault = \"figma token\", field = \"token\" }, MODE = \"stdio\" }\n\
+             [environments.fw.mcp_servers.figma-dev]\ntype = \"http\"\nurl = \"http://127.0.0.1:3845/mcp\"\n\
+             headers = { X-Token = \"t\" }\npin = false\n\
+             [environments.fw.mcp_servers.kicad]\ncommand = \"/opt/kicad/mcp\"\ncwd = \"/tmp\"\n",
+        )
+        .unwrap();
+        let e = &c.environments[0];
+        let names: Vec<&str> = e.mcp_servers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["figma", "figma-dev", "kicad"]);
+        let figma = &e.mcp_servers[0];
+        assert!(figma.pin);
+        let LocalMcpTransport::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } = &figma.transport
+        else {
+            panic!("stdio")
+        };
+        assert_eq!(command, "npx");
+        assert_eq!(args, &["-y", "figma-developer-mcp"]);
+        assert!(cwd.is_none());
+        assert_eq!(
+            env[0],
+            (
+                "FIGMA_API_KEY".to_string(),
+                McpValue::Vault(VaultRef {
+                    entry: "figma token".into(),
+                    field: Some("token".into())
+                })
+            )
+        );
+        assert_eq!(
+            env[1],
+            ("MODE".to_string(), McpValue::Plain(Secret::new("stdio")))
+        );
+        assert!(
+            !format!("{figma:?}").contains("stdio\")"),
+            "a plain value is not printed"
+        );
+        let dev = &e.mcp_servers[1];
+        assert!(!dev.pin);
+        assert!(
+            matches!(&dev.transport, LocalMcpTransport::Http { url, headers }
+            if url == "http://127.0.0.1:3845/mcp" && headers.len() == 1)
+        );
+        assert!(c.default_environment.mcp_servers.is_empty());
+
+        for (bad, why) in [
+            ("[environments.fw.mcp_servers.hqc]\ncommand = \"x\"\n", "not a server name"),
+            ("[environments.fw.mcp_servers.Figma]\ncommand = \"x\"\n", "not a server name"),
+            ("[environments.fw.mcp_servers.a__b]\ncommand = \"x\"\n", "not a server name"),
+            ("[environments.fw.mcp_servers.f]\nargs = []\n", "needs command"),
+            ("[environments.fw.mcp_servers.f]\ncommand = \"bin/x\"\n", "absolute path or a program name"),
+            ("[environments.fw.mcp_servers.f]\ncommand = \"x\"\ncwd = \"rel\"\n", "not an absolute path"),
+            ("[environments.fw.mcp_servers.f]\ncommand = \"x\"\nenv = { HQC_X = \"1\" }\n", "HQC_"),
+            ("[environments.fw.mcp_servers.f]\ncommand = \"x\"\nenv = { \"1A\" = \"1\" }\n", "not a variable name"),
+            ("[environments.fw.mcp_servers.f]\ncommand = \"x\"\nurl = \"http://x\"\n", "for type = \"http\""),
+            ("[environments.fw.mcp_servers.f]\ntype = \"http\"\n", "needs url"),
+            ("[environments.fw.mcp_servers.f]\ntype = \"http\"\nurl = \"ftp://x\"\n", "http:// or https://"),
+            ("[environments.fw.mcp_servers.f]\ntype = \"http\"\nurl = \"http://u:p@x\"\n", "credentials"),
+            ("[environments.fw.mcp_servers.f]\ntype = \"http\"\nurl = \"http://x\"\ncommand = \"x\"\n", "for a stdio server"),
+            ("[environments.fw.mcp_servers.f]\ntype = \"http\"\nurl = \"http://x\"\nheaders = { \"a b\" = \"1\" }\n", "not a header name"),
+            ("[environments.fw.mcp_servers.f]\ntype = \"http\"\nurl = \"http://x\"\nheaders = { A = \"1\\r\\nB: 2\" }\n", "line break"),
+            ("[environments.fw.mcp_servers.f]\ntype = \"sse\"\nurl = \"http://x\"\n", "\"stdio\" or \"http\""),
+            ("[environments.fw.mcp_servers.f]\ncommand = \"x\"\nenv = { A = { vault = \"\" } }\n", "vault"),
+            ("[environments.fw.mcp_servers.f]\ncommand = \"x\"\nenv = { A = { vualt = \"e\" } }\n", "a value, or a table"),
+            ("[environments.fw.mcp_servers.f]\ncommand = \"x\"\nbogus = 1\n", "unknown field"),
+        ] {
+            let e = format!("{:#}", parse(bad).unwrap_err());
+            assert!(e.contains(why), "{bad}: {e}");
+            assert!(e.contains("mcp_servers.") || e.contains("unknown field") || e.contains("a value"), "{e}");
+        }
+    }
+
+    /// Iteration 9: the machine's servers on the same terms as the hub's, and one of them wins
+    /// over the hub's server of the same name.
+    #[cfg(unix)]
+    #[test]
+    fn local_mcp_servers_for_the_owners_unrestricted_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for d in ["fw", "other"] {
+            std::fs::create_dir(root.join(d)).unwrap();
+        }
+        let c = Config::parse(&format!(
+            r#"
+hub_url = "https://h"
+allowed_roots = [{root:?}]
+allow_foreign_sessions = true
+[environments.fw]
+hub_mcp = true
+[environments.fw.mcp_servers.figma]
+command = "npx"
+[environments.fw.mcp_servers.github]
+type = "http"
+url = "http://127.0.0.1:1/mcp"
+[[env_bindings]]
+path = {fw:?}
+environment = "fw"
+"#,
+            root = root.display().to_string(),
+            fw = root.join("fw").display().to_string(),
+        ))
+        .unwrap();
+        let start = |ws: &str, owner: bool, restricted: bool| {
+            let s: hqc_proto::frame::SessionStart = serde_json::from_value(serde_json::json!({
+                "session_id": Uuid::now_v7(), "mode": "new", "runtime": "claude_code",
+                "workspace_path": root.join(ws).display().to_string(), "cwd": ".",
+                "disallowed_tools": [], "restricted": restricted, "auto_approve": false,
+                "session_token": "hqcs_x", "owner_is_worker_owner": owner, "ask_timeout_s": 600,
+                "mcp_servers": ["github", "wiki"],
+            }))
+            .unwrap();
+            c.check_start(&s).unwrap()
+        };
+        let s = start("fw", true, false);
+        let local = s.local_mcp.expect("local servers");
+        assert_eq!(local.environment, "fw");
+        assert_eq!(local.names(), ["figma", "github"]);
+        assert_eq!(local.pins, c.mcp_pins);
+        assert_eq!(s.mcp_servers, ["wiki"], "the machine's github wins");
+        assert!(
+            start("other", true, false).local_mcp.is_none(),
+            "default has none"
+        );
+        assert!(start("fw", true, true).local_mcp.is_none(), "restricted");
+        assert!(
+            start("fw", false, false).local_mcp.is_none(),
+            "not the owner's"
+        );
     }
 
     /// SPEC 0.245: the hub's skills only in an environment with `hub_skills`, for an

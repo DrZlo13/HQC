@@ -55,6 +55,9 @@ pub fn served(path: &Path) -> bool {
 pub struct McpSocket {
     listener: UnixListener,
     path: PathBuf,
+    /// The worker's binary, which alone may ask for a local MCP server's spec (iteration 9);
+    /// `None`: no local server is given out.
+    launcher: Option<PathBuf>,
 }
 
 impl McpSocket {
@@ -82,7 +85,15 @@ impl McpSocket {
         Ok(Self {
             listener,
             path: path.to_path_buf(),
+            launcher: None,
         })
+    }
+
+    /// The program the CLI starts as `hqc-worker mcp --local <name>`: only a peer running it
+    /// gets a local server's spec, whose values are secrets (iteration 9).
+    pub fn with_launcher(mut self, program: PathBuf) -> Self {
+        self.launcher = Some(program);
+        self
     }
 
     pub fn path(&self) -> &Path {
@@ -123,6 +134,7 @@ impl McpSocket {
                 peer_pid,
                 link.clone(),
                 attacher.clone(),
+                self.launcher.clone(),
                 stop.clone(),
             ));
         }
@@ -179,6 +191,7 @@ async fn serve(
     peer_pid: Option<u32>,
     link: HubLink,
     attacher: Attacher,
+    launcher: Option<PathBuf>,
     stop: CancellationToken,
 ) {
     let (rd, mut wr) = stream.into_split();
@@ -343,6 +356,29 @@ async fn serve(
                     let _ = out.send(FromDaemon::Result { id, result, error });
                 });
             }
+            Some(Ok(ToDaemon::Local { id, server })) => {
+                let out = out_tx.clone();
+                let (link, launcher, token) = (link.clone(), launcher.clone(), token.clone());
+                tokio::spawn(async move {
+                    let (result, error) =
+                        match local_spec(&link, &token, peer_pid, launcher.as_deref(), &server)
+                            .await
+                        {
+                            Ok(r) => (Some(r), None),
+                            Err(e) => (None, Some(e)),
+                        };
+                    let _ = out.send(FromDaemon::Result { id, result, error });
+                });
+            }
+            Some(Ok(ToDaemon::LocalFailed {
+                server,
+                code,
+                detail,
+            })) => {
+                if let Some(sid) = link.mcp().session_for(&token) {
+                    local_failed(&link, sid, &server, &code, &detail);
+                }
+            }
             Some(Ok(ToDaemon::Call { id, tool, args })) => {
                 let fail = |code: &str, message: String| {
                     let _ = out_tx.send(FromDaemon::Result {
@@ -427,6 +463,110 @@ async fn serve(
     }
     drop(out_tx);
     let _ = writer.await;
+}
+
+/// The resolved spec of the session's local MCP server `server` for its launcher (iteration
+/// 9), as JSON; its values are read from Vaultwarden now. A failure also goes into the chat.
+async fn local_spec(
+    link: &HubLink,
+    token: &str,
+    peer: Option<u32>,
+    launcher: Option<&Path>,
+    server: &str,
+) -> Result<serde_json::Value, McpError> {
+    let Some(sid) = link.mcp().session_for(token) else {
+        return Err(McpError::new(
+            error_code::UNAUTHORIZED,
+            "the session's agent no longer runs",
+        ));
+    };
+    let local = link.mcp().local(sid);
+    let Some(local) = local.filter(|l| l.servers.iter().any(|s| s.name == server)) else {
+        return Err(McpError::new(
+            error_code::NOT_FOUND,
+            format!("the session's agent was not started with the local MCP server {server}"),
+        ));
+    };
+    // The values are secrets: only the worker's own launcher gets them, not another program
+    // of the agent that read the token off the CLI's command line.
+    let ours = match (peer, launcher) {
+        (Some(pid), Some(program)) => super::procs::runs(pid, program),
+        _ => false,
+    };
+    if !ours {
+        tracing::warn!(session_id = %sid, %server, ?peer, "mcp socket: a local server's spec asked for by a program that is not the worker's launcher; refused");
+        return Err(McpError::new(
+            error_code::UNAUTHORIZED,
+            "only the worker's launcher gets a local MCP server",
+        ));
+    }
+    let Some(folders) = link.mcp().folders(sid) else {
+        return Err(McpError::new(
+            error_code::UNAVAILABLE,
+            "the session's agent no longer runs",
+        ));
+    };
+    match super::local::resolve(&local, server, &folders.workdir).await {
+        Ok(spec) => {
+            tracing::info!(session_id = %sid, %server, environment = %local.environment, "local mcp server started");
+            serde_json::to_value(&spec)
+                .map_err(|e| McpError::new(error_code::INTERNAL, e.to_string()))
+        }
+        Err(why) => {
+            local_failed(link, sid, server, super::local::MCP_SERVER_FAILED, &why);
+            Err(McpError::new(error_code::UNAVAILABLE, why))
+        }
+    }
+}
+
+/// A local MCP server of session `sid` failed: the worker's log and a `system` line in the
+/// chat (iteration 9). The text is the daemon's; of the launcher's `detail` only one line of
+/// printable characters is kept.
+fn local_failed(link: &HubLink, sid: Uuid, server: &str, code: &str, detail: &str) {
+    let Some(local) = link.mcp().local(sid) else {
+        return;
+    };
+    if !local.servers.iter().any(|s| s.name == server) {
+        return;
+    }
+    let detail: String = detail
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(1000)
+        .collect();
+    let text = match code {
+        super::local::MCP_SERVER_FAILED => {
+            format!("The MCP server {server} of this machine could not start: {detail}")
+        }
+        super::local::MCP_TOOLS_CHANGED => format!(
+            "The MCP server {server} is off: its tools changed since they were approved \
+             ({detail}). Check the change on the worker's machine and approve it there with \
+             `hqc-worker mcp approve {}`",
+            super::pins::key(&local.environment, server)
+        ),
+        _ => return,
+    };
+    tracing::warn!(session_id = %sid, %server, environment = %local.environment, %code, "local mcp server failed: {detail}");
+    let ev = crate::adapter::new_event(
+        sid,
+        hqc_proto::event::Author::System,
+        hqc_proto::event::EventKind::System {
+            text,
+            code: code.into(),
+            call_id: None,
+            status: None,
+            task_id: None,
+            from_session_id: None,
+            usage: None,
+            fork: None,
+            compaction: None,
+            model: None,
+            goal: None,
+        },
+    );
+    if let Err(e) = link.event(ev) {
+        tracing::error!(session_id = %sid, "outbox write failed: {e:#}");
+    }
 }
 
 /// Sends `mcp.call` for the connection's call `id` and hands its `mcp.result` back; the files

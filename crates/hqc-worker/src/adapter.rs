@@ -371,6 +371,11 @@ pub trait AdapterFactory: Send + Sync + 'static {
     fn supports(&self, runtime: Runtime) -> bool;
     /// A new, not yet started adapter for one session; it reports through `events`.
     fn create(&self, spec: &StartSpec, events: EventSink) -> Box<dyn Adapter>;
+    /// The program the runtimes start as the hqc MCP server and the launchers of the local
+    /// MCP servers (iteration 9); `None`: they get none.
+    fn mcp_program(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// The runtimes of this build: Claude Code (T4).
@@ -401,6 +406,10 @@ impl BuiltinAdapters {
 impl AdapterFactory for BuiltinAdapters {
     fn supports(&self, runtime: Runtime) -> bool {
         self.claude.supports(runtime)
+    }
+
+    fn mcp_program(&self) -> Option<std::path::PathBuf> {
+        self.claude.mcp_program()
     }
 
     fn create(&self, spec: &StartSpec, events: EventSink) -> Box<dyn Adapter> {

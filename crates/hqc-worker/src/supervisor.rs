@@ -3473,6 +3473,10 @@ impl Session {
         self.link
             .mcp()
             .set_upstreams(self.id, self.spec.mcp_servers.clone());
+        // Iteration 9: the launchers of the machine's servers may ask for these only.
+        self.link
+            .mcp()
+            .set_local(self.id, self.spec.local_mcp.clone());
         // `mode: resume` from the hub, or this process ran the agent before (kill, idle
         // timeout, crash). The Claude Code adapter checks for the transcript either way.
         let mode = self.start_mode();

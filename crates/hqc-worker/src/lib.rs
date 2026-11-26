@@ -184,7 +184,10 @@ impl Worker {
         let mcp_stop = CancellationToken::new();
         let mcp_task = match &self.mcp_socket {
             Some(path) => {
-                let socket = mcp::daemon::McpSocket::bind(path)?;
+                let mut socket = mcp::daemon::McpSocket::bind(path)?;
+                if let Some(program) = self.adapters.mcp_program() {
+                    socket = socket.with_launcher(program);
+                }
                 tracing::info!(path = %socket.path().display(), "mcp socket ready");
                 let attacher = mcp::attach::Attacher {
                     allowed_roots: self.config.allowed_roots.clone(),

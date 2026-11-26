@@ -72,6 +72,8 @@ pub enum FakeCall {
 
 #[derive(Default)]
 struct State {
+    /// What [`AdapterFactory::mcp_program`] answers (iteration 9's launchers).
+    mcp_program: Option<std::path::PathBuf>,
     calls: Vec<FakeCall>,
     created: usize,
     fail_start: bool,
@@ -105,6 +107,12 @@ pub struct FakeAdapters {
 impl FakeAdapters {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The program its runtimes would start as the hqc MCP server and the local servers'
+    /// launchers: the daemon gives a local server's spec to a peer running it only.
+    pub fn set_mcp_program(&self, program: std::path::PathBuf) {
+        self.lock().mcp_program = Some(program);
     }
 
     /// The process the agents of this factory report as theirs ([`Adapter::pid`]); by
@@ -274,6 +282,10 @@ pub fn agent_event(session_id: Uuid, kind: EventKind) -> Event {
 impl AdapterFactory for FakeAdapters {
     fn supports(&self, runtime: Runtime) -> bool {
         runtime == Runtime::ClaudeCode
+    }
+
+    fn mcp_program(&self) -> Option<std::path::PathBuf> {
+        self.lock().mcp_program.clone()
     }
 
     fn create(&self, spec: &StartSpec, events: EventSink) -> Box<dyn Adapter> {

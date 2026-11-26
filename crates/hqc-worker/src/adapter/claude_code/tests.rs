@@ -190,6 +190,7 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         browser: false,
         browser_refused: None,
         mcp_servers: vec![],
+        local_mcp: None,
         skills: vec![],
         skill_dir: None,
         fork: None,
@@ -13216,6 +13217,66 @@ async fn the_hubs_mcp_servers_are_relays_under_their_own_names() {
     assert!(
         !cmd.args.iter().any(|a| a.contains("mcp__github")),
         "not allowed outright"
+    );
+}
+
+/// Iteration 9: each local MCP server goes in `--mcp-config` as the launcher
+/// `hqc-worker mcp --local <name>`, never as its program: no command, value or header of it is on
+/// the CLI's command line, and `--strict-mcp-config` stays.
+#[tokio::test]
+async fn local_mcp_servers_are_launchers_and_strict_stays() {
+    use crate::config::{LocalMcp, LocalMcpServer, LocalMcpTransport, McpValue};
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let launch = super::McpLaunch {
+        program: "/opt/hqc/hqc-worker".into(),
+        socket: "/home/u/.hqc/mcp.sock".into(),
+    };
+    let factory =
+        ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone())).with_mcp(launch);
+    let mut s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+    s.session_token = crate::token::Secret::new("hqcs_the_token");
+    s.mcp_servers = vec!["wiki".into()];
+    s.local_mcp = Some(LocalMcp {
+        environment: "firmware".into(),
+        servers: vec![Arc::new(LocalMcpServer {
+            name: "figma".into(),
+            pin: true,
+            transport: LocalMcpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["figma-developer-mcp".into()],
+                env: vec![(
+                    "FIGMA_API_KEY".into(),
+                    McpValue::Plain(crate::token::Secret::new("figd_s3cret")),
+                )],
+                cwd: None,
+            },
+        })],
+        rbw: "rbw".into(),
+        pins: "/home/u/.hqc/mcp-pins.json".into(),
+    });
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let cmd = claude.commands()[0].clone();
+    assert!(cmd.args.iter().any(|a| a == "--strict-mcp-config"));
+    let i = cmd.args.iter().position(|a| a == "--mcp-config").unwrap();
+    let cfg: serde_json::Value = serde_json::from_str(&cmd.args[i + 1]).unwrap();
+    assert_eq!(
+        cfg["mcpServers"]["figma"],
+        json!({
+            "type": "stdio",
+            "command": "/opt/hqc/hqc-worker",
+            "args": ["mcp", "--socket", "/home/u/.hqc/mcp.sock", "--local", "figma"],
+            "env": {"HQC_SESSION_TOKEN": "hqcs_the_token"},
+        })
+    );
+    assert_eq!(cfg["mcpServers"]["wiki"]["args"][4], "wiki");
+    let all = format!("{:?} {:?}", cmd.args, cmd.env);
+    assert!(
+        !all.contains("figd_s3cret") && !all.contains("figma-developer-mcp"),
+        "{all}"
     );
 }
 

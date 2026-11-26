@@ -12,15 +12,20 @@
 //! CLI's command line. The launcher authenticates on the daemon's socket as the hqc server
 //! does (the session token, a process inside the session's agent) and asks for the spec of
 //! one server of its session ([`super::ToDaemon::Local`]); the daemon also checks that the
-//! peer runs the worker's own binary, so that no other program of the agent gets the values.
+//! peer runs the worker's own binary, a guard against accidents: an agent of the same OS user
+//! can still read what a server was given (its process environment, `rbw` itself).
 //! The daemon resolves it ([`resolve`]): the program as an absolute path (from the daemon's
 //! `PATH`), its environment (the child allowlist without `CLAUDE_*`/`ANTHROPIC_*`, then the
 //! server's `env`), its working folder (the session's, unless `cwd`), or the URL and headers.
 //! The spec is never logged or printed.
 //!
 //! The launcher then passes the messages between the CLI and the server, and pins the server's
-//! tools ([`super::pins`]) unless its table says `pin = false`: after `notifications/initialized`
-//! it reads the whole `tools/list` itself, before the agent sees any of it, and checks it. The
+//! tools ([`super::pins`]) unless its table says `pin = false`: it holds the server's answer to
+//! `initialize`, tells the server `notifications/initialized` itself, reads the whole
+//! `tools/list`, and checks the server's name and instructions and the tools before the agent
+//! sees any of it. An answer of the server reaches the CLI only for a request of the CLI that
+//! went to the server and is still open, so the server cannot answer the CLI's `tools/list`
+//! itself. The
 //! CLI's `tools/list` is answered from that checked list (names, descriptions and input
 //! schemas only: exactly what was approved), and a `tools/call` of another name is refused. A
 //! changed list fails the server: the CLI gets errors and the launcher exits, the daemon puts a
@@ -34,6 +39,7 @@
 //! `GET` stream) are not listened to. Redirects are not followed, so the headers go nowhere
 //! else.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -641,6 +647,19 @@ struct Proxy<'a> {
     again: bool,
     seq: u64,
     daemon: Option<&'a mut Daemon>,
+    /// The ids of the CLI's requests that went to the server and wait for its answer (as JSON
+    /// text): an answer of the server to any other id is dropped, so that it cannot answer a
+    /// request the launcher answers itself (`tools/list`) before the pin is checked.
+    forwarded: HashSet<String>,
+    /// The id of the CLI's `initialize`, until the server answers it.
+    init_id: Option<String>,
+    /// The server's answer to `initialize`, held until its name, instructions and tools are
+    /// checked against the pin.
+    init_answer: Option<Value>,
+    /// The launcher told the server `notifications/initialized` (the CLI's own is dropped).
+    initialized: bool,
+    /// [`pins::server_meta`] of the server's answer to `initialize`.
+    meta: Value,
 }
 
 /// Why the proxy stops.
@@ -686,6 +705,11 @@ where
         again: false,
         seq: 0,
         daemon,
+        forwarded: HashSet::new(),
+        init_id: None,
+        init_answer: None,
+        initialized: false,
+        meta: Value::Null,
     };
     let stop = loop {
         tokio::select! {
@@ -705,6 +729,9 @@ where
     };
     if let Stop::ServerGone = stop {
         // Whatever the CLI still waits for will not come.
+        if let Some(a) = p.init_answer.take() {
+            p.error(&a, "the server exited");
+        }
         for m in std::mem::take(&mut p.held) {
             p.error(&m, "the server exited");
         }
@@ -745,7 +772,14 @@ impl Proxy<'_> {
         let method = m.get("method").and_then(Value::as_str).unwrap_or("");
         let request = m.get("id").is_some();
         match (method, request) {
+            ("initialize", true) => {
+                self.init_id = m.get("id").map(Value::to_string);
+                self.request(m);
+            }
+            // The launcher said it already, when the server answered `initialize`.
+            ("notifications/initialized", false) if self.initialized => {}
             ("notifications/initialized", false) => {
+                self.initialized = true;
                 let _ = self.server.send(m);
                 self.start_fetch(false);
             }
@@ -753,17 +787,35 @@ impl Proxy<'_> {
                 Tools::Ready(_) => self.answer(m),
                 Tools::Unknown => {
                     self.held.push(m);
-                    self.start_fetch(false);
+                    if self.initialized {
+                        self.start_fetch(false);
+                    }
                 }
             },
-            _ => {
+            ("notifications/cancelled", false) => {
+                if let Some(id) = m.pointer("/params/requestId") {
+                    self.forwarded.remove(&id.to_string());
+                }
                 let _ = self.server.send(m);
             }
+            ("", _) | (_, false) => {
+                // The CLI's answer to a request of the server, or a notification.
+                let _ = self.server.send(m);
+            }
+            _ => self.request(m),
         }
     }
 
+    /// A request of the CLI to the server: its answer is awaited.
+    fn request(&mut self, m: Value) {
+        if let Some(id) = m.get("id") {
+            self.forwarded.insert(id.to_string());
+        }
+        let _ = self.server.send(m);
+    }
+
     /// A `tools/list` or `tools/call` of the CLI once the tools are checked.
-    fn answer(&self, m: Value) {
+    fn answer(&mut self, m: Value) {
         let Tools::Ready(tools) = &self.tools else {
             return;
         };
@@ -779,7 +831,7 @@ impl Proxy<'_> {
             .iter()
             .any(|t| name.is_some() && t.get("name").and_then(Value::as_str) == name)
         {
-            let _ = self.server.send(m);
+            self.request(m);
         } else {
             let _ = self.cli.send(json!({
                 "jsonrpc": "2.0",
@@ -825,20 +877,46 @@ impl Proxy<'_> {
             let _ = self.cli.send(m);
             return true;
         }
-        let own = m
-            .get("id")
-            .and_then(Value::as_str)
-            .is_some_and(|id| id.starts_with(OWN_ID))
-            && m.get("method").is_none();
-        if own {
+        if let Some(method) = m.get("method").and_then(Value::as_str) {
+            if method == "notifications/tools/list_changed" && m.get("id").is_none() {
+                // Checked before the CLI hears of it.
+                self.start_fetch(true);
+                return true;
+            }
+            // A request or notification of the server.
+            let _ = self.cli.send(m);
+            return true;
+        }
+        // An answer: to one of ours, or to a request of the CLI that went to the server and
+        // was not answered yet. Anything else (an id the launcher answers itself, one it never
+        // forwarded, a second answer, a batch) is dropped.
+        let Some(id) = m.get("id") else {
+            eprintln!("hqc-worker mcp --local: an answer of the server without an id dropped");
+            return true;
+        };
+        if id.as_str().is_some_and(|id| id.starts_with(OWN_ID)) {
             return self.fetched(m).await;
         }
-        if m.get("method").and_then(Value::as_str) == Some("notifications/tools/list_changed")
-            && m.get("id").is_none()
-        {
-            // Checked before the CLI hears of it.
-            self.start_fetch(true);
+        let key = id.to_string();
+        if !self.forwarded.remove(&key) {
+            eprintln!("hqc-worker mcp --local: an answer of the server to {key}, which it was not asked, dropped");
             return true;
+        }
+        if self.init_id.as_deref() == Some(key.as_str()) {
+            self.init_id = None;
+            if let Some(r) = m.get("result").filter(|r| r.is_object()) {
+                // Its name and instructions are pinned with its tools: the CLI gets the answer
+                // once they are checked. The server is told it is initialized now, so that it
+                // answers the launcher's `tools/list`.
+                self.meta = pins::server_meta(r);
+                self.init_answer = Some(m);
+                self.initialized = true;
+                let _ = self
+                    .server
+                    .send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+                self.start_fetch(false);
+                return true;
+            }
         }
         let _ = self.cli.send(m);
         true
@@ -868,7 +946,9 @@ impl Proxy<'_> {
         let f = self.fetch.take().expect("a fetch");
         let (path, key) = self.pin.clone().expect("pinned");
         let tools = f.tools.clone();
-        let checked = tokio::task::spawn_blocking(move || pins::check(&path, &key, &tools)).await;
+        let meta = self.meta.clone();
+        let checked =
+            tokio::task::spawn_blocking(move || pins::check(&path, &key, &meta, &tools)).await;
         let failure = match checked {
             Ok(Ok(pins::Check::Recorded | pins::Check::Same)) => None,
             Ok(Ok(pins::Check::Changed(d))) => Some((MCP_TOOLS_CHANGED, d.summary())),
@@ -883,6 +963,12 @@ impl Proxy<'_> {
             if let Some(d) = self.daemon.as_mut() {
                 d.failed(code, &detail).await;
             }
+            if let Some(a) = self.init_answer.take() {
+                self.error(
+                    &a,
+                    "this MCP server is off: it is not the one its owner approved",
+                );
+            }
             for h in std::mem::take(&mut self.held) {
                 self.error(
                     &h,
@@ -892,6 +978,9 @@ impl Proxy<'_> {
             return false;
         }
         self.tools = Tools::Ready(pins::normalize(&f.tools).into_iter().map(shown).collect());
+        if let Some(a) = self.init_answer.take() {
+            let _ = self.cli.send(a);
+        }
         for h in std::mem::take(&mut self.held) {
             self.answer(h);
         }

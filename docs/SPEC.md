@@ -7450,25 +7450,35 @@ base_url = "http://192.168.1.229:8082" # must equal the hub's description
   MCP tool; a hub server of the same name is left out of the session (the machine wins, logged).
   The worker never reads `~/.claude.json` or a repository's `.mcp.json` for them. The CLI gets
   each as the launcher `hqc-worker mcp --local <name>` (§8.1), which authenticates on the
-  daemon's socket as the hqc server does and asks for the server's spec; the daemon gives it
-  only to a peer that runs the worker's own binary (the token is on the CLI's command line, which
-  other programs of the agent can read), after reading its Vaultwarden values. A `stdio` program
+  daemon's socket as the hqc server does and asks for the server's spec, which the daemon
+  resolves then (its Vaultwarden values read). The daemon also checks that the peer runs the
+  worker's own binary: a guard against accidents, not a boundary. The values stay off every
+  command line, `hello`, log, file and the transcript; but an agent of the same OS user can still
+  read what a server it can talk to was given (the server's process environment, the socket with
+  the token from the CLI's command line, `rbw` itself), as it can an environment's `env` or a
+  provider's key: a real boundary needs another OS user (`launch = os-user`). A `stdio` program
   runs in the session's working folder (or `cwd`) with the child allowlist of §8.1 without
   `CLAUDE_*` and `ANTHROPIC_*`, then its `env`, and nothing else (not the session token, not the
   environment's `env`); an `http` server gets every message as a `POST` with its headers,
   `Mcp-Session-Id` and `MCP-Protocol-Version` once named, no redirect followed, and the optional
   `GET` stream of server requests is not opened. The values are in no `hello`, log, file or
-  error. **Pinning** (from MCPProxy): after `notifications/initialized` the launcher reads the
-  whole `tools/list` itself (every page), before the agent sees any of it, and checks the
-  SHA-256 of the tools' names, descriptions and input schemas (sorted by name, compact JSON with
-  sorted keys) against `$HQC_HOME/mcp-pins.json` (0600) under `<environment>/<server>`: none,
-  it is recorded; the same, the CLI's `tools/list` is answered with exactly those fields of the
-  checked list and a `tools/call` of another name is refused; another, the list is kept as
-  pending beside the pin, the CLI gets errors, the launcher exits and the chat gets `system
-  mcp_tools_changed` naming the tools added, removed and changed and the command
-  `hqc-worker mcp approve <env>/<server>`, which shows the change on the machine (every new or
-  changed description and schema) and, once the owner agrees, makes it the pin; until then
-  every start fails the same way. `hqc-worker mcp pins` lists the pins and those waiting. A
+  error. **Pinning** (from MCPProxy): the launcher holds the server's answer to `initialize`,
+  tells the server `notifications/initialized` itself (the CLI's own is then dropped), reads the
+  whole `tools/list` (every page), and checks the SHA-256 of the server's name and
+  `instructions` (which reach the agent's system prompt) and the tools' names, descriptions and
+  input schemas (sorted by name, compact JSON with sorted keys) against `$HQC_HOME/mcp-pins.json`
+  (0600) under `<environment>/<server>`, all before the CLI gets any of it: none, it is
+  recorded; the same, the CLI gets the `initialize` answer, its `tools/list` is answered with
+  exactly those fields of the checked list and a `tools/call` of another name is refused;
+  another, it is kept as pending beside the pin, the CLI gets errors (its `initialize` too), the
+  launcher exits and the chat gets `system mcp_tools_changed` naming the tools added, removed and
+  changed (and a changed name or instructions) and the command
+  `hqc-worker mcp approve <env>/<server>`, which shows the change on the machine (the
+  instructions, every new or changed description and schema) and, once the owner agrees, makes
+  it the pin; until then every start fails the same way. A pinned server's answer reaches the
+  CLI only for a request of the CLI the launcher forwarded and is still open: an answer to an id
+  the launcher answers itself (`tools/list`), one it never forwarded or a second one is dropped,
+  so the server cannot answer the CLI's `tools/list` in the launcher's place. `hqc-worker mcp pins` lists the pins and those waiting. A
   `notifications/tools/list_changed` is checked the same way before the CLI hears of it.
   `pin = false` passes everything through unchecked (a server whose package moves on its own,
   `uvx` or `npx` without a version). A server that cannot start (a missing program, a value
@@ -8561,10 +8571,13 @@ client (#171).
 Implemented (T70–T71a): §14 `mcp_servers` per environment, checked at load, listed by
 `hqc-worker env` and `env which` without values, with a warning on `allow_local_mcp`; §8.1 the
 launcher `hqc-worker mcp --local <name>` in `--mcp-config`, `--strict-mcp-config` kept; the
-daemon gives a server's spec (Vaultwarden values read then) only to a peer running the worker's
-binary; a stdio program gets the child allowlist without `CLAUDE_*`/`ANTHROPIC_*` plus its own
+daemon gives a server's spec (Vaultwarden values read then) to a peer running the worker's
+binary (a guard against accidents, not a boundary against an agent of the same OS user); a
+stdio program gets the child allowlist without `CLAUDE_*`/`ANTHROPIC_*` plus its own
 `env`; `http` is relayed with its headers, no redirect followed; the tools pinned in
-`$HQC_HOME/mcp-pins.json` unless `pin = false`, `hqc-worker mcp approve` and `mcp pins`; §4
+`$HQC_HOME/mcp-pins.json` with the server's name and instructions unless `pin = false`, the
+CLI's `initialize` answer held until checked, an answer of the server passed on only for a request
+the launcher forwarded (security review), `hqc-worker mcp approve` and `mcp pins`; §4
 `system mcp_server_failed` and `mcp_tools_changed`.
 
 Implemented (T72, T73): §5.3 `hello.environments[].mcp_servers` (names only), kept by the hub

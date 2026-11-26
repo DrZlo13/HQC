@@ -55,7 +55,8 @@ pub fn served(path: &Path) -> bool {
 pub struct McpSocket {
     listener: UnixListener,
     path: PathBuf,
-    /// The worker's binary, which alone may ask for a local MCP server's spec (iteration 9);
+    /// The worker's binary, which alone asks for a local MCP server's spec (iteration 9): a
+    /// guard against accidents, not a boundary against an agent of the same OS user;
     /// `None`: no local server is given out.
     launcher: Option<PathBuf>,
 }
@@ -487,8 +488,9 @@ async fn local_spec(
             format!("the session's agent was not started with the local MCP server {server}"),
         ));
     };
-    // The values are secrets: only the worker's own launcher gets them, not another program
-    // of the agent that read the token off the CLI's command line.
+    // The values are secrets: they go to the worker's own launcher, not by accident to another
+    // program of the agent that read the token off the CLI's command line. Not a boundary: an
+    // agent of the same OS user can still read the running server's environment.
     let ours = match (peer, launcher) {
         (Some(pid), Some(program)) => super::procs::runs(pid, program),
         _ => false,
@@ -497,7 +499,7 @@ async fn local_spec(
         tracing::warn!(session_id = %sid, %server, ?peer, "mcp socket: a local server's spec asked for by a program that is not the worker's launcher; refused");
         return Err(McpError::new(
             error_code::UNAUTHORIZED,
-            "only the worker's launcher gets a local MCP server",
+            "a local MCP server's spec goes to the worker's launcher only",
         ));
     }
     let Some(folders) = link.mcp().folders(sid) else {

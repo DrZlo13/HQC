@@ -109,6 +109,7 @@ async fn live_a_schedules_a_message_into_b() {
         machine_id: None,
         known_paths_file: run.join("home/known_workspaces.json"),
         mcp_socket: Some(socket),
+        drain: None,
         logs: None,
         mirror: None,
     };

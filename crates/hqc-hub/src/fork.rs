@@ -296,7 +296,9 @@ pub fn waited_place(marks: &[db::TurnMark], seq: i64) -> Option<i64> {
             }
             let id = m.event_id.to_string();
             let waited = m.delivery.as_deref() == Some("pending")
-                || next_end[i].is_some_and(|e| end_of(&marks[e]) != Some(id.as_str()));
+                || next_end[i].is_some_and(|e| {
+                    end_of(&marks[e]) != Some(id.as_str()) && !taken_before_loss(m, &marks[e])
+                });
             if (open || !waiting.is_empty()) && may_wait(m) && waited {
                 waiting.push(i);
                 continue;
@@ -360,6 +362,15 @@ fn end_of(m: &db::TurnMark) -> Option<&str> {
     matches!(m.kind.as_str(), "agent.message" | "status")
         .then_some(m.in_reply_to.as_deref())
         .flatten()
+}
+
+/// `end` is a `system turn_lost` the hub wrote after it took `m`'s delivery: the runtime took
+/// `m` into the turn that was lost (its own, or one the runtime ran by itself, which a lost turn
+/// does not name), so `m` waited for nothing. Both times are the hub's clock.
+fn taken_before_loss(m: &db::TurnMark, end: &db::TurnMark) -> bool {
+    end.kind == "system"
+        && end.code.as_deref() == Some("turn_lost")
+        && m.delivered_at.is_some_and(|d| d <= end.ts)
 }
 
 /// An input the hub queued for the agent (SPEC §5.2): it has a `delivery`.
@@ -698,5 +709,35 @@ mod tests {
         ];
         assert_eq!(waited_place(&m, 3), Some(7));
         assert_eq!(waited_place(&m, 8), None);
+    }
+
+    /// The runtime ran a turn by itself, took input 2 into it (a plain ack) and input 3 joined
+    /// behind it, then the turn was lost: `turn_lost` names no input and the next turn is input
+    /// 7's. Delivered before the loss, both waited for nothing; one delivered after it waited
+    /// through it.
+    #[test]
+    fn an_input_taken_into_a_lost_turn_did_not_wait() {
+        let m = [
+            work(1),
+            input(2, Some(4.5)),
+            joined(3, 4.6),
+            work(4),
+            work(5),
+            system(6, "turn_lost"),
+            input(7, Some(7.1)),
+            work(8),
+            answer(9, 7),
+        ];
+        assert_eq!(waited_place(&m, 2), None);
+        assert_eq!(waited_place(&m, 3), None);
+        let m = [
+            work(1),
+            input(2, Some(4.5)),
+            work(3),
+            system(4, "turn_lost"),
+            work(5),
+            answer(6, 2),
+        ];
+        assert_eq!(waited_place(&m, 2), Some(5));
     }
 }

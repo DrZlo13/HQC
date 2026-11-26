@@ -159,6 +159,24 @@ describe('the text of a clipped selection', () => {
     expect(got).toBe('Intro\n\nFile\tStatus\na.rs\tok\nb.rs\tno\n\none\ntwo\n\nOutro');
   });
 
+  it("reads a quote block of the owner's message on lines of its own", async () => {
+    const got = await quoted(
+      [agent(1, 'Intro', 0, true), user(2, 'before\n\n> q one\n> q two\n\nafter')],
+      (r) => [textOf(r, 'Intro'), 0],
+      (r) => [textOf(r, '\nafter'), 6],
+    );
+    expect(got).toBe('Intro\n\nbefore\nq one\nq two\nafter');
+  });
+
+  it("reads a quote that starts the owner's message above its text, on a line of its own", async () => {
+    const got = await quoted(
+      [agent(1, 'Intro', 0, true), user(2, '> q one\n> q two\n\nafter text')],
+      (r) => [textOf(r, 'Intro'), 0],
+      (r) => [textOf(r, 'after text'), 10],
+    );
+    expect(got).toBe('Intro\n\nq one\nq two\n\nafter text');
+  });
+
   it("leaves the answer's usage line out when the range runs past the answer's end", async () => {
     const usage = ev('event.usage', (e) => {
       e.seq = 2;
@@ -865,5 +883,13 @@ describe('the one-column gutter', () => {
     );
     // A fold's chevron turns with it: the mark comes after the block.
     expect(CSS).toMatch(/:root\.feed-column \.feed-block > details\[open\] ~ \.feed-mark \.icon \{\s*transform: rotate\(90deg\);/);
+  });
+});
+
+describe('FeedBlocks without `swipe` (ChatItems, a subagent\'s history)', () => {
+  it('has no swipe to quote, whatever its actions offer', () => {
+    show([user(1, 'Run the tests'), agent(2, 'All tests pass.', 1, true)], { quote: vi.fn() });
+    expect(root.querySelector('.msg-agent')).not.toBeNull();
+    expect(root.querySelector('.feed-swipe, .feed-swipe-icon')).toBeNull();
   });
 });

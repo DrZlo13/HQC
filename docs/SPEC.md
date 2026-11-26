@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.247, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.262, 2026-11-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -172,7 +172,7 @@ OIDC sign-in, §6; hub migration `0031_oidc_subject`), `display_name`, `api_keys
 (OpenRouter, Anthropic API; encrypted with the hub's master key, which lives in the hub's
 env/file, not in the database), `timezone`, `personal_project_id` (the implicit personal
 project, created on first sign-in; the personal assistant session lives in it), `theme`,
-`look`, `project_sort`, `new_session_project_id`.
+`look`, `project_sort`, `new_session_project_id`, `quick_messages`.
 
 `theme` (since 0.51, T49) — the client's base palette: three dark ones, `warm` (default) |
 `graphite` | `contrast`, and since 0.88 their light counterparts `warm_light` |
@@ -203,6 +203,12 @@ the user picks one in Settings and again when that project is deleted (`ON DELET
 the same on every device of the user (`PATCH /api/me`, §6). The hub stores it; the client uses
 it only while the project is on the bar, else the user's personal project, so there is always
 a target and no "none" choice (§6 client layout, the phone and Settings).
+
+`quick_messages` (since 0.255, hub migration `0061_user_quick_messages`) — the user's own quick
+messages: texts (`text[]`, empty by default) that every project's chat offers before the
+project's own (§3 Project `quick_messages`, §6 client layout), in the order the user keeps them,
+the same on every device (`PATCH /api/me`, §6). The same rules as a project's list: each at least
+one character other than whitespace and at most 10 000 characters, at most 100.
 
 `timezone` (since 0.38, T35) — an IANA name, `UTC` until set; the default zone of new
 schedules (§16). The client sets it to the browser's zone (`PATCH /api/me`, §6) when it starts
@@ -615,7 +621,7 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `quiet?` (since 0.231: `true` once the worker wrote the message into the agent's history without a turn at the owner's Stop, set by the hub on `ack {quiet: true}`, §5.2, §17.2; absent when false; the feed stands it behind its `joined_after`, where Claude Code recorded it, §6), `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `joined_after?` (since 0.221, with `joined` or (since 0.231) `quiet`, set by the hub in the same write: the `seq` of the last event of the session that is no `user.message` or `peer.message`, stored before the hub took the ack, when it is past the message's own; absent when there is none and on a message joined before 0.221; §6), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise), `human?` (since 0.219: `true` on a message the owner typed in `POST /api/sessions/{id}/input` (§6), written there and nowhere else, so it is absent on a hub's own note (a resume, `hqc_move`, subagent leftovers, long runs), a run of a schedule, a room's post to its agent and a message from the Claude Code transcript; it is what Take back and Send now require (§6, §17.2) and what the worker writes Claude Code's `origin: human` for (§5.3, §8.1)) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.203: authored by the session's owner, no chain); hub on `session.long_runs` (§8.1, since 0.244: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
+| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `quiet?` (since 0.231: `true` once the worker wrote the message into the agent's history without a turn at the owner's Stop, set by the hub on `ack {quiet: true}`, §5.2, §17.2; absent when false; the feed stands it behind its `joined_after`, where Claude Code recorded it, §6), `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `joined_after?` (since 0.221, with `joined` or (since 0.231) `quiet`, set by the hub in the same write: the `seq` of the last event of the session that is no `user.message` or `peer.message`, stored before the hub took the ack, when it is past the message's own; absent when there is none and on a message joined before 0.221; §6), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise), `restart?` (since 0.256: `true` on the hub's note after a worker restart, §17.3; absent otherwise), `human?` (since 0.219: `true` on a message the owner typed in `POST /api/sessions/{id}/input` (§6), written there and nowhere else, so it is absent on a hub's own note (a resume, `hqc_move`, subagent leftovers, long runs), a run of a schedule, a room's post to its agent and a message from the Claude Code transcript; it is what Take back and Send now require (§6, §17.2) and what the worker writes Claude Code's `origin: human` for (§5.3, §8.1)) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); hub on `session.subagent_leftovers` (§8.1, since 0.203: authored by the session's owner, no chain); hub on `session.long_runs` (§8.1, since 0.244: authored by the session's owner, no chain); hub after a worker restart (§17.3, since 0.256: authored by the session's owner, no chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text`, `reset?` (since 0.161: `true` when the runtime abandoned the attempt that wrote the text so far, which the hub and the client drop, and (since 0.208) the thinking being written with it, §6, §8.1; `text` is then empty; absent when false), `thinking?` (since 0.208: `true` for a piece of the agent's thinking being written, not of its answer; absent when false; §6, §8.1) | adapter; transport only, not written to the database |
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?, due_in_ms?, retry?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands and (since 0.169) Monitor watchers, in the order they became rows, then (since 0.169) the wakeup the agent armed and its cron jobs, empty when none (§8.1); since 0.181 a task the CLI marks `ambient` is no row, and the commands and subagents it starts are rows as the agent's own (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.161; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row, a command's and (since 0.169) a Monitor's say, `retry` (since 0.179) `{attempt, max_retries, retry_delay_ms, error_status?}` while its request to the model API failed and waits to be retried (`error_status` absent: the attempt got no response; §8.1), `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row, `command` for a command's and, since 0.169, `monitor` for a Monitor's, `wakeup` for the agent's wakeup and `cron` for one of its cron jobs; a command's or a Monitor's row carries only `task_id`, `description` (its Bash call's description, or the command; the Monitor's description), `duration_ms`, `call_id?`, `kind` and `stoppable`; a wakeup's and a job's row also `due_in_ms` (since 0.169), the milliseconds until it fires when the list was sent, by the worker's clock, 0 once due, absent on a job whose next fire is not known |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops, and (since 0.179) again, unchanged, at each heartbeat of a long call of the main agent (§8.1, §17.3) |
@@ -1764,13 +1770,15 @@ HTTP API (iteration 1 and projects with workspaces from iteration 2; the list is
 the rest is marked "later"):
 
 - `GET /api/me` → `{id, email, display_name, timezone, personal_project_id, theme, look,
-  project_sort, new_session_project_id, limit_notice_percent}` (`api.me.json`;
+  project_sort, new_session_project_id, quick_messages, limit_notice_percent}` (`api.me.json`;
   `limit_notice_percent` since 0.190: the hub's `HQC_LIMIT_NOTICE_PERCENT`, the limit bar's
   threshold below, 70 from a hub before it); `PATCH /api/me` {timezone?, theme?, look?,
-  project_sort?, new_session_project_id?} (since 0.38, `api.me.patch.request.json`; an unknown
+  project_sort?, new_session_project_id?, quick_messages?} (since 0.38, `api.me.patch.request.json`; an unknown
   zone: `400`; `theme` since 0.51, `look` and `project_sort` since 0.114, §3 User, another value:
   `422`; `new_session_project_id` since 0.188: a project that is not the user's or does not
-  exist: `404`, nothing stored) → the same object;
+  exist: `404`, nothing stored; `quick_messages` since 0.255: the whole list, replacing the stored
+  one, a blank message, one over 10 000 characters or more than 100: `400`, nothing stored,
+  not even another field of the request) → the same object;
   later keys; `PUT /api/me/project_order` {project_ids} (since 0.64,
   `api.project_order.request.json`) → `{projects[]}` in that order: the user's own order of the
   project bar, kept per user (`users.project_order`); ids that are not the user's projects and
@@ -2487,7 +2495,11 @@ arrow to the address it was opened from (on a computer, from `#/`, the current p
 project the phone's floating button and a wrapper's shortcut (`window.hqc.newSessionInProject()`,
 below) open a new session in (§3 User `new_session_project_id`), the same on every device; it
 shows the project in use, the personal one while none is picked or the picked one has left the
-bar, and a pick is stored at once, no "Save"; "Web search" (since
+bar, and a pick is stored at once, no "Save"; "Quick messages" (since 0.255), after it, the
+user's own quick messages, offered in every project before the project's own (below), edited as
+the project's (below): the intro line "Texts sent to the agent with one press from the button
+beside the message field, in every project, before the project's own. The same on every
+device.", the list, "Add a quick message"; "Web search" (since
 0.142) picks where "Search in …" of selected text searches: Google (the default), DuckDuckGo,
 Bing or Yandex, kept on this device (`localStorage`), not on the hub; "Keys" (since 0.242)
 holds the key of every action below that has one: Quote and Search of selected text, the
@@ -2758,18 +2770,22 @@ The page has one function for a wrapper around it (since 0.188),
 the project in use, and, called before `/api/me` has answered and that project is known, does it
 as soon as they are. The macOS app hangs its global shortcut on it.
 
-Quick messages (since 0.167, §3 Project). A chat whose project is known has a lightning-bolt
-button in the composer's row, right after the attach one (and after the key button, when there is
-one). It opens a list above the field, in the look of the command list: a row per message of the
-project in its stored order, its first line on one line ending in "…" when it does not fit, the
-whole text as the row's title (each row a button, so Tab reaches it), and a last row "Edit quick messages", a link to the project's
+Quick messages (since 0.167, §3 Project; the user's own since 0.255, §3 User). A chat whose
+project is known has a lightning-bolt button in the composer's row, right after the attach one (and
+after the key button, when there is one). It opens a list above the field, in the look of the
+command list: a row per message, the user's own in their order, then the project's in its stored
+order, a text in both once at its place in the user's list (since 0.255); its first line on one
+line ending in "…" when it does not fit, the
+whole text as the row's title (each row a button, so Tab reaches it), and a last row "Edit quick
+messages: all projects · this project", links to Settings (`#/settings`) and to the project's
 settings (`#/p/<id>/settings`); with no messages the list says "No quick messages yet — add them
-in project settings" with the same link. A press on a message sends it at once as the input of
+in Settings or in project settings", with the same two links. A press on a message sends it at once as the input of
 the session, exactly as stored, and closes the list; what is typed in the field and the files
 attached stay as they are, unsent. Esc and a press outside close the list, the field keeps the
 focus; the list and the field's completion list are never open together. Opening the list asks
-the hub for the project again (`GET /api/projects/{id}`): the list kept on the client shows at
-once, and what another device changed shows when the answer comes.
+the hub for the project and for the user again (`GET /api/projects/{id}`, `GET /api/me`): the
+lists kept on the client show at once, and what another device changed shows when the answers
+come.
 Each message in the list is a button. The opener has `aria-expanded` and, while the list is open,
 `aria-controls`; Esc on a message of the list puts the focus back on the opener. The new session's
 window has no such button.
@@ -2778,8 +2794,9 @@ its buttons, right before fork (since 0.204); like fork, not while it waits for 
 when it was not delivered. A press reads the project from the hub, adds the
 message's text exactly as typed at the end of that list and sends it whole in `PATCH
 /api/projects/{id}`; a text the hub's list has already sends nothing. A text the project's list
-has is a check, "In quick messages", that cannot be pressed; the hub's refusal is said in the
-chat's notice. The service session has no such button.
+has, or the user's own list has (since 0.255), is a check, "In quick messages", that cannot be
+pressed; the hub's refusal is said in the chat's notice. The button always adds to the
+project's list. The service session has no such button.
 The project settings have a section "Quick messages" between Appearance and Workspaces: a line
 saying what they are, the list in stored order (each message as written, kept to 3 lines, with
 "Edit" and "Delete"), and "Add a quick message"; the form for a new or an edited message is a
@@ -2789,7 +2806,9 @@ is open the other buttons are disabled. Every change
 first reads the project from the hub, applies itself to that list (an added message goes last; an
 edit replaces the first message equal to the text it started from, or adds the new text when none
 is; a delete removes the first message equal to its text, and sends nothing when none is), sends
-the whole list in `PATCH /api/projects/{id}` and shows the hub's refusal under the list.
+the whole list in `PATCH /api/projects/{id}` and shows the hub's refusal under the list. The
+Settings section (since 0.255) is the same editor over the user's list: it reads `GET /api/me`
+and sends the whole list in `PATCH /api/me`.
 The messages cannot be reordered and have no names.
 
 Secrets (since 0.147, §14). The composer of a session whose worker has `session_secrets` has a
@@ -2988,6 +3007,39 @@ Mac, Ctrl+' and Ctrl+E elsewhere: the first quotes the selection as the button d
 is an input), the second searches it as "Search in …" does, in a new tab; they take a selection
 that starts in the feed or in a subagent's history; without one the key is the browser's. The
 button's tooltip and the menu's Quote and Search name the keys in use.
+On a touch screen a finger that swipes a message of the chat's feed left quotes it, as Telegram
+does (since 0.252): the agent's answer (one to another session's question too), the user's own
+message, a message from another session or a room's post. The message follows the finger and a
+quote mark comes out at its right at the finger's height; released past 60 px, the message's first
+two sentences go into the input as Quote puts a selection there, with "…" when its text goes on
+(the Markdown of an answer or of another session's message as its text, a list item or a table row
+a line of its own; the user's message without its quote lines); released before, nothing. Where
+there is no input a message does not move; a swipe on a code block or a table that scrolls
+sideways scrolls it, and a touch held half a second before it moves is the browser's (a long press
+selects text). A subagent's history has no swipe.
+In the user's message a run of lines `> text` or a bare `>` (what Quote puts in) shows as a quote,
+without the `>`, with a bar on its left (since 0.253; before it the lines showed as typed): those the
+message starts with, blank lines between them too, stand above the time across the bubble, as in
+Telegram, the time on the line of the text after them; one further on stands in the text, one line
+break apart from it. A click on it
+(not one that ends a selection), a tap (pressed on the finger's lift, as a button) or Enter or Space
+on it takes the chat to the text it quotes, as Telegram does. The client looks for the quote's
+letters and digits (lowercased, NFKC; in a source the feed renders as Markdown, its marks, link
+targets, ordered-list numbers and fence lines left out) in the session's events before the message,
+newest first: agent messages and reasoning, the user's messages, text answers to a request and side
+questions without their own quote lines, messages from other sessions, side answers, the feed's
+notes (a subagent's report, a background task's line, a compaction summary), the text of permission
+and question cards, the arguments and
+results of calls; the whole quote first, else its first paragraph (a quote taken across messages),
+in the loaded events and then in each older page as it comes in, 1000 events a page, until it is
+found; then in the events after the message (an answer quoted while it was being written is stored
+after the quote). The feed renders from the block that draws the source (the block that starts at
+it, else the one that holds it: a call shown on its permission card is that card's), as for a search
+hit, lets go of the bottom, opens a folded reasoning the text is in, scrolls the text to the middle
+and highlights exactly it for 2.4 s (the CSS Custom Highlight API). Where the text is not in the
+page (a reasoning in a folded run of calls) or the browser has no custom highlights, the block is
+marked as a search hit is. Found nowhere: "The quoted text is not in this chat"; an older page that
+did not load: "Older history did not load".
 The input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
 computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input
 takes the caret when the chat opens, once its newest page is in, unless a request waits for an
@@ -3043,10 +3095,43 @@ Keys for the same (since 0.238; set in Settings ▸ Keys since 0.242), by defaul
 Mac, Ctrl+' and Ctrl+E elsewhere: the first quotes the selection as the button does (where there
 is an input), the second searches it as "Search in …" does, in a new tab; they take a selection
 that starts in the feed or in a subagent's history; without one the key is the browser's. The
-button's tooltip and the menu's Quote and Search name the keys in use. The input is one
-row: the paperclip, the field growing with its lines up to 200 px, send; on a computer its
-placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input takes the
-caret when the chat opens, once its newest page is in, unless a request waits
+button's tooltip and the menu's Quote and Search name the keys in use.
+On a touch screen a finger that swipes a message of the chat's feed left quotes it, as Telegram
+does (since 0.252): the agent's answer (one to another session's question too), the user's own
+message, a message from another session or a room's post. The message follows the finger and a
+quote mark comes out at its right at the finger's height; released past 60 px, the message's first
+two sentences go into the input as Quote puts a selection there, with "…" when its text goes on
+(the Markdown of an answer or of another session's message as its text, a list item or a table row
+a line of its own; the user's message without its quote lines); released before, nothing. Where
+there is no input a message does not move; a swipe on a code block or a table that scrolls
+sideways scrolls it, and a touch held half a second before it moves is the browser's (a long press
+selects text). A subagent's history has no swipe.
+In the user's message a run of lines `> text` or a bare `>` (what Quote puts in) shows as a quote,
+without the `>`, with a bar on its left (since 0.253; before it the lines showed as typed): those the
+message starts with, blank lines between them too, stand above the time across the bubble, as in
+Telegram, the time on the line of the text after them; one further on stands in the text, one line
+break apart from it. A click on it
+(not one that ends a selection), a tap (pressed on the finger's lift, as a button) or Enter or Space
+on it takes the chat to the text it quotes, as Telegram does. The client looks for the quote's
+letters and digits (lowercased, NFKC; in a source the feed renders as Markdown, its marks, link
+targets, ordered-list numbers and fence lines left out) in the session's events before the message,
+newest first: agent messages and reasoning, the user's messages, text answers to a request and side
+questions without their own quote lines, messages from other sessions, side answers, the feed's
+notes (a subagent's report, a background task's line, a compaction summary), the text of permission
+and question cards, the arguments and
+results of calls; the whole quote first, else its first paragraph (a quote taken across messages),
+in the loaded events and then in each older page as it comes in, 1000 events a page, until it is
+found; then in the events after the message (an answer quoted while it was being written is stored
+after the quote). The feed renders from the block that draws the source (the block that starts at
+it, else the one that holds it: a call shown on its permission card is that card's), as for a search
+hit, lets go of the bottom, opens a folded reasoning the text is in, scrolls the text to the middle
+and highlights exactly it for 2.4 s (the CSS Custom Highlight API). Where the text is not in the
+page (a reasoning in a folded run of calls) or the browser has no custom highlights, the block is
+marked as a search hit is. Found nowhere: "The quoted text is not in this chat"; an older page that
+did not load: "Older history did not load".
+The input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
+computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input
+takes the caret when the chat opens, once its newest page is in, unless a request waits
 for an answer (an open approval in the feed, or the session `waiting`), another field has the
 focus, or a menu or the slid-out column is open; on a phone only when the chat replaces a new
 session's window. An open chat stays at its bottom while its images load: only a scroll up lets
@@ -3063,7 +3148,14 @@ while it goes on, the chat sets no scroll position of its own: it neither follow
 renders older blocks, so a scroll up stops at the top of the rendered blocks until the scroll
 settles (since 0.136 for a wheel, since 0.198 for the rest). Once it settles, the chat follows the
 bottom if the feed still holds it and something moved it meanwhile, and renders the 60 older
-blocks if the feed is still within 400 px of its top.
+blocks if the feed is still within 400 px of its top. Since 0.254, while the feed does not follow
+its bottom (a move up that left it 80 px or more above its bottom, or a jump to an event, let go of
+it) and the bottom is more than two of the feed's windows down, a button with a chevron down stands
+in the middle of the feed's bottom edge, over the feed: the send button's corners, 56 × 28 px (48 ×
+24 in Compact on a computer). Its press puts the feed at its bottom and the feed follows it again,
+and keeps the focus in the input. Pressed while the user's scroll goes on (a fling coasting under
+it), the rest of that scroll does not let go of the bottom, and in WebKit the feed goes there once
+the scroll settles; a new input up after the press is a scroll of its own.
 
 Messages between sessions in the feed (since 0.54, T51; mockups `Session`, `AskingSession`,
 `MSession2`): violet blocks (`--relay`) with an arrow, ↗ for what left this session and ↙
@@ -3316,8 +3408,11 @@ than `running`, and
 `system context_compacted`, with which a `/compact` starts, and since 0.218 `system
 command_output`, with which a slash command's turn starts), to its end (the final
 `agent.message`, `status` `idle` or `error`, `system turn_lost`); a delivered input waited only
-if the first end after it is not its own (`in_reply_to`). Inputs waiting one behind another
-take the turns in `seq` order: the first delivered one starts at the agent's first event of
+if the first end after it is not its own (`in_reply_to`) and, since 0.250, when that end is a
+`system turn_lost`, only if it was delivered after it (`delivered_at` against the `ts` of
+`turn_lost`, both the hub's clock): delivered before, it went into the turn that was lost, its
+own or one the runtime ran by itself, which `turn_lost` does not name. Inputs waiting one behind
+another take the turns in `seq` order: the first delivered one starts at the agent's first event of
 work after the end of the turn before, or before the end of its own turn when that comes
 first, an end that names it or, with no turn opened since the end before, one that names no
 input and is no `status` (a `status` there closes the same turn as the end before it). A
@@ -3357,8 +3452,12 @@ drops the copy, and the chat shows the hub's page. The copy is the user's: a cha
 `/api/me` answers waits for it. A session the hub answers `404` for is forgotten; one deleted from
 this client, a room's agents with their room and the sessions of a deleted project are forgotten
 with the attachments their copies refer to (`artifact_ids`, `artifact_id`, as the hub's cleanup
-counts them, §12). Since 0.240 the copies leave the device on their own too. When `/api/me`
-answers `401` or `403` (signed out) the client deletes both databases of the user who signed in
+counts them, §12). Since 0.240 the copies leave the device on their own too. When `/api/me` answers
+`401` or `403` (signed out; since 0.249 also a redirect: the client asks it with
+`redirect: 'manual'`, and a sign-in proxy such as Cloudflare Access or oauth2-proxy answers a
+signed-out user with a redirect to its sign-in page, which, followed, fails `fetch` as offline; the
+hub never redirects `/api/me`, so any redirect is taken for a sign-out, and one for another reason
+costs the copies, which download again) the client deletes both databases of the user who signed in
 last on this device (whose id it keeps in `localStorage` `hqc-device-user`), and when another user
 signs in, the previous user's; offline or a hub error keeps them. "Forget this device" in Settings
 deletes the user's two databases; a chat held in memory keeps writing what comes after, not what it
@@ -4387,8 +4486,8 @@ files on the worker cleaned up), then the room: no agent is left behind as a ses
   worker (§5.2), writes `system room_stopped` "<agent's title> did not get the message:
   <reason>" in the room, in both modes. Since 0.241 not when the room's message it carries is
   older than the room's last "Stopped" (`POST /stop`): that Stop wrote its line and ended the
-  round already. An input the agent's worker drops at that Stop, its cap below the agent's
-  mode (§17.2), fails so.
+  round already. An input the agent's worker drops at that Stop, its cap below `allow_all`
+  (§17.2), fails so.
 - An input from the room that reaches an agent while its turn runs joins that turn, as a
   person's message does (`joined`, §17.2): the turn's final message answers both and is one
   post.
@@ -7767,10 +7866,10 @@ started by a `send` or capped to `ask` or `auto` takes what may join (a capped t
 lower mode, which only makes it safer). The agent must also have no open `approval` or
 `clarify`. A person's input that carries buffered sends of other sessions (`peer_prefix`, §7.1)
 may join: the cap of §7.1 caps it whenever one of them comes from a session in `ask` or (since
-0.129) `auto`, and a capped person's input never joins. The hub honours `joined` only for a
-`user.message` without `schedule_id`, a room's input to its agent (since 0.172), which the
-worker gets without `peer` (§7.1.1), and (since 0.174) a `peer.message` of mode `send` without
-`schedule_id`; a `joined` on any other input is the worker's mistake, logged, not kept, and the
+0.129) `auto`, and the worker never writes a capped person's input into a running turn. The hub
+honours `joined` only for a `user.message` without `schedule_id`, a room's input to its agent
+(since 0.172), which the worker gets without `peer` (§7.1.1), and (since 0.174) a `peer.message`
+of mode `send` without `schedule_id`; a `joined` on any other input is the worker's mistake, logged, not kept, and the
 input's turn opens (since 0.71). Since 0.112 the hub keeps an honoured one on the message,
 `payload.joined: true` (§4) and, since 0.221, `payload.joined_after`, where the agent took it
 (§4, §6), and sends them with the `delivery` frame (§6); the client marks the first line of a person's message with an icon before the time, "Joined the turn" its tooltip (since 0.178; the words in the line before; a send's bubble has no such note).
@@ -7795,7 +7894,16 @@ after the owner raised the mode during the turn before, it lowers the runtime to
 The same holds for an input sent during a turn the CLI began by itself after a background task
 (since 0.161 it leaves that turn's last text held for its `result`, §8.1); since 0.71
 `session.stop` interrupts such
-a turn too (the adapter knows it from the CLI's `system/init` with no input of hqc's). An input
+a turn too (the adapter knows it from the CLI's `system/init` with no input of hqc's). With no turn
+of hqc's running, the worker gives such an input as a turn of its own; when the CLI takes it into
+the turn it began (the echo comes before that turn's `result`), since 0.251 the worker acks it
+`joined: true` when the hub honours `joined` on it (no `schedule_id`; no `peer`, or a `send`; a
+slash command or a capped input too: the worker gave it as a turn of its own, in its cap's mode,
+and the CLI took it into its turn), so the hub keeps its `joined_after` and the feed stands it
+where the agent took it; an `hqc_ask` or a run of a schedule taken so gets a plain `ack`. The
+CLI's `result` still ends that turn, and an input the CLI runs after it gets a plain `ack`. Before
+0.251 both got a plain `ack`, and the message stood at its own `seq`, above the steps the agent
+made before it took it. An input
 the CLI cancels after a `session.stop` (a carried input on a second Stop) fails, not retryable,
 instead of going back to the queue: the person cancelled it. Since 0.231 the owner's own Stop of a
 turn that runs (`session.stop {quiet: true}`: the stop button, a room's Stop; a pause's stop is none
@@ -7808,18 +7916,19 @@ them now. Each is acked `quiet` when the runtime has taken it, and acked `quiet`
 resends it. A slash command among them fails, not retryable ("cancelled by Stop"): it runs or it
 does not, it is no text for the history (what decides is the text the runtime gets: a message of
 another session whose text starts with a path carries a header first and is no command).
-Since 0.241 so does an input whose cap is below the session's own mode (T39, §7.1:
-a message of another session or a run of an agent's schedule sent with a lower ceiling): it was
-never handled under its cap, and the next turn, in the session's mode, would find it in the
-history unhandled. The worker fails it, not retryable ("dropped at Stop: it may not run in this
-session's permission mode": the feed shows it not delivered with that reason, and an `hqc_ask` it
-carried fails at once, §7.1), and writes in its place, after the quiet inputs, a quiet note of its
-own that names what was dropped and never its text: "[hqc] A message from the session <address>
-was dropped at the owner's Stop because of a permission conflict: it may run only in a lower
-permission mode than this session's. Its text is not shown." ("A scheduled message" for a run of
-a schedule, "A message" otherwise). The note is no input of the hub: the feed does not show it,
-nothing is acked for it, and a `session.kill` or a worker restart before the runtime took it loses
-it. Limitation: an input capped only by the buffered `send` messages it carries in front (T40,
+Since 0.241 so does an input whose cap is below the session's own mode (T39, §7.1: a message of
+another session or a run of an agent's schedule sent with a lower ceiling), and since 0.248 every
+input with a cap below `allow_all`, also one at the session's own mode: it was never handled under
+its cap, and the next turn would find it in the history unhandled in the session's mode then, which
+the owner may raise to `allow_all` meanwhile. The worker fails it, not retryable ("dropped at Stop:
+it may run only in a permission mode below Allow all": the feed shows it not delivered with that
+reason, and an `hqc_ask` it carried fails at once, §7.1), and writes in its place, after the quiet
+inputs, a quiet note of its own that names what was dropped and never its text: "[hqc] A message
+from the session <address> was dropped at the owner's Stop because of a permission conflict: it may
+run only in a permission mode below Allow all. Its text is not shown." ("A scheduled message" for a
+run of a schedule, "A message" otherwise). The note is no input of the hub: the feed does not show
+it, nothing is acked for it, and a `session.kill` or a worker restart before the runtime took it
+loses it. Limitation: an input capped only by the buffered `send` messages it carries in front (T40,
 §7.1), the owner's own message among them, is dropped the same way, and the buffered messages come
 with the next input. Until the
 stopped turn ends nothing new goes into it, and what comes after the Stop is never marked: it waits,
@@ -7962,6 +8071,24 @@ sent now until that worker is connected (§6).
   `status running` the worker's outbox sends again after that `hello` opens no turn (§17.1);
   `pending` inputs are resent after `hello` (via `session.start` with `mode: resume`).
   A reconnect with the same `boot_id` is not a restart, nothing is cancelled.
+  Since 0.256 (#220) the agent is told what the restart took: before it forgets the counts, the
+  hub takes each live session of the worker (no room, no paused or service session) whose turn
+  was open, whose `subagents` or `background_tasks` were above 0, or that had a kept
+  `subagents.live` list (its wakeups and cron jobs die with the process too), and stores for it a
+  pending `user.message` of the session's owner with `restart: true` (§4): "[hqc] The worker
+  running you restarted at HH:MM UTC, and your process with it.", then, for a cut turn, that a
+  step shown as rejected or interrupted was the restart and to check what is done before
+  repeating a step that changes something, and the lost work by kind and description (each a
+  JSON string, as in the leftovers notes, §8.1) or by count, with "check what got done and start
+  again what is still needed". The starts after `hello` deliver it like any pending input, so the
+  agent goes on at once instead of at the next message. A session that got such a note in the
+  last 10 minutes gets none, so a worker that dies again at once does not restart an agent into
+  it over and over.
+- A worker that gets `SIGUSR1` (since 0.256) stops as on `SIGTERM`, but only once no session's
+  agent works: no turn (its own or one hqc started), no input waiting for it, no background
+  subagent or command, no side question, no mode switch under way; armed wakeups and cron jobs do
+  not count. It waits at most 30 minutes, then stops anyway. The service manager (`KeepAlive`,
+  `Restart=always`) starts it again: an update then loses nothing an agent was doing.
 - An agent process that exits within 500 ms of launch is a failed
   start: the adapter's `start`/`resume` returns an error (the worker replies
   `agent_start_failed`, retryable, §5.2), not "process exited"; otherwise a worker with a
@@ -8133,8 +8260,8 @@ is not asked, does not see the question or the answer, and does not work on it.
    each by name next to `hqc` and the hub's relays, with `--strict-mcp-config` kept, so no
    server of `~/.claude.json` and no `claude.ai` connector comes with them; secrets are read
    from Vaultwarden at every start through a launcher of the worker, never on a command line;
-   the launcher pins a hash of each server's tools, and a changed list fails the server until
-   the owner approves it on the machine; `hello` names them for Settings. The hub cannot add or start one (§2.1). Tasks:
+   the launcher pins a hash of each server's tools (unless the server says `pin = false`), and a
+   changed list fails the server until the owner approves it on the machine; `hello` names them for Settings. The hub cannot add or start one (§2.1). Tasks:
    `docs/ITERATION-9.md`.
 10. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
    worker; the bare model; the personal assistant session (moved from 3: its default runtime is
@@ -8357,12 +8484,87 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
-### 0.246 → 0.247 (iteration 9 planned: MCP servers on the machine)
+### 0.256 → 0.262 (iteration 9 planned: MCP servers on the machine)
 §19: a new iteration 9, MCP servers that run on the machine, declared per environment in
 `worker.toml` (the rest of #59); the generic ACP adapter becomes iteration 10, sharing 11, Tauri
 12, and the references to them follow. Plan: `docs/ITERATION-9.md`. Found on 2.1.328:
 `allow_local_mcp` gives the agent every server the machine's CLI knows, the account's `claude.ai`
-connectors included; `--strict-mcp-config` gives none of them.
+connectors included; `--strict-mcp-config` gives none of them. 0.257–0.261 are left to the iOS
+client (#171).
+
+### 0.255 → 0.256 (a worker restart: waited for, and told to the agent)
+#220: a worker restarted for an update killed a session's background subagents, and nothing told
+the agent until the owner wrote again. §17.3: `SIGUSR1` makes the worker stop once no agent works
+(at most 30 minutes), so an update waits for turns and background work; after a restart the hub
+gives each agent that lost a turn, background work, a wakeup or a cron job a note of the owner
+(`user.message.restart`, §4), and the agent goes on at once.
+
+### 0.254 → 0.255 (quick messages for every project)
+§3 User `quick_messages` (hub migration `0061_user_quick_messages`), §6 `GET`/`PATCH /api/me`
+(`Me.quick_messages`, `PatchMe.quick_messages`; the whole list replaces the stored one, refused
+as a project's list is, `400`, before anything of the request is stored), §6 client layout: the
+user's own quick messages, edited in Settings after "New session" with the project editor, show in
+every project's composer before the project's own (a text in both once); the list's last row links
+to Settings and to the project's settings; opening the list re-reads `/api/me` too; the "In quick
+messages" check of a message counts the user's list. "Add to quick messages" still adds to the
+project's list.
+
+### 0.253 → 0.254 (a button to the bottom of the chat)
+§6: scrolled up through a long chat, the only way back to the newest text was to scroll all the
+way down by hand. While the feed does not follow its bottom and the bottom is more than two of the
+feed's windows down, a button in the middle of the feed's bottom edge now puts the feed at its
+bottom, and the feed follows it again. Client only.
+
+### 0.252 → 0.253 (a click on a quote goes to the text it quotes)
+§6: the user's `>` lines (what Quote puts in) showed as typed, with nothing that led back to what
+they quote. They now show as a quote block in the bubble, and a click on it, as in Telegram, takes
+the chat to the quoted text and highlights it: the client looks for it by its letters and digits in
+the session's events before the message (the older history loaded until it is found), then after it,
+and jumps there as to a search hit. A search hit's jump now also takes the block that draws its
+event (a call shown on its permission card), not the last block that starts before it. A swipe of
+the user's message leaves out only these quote lines too, not every line that starts with `>`
+(a `>>>` line the bubble shows as text is in the swiped quote, so the quote is found). Client only.
+
+### 0.251 → 0.252 (a message swiped left is quoted)
+§6: on a phone a message was quoted only by selecting its text and pressing Quote. Now a finger
+that swipes a message left quotes its first two sentences, as Telegram does; the message follows
+the finger, and a release past 60 px quotes it. Client only.
+
+### 0.250 → 0.251 (a message taken into a turn the runtime began by itself joined it)
+§17.2: while Claude Code ran a turn it began by itself (after a background task's notice), the
+worker gave the owner's message as a turn of its own; the CLI took it into its running turn, and
+the worker sent a plain `ack`. The hub kept no `joined_after`, and the feed showed the message where
+it was sent, above the steps the agent made before it took it. The adapter now says whether it took
+an input into a turn already running (`AdapterEvent::InputAccepted.joined`: the echo came during the
+CLI's own turn), and the worker acks such an input `joined: true` when the hub honours `joined` on
+it (a person's, a room's, a `send`, none a schedule's run); an `hqc_ask` or a schedule's run taken
+so keeps its plain `ack`. The protocol, the
+hub and the client are unchanged.
+
+### 0.249 → 0.250 (a message taken into a turn that was lost is not left waiting at the bottom)
+The runtime ran a turn by itself, took the owner's message into it (the worker had written it as
+a turn: a plain `ack`, no `joined`) and its process died: `system turn_lost` names no input, so
+the client counted the message as waiting through that turn, and as the next turn was another
+message's, it and the message joined behind it stood queued under everything that came later,
+for good. §6: when the first end after a delivered input is `turn_lost`, the input waited only if
+it was delivered after it; delivered before, it stands at its own place, as in the turn it went
+into. The hub's `waited_place` (the cut of a fork before such a message) follows the client.
+
+### 0.248 → 0.249 (a sign-in proxy's redirect at sign-out wipes the device's copies)
+§6: since 0.240 the client deletes the device's copies of a user when `/api/me` answers `401` or
+`403`, but a sign-in proxy (Cloudflare Access, oauth2-proxy) answers a signed-out user with a
+redirect to its sign-in page; `fetch` followed it, failed as offline, and the copies stayed. The
+client now asks `/api/me` with `redirect: 'manual'` and takes a redirect for `401`. Client only.
+
+### 0.247 → 0.248 (every capped input that waits at the owner's Stop is dropped)
+§17.2: since 0.241 the owner's Stop drops an input of another session or a schedule's run capped
+below the session's mode (T39), but writes one capped at or above that mode into the agent's
+history; when the owner raised the mode to `allow_all` afterwards, the next turn found it there
+unhandled in the higher mode. The worker now drops every input with a cap below `allow_all` at the
+owner's Stop, with the same note to the agent, the owner's own message capped by the buffered
+`send` messages in front of it (T40) included; the reason and the note no longer speak of the
+session's mode. §7.1.1 follows. The protocol, the hub, the client and the macOS app are
+unchanged.
 
 ### 0.245 → 0.246 (Auto on a provider; an MCP server's form answers kept out of the history; `sudo` over ssh)
 #194: a session on a model provider in Auto had every call that needs Auto's safety check

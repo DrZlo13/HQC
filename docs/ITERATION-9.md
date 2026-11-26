@@ -76,7 +76,10 @@ agent of that folder the owner's mail. With `--strict-mcp-config` it gets none o
    and the command to run; the owner checks the change and runs
    `hqc-worker mcp approve <env>/<name>` on the machine.
    A package update that rewrites a tool's description (a prompt injection in it) therefore
-   never reaches an agent unseen. The launcher thus speaks the protocol between the CLI and the
+   never reaches an agent unseen. A server whose package moves on its own (`uvx` or `npx`
+   without a version start the latest release every time) may say `pin = false` in its table:
+   pinned by default, unpinned only by the owner's word (vvzvlad on #210: his Google Workspace
+   server through `uvx` would otherwise go away from the agents at every release). The launcher thus speaks the protocol between the CLI and the
    program instead of only `exec`ing it.
 2. **Only `worker.toml`.** The worker does not read `~/.claude.json` or a repository's
    `.mcp.json`: a server an environment gets is the one written in its table.
@@ -100,8 +103,8 @@ says so in a `system` line, as a refused provider key does.
 
 ## T71a. Pinning
 
-The launcher hashes `tools/list` (names, descriptions, input schemas, sorted) and compares it
-with `$HQC_HOME/mcp-pins.json`: no pin, record it; the same, go on; another, fail the server with
+The launcher hashes `tools/list` (names, descriptions, input schemas, sorted) and, unless the
+server's table says `pin = false`, compares it with `$HQC_HOME/mcp-pins.json`: no pin, record it; the same, go on; another, fail the server with
 a `system` line (`mcp_tools_changed`, the server and the command to run) and log the names of the
 tools that changed. `hqc-worker mcp approve <env>/<name>` shows what changed against the pin and
 records the new hash; `hqc-worker mcp pins` lists them. A `notifications/tools/list_changed` in

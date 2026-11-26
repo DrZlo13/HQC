@@ -826,6 +826,18 @@ function endOf(e: HqcEvent | undefined): string | undefined {
   return e?.type === "agent.message" || e?.type === "status" ? e.payload.in_reply_to : undefined;
 }
 
+/** `end` is a `system turn_lost` the hub wrote after it took `e`'s delivery: the runtime took `e`
+ *  into the turn that was lost (its own, or one the runtime ran by itself, which a lost turn
+ *  does not name), so `e` waited for nothing. Both times are the hub's clock. */
+function takenBeforeLoss(e: EventOf<"user.message" | "peer.message">, end: HqcEvent): boolean {
+  return (
+    end.type === "system" &&
+    end.payload.code === "turn_lost" &&
+    e.delivered_at !== undefined &&
+    Date.parse(e.delivered_at) <= Date.parse(end.ts)
+  );
+}
+
 /** An input the hub queued for the agent (SPEC §5.2): it has a `delivery`. */
 function isInput(e: HqcEvent): e is EventOf<"user.message" | "peer.message"> {
   return (e.type === "user.message" || e.type === "peer.message") && e.delivery !== undefined;
@@ -858,8 +870,9 @@ function agentWork(e: HqcEvent): boolean {
  *  no `status` closing that same turn; one whose turn has not started stands at the bottom. In
  *  `seq` order a turn runs from an input that does not wait, or from the agent's work, to an
  *  event that `endsTurn`. A delivered input waited only if the first end of a turn after it is
- *  not its own. A `joined` input behind waiting ones went into one of the later turns after the
- *  last of them that was delivered before it: it stays right behind that one; if each was still
+ *  not its own and, when that end is a `system turn_lost`, came before its delivery. A `joined`
+ *  input behind waiting ones went into one of the later turns after the last of them that was
+ *  delivered before it: it stays right behind that one; if each was still
  *  pending when it was delivered it went past them all, into the turn running then, and stands
  *  at its own `seq`. A `quiet` input (the hub keeps it as `payload.quiet`: written into the
  *  history as a Stop ended the turn that ran then, no turn of its own) never waits and opens no
@@ -901,8 +914,10 @@ function placeQueued(items: Item[]): Item[] {
           return;
         }
       }
+      const next = nextEnd[i];
       const waited =
-        e.delivery === "pending" || (nextEnd[i] !== undefined && endOf(nextEnd[i]) !== e.event_id);
+        e.delivery === "pending" ||
+        (next !== undefined && endOf(next) !== e.event_id && !takenBeforeLoss(e, next));
       if ((open || waiting.length > 0) && mayWait(e) && waited) {
         waiting.push(it);
         return;

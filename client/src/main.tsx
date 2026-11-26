@@ -26,8 +26,8 @@ window.hqc = { newSessionInProject: () => app.openNewSessionInProject() };
 void app.init();
 // Before the app listens to the address: its entries are stamped first.
 trackHistory();
-// Every touch reaches the page: on an iPhone a tap on a project after a scroll elsewhere only
-// hovered it (taps.ts).
+// Every touch reaches the page, and a tap on a button or a link presses it on the finger's lift:
+// on an iPhone a tap lost its click when the page rendered a button or a link during it (taps.ts).
 listenForTaps();
 render(<App app={app} />, document.getElementById('app')!);
 watchTabIcon(app);

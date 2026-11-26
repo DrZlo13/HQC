@@ -3425,6 +3425,33 @@ async fn turn_of(c: &mut HubConn, env: &Env, adapters: &FakeAdapters, sid: Uuid,
     assert_eq!(c.expect("ack").await["payload"], json!({"event_id": a}));
 }
 
+// #220, SPEC 0.256: SIGUSR1 stops the worker only once no agent works: not during a turn, not
+// while a background task of the agent runs after it; then at once.
+#[tokio::test]
+async fn a_drain_stops_the_worker_once_no_agent_works() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    turn_of(&mut c, &env, &adapters, sid, Uuid::now_v7()).await;
+    w.drain.cancel();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(!w.task.is_finished(), "a turn runs");
+    adapters.emit(sid, AdapterEvent::BackgroundTasks(1)).await;
+    adapters.end_turn(sid).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(!w.task.is_finished(), "a background task runs");
+    adapters.emit(sid, AdapterEvent::BackgroundTasks(0)).await;
+    tokio::time::timeout(WAIT, w.task)
+        .await
+        .expect("stopped once nothing works")
+        .unwrap()
+        .unwrap();
+}
+
 /// The ack of frame `id`, skipped or next; other acks read meanwhile are dropped.
 async fn ack_of(c: &mut HubConn, id: &str) -> Value {
     if let Some(i) = c
@@ -3966,6 +3993,66 @@ async fn a_send_during_a_persons_turn_joins_it() {
         "{:?}",
         adapters.calls()
     );
+    w.stop().await;
+}
+
+// SPEC 0.251: an input given as a turn of its own while the runtime runs one it started by
+// itself, and taken into that turn, is acked joined, also when it is resent, and so is a `send`;
+// an `hqc_ask` and a run of a schedule taken so cannot join and are acked as turns, as the hub
+// keeps them.
+#[tokio::test]
+async fn an_input_taken_into_the_runtimes_own_turn_is_joined() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let b = Uuid::now_v7();
+
+    adapters.set_own_turn(true);
+    let fb = c.frame("session.input", input(sid, b, "B")).await;
+    adapters
+        .wait_for("B given", has_call(input_call(sid, b)))
+        .await;
+    adapters.accept_input_joined(sid, b).await;
+    assert_eq!(
+        ack_of(&mut c, &fb).await["payload"],
+        json!({"event_id": b, "joined": true})
+    );
+    let fb2 = c.frame("session.input", input(sid, b, "B")).await;
+    assert_eq!(
+        ack_of(&mut c, &fb2).await["payload"],
+        json!({"event_id": b, "joined": true})
+    );
+    adapters.set_own_turn(false);
+    adapters.end_turn(sid).await;
+
+    let (s, p, r) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    let mut scheduled = input(sid, r, "Check the build");
+    scheduled["schedule_id"] = json!(Uuid::now_v7());
+    for (eid, frame, joined) in [
+        (s, send_input(sid, s, "FYI"), true),
+        (p, ask_input(sid, p), false),
+        (r, scheduled, false),
+    ] {
+        adapters.set_own_turn(true);
+        let f = c.frame("session.input", frame).await;
+        adapters
+            .wait_for("given as a turn", has_call(input_call(sid, eid)))
+            .await;
+        adapters.accept_input_joined(sid, eid).await;
+        let want = if joined {
+            json!({"event_id": eid, "joined": true})
+        } else {
+            json!({"event_id": eid})
+        };
+        assert_eq!(ack_of(&mut c, &f).await["payload"], want);
+        adapters.set_own_turn(false);
+        adapters.end_turn(sid).await;
+    }
     w.stop().await;
 }
 
@@ -4830,10 +4917,13 @@ async fn error_of(c: &mut HubConn, id: &str) -> Value {
 fn dropped_note(what: &str) -> String {
     format!(
         "[hqc] {what} was dropped at the owner's Stop because of a permission \
-         conflict: it may run only in a lower permission mode than this session's. Its text is \
-         not shown."
+         conflict: it may run only in a permission mode below Allow all. Its text is not shown."
     )
 }
+
+/// The reason the frame of an input dropped at the owner's Stop fails with.
+const DROPPED_AT_STOP: &str =
+    "dropped at Stop: it may run only in a permission mode below Allow all";
 
 /// A capped input `v` that waits in the queue of a session in `auto` while a turn runs, at the
 /// owner's Stop: the error its frame gets, and the text of the one note written quiet after the
@@ -4894,11 +4984,11 @@ async fn capped_input_at_a_stop(
     (err, note.text)
 }
 
-// SPEC 0.231: an input whose cap is below the session's mode that waits at the owner's Stop is
-// not written into the history (the owner's next turn, in the full mode, would see it unhandled
-// there): its frame fails, and the agent gets a quiet note of its own, after the quiet inputs,
-// that the session sent a message and it was dropped, without its text. The note has no frame,
-// so it is acked nowhere, and a normal input waits for it like for any quiet line.
+// SPEC 0.231: an input with a cap below `allow_all` (here below the session's mode too) that waits
+// at the owner's Stop is not written into the history (the owner's next turn, in a higher mode,
+// would see it unhandled there): its frame fails, and the agent gets a quiet note of its own, after
+// the quiet inputs, that the session sent a message and it was dropped, without its text. The note
+// has no frame, so it is acked nowhere, and a normal input waits for it like for any quiet line.
 #[tokio::test]
 async fn a_stop_drops_the_capped_send_that_waits_and_tells_the_agent() {
     let env = Env::new();
@@ -4967,11 +5057,7 @@ async fn a_stop_drops_the_capped_send_that_waits_and_tells_the_agent() {
     // The send's frame fails, not retryable, with the reason.
     let err = error_of(&mut c, &fsend).await;
     assert_eq!(err["payload"]["retryable"], false, "{err}");
-    assert_eq!(
-        err["payload"]["message"],
-        "dropped at Stop: it may not run in this session's permission mode",
-        "{err}"
-    );
+    assert_eq!(err["payload"]["message"], DROPPED_AT_STOP, "{err}");
     // A normal input waits for the note's acceptance too.
     let fnew = c.frame("session.input", input(sid, n, "N")).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -5024,10 +5110,12 @@ async fn the_dropped_note_names_what_was_dropped() {
     w.stop().await;
 }
 
-// SPEC 0.231: an input whose cap is the session's own mode lowers nothing: it is written quiet
-// as any other, no note.
+// SPEC 0.248: an input capped at the session's own mode is dropped at the owner's Stop as well
+// (the owner may raise the mode before the next turn, which would find it unhandled there): its
+// frame fails and the agent gets the note. A cap of `allow_all` lowers nothing: such an input is
+// written quiet as any other.
 #[tokio::test]
-async fn a_stop_writes_an_input_capped_at_the_sessions_mode_quiet() {
+async fn a_stop_drops_an_input_capped_at_the_sessions_mode() {
     let env = Env::new();
     let adapters = FakeAdapters::new();
     let mut hub = FakeHub::start().await;
@@ -5035,7 +5123,7 @@ async fn a_stop_writes_an_input_capped_at_the_sessions_mode_quiet() {
     let sid = Uuid::now_v7();
     let mut c = hub.accept().await;
     c.handshake().await;
-    let (a, s) = (Uuid::now_v7(), Uuid::now_v7());
+    let (a, s, o) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     started_in(&mut c, &env, sid, "auto").await;
     c.frame("session.input", input(sid, a, "A")).await;
     adapters
@@ -5043,28 +5131,49 @@ async fn a_stop_writes_an_input_capped_at_the_sessions_mode_quiet() {
         .await;
     adapters.accept_input(sid, a).await;
     assert_eq!(c.expect("ack").await["payload"], json!({"event_id": a}));
-    let mut send = send_input(sid, s, "FYI");
-    send["permission_cap"] = json!("auto");
-    c.frame("session.input", send).await;
+    let mut at_mode = send_input(sid, s, "SECRET TEXT");
+    at_mode["permission_cap"] = json!("auto");
+    let fs = c.frame("session.input", at_mode).await;
+    let mut uncapped = send_input(sid, o, "FYI");
+    uncapped["permission_cap"] = json!("allow_all");
+    c.frame("session.input", uncapped).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let fs = c
+    let fstop = c
         .frame("session.stop", json!({"session_id": sid, "quiet": true}))
         .await;
-    assert_eq!(ack_of(&mut c, &fs).await["id"], fs.as_str());
+    assert_eq!(ack_of(&mut c, &fstop).await["id"], fstop.as_str());
     adapters.end_turn(sid).await;
-    adapters
-        .wait_for("S quiet", has_call(quiet_call(sid, s)))
+    let calls = adapters
+        .wait_for("O and the note", |c| {
+            c.iter()
+                .filter(|c| matches!(c, FakeCall::InputQuiet { .. }))
+                .count()
+                == 2
+        })
         .await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let calls = adapters.calls();
-    assert_eq!(
-        calls
-            .iter()
-            .filter(|c| matches!(c, FakeCall::InputQuiet { .. }))
-            .count(),
-        1,
-        "{calls:?}"
-    );
+    let quiet: Vec<&FakeCall> = calls
+        .iter()
+        .filter(|c| matches!(c, FakeCall::InputQuiet { .. }))
+        .collect();
+    assert_eq!(quiet[0], &quiet_call(sid, o), "{calls:?}");
+    let FakeCall::InputQuiet {
+        event_id: note_id, ..
+    } = quiet[1]
+    else {
+        unreachable!()
+    };
+    assert!(!calls.contains(&quiet_call(sid, s)), "{calls:?}");
+    assert!(!calls.contains(&input_call(sid, s)), "{calls:?}");
+    let note = adapters
+        .inputs()
+        .into_iter()
+        .find(|(i, _)| i.event_id == *note_id)
+        .unwrap()
+        .0;
+    assert_eq!(note.text, dropped_note("A message from the session hqc/a"));
+    let err = error_of(&mut c, &fs).await;
+    assert_eq!(err["payload"]["retryable"], false, "{err}");
+    assert_eq!(err["payload"]["message"], DROPPED_AT_STOP, "{err}");
     w.stop().await;
 }
 

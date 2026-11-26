@@ -97,13 +97,15 @@ A 12-megapixel photo takes about a second. libheif is LGPL-3.0; its license is i
     new session as a chat window with its chips; `ContextMenu.tsx` — the client's menus, an item's
     submenu as a flyout beside it on a computer and unfolded under it on a phone;
   - `ProjectSettings.tsx` — the project settings page (`#/p/<id>/settings`): Appearance, the
-    project's quick messages (a list, an add and edit form; every save sends the whole list on top of
-    the hub's current one), workspaces (add from the worker's folder tree, import from Claude Code, "VS Code
+    project's quick messages, workspaces (add from the worker's folder tree, import from Claude Code, "VS Code
     sessions", make default, remove), rename and delete; `Appearance.tsx` — the project's tile
     (`ProjectGlyph`) and the "Project appearance" dialog (icon, color, a live preview in the app
-    theme; a full-screen sheet on a phone);
+    theme; a full-screen sheet on a phone); `QuickMessagesEditor.tsx` — the editor of a list of
+    quick messages, the project's in its settings and the user's in Settings (a list, an add and
+    edit form; every save reads the list from the hub first and sends it whole with the change);
   - `Chat.tsx` — the composer completes `/` from the session's `commands` (T27: arrows, Tab or
-    Enter, Esc, a tap); its bolt button opens the project's quick messages, a press of one sends it;
+    Enter, Esc, a tap); its bolt button opens the user's quick messages, then the project's, a press
+    of one sends it;
   - `Chat.tsx` — the header (the title renamed in place; the state, the permission mode and the
     model as pills, their menus switching them, the model's with the usage limits; worker, path
     and cost from `usage`; "Pause" or "Resume" before "Stop"; the "More" menu; on a phone the
@@ -116,7 +118,8 @@ A 12-megapixel photo takes about a second. libheif is LGPL-3.0; its license is i
   - `cards.tsx` — messages, tool groups, service lines, the agent's question;
     `permission.tsx` — the permission card (Enter/Esc, reply with text, collapsed line);
   - `Settings` (the app theme first: a row of dark and a row of light tiles, applied on a
-    click; the look, Compact or Spacious, the user's like the theme; the keys of the actions,
+    click; the look, Compact or Spacious, the user's like the theme; the user's own quick
+    messages; the keys of the actions,
     Keys, kept on the device by `keys.ts`; notifications; workers), `Enroll` — pages; `Markdown.tsx` — markdown and code blocks with
     "Copy"; `icons.tsx` — icons; `labels.ts` — labels and formats.
   `src/clipboard.ts` — copying through `navigator.clipboard`, or a hidden textarea if the API is missing

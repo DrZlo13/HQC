@@ -158,6 +158,12 @@ describe('layout widths', () => {
     expect([pills['height'], pills['border-radius']]).toEqual(['20px', '10px']);
   });
 
+  it("the user's quick messages in Settings stand across the page, as the project settings' section", () => {
+    // The page's body lines its parts up at their own width (`align-items: flex-start`).
+    expect(rule('.page-body')['align-items']).toBe('flex-start');
+    expect(rule('.settings-quick')['align-self']).toBe('stretch');
+  });
+
   it("an option's box keeps its 18px beside a long description, the Other field takes the rest", () => {
     expect(rule('.choice input')['flex']).toBe('none');
     expect(rule('.choice-other .input')['flex']).toBe('1');
@@ -286,5 +292,21 @@ describe('notes and spinners', () => {
     expect(rule('.spinner')['animation']).toBe('spin 0.8s linear infinite');
     // In a line the spinner is as tall as the text; centred, 20 px.
     expect([rule('.spinner')['width'], rule('.loading-center .spinner')['width']]).toEqual(['1em', '20px']);
+  });
+});
+
+describe('a message swiped to the left', () => {
+  it('keeps the vertical scroll to the browser and the horizontal to the swipe, and goes back by a transition', () => {
+    expect(rule('.feed-block.feed-swipe')['touch-action']).toBe('pan-y pinch-zoom');
+    expect(rule('.feed-block.feed-swipe').transition).toContain('transform');
+    expect(rule('.feed-block.is-swiping').transition).toBe('none');
+    expect(rule('.feed-swipe-icon').display).toBe('none');
+  });
+});
+
+describe("the owner's quote", () => {
+  it('keeps its line breaks above the time too, outside the text whose pre-wrap keeps them', () => {
+    expect(rule('.msg-text')['white-space']).toBe('pre-wrap');
+    expect(rule('.msg-quote')['white-space']).toBe('pre-wrap');
   });
 });

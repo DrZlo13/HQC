@@ -3053,6 +3053,37 @@ button.btn-mode-pill.perm-allow-all:hover,
   padding: 28px 28px 32px;
 }
 
+/* The timeline, and the button to the bottom in the middle of its bottom edge while the feed does
+   not follow its bottom (Chat.tsx): the send button's corners, wider than it is high. Under the
+   menus of the header and the composer's popups. */
+.timeline-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.btn-to-bottom {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  z-index: 5;
+  transform: translateX(-50%);
+  width: 56px;
+  height: 28px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text2);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--shade) 35%, transparent);
+}
+:root.feed-column .chat:not(.chat-phone) .btn-to-bottom {
+  width: 48px;
+  height: 24px;
+}
+.chat-phone .btn-to-bottom {
+  bottom: 12px;
+}
+
 .feed {
   width: 100%;
   max-width: 780px;
@@ -3139,6 +3170,38 @@ button.btn-mode-pill.perm-allow-all:hover,
 /* The anchor of a block's gutter mark (the one-column feed). */
 .feed-block {
   position: relative;
+}
+
+/* A message pulled to the left (swipequote.ts): it follows the finger, goes back by a transition,
+   and the quote mark comes out at its right at the finger's height. */
+.feed-block.feed-swipe {
+  touch-action: pan-y pinch-zoom;
+  transition: transform 0.18s ease-out;
+}
+.feed-block.is-swiping {
+  transition: none;
+}
+.feed-swipe-icon {
+  display: none;
+}
+.is-swiping > .feed-swipe-icon {
+  position: absolute;
+  left: 100%;
+  top: calc(var(--swipe-y) * 1px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: var(--muted);
+  background: var(--surface);
+  transform: translate(calc(var(--swipe-x) * 0.5px - 50%), -50%) scale(var(--swipe));
+  opacity: var(--swipe);
+  pointer-events: none;
+}
+.is-armed > .feed-swipe-icon {
+  color: var(--accent-text);
 }
 
 /* The Compact look (applyLook): the feed and the composer across the chat column. */
@@ -3502,6 +3565,30 @@ button.btn-mode-pill.perm-allow-all:hover,
    next to it. */
 .msg-bubble > .msg-text {
   display: inline;
+}
+/* A run of `>` lines in the user's text: a quote block, as in Telegram. The pointer cursor: iOS
+   Safari fires a click on a non-interactive element only with one, and a click takes the chat to
+   what the quote quotes (quotejump.ts). */
+.msg-quote {
+  /* Inline, as the text it stands in is (next to the bubble's floated time): a block would wrap
+     a short quote under the time, mid-word. */
+  display: inline-block;
+  vertical-align: top;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 4px 0;
+  padding-left: 8px;
+  border-left: 3px solid var(--accent);
+  color: var(--muted);
+  cursor: pointer;
+  /* Its own: a leading quote stands outside `.msg-text`, whose pre-wrap keeps the line breaks. */
+  white-space: pre-wrap;
+}
+/* A quote that starts the message: a block above the time (the time floats on the line of the
+   text after it). */
+.msg-quote-lead {
+  display: block;
+  margin: 0 0 4px;
 }
 
 .delivery-failed {
@@ -6125,6 +6212,15 @@ button.ps-look {
   font-size: 15px;
 }
 
+/* The user's quick messages in Settings: the page's body lines its parts up at their own width,
+   so the list is stretched across it as the project settings' section is. */
+.settings-quick {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-self: stretch;
+}
+
 /* A quick message on a phone: its text across the card, Edit and Delete side by side under it. */
 .is-phone .quick-row {
   flex-direction: column;
@@ -8026,6 +8122,9 @@ button.ps-look {
 .feed-block.is-found {
   border-radius: 10px;
   animation: found 2.4s ease-out;
+}
+::highlight(quote-jump) {
+  background-color: var(--accent-soft);
 }
 @keyframes found {
   from {

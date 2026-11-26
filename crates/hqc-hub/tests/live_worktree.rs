@@ -139,6 +139,7 @@ async fn live_a_spawns_b_in_a_worktree() {
         machine_id: None,
         known_paths_file: run.join("home/known_workspaces.json"),
         mcp_socket: Some(socket),
+        drain: None,
         logs: None,
         mirror: None,
     };

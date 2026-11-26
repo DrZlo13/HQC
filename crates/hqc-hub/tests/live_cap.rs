@@ -111,6 +111,7 @@ async fn live_a_in_ask_asks_b_in_auto_and_b_asks_too() {
         machine_id: None,
         known_paths_file: run.join("home/known_workspaces.json"),
         mcp_socket: Some(socket),
+        drain: None,
         logs: None,
         mirror: None,
     };

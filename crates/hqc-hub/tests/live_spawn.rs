@@ -110,6 +110,7 @@ async fn live_a_spawns_b_and_bs_first_turn_runs() {
         machine_id: None,
         known_paths_file: run.join("home/known_workspaces.json"),
         mcp_socket: Some(socket),
+        drain: None,
         logs: None,
         mirror: None,
     };

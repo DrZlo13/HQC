@@ -13,6 +13,9 @@
 //!   inside `allowed_roots` and the top folder of a git repository; the new path is checked and
 //!   created as for a clone, recorded with its origin, and `git worktree add` runs in the origin
 //!   in the environment of the new path. A branch checked out in another worktree is refused.
+//!   A new branch starts from the origin's `HEAD`, or from `base` (SPEC 0.265), which git
+//!   resolves to a commit in the origin: the branch tracks nothing, and an existing branch is
+//!   never reset.
 //! - `workspace.delete` removes only a folder of that list, by its canonical path: the hub
 //!   cannot name another one (SPEC §2.1). A worktree goes with `git worktree remove` in its
 //!   origin (`--force` only when the hub says the user confirmed the uncommitted files), then
@@ -30,9 +33,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use hqc_proto::frame::{
-    check_branch, check_clone_url, CloneFrom, Unpushed, WorkerFrame, WorkspaceCreate,
-    WorkspaceCreated, WorkspaceDelete, WorkspaceDeleteResult, WorkspaceInspectResult,
-    WorkspaceSource, MAX_DIRTY, MAX_UNPUSHED,
+    branch_exists, check_base, check_branch, check_clone_url, CloneFrom, Unpushed, WorkerFrame,
+    WorkspaceCreate, WorkspaceCreated, WorkspaceDelete, WorkspaceDeleteResult,
+    WorkspaceInspectResult, WorkspaceSource, MAX_DIRTY, MAX_UNPUSHED,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt as _;
@@ -284,14 +287,16 @@ impl Workspaces {
                 origin,
                 branch,
                 new_branch,
+                base,
             } => {
                 let origin = self.origin(origin, known)?;
                 let env = self.cfg.environment(&origin);
-                let (o, b, new) = (origin.clone(), branch.clone(), *new_branch);
-                let (options, commit) =
-                    tokio::task::spawn_blocking(move || worktree_args(&env, &o, &b, new))
-                        .await
-                        .map_err(|e| format!("checking the branch: {e}"))??;
+                let (o, b, new, base) = (origin.clone(), branch.clone(), *new_branch, base.clone());
+                let (options, commit) = tokio::task::spawn_blocking(move || {
+                    worktree_args(&env, &o, &b, new, base.as_deref())
+                })
+                .await
+                .map_err(|e| format!("checking the branch: {e}"))??;
                 Run::Worktree {
                     origin,
                     options,
@@ -635,7 +640,8 @@ enum Run<'a> {
 }
 
 /// The checks of a worktree's branch in its `origin` and what `git worktree add` gets for it:
-/// a new branch from `HEAD` (refused if it exists), a local branch that no worktree has
+/// a new branch from `HEAD` or the commit `base` resolves to (refused if the branch exists; a
+/// `base` only with a new branch), a local branch that no worktree has
 /// checked out, or a branch of exactly one remote, which becomes a local branch tracking it.
 /// The name passes [`check_branch`] and `git check-ref-format --branch`.
 fn worktree_args(
@@ -643,19 +649,45 @@ fn worktree_args(
     origin: &Path,
     branch: &str,
     new_branch: bool,
+    base: Option<&str>,
 ) -> Result<(Vec<OsString>, String), String> {
     check_branch(branch)?;
+    if base.is_some() && !new_branch {
+        return Err("a base goes only with a new branch".into());
+    }
     git_output(env, origin, &["check-ref-format", "--branch", branch])
         .map_err(|_| format!("{branch:?} is not a branch name"))?;
     let local = format!("refs/heads/{branch}");
     let exists = git_output(env, origin, &["rev-parse", "--verify", "--quiet", &local]).is_ok();
     if new_branch {
         if exists {
-            return Err(format!(
-                "the branch {branch} exists already: pick it as an existing branch"
-            ));
+            return Err(branch_exists(branch));
         }
-        return Ok((vec!["-b".into(), branch.into()], "HEAD".into()));
+        let commit = match base {
+            None => "HEAD".into(),
+            Some(b) => {
+                // Not an option (no leading `-`); `^{commit}` peels a tag and refuses a tree.
+                check_base(b)?;
+                git_output(
+                    env,
+                    origin,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("{b}^{{commit}}"),
+                    ],
+                )
+                .map(|c| c.trim().to_string())
+                .map_err(|_| {
+                    format!(
+                        "there is no branch, tag or commit {b} in {}",
+                        origin.display()
+                    )
+                })?
+            }
+        };
+        return Ok((vec!["-b".into(), branch.into()], commit));
     }
     if exists {
         let list = git_output(env, origin, &["worktree", "list", "--porcelain"])?;
@@ -927,8 +959,16 @@ mod tests {
                 origin: origin.to_string_lossy().into_owned(),
                 branch: branch.into(),
                 new_branch,
+                base: None,
             },
         }
+    }
+
+    fn based(mut req: WorkspaceCreate, b: &str) -> WorkspaceCreate {
+        if let WorkspaceSource::Worktree { base, .. } = &mut req.source {
+            *base = Some(b.into());
+        }
+        req
     }
 
     fn listed(fx: &Fx) -> Vec<Entry> {
@@ -1321,6 +1361,77 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(ws.created(), [c6, fix, side, feature, y]);
+    }
+
+    /// A new branch from `base` (SPEC 0.265): a local branch, a remote branch or a commit,
+    /// resolved to its commit, so the new branch tracks nothing; a base that is no commit, one
+    /// that could be an option, or one with an existing branch is refused and leaves nothing.
+    #[tokio::test]
+    async fn worktree_from_a_base() {
+        let fx = Fx::new();
+        let ws = fx.workspaces(fx.config(""));
+        let c6 = origin(&fx, &ws).await;
+        let first = git_read(&c6, &["rev-parse", "HEAD"]).unwrap();
+        git(&c6, &["commit", "--allow-empty", "-m", "second"]);
+        let second = git_read(&c6, &["rev-parse", "HEAD"]).unwrap();
+        git(&c6, &["update-ref", "refs/remotes/origin/old", &first]);
+        git(&c6, &["tag", "v1", &first]);
+
+        for (name, base, want) in [
+            ("from-remote", "origin/old", &first),
+            ("from-tag", "v1", &first),
+            ("from-commit", &first[..12], &first),
+            ("from-parent", "main~1", &first),
+            ("from-main", "main", &second),
+        ] {
+            let path = fx.root.join(format!("c6-{name}"));
+            ws.make(&based(worktree_req(&path, &c6, name, true), base), &[])
+                .await
+                .unwrap();
+            assert_eq!(
+                git_read(&path, &["rev-parse", "HEAD"]).as_ref(),
+                Some(want),
+                "{name}"
+            );
+            assert_eq!(
+                git_read(
+                    &path,
+                    &["rev-parse", "--abbrev-ref", &format!("{name}@{{upstream}}")]
+                ),
+                None,
+                "{name} tracks nothing"
+            );
+        }
+
+        let x = fx.root.join("c6-x");
+        for (req, why) in [
+            (
+                based(worktree_req(&x, &c6, "x", true), "nope"),
+                "no branch, tag or commit",
+            ),
+            (
+                based(worktree_req(&x, &c6, "x", true), "--orphan"),
+                "is not a branch, tag or commit",
+            ),
+            (
+                based(worktree_req(&x, &c6, "x", true), "a b"),
+                "is not a branch, tag or commit",
+            ),
+            (
+                based(worktree_req(&x, &c6, "main", false), "v1"),
+                "only with a new branch",
+            ),
+            (
+                based(worktree_req(&x, &c6, "from-tag", true), "main"),
+                "exists already",
+            ),
+        ] {
+            let e = ws.make(&req, &[]).await.unwrap_err();
+            assert!(e.contains(why), "{req:?}: {e}");
+        }
+        assert!(!x.exists());
+        // The existing branch kept its commit.
+        assert_eq!(git_read(&c6, &["rev-parse", "from-tag"]), Some(first));
     }
 
     /// The branch `hqc_spawn` names a worktree after (T47): `hqc/` and the session's slug, new

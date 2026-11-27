@@ -5637,6 +5637,27 @@ a.relay-peer {
   gap: 4px;
   padding: 4px 6px 6px;
 }
+/* A new session's worktree (SPEC 0.265): the existing branch's switch, and Done beside "No
+   worktree". */
+.menu-field-check {
+  max-width: 260px;
+  font-size: 13px;
+  color: var(--text2);
+}
+.menu-field-row {
+  flex-direction: row;
+}
+/* What a new session waits for under its first message (its worktree, SPEC 0.265). */
+.new-starting {
+  padding: 4px 0;
+  font-size: 13px;
+  color: var(--text2);
+  text-align: right;
+}
+/* A way out of a refused new session, beside the reason (the existing branch). */
+.notice .notice-action {
+  margin-left: 6px;
+}
 
 /* ---- phone chat (Mobile-Session) ---- */
 

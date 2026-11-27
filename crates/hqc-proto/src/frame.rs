@@ -789,14 +789,20 @@ pub enum WorkspaceSource {
         branch: Option<String>,
     },
     /// `git worktree add` in `origin`, a git workspace the worker knows (T46): `branch` checked
-    /// out at `path`, or with `new_branch` created there from the origin's `HEAD`. Runs in the
-    /// environment of `path`.
+    /// out at `path`, or with `new_branch` created there from the origin's `HEAD`, or from
+    /// `base` (since SPEC 0.265). Runs in the environment of `path`.
     Worktree {
         /// The origin workspace's canonical path.
         origin: String,
         branch: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         new_branch: bool,
+        /// Only with `new_branch`: what the new branch starts from instead of the origin's
+        /// `HEAD`, a branch, a remote branch (`origin/main`), a tag or a commit, as
+        /// [`check_base`] allows it; the worker resolves it to a commit in the origin, so the
+        /// new branch tracks nothing. Sent only to a worker whose `hello` has `worktree_base`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
     },
 }
 
@@ -943,6 +949,35 @@ pub fn check_branch(b: &str) -> Result<(), String> {
     } else {
         Err(format!("{b:?} is not a branch name"))
     }
+}
+
+/// What a new worktree's branch starts from (SPEC 0.265): a branch, a remote branch, a tag or a
+/// commit, `~`/`^` suffixes included: letters, digits and `._/-~^`, not starting with `-` or `/`,
+/// without `..`, at most 255 bytes. The worker resolves it with git in the origin.
+pub fn check_base(b: &str) -> Result<(), String> {
+    let ok = (1..=255).contains(&b.len())
+        && b.bytes().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'/' | b'-' | b'~' | b'^')
+        })
+        && !b.starts_with(['-', '/'])
+        && !b.contains("..");
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("{b:?} is not a branch, tag or commit"))
+    }
+}
+
+/// The worker's reason for a new worktree branch that exists already (T46); the hub tells it
+/// from other failures by [`is_branch_exists`] and offers the existing branch (SPEC 0.265).
+pub fn branch_exists(branch: &str) -> String {
+    format!("the branch {branch} exists already: pick it as an existing branch")
+}
+
+/// The reason is [`branch_exists`]'s.
+pub fn is_branch_exists(error: &str) -> bool {
+    error.starts_with("the branch ")
+        && error.ends_with(" exists already: pick it as an existing branch")
 }
 
 /// `title.request {request_id, session_id, user_text, agent_text}` -> `result {request_id,
@@ -2554,11 +2589,13 @@ mod tests {
             origin,
             branch,
             new_branch,
+            base,
         } = &w.source
         else {
             panic!("not a worktree");
         };
         assert!(check_branch(branch).is_ok() && *new_branch);
+        assert!(check_base(base.as_deref().unwrap()).is_ok());
         assert!(w.path.starts_with(&format!("{origin}-")));
         let d: Envelope<HubFrame> =
             serde_json::from_str(include_str!("../examples/wire/hub.workspace.delete.json"))
@@ -2656,6 +2693,30 @@ mod tests {
         ] {
             assert!(check_branch(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn worktree_bases() {
+        for ok in [
+            "main",
+            "origin/main",
+            "v1.2.3",
+            "HEAD~2",
+            "a1b2c3d",
+            "main^",
+        ] {
+            assert!(check_base(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "", "-b", "--orphan", "/a", "a..b", "a b", "a:b", "a@{1}", "$(x)",
+        ] {
+            assert!(check_base(bad).is_err(), "{bad:?}");
+        }
+        let e = branch_exists("hqc/fix");
+        assert!(is_branch_exists(&e));
+        assert!(!is_branch_exists(
+            "the branch x is already checked out at /a"
+        ));
     }
 
     #[test]

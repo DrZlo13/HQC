@@ -840,7 +840,7 @@ impl FakeWorker {
         self.seen.push_back(f.clone());
     }
 
-    async fn recv_within(&mut self, d: Duration) -> Option<Value> {
+    pub async fn recv_within(&mut self, d: Duration) -> Option<Value> {
         let deadline = tokio::time::Instant::now() + d;
         loop {
             let f = match self.queue.pop_front() {

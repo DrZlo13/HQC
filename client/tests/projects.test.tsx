@@ -539,9 +539,12 @@ it('makes a worktree of a workspace, shows it under its origin and deletes it th
   row('/work/hold-wt')!.querySelector<HTMLButtonElement>('.btn-new-worktree')!.click();
   await until('worktree form', () => $('.new-worktree input[name=branch]'));
   type('.new-worktree input[name=branch]', 'dirty');
+  expect($('.new-worktree input[name=base]')).not.toBeNull();
   $<HTMLInputElement>('.new-worktree input[value=existing]')!.click();
   type('.new-worktree input[name=path]', '/Users/home-mac/work/wt-dirty');
   await settle();
+  // An existing branch starts from nothing (SPEC 0.265).
+  expect($('.new-worktree input[name=base]')).toBeNull();
   submit('.new-worktree');
   await until('edited folder', () => row('/work/wt-dirty')?.querySelector('.btn-rules'));
   row('/work/hold-wt')!.querySelector<HTMLButtonElement>('.btn-new-worktree')!.click();
@@ -594,7 +597,7 @@ it('shows a spawned session’s worktree for deletion once its sessions are arch
   await app.loadWorkspaces(pid);
   const end = '/work/hold-wt-hqc-session-5';
   await until('spawned worktree', () => row(end));
-  expect(row(end)!.querySelector('.workspace-ephemeral')!.textContent).toBe('spawned');
+  expect(row(end)!.querySelector('.workspace-ephemeral')!.textContent).toBe('for a session');
   expect(row(end)!.querySelector('.workspace-branch')!.textContent).toBe('hqc/session-5');
   expect(row(end)!.querySelector('.workspace-marked')).toBeNull();
   expect(row(end)!.querySelector('.btn-remove-workspace')!.textContent).toBe('Remove');
@@ -617,7 +620,7 @@ it('shows a spawned session’s worktree for deletion once its sessions are arch
   expect(mock.removedWorkspaces.find((w) => w.path.endsWith(end))).toBeUndefined();
   row(end)!.querySelector<HTMLButtonElement>('.btn-remove-workspace')!.click();
   await until('dialog checked', () => $('.delete-folder .delete-unpushed'));
-  expect($('.delete-what')!.textContent).toContain('for a session an agent started');
+  expect($('.delete-what')!.textContent).toContain('for the session started in it');
   expect($('.delete-unpushed')!.textContent).toContain('1 commit not pushed on hqc/session-5.');
   button('Delete folder', '.delete-folder')!.click();
   await until('deleted', () => !row(end) && !$('.delete-folder'));
@@ -635,6 +638,53 @@ it('opens the session last open in a project', async () => {
   await until('other project', () => app.currentProject()?.id === other.id);
   location.hash = `#/p/${personal}`;
   await until('reopened', () => location.hash === `#/s/${s.id}`);
+});
+
+it('starts a new session in a new worktree from the workspace chip (SPEC 0.265)', async () => {
+  const pid = app.sortedProjects().find((p) => p.name === 'Worktrees')!.id;
+  const origin = app.workspaces.get(pid)!.find((w) => w.path.endsWith('/work/hold-wt'))!;
+  location.hash = `#/p/${pid}/new`;
+  await until('new session window', () => app.newSession?.projectId === pid && $('.chat-new .btn-chip-workspace'));
+  $<HTMLButtonElement>('.btn-chip-workspace')!.click();
+  const pick = await until('origin in the menu', () =>
+    $$('.ctx-menu .btn-pick-workspace').find((b) => b.textContent?.endsWith('/work/hold-wt')),
+  );
+  pick.click();
+  await settle();
+  $<HTMLButtonElement>('.btn-chip-workspace')!.click();
+  (await until('new worktree item', () => $<HTMLButtonElement>('.ctx-menu .btn-new-worktree')))!.click();
+  await until('worktree form', () => $('.ctx-menu input[name=branch]'));
+  expect($<HTMLInputElement>('.ctx-menu input[name=branch]')!.placeholder).toBe('hqc/session-N');
+  expect($<HTMLInputElement>('.ctx-menu input[name=existing]')!.disabled).toBe(true);
+  type('.ctx-menu input[name=branch]', 'fix/exists-one');
+  await settle();
+  type('.ctx-menu input[name=base]', 'origin/main');
+  await settle();
+  expect($('.btn-chip-workspace')!.textContent).toContain('Worktree fix/exists-one of hold-wt');
+  expect($('.btn-chip-workspace')!.getAttribute('title')).toContain('a new branch fix/exists-one from origin/main');
+  button('Done', '.ctx-menu')!.click();
+  await settle();
+
+  // The branch exists: the window says so, keeps the draft, and offers the existing branch.
+  type('.chat-new .composer-input', 'Show the markdown sample');
+  await settle();
+  submit('.chat-new form.composer');
+  await until('waits for the worktree', () => $('.chat-new .new-starting')?.textContent === 'Making the worktree…', 2000);
+  const notice = await until('refused', () => $('.chat-new .notice'));
+  expect(notice.textContent).toContain('exists already');
+  await until('draft kept', () => $<HTMLTextAreaElement>('.chat-new .composer-input')?.value === 'Show the markdown sample');
+  button('Check out the existing fix/exists-one instead', '.chat-new .notice')!.click();
+  await settle();
+  expect($('.chat-new .notice')).toBeNull();
+  expect($('.btn-chip-workspace')!.getAttribute('title')).toContain('the existing branch fix/exists-one');
+
+  submit('.chat-new form.composer');
+  await until('chat', () => location.hash.startsWith('#/s/') && $('.chat:not(.chat-new) textarea'));
+  const s = await app.api.session(location.hash.split('/')[2]);
+  const wt = app.workspaces.get(pid)!.find((w) => w.id === s.workspace_id)!;
+  expect(wt).toMatchObject({ kind: 'worktree', ephemeral: true, origin_workspace_id: origin.id, branch: 'fix/exists-one' });
+  expect(wt.path).toBe(`${origin.path}-fix-exists-one`);
+  await until('its turn ended', () => app.sessions.get(s.id)?.state === 'idle');
 });
 
 it('orders the project bar by name or by hand, and keeps the order in the hub', async () => {

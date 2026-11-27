@@ -1191,10 +1191,10 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (body?.session_ids) orders.set(pid, orderOf(pid));
     return orderOf(pid);
   });
-  route('POST', '/api/projects/:pid/sessions', (p, body) => {
+  route('POST', '/api/projects/:pid/sessions', async (p, body) => {
     const pr = projectOr404(p.pid);
     const wsId = body?.workspace_id ?? pr.default_workspace_id;
-    const ws = workspaces.get(wsId);
+    let ws = workspaces.get(wsId);
     if (!wsId) throw fail(409, 'no_workspace', 'the project has no workspace; add one first');
     if (!ws || ws.project_id !== pr.id) throw fail(400, 'bad_request', 'workspace_id is not a workspace of this project');
     if (ws.state && ws.state !== 'ready') throw fail(409, 'workspace_not_ready', `the worker is still making ${ws.path}`);
@@ -1202,6 +1202,26 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     const mode = body?.permission_mode;
     if (mode !== undefined && !MODES.includes(mode)) throw fail(400, 'bad_request', 'permission_mode is ask, auto or allow_all');
     const agent = agentSettings({}, body);
+    if (body?.isolation === 'worktree') {
+      // SPEC 0.265: a new ephemeral worktree of the workspace, made for a moment; a new branch
+      // whose name has `exists` in it exists already.
+      if (ws.kind === 'worktree') throw fail(400, 'invalid_origin', 'the origin is a worktree itself: make the worktree from its origin');
+      const branch = String(body.branch || `hqc/session-${n}`);
+      await new Promise((r) => setTimeout(r, 300 * speed));
+      if (branch.includes('exists') && !body.existing_branch) {
+        throw fail(409, 'branch_exists', `the worktree could not be made: the branch ${branch} exists already: pick it as an existing branch`);
+      }
+      const path = `${ws.path}-${branch.replace(/\//g, '-')}`;
+      const w = {
+        ...ws, id: randomUUID(), path, label: '', kind: 'worktree', origin_workspace_id: ws.id, branch,
+        ephemeral: true, created_by_hqc: true, mirror_enabled: false, hqc_rules: 0, state: 'ready',
+        created_at: now(), updated_at: now(),
+      };
+      workspaces.set(w.id, w);
+      const cut = path.lastIndexOf('/');
+      (TREE[path.slice(0, cut)] ??= []).push(path.slice(cut + 1));
+      ws = w;
+    }
     const s = newSession(String(body?.title || `Session ${n}`), randomUUID(), {
       project_id: pr.id, workspace_id: ws.id, cwd: String(body?.cwd || '.'),
     });

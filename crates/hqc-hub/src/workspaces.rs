@@ -23,7 +23,7 @@ use axum::{
 use hqc_proto::{
     api::{self, CreateWorkspace, WorkspaceInspection, WorkspaceState},
     frame::{
-        check_branch, check_clone_url, FsStat, HubFrame, ResultBody, WorkspaceCreate,
+        check_base, check_branch, check_clone_url, FsStat, HubFrame, ResultBody, WorkspaceCreate,
         WorkspaceCreated, WorkspaceDelete, WorkspacePath, WorkspaceSource,
     },
 };
@@ -82,8 +82,11 @@ pub async fn create_clone(
 /// (T46): the origin is a ready workspace of the same project and worker and not a worktree
 /// itself (`400 invalid_origin`); whether it is a git repository only the worker knows (the
 /// worktree fails then). `path` defaults to `<origin-parent>/<origin-name>-<branch>` with the
-/// branch's slashes as `-`, and is checked as a clone's ([`new_folder`]). `ephemeral`: the id
-/// of `hqc_spawn`'s worktree for the session it starts (T47).
+/// branch's slashes as `-`, and is checked as a clone's ([`new_folder`]). `base` (SPEC 0.265):
+/// what a new branch starts from instead of the origin's `HEAD`, only with `new_branch`
+/// (`400 invalid_base`) and only on a worker whose `hello` has `worktree_base` (`409
+/// worker_outdated`; an older one would start from `HEAD`). `ephemeral`: the id of the worktree
+/// `hqc_spawn` or a new session with isolation makes for its session (T47, SPEC 0.265).
 #[allow(clippy::too_many_arguments)]
 pub async fn create_worktree(
     app: &AppState,
@@ -118,6 +121,22 @@ pub async fn create_worktree(
     }
     let branch = b.branch.as_deref().map(str::trim).unwrap_or("");
     check_branch(branch).map_err(|e| ApiError::Invalid("invalid_branch", e))?;
+    let base = b.base.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if let Some(base) = base {
+        if !b.new_branch {
+            return Err(ApiError::Invalid(
+                "invalid_base",
+                "a base goes only with a new branch".into(),
+            ));
+        }
+        check_base(base).map_err(|e| ApiError::Invalid("invalid_base", e))?;
+        if worker.capabilities["worktree_base"] != true {
+            return Err(ApiError::Conflict(
+                "worker_outdated",
+                "the worker cannot start a worktree's branch from a base yet; update it".into(),
+            ));
+        }
+    }
     let path = match b.path.trim() {
         "" => default_worktree_path(&origin.path, branch),
         p => p.to_string(),
@@ -136,6 +155,7 @@ pub async fn create_worktree(
                 origin: origin.id,
                 branch,
                 new_branch: b.new_branch,
+                base,
             },
             ephemeral,
         },
@@ -261,6 +281,7 @@ pub async fn send_create(
                 origin: origin.path,
                 branch: ws.branch.clone().unwrap_or_default(),
                 new_branch: ws.new_branch,
+                base: ws.base.clone(),
             }
         }
         (None, None) => return Ok(()),

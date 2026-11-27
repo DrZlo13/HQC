@@ -213,26 +213,30 @@ async fn worktree_of_a_workspace() {
     hub.finish().await;
 }
 
-/// A worktree in progress is asked for again after a reconnect (with its origin's rules) and
-/// fails on a worker restart, like a clone.
+/// A worktree in progress is asked for again after a reconnect (with its origin's rules and,
+/// since SPEC 0.265, its base) and fails on a worker restart, like a clone.
 #[tokio::test]
 async fn worktree_resent_after_hello_and_failed_on_restart() {
     let hub = TestHub::start().await;
     let (_, token) = hub.enroll("home-mac").await;
     let mut w = FakeWorker::connect(&hub, &token).await.unwrap();
-    w.hello(ROOT, hub.boot_id).await;
+    let base = json!({"capabilities": {"claude_code": {"version": "2.1.307"}, "acp_agents": [],
+                                       "worktree_base": true}});
+    w.hello_with(ROOT, hub.boot_id, base.clone()).await;
     let pid = hub.personal_project().await;
     let c6 = ready_clone(&hub, &mut w, &pid, "/w/c6-missing").await;
-    let (s, v) = worktree(&hub, &mut w, &pid, &c6, "a", json!({})).await;
+    let (s, v) = worktree(&hub, &mut w, &pid, &c6, "a", json!({"base": "v1.2"})).await;
     assert_eq!(s, 201, "{v}");
     let a = v["id"].as_str().unwrap().to_string();
-    create_frame(&mut w, &a).await;
+    let f = create_frame(&mut w, &a).await;
+    assert_eq!(f["payload"]["base"], "v1.2");
     w.close().await;
 
     let mut w = FakeWorker::connect(&hub, &token).await.unwrap();
-    w.hello(ROOT, hub.boot_id).await;
+    w.hello_with(ROOT, hub.boot_id, base).await;
     let f = create_frame(&mut w, &a).await;
     assert_eq!(f["payload"]["origin"], "/w/c6-missing");
+    assert_eq!(f["payload"]["base"], "v1.2");
     assert!(w
         .rules
         .iter()

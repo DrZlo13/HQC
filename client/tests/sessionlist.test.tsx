@@ -3191,7 +3191,13 @@ describe('a new session', () => {
     // The workspace's menu: each with its worker and whole path, "Add a workspace…" under them.
     await click(root.querySelector('.btn-chip-workspace'));
     expect(root.querySelector('.ctx-menu .menu-head')!.textContent).toBe('Workspace');
-    expect(menuItems()).toEqual(['phys-mphome-mac:~/work/games/phys-mp', 'phys-detdrzlo-mac:~/work/games/phys-det', 'Add a workspace…']);
+    // A worktree of the chosen folder (SPEC 0.265), then a new workspace.
+    expect(menuItems()).toEqual([
+      'phys-mphome-mac:~/work/games/phys-mp',
+      'phys-detdrzlo-mac:~/work/games/phys-det',
+      'New worktree…of phys-mp',
+      'Add a workspace…',
+    ]);
     expect(root.querySelector('.ctx-menu .btn-add-workspace')!.getAttribute('href')).toBe('#/p/p1/settings');
     await click(root.querySelectorAll('.ctx-menu .btn-pick-workspace')[1]);
     expect(chips()[0]).toBe('phys-det · drzlo-mac');

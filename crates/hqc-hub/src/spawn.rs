@@ -25,6 +25,10 @@
 //!   the worker made it ([`Answer::Wait`]), then creates the session there and also returns
 //!   the worktree's path and branch. A failed worktree fails the call with the worker's reason
 //!   and leaves neither a session nor the record. A worktree being made counts as a spawn.
+//!   `base` (SPEC 0.265): the new branch starts there instead of the origin's `HEAD`.
+//! - `POST /api/projects/{id}/sessions` with `isolation: "worktree"` (SPEC 0.265,
+//!   [`isolated_session`]): the owner's new session in such a worktree, by the same steps; the
+//!   branch may be an existing one there.
 //! - `hqc_room(project, workspace?, title?, mode?, agents, message)`: a room (SPEC §7.1.1) by
 //!   [`api::new_room`], the path of `POST /api/projects/{id}/rooms`, and `message` as its first
 //!   message from the caller, a `peer.message` that [`peers::into_room`] hands to the room's
@@ -88,6 +92,8 @@ struct SpawnArgs {
     isolation: Option<String>,
     /// The worktree's new branch (T47).
     branch: Option<String>,
+    /// What the new branch starts from (SPEC 0.265).
+    base: Option<String>,
 }
 
 /// `hqc_spawn(project, workspace?, runtime?, model?, provider?, prompt, isolation?, branch?)`:
@@ -107,10 +113,10 @@ pub async fn spawn(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<A
             ))
         }
     };
-    if a.branch.is_some() && !isolated {
+    if (a.branch.is_some() || a.base.is_some()) && !isolated {
         return Err(err(
             error_code::INVALID_ARGS,
-            "branch goes with isolation: worktree",
+            "branch and base go with isolation: worktree",
         ));
     }
     let chain = peers::outgoing_chain(app, caller, c, false).await?;
@@ -137,7 +143,7 @@ pub async fn spawn(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<A
     let (app, caller, c) = (app.clone(), caller.clone(), c.clone());
     Ok(Answer::Wait(Box::pin(async move {
         let ws = worktree(&app, &caller, &c, &chain, &a).await?;
-        let ws = ready(&app, ws).await?;
+        let ws = ready(&app, ws).await.map_err(api_error)?;
         let s = create(&app, &caller, id, &chain, &a, Some(&ws)).await?;
         started(&app, &caller, &c, &a, &s, &chain).await.map(Some)
     })))
@@ -221,23 +227,19 @@ async fn create(
         id,
         by: caller.id,
         chain_id,
-        // The N the default branch was named after.
-        number: ws.filter(|_| a.branch.is_none()).and_then(|ws| {
-            ws.branch
-                .as_deref()?
-                .strip_prefix(BRANCH_PREFIX)?
-                .parse()
-                .ok()
-        }),
     };
-    match api::new_session(app, caller.owner_id, &project, &req, Some(spawn)).await {
+    // The N the default branch was named after.
+    let number = ws
+        .filter(|_| a.branch.is_none())
+        .and_then(|ws| branch_number(ws.branch.as_deref()?));
+    match api::new_session(app, caller.owner_id, &project, &req, Some(spawn), number).await {
         Ok(s) => Ok(s),
         Err(ApiError::Unprocessable("provider_not_allowed", _)) if inherited => {
             let req = CreateSessionRequest {
                 provider_id: None,
                 ..req
             };
-            api::new_session(app, caller.owner_id, &project, &req, Some(spawn))
+            api::new_session(app, caller.owner_id, &project, &req, Some(spawn), number)
                 .await
                 .map_err(api_error)
         }
@@ -409,7 +411,6 @@ async fn create_room(
         id,
         by: caller.id,
         chain_id: chain.chain_id,
-        number: None,
     };
     match api::new_room(app, caller.owner_id, &project, &req, Some(spawn)).await {
         Ok(s) => Ok(s),
@@ -501,31 +502,134 @@ async fn worktree(
         Some(b) => b.to_string(),
         None => default_branch(app, project.id).await.map_err(internal)?,
     };
+    make_worktree(
+        app,
+        &project,
+        &worker,
+        caller.owner_id,
+        origin.id,
+        id,
+        branch,
+        true,
+        a.base.clone(),
+    )
+    .await
+    .map_err(api_error)?;
+    Ok(id)
+}
+
+/// The ephemeral worktree `id` of `origin` on `branch` (T46's checks), `creating` until the
+/// worker made it: a new branch from `base` (the origin's `HEAD` when absent), or the existing
+/// `branch`.
+#[allow(clippy::too_many_arguments)]
+async fn make_worktree(
+    app: &AppState,
+    project: &db::ProjectRow,
+    worker: &db::WorkerRow,
+    owner: Uuid,
+    origin: Uuid,
+    id: Uuid,
+    branch: String,
+    new_branch: bool,
+    base: Option<String>,
+) -> Result<(), ApiError> {
     let b = CreateWorkspace {
         kind: Some("worktree".into()),
         project_id: project.id,
         worker_id: worker.id,
         path: String::new(),
-        origin_workspace_id: Some(origin.id),
-        new_branch: true,
+        origin_workspace_id: Some(origin),
+        new_branch,
         label: None,
         create: false,
         url: None,
         branch: Some(branch),
+        base,
     };
-    let (_, ws) = crate::workspaces::create_worktree(
-        app,
-        &project,
-        &worker,
-        caller.owner_id,
-        b,
-        "",
-        false,
-        Some(id),
-    )
+    crate::workspaces::create_worktree(app, project, worker, owner, b, "", false, Some(id))
+        .await
+        .map(drop)
+}
+
+/// `POST /api/projects/{id}/sessions` with `isolation: "worktree"` (SPEC 0.265): the session
+/// starts in a new ephemeral worktree of the workspace `b` picks, as `hqc_spawn` makes one
+/// (T47): checked first as the session would be in that workspace, then the worktree on
+/// `branch` (`hqc/session-N` with the session's N when absent), new from `base`, or the
+/// existing one with `existing_branch`. The request waits until the worker made it, then
+/// creates the session there; a failed worktree leaves no record and is `409` with the worker's
+/// reason (`branch_exists` for a new branch that exists). The wait runs on its own task: an
+/// owner who goes away meanwhile still gets the session in the list.
+pub async fn isolated_session(
+    app: &AppState,
+    owner: Uuid,
+    project: db::ProjectRow,
+    b: CreateSessionRequest,
+) -> Result<SessionRow, ApiError> {
+    let branch = b
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let base = b
+        .base
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if b.existing_branch && (branch.is_none() || base.is_some()) {
+        return Err(ApiError::BadRequest(
+            "existing_branch needs branch and no base".into(),
+        ));
+    }
+    let (origin, worker, _) = api::session_place(app, owner, &project, &b).await?;
+    let id = db::new_id();
+    let number = {
+        // Held until the worktree is stored: a parallel default branch counts it.
+        let _lock = app.owner_lock("spawn", owner).await;
+        let (branch, number) = match branch {
+            Some(b) => (b, None),
+            None => {
+                let b = default_branch(app, project.id).await?;
+                let n = branch_number(&b);
+                (b, n)
+            }
+        };
+        make_worktree(
+            app,
+            &project,
+            &worker,
+            owner,
+            origin.id,
+            id,
+            branch,
+            !b.existing_branch,
+            base,
+        )
+        .await?;
+        number
+    };
+    let app = app.clone();
+    tokio::spawn(async move {
+        let ws = ready(&app, id).await?;
+        let req = CreateSessionRequest {
+            workspace_id: Some(ws.id),
+            worker_id: None,
+            isolation: None,
+            branch: None,
+            base: None,
+            existing_branch: false,
+            ..b
+        };
+        api::new_session(&app, owner, &project, &req, None, number).await
+    })
     .await
-    .map_err(api_error)?;
-    Ok(ws.0.id)
+    .map_err(|e| ApiError::Internal(anyhow::anyhow!("the new session's task: {e}")))?
+}
+
+/// The N of a default branch `hqc/session-N`.
+fn branch_number(branch: &str) -> Option<i64> {
+    branch.strip_prefix(BRANCH_PREFIX)?.parse().ok()
 }
 
 /// `hqc/session-N` with the N of the project's next default title, past the slugs and the
@@ -550,33 +654,36 @@ async fn default_branch(app: &AppState, project: Uuid) -> sqlx::Result<String> {
 }
 
 /// The worktree `id` once the worker made it. A failed one is removed (only its record was
-/// left) and fails the call with the worker's reason.
-async fn ready(app: &AppState, id: Uuid) -> Result<db::WorkspaceRow, McpError> {
+/// left) and fails the call with the worker's reason: `409 branch_exists` for a new branch that
+/// exists, else `409 worktree_failed`.
+async fn ready(app: &AppState, id: Uuid) -> Result<db::WorkspaceRow, ApiError> {
     let deadline = tokio::time::Instant::now() + WORKTREE_WAIT;
     loop {
-        let ws = db::workspace(&app.db, id)
-            .await
-            .map_err(internal)?
-            .ok_or_else(|| {
-                err(
-                    error_code::UNAVAILABLE,
-                    "the worktree was removed before the session started",
-                )
-            })?;
+        let ws = db::workspace(&app.db, id).await?.ok_or_else(|| {
+            ApiError::Conflict(
+                "worktree_removed",
+                "the worktree was removed before the session started".into(),
+            )
+        })?;
         match ws.state() {
             WorkspaceState::Ready => return Ok(ws),
             WorkspaceState::Failed => {
-                db::delete_workspace(&app.db, &ws).await.map_err(internal)?;
+                db::delete_workspace(&app.db, &ws).await?;
                 let why = ws.error.as_deref().unwrap_or("no reason");
                 tracing::info!(workspace_id = %id, error = %why, "spawn worktree failed, record removed");
-                return Err(err(
-                    error_code::UNAVAILABLE,
+                let code = if hqc_proto::frame::is_branch_exists(why) {
+                    "branch_exists"
+                } else {
+                    "worktree_failed"
+                };
+                return Err(ApiError::Conflict(
+                    code,
                     format!("the worktree could not be made: {why}"),
                 ));
             }
             WorkspaceState::Creating if tokio::time::Instant::now() >= deadline => {
-                return Err(err(
-                    error_code::UNAVAILABLE,
+                return Err(ApiError::Conflict(
+                    "worktree_timeout",
                     format!(
                         "the worker has not made the worktree {} in {} minutes; no session was started",
                         ws.path,

@@ -113,6 +113,18 @@ export interface NewSessionOptions {
   /** A provider the workspace's worker allows (SPEC 0.144); absent: the runtime's own
    *  endpoint. */
   provider_id?: string;
+  /** The session starts in a new worktree of the workspace (SPEC 0.265): the request waits
+   *  until the worker made it. */
+  worktree?: NewWorktree;
+}
+
+/** A new session's worktree (SPEC 0.265): its branch (`hqc/session-N` after the session when
+ *  empty), new from `base` (the workspace's `HEAD` when empty), or the existing branch with
+ *  `existing`. */
+export interface NewWorktree {
+  branch: string;
+  base: string;
+  existing?: boolean;
 }
 
 /** `POST /api/projects/{id}/rooms`: a room and one member session per agent, at least one. The
@@ -439,13 +451,21 @@ export class Api {
   /** No `title`: the hub's default "Session N", which the runtime's title may replace. No
    *  `workspace_id`: the project's default workspace; `cwd` is relative to it (SPEC §13.4). */
   async createSession(projectId: string, title?: string, opts: NewSessionOptions = {}): Promise<SessionInfo> {
-    const body: Record<string, string> = {};
+    const body: Record<string, string | boolean> = {};
     if (title) body.title = title;
     if (opts.workspace_id) body.workspace_id = opts.workspace_id;
     if (opts.cwd && opts.cwd !== '.') body.cwd = opts.cwd;
     if (opts.permission_mode) body.permission_mode = opts.permission_mode;
     if (opts.model) body.model = opts.model;
     if (opts.provider_id) body.provider_id = opts.provider_id;
+    if (opts.worktree) {
+      body.isolation = 'worktree';
+      const branch = opts.worktree.branch.trim();
+      const base = opts.worktree.base.trim();
+      if (branch) body.branch = branch;
+      if (opts.worktree.existing && branch) body.existing_branch = true;
+      else if (base) body.base = base;
+    }
     const data = await this.req('POST', `/api/projects/${enc(projectId)}/sessions`, body);
     return parseSessionInfo(data);
   }
@@ -549,6 +569,8 @@ export class Api {
     branch?: string;
     origin_workspace_id?: string;
     new_branch?: boolean;
+    /** What a worktree's new branch starts from instead of the origin's `HEAD` (SPEC 0.265). */
+    base?: string;
     /** A missing folder is made by the worker (since SPEC 0.64). */
     create?: boolean;
     /** The worker mirrors the folder's Claude Code sessions (SPEC §9.1); on by default

@@ -1017,6 +1017,8 @@ pub struct WorkspaceRow {
     pub origin_workspace_id: Option<Uuid>,
     /// The worktree creates `branch` (T46).
     pub new_branch: bool,
+    /// What the new `branch` starts from instead of the origin's `HEAD` (SPEC 0.265).
+    pub base: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1026,7 +1028,7 @@ const WORKSPACE_COLS: &str = "id, project_id, owner_id, worker_id, path, label, 
     (ephemeral AND state = 'ready' AND NOT EXISTS (SELECT 1 FROM sessions s \
         WHERE s.workspace_id = workspaces.id AND NOT s.archived)) AS marked_for_deletion, \
     (SELECT count(*)::int FROM workspace_rules r WHERE r.workspace_id = workspaces.id) AS hqc_rules, \
-    state, error, clone_url, branch, origin_workspace_id, new_branch, created_at, updated_at";
+    state, error, clone_url, branch, origin_workspace_id, new_branch, base, created_at, updated_at";
 
 impl WorkspaceRow {
     pub fn state(&self) -> WorkspaceState {
@@ -1322,6 +1324,8 @@ pub enum Source<'a> {
         origin: Uuid,
         branch: &'a str,
         new_branch: bool,
+        /// SPEC 0.265.
+        base: Option<&'a str>,
     },
 }
 
@@ -1359,21 +1363,29 @@ pub async fn create_workspace(db: &PgPool, n: NewWorkspace<'_>) -> sqlx::Result<
             .fetch_optional(&mut *tx)
             .await?;
     let bindings = env_bindings(bindings.unwrap_or_default());
-    let (kind, url, branch, origin, new_branch) = match n.source {
-        Source::Dir => ("dir", None, None, None, false),
-        Source::Clone { url, branch } => ("clone", Some(url), branch, None, false),
+    let (kind, url, branch, origin, new_branch, base) = match n.source {
+        Source::Dir => ("dir", None, None, None, false, None),
+        Source::Clone { url, branch } => ("clone", Some(url), branch, None, false, None),
         Source::Worktree {
             origin,
             branch,
             new_branch,
-        } => ("worktree", None, Some(branch), Some(origin), new_branch),
+            base,
+        } => (
+            "worktree",
+            None,
+            Some(branch),
+            Some(origin),
+            new_branch,
+            base,
+        ),
     };
     let made = !matches!(n.source, Source::Dir);
     let row: WorkspaceRow = sqlx::query_as(&format!(
         "INSERT INTO workspaces (id, project_id, owner_id, worker_id, path, label, mirror_enabled,
             environment, kind, created_by_hqc, state, clone_url, branch, origin_workspace_id,
-            new_branch, ephemeral)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            new_branch, ephemeral, base)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
          RETURNING {WORKSPACE_COLS}"
     ))
     .bind(n.ephemeral.unwrap_or_else(new_id))
@@ -1399,6 +1411,7 @@ pub async fn create_workspace(db: &PgPool, n: NewWorkspace<'_>) -> sqlx::Result<
     .bind(origin)
     .bind(new_branch)
     .bind(n.ephemeral.is_some())
+    .bind(base)
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query(
@@ -1617,9 +1630,6 @@ pub struct Spawn {
     pub id: Uuid,
     pub by: Uuid,
     pub chain_id: Uuid,
-    /// The N of "Session N" chosen before the session, when its worktree's branch was named
-    /// after the slug (T47); `None`: counted now.
-    pub number: Option<i64>,
 }
 
 /// What an agent of a room records on its session (SPEC §7.1.1): the room, which is also its
@@ -1635,21 +1645,24 @@ pub struct Member<'a> {
 /// Creates the session with a slug unique in the project (SPEC §3 Session) and a
 /// hub-assigned `runtime_session_id` for Claude Code (SPEC §8.1).
 pub async fn create_session(db: &PgPool, n: NewSession<'_>) -> sqlx::Result<Uuid> {
-    create_spawned_session(db, n, None, None).await
+    create_spawned_session(db, n, None, None, None).await
 }
 
 /// [`create_session`], recording `hqc_spawn`'s [`Spawn`] or a room's [`Member`] when given. A
-/// session with the spawn's id already there is a unique violation.
+/// session with the spawn's id already there is a unique violation. `number`: the N of "Session
+/// N" chosen before the session, when its worktree's branch was named after the slug (T47, SPEC
+/// 0.265); `None`: counted now.
 pub async fn create_spawned_session(
     db: &PgPool,
     n: NewSession<'_>,
     spawn: Option<Spawn>,
     member: Option<Member<'_>>,
+    number: Option<i64>,
 ) -> sqlx::Result<Uuid> {
     let (title, source, base) = match n.title {
         Some(t) => (t.to_string(), TitleSource::User, slugify(t)),
         None => {
-            let num = match spawn.and_then(|s| s.number) {
+            let num = match number {
                 Some(num) => num,
                 None => next_session_number(db, n.project_id).await?,
             };

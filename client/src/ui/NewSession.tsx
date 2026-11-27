@@ -6,6 +6,7 @@
 
 import type { ComponentChildren } from 'preact';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { ApiError } from '../api';
 import type { AppState, NewSessionDraft } from '../app';
 import { onBack, replaceHash } from '../nav';
 import { ROOM_MODES, type PermissionMode, type RoomMode, type SessionInfo } from '../proto';
@@ -16,7 +17,7 @@ import { ChatItems, type ChatActions } from './cards';
 import { Composer, SessionsButton, toOutgoing, type SessionsToggle } from './Chat';
 import { ContextMenu, type MenuEntry } from './ContextMenu';
 import { useSubscription } from './hooks';
-import { IconBack, IconChevronUp, IconFolder, IconModel, IconPlus, IconRoom, IconShield, IconWorkspace } from './icons';
+import { IconBack, IconChevronUp, IconFolder, IconFork, IconModel, IconPlus, IconRoom, IconShield, IconWorkspace } from './icons';
 import { AUTO_NEEDS_ANTHROPIC, ROOM_MODE_LABELS, ROOM_MODE_NOTES, homePath, modeConfirm, modelName } from './labels';
 import { workspaceName } from './ProjectSettings';
 
@@ -26,11 +27,13 @@ interface Outgoing {
   files: OutgoingFile[];
 }
 
-/** The draft's worker and folder, as its header and its row in the list name them. */
+/** The draft's worker and folder, as its header and its row in the list name them; a new
+ *  worktree's folder is the hub's to name, so only its worker. */
 export function newSessionWhere(app: AppState, d: NewSessionDraft): { worker?: string; path?: string } {
   const id = app.newSessionWorkspace(d);
   const w = id ? app.workspaces.get(d.projectId)?.find((x) => x.id === id) : undefined;
   if (!w) return {};
+  if (d.worktree) return { worker: app.workerName(w.worker_id) };
   return { worker: app.workerName(w.worker_id), path: app.sessionPath({ project_id: d.projectId, workspace_id: w.id, cwd: d.cwd.trim() }) };
 }
 
@@ -56,6 +59,7 @@ export function NewSessionChat({
     return () => app.closeNewSession();
   }, [app, projectId]);
   const draft: NewSessionDraft = app.newSession?.projectId === projectId ? app.newSession : { projectId, cwd: '' };
+  const wt = draft.worktree;
   return (
     <NewChatWindow
       app={app}
@@ -66,8 +70,27 @@ export function NewSessionChat({
       where={newSessionWhere(app, draft)}
       hint="Workspace, folder, permissions and model are above the box; the defaults are already picked."
       create={() => app.startNewSession()}
+      starting={wt ? 'Making the worktree…' : undefined}
+      // A new branch that exists (SPEC 0.265): its worktree may check it out as it is instead.
+      recover={(e) =>
+        e instanceof ApiError && e.code === 'branch_exists' && wt && !wt.existing && wt.branch.trim()
+          ? {
+              label: `Check out the existing ${wt.branch.trim()} instead`,
+              run: () => app.setNewSession({ worktree: { ...wt, existing: true } }),
+            }
+          : undefined
+      }
       chips={(disabled) => (
-        <NewSessionChips app={app} projectId={projectId} values={draft} onChange={(patch) => app.setNewSession(patch)} withModel disabled={disabled} phone={phone} />
+        <NewSessionChips
+          app={app}
+          projectId={projectId}
+          values={draft}
+          onChange={(patch) => app.setNewSession(patch)}
+          withModel
+          withWorktree
+          disabled={disabled}
+          phone={phone}
+        />
       )}
     />
   );
@@ -90,6 +113,8 @@ export function NewChatWindow({
   where: { worker, path },
   hint,
   create,
+  starting,
+  recover,
   chips,
 }: {
   app: AppState;
@@ -102,10 +127,17 @@ export function NewChatWindow({
   /** Under the feed's "Write the first message", what the chips hold. */
   hint: string;
   create: () => Promise<SessionInfo>;
+  /** What the window shows under the first message while `create` runs (the worktree being
+   *  made), and its Send button says; "Starting…" there without it. */
+  starting?: string;
+  /** A refused create the window offers a way out of: a button beside the reason. */
+  recover?: (e: unknown) => { label: string; run: () => void } | undefined;
   /** The chips over the input; `disabled` once the first message is on its way. */
   chips: (disabled: boolean) => ComponentChildren;
 }) {
   const [notice, setNotice] = useState<string | null>(null);
+  // The way out `recover` offered for the refusal the notice shows.
+  const [way, setWay] = useState<{ label: string; run: () => void } | null>(null);
   const list = app.workspaces.get(projectId);
   useEffect(() => {
     app.loadWorkspaces(projectId).catch((e: Error) => setNotice(`Workspaces not loaded: ${e.message}`));
@@ -191,6 +223,7 @@ export function NewChatWindow({
       setFiles((cur) => [...m.files, ...cur]);
       setInput((cur) => ({ text, n: cur.n + 1 }));
       setNotice(`Not ${done}: ${reason}`);
+      setWay(recover?.(e) ?? null);
     }
   };
   // The first message makes it; the input sends nothing more until the chat is here.
@@ -200,6 +233,7 @@ export function NewChatWindow({
     typed.current = '';
     setFiles([]);
     setNotice(null);
+    setWay(null);
     setFirst(m);
     void start(m);
   };
@@ -288,6 +322,7 @@ export function NewChatWindow({
         {first ? (
           <div class="feed">
             <ChatItems items={items} actions={actions} />
+            {starting && <div class="new-starting">{starting}</div>}
           </div>
         ) : (
           <div class="new-empty">
@@ -306,8 +341,32 @@ export function NewChatWindow({
         )}
       </div>
       {notice && (
-        <div class="notice" role="alert" onClick={() => setNotice(null)}>
+        <div
+          class="notice"
+          role="alert"
+          onClick={() => {
+            setNotice(null);
+            setWay(null);
+          }}
+        >
           {notice}
+          {way && (
+            <>
+              {' '}
+              <button
+                type="button"
+                class="btn btn-small notice-action"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  way.run();
+                  setNotice(null);
+                  setWay(null);
+                }}
+              >
+                {way.label}
+              </button>
+            </>
+          )}
         </div>
       )}
       <div class="new-chips">{chips(!!first)}</div>
@@ -316,7 +375,7 @@ export function NewChatWindow({
         initial={input.text}
         onDraft={(t) => (typed.current = t)}
         autoFocus
-        wait={first ? 'Starting…' : undefined}
+        wait={first ? (starting ?? 'Starting…') : undefined}
         phone={phone}
         files={files}
         reading={reading}
@@ -339,7 +398,7 @@ export const PERMISSIONS: [PermissionMode | undefined, string][] = [
 ];
 
 /** What the chips choose, as a new session's draft keeps it. */
-export type ChipValues = Pick<NewSessionDraft, 'workspace_id' | 'cwd' | 'permission_mode' | 'model' | 'provider_id'>;
+export type ChipValues = Pick<NewSessionDraft, 'workspace_id' | 'cwd' | 'permission_mode' | 'model' | 'provider_id' | 'worktree'>;
 
 /** Where a chip's menu opens: its top left corner, and the chip that toggles it. */
 export interface ChipAt {
@@ -391,7 +450,10 @@ export function ChipButton({
 }
 
 /** The chips over a new session's or room's input: the workspace (each of the project's with
- *  its worker and whole path, the default marked, "Add a workspace…" under them), the folder
+ *  its worker and whole path, the default marked, with `withWorktree` "New worktree…" of the
+ *  chosen one when it is a ready folder that is not a worktree itself (SPEC 0.265: its branch,
+ *  `hqc/session-N` when empty, new from its base, `HEAD` when empty, or existing), "Add a
+ *  workspace…" under them), the folder
  *  inside it (typed), the permissions (the worker's default, Ask, Auto, Allow all) and, with
  *  `withModel`, the model (Claude Code's default, a family with its versions in a submenu,
  *  another name typed);
@@ -403,6 +465,7 @@ export function NewSessionChips({
   values,
   onChange,
   withModel,
+  withWorktree,
   mode: room,
   phone,
   disabled,
@@ -412,6 +475,8 @@ export function NewSessionChips({
   values: ChipValues;
   onChange: (patch: Partial<ChipValues>) => void;
   withModel?: boolean;
+  /** A new session's: "New worktree…" in the workspace's menu (SPEC 0.265). */
+  withWorktree?: boolean;
   /** A room's: Conversation or Council, with what each does. */
   mode?: { value: RoomMode; onChange: (mode: RoomMode) => void };
   phone: boolean;
@@ -424,6 +489,10 @@ export function NewSessionChips({
   const id = app.newSessionWorkspace({ projectId, ...values });
   const workspace = list?.find((w) => w.id === id);
   const worker = workspace && app.workerName(workspace.worker_id);
+  // A worktree is made of a ready folder that is not one itself (T46); whether it is a git
+  // repository only the worker knows.
+  const branchable = withWorktree && workspace && workspace.kind !== 'worktree' && workspace.state === 'ready';
+  const wt = branchable ? values.worktree : undefined;
   const custom = isTypedModel(values.model);
   // A provider the draft chose that this workspace's worker does not allow is not shown.
   const chosenProvider = app.providersFor(workspace?.worker_id).find((p) => p.id === values.provider_id);
@@ -459,12 +528,94 @@ export function NewSessionChips({
         label: `${workspaceName(w)}${w.id === project?.default_workspace_id ? ' (default)' : ''}`,
         detail: [app.workerName(w.worker_id), homePath(w.path)].filter(Boolean).join(':'),
         cls: 'btn-pick-workspace',
-        checked: w.id === id,
-        onSelect: () => onChange({ workspace_id: w.id }),
+        checked: w.id === id && !wt,
+        onSelect: () => onChange(withWorktree ? { workspace_id: w.id, worktree: undefined } : { workspace_id: w.id }),
       }));
       if (items.length) items.push('sep');
+      if (branchable) {
+        items.push({
+          label: 'New worktree…',
+          detail: `of ${workspaceName(workspace)}`,
+          cls: 'btn-new-worktree',
+          title: 'The session starts in a new git worktree of this folder, on a branch of its own',
+          checked: !!wt,
+          keepOpen: true,
+          onSelect: () => {
+            if (!wt) onChange({ worktree: { branch: '', base: '' } });
+            setOpen({ ...open, custom: true });
+          },
+        });
+      }
       items.push({ label: 'Add a workspace…', icon: <IconPlus />, cls: 'btn-add-workspace', href: `#/p/${projectId}/settings` });
       menu = <ContextMenu {...at} label="Workspace" heading="Workspace" items={items} />;
+      if (open.custom && wt && workspace) {
+        const set = (patch: Partial<typeof wt>) => onChange({ worktree: { ...wt, ...patch } });
+        menu = (
+          <ContextMenu {...at} label="New worktree" heading={`New worktree of ${workspaceName(workspace)}`}>
+            <label class="menu-field">
+              <span class="field-label">Branch</span>
+              <input
+                class="input mono"
+                name="branch"
+                placeholder="hqc/session-N"
+                autocomplete="off"
+                data-focus
+                value={wt.branch}
+                onInput={(e) => {
+                  const branch = (e.currentTarget as HTMLInputElement).value;
+                  set(branch.trim() ? { branch } : { branch, existing: false });
+                }}
+                onKeyDown={enterCloses}
+              />
+            </label>
+            <label class="menu-field">
+              <span class="field-label">New from</span>
+              <input
+                class="input mono"
+                name="base"
+                placeholder={`HEAD of ${workspaceName(workspace)}`}
+                autocomplete="off"
+                disabled={!!wt.existing}
+                value={wt.existing ? '' : wt.base}
+                onInput={(e) => set({ base: (e.currentTarget as HTMLInputElement).value })}
+                onKeyDown={enterCloses}
+              />
+            </label>
+            <label class="menu-field menu-field-check">
+              <span>
+                <input
+                  type="checkbox"
+                  name="existing"
+                  checked={!!wt.existing}
+                  disabled={!wt.branch.trim()}
+                  onChange={(e) => set({ existing: (e.currentTarget as HTMLInputElement).checked })}
+                />{' '}
+                The branch exists: check it out as it is
+              </span>
+            </label>
+            <p class="menu-note">
+              {wt.existing
+                ? 'The worktree checks the branch out; nothing on it changes.'
+                : `A new branch, ${wt.branch.trim() ? '' : 'hqc/session-N after the session, '}from ${wt.base.trim() || 'the current commit'}: a branch, origin/main, a tag or a commit.`}
+            </p>
+            <div class="menu-field menu-field-row">
+              <button type="button" class="btn btn-small btn-primary" onClick={close}>
+                Done
+              </button>
+              <button
+                type="button"
+                class="btn btn-small btn-no-worktree"
+                onClick={() => {
+                  onChange({ worktree: undefined });
+                  close();
+                }}
+              >
+                No worktree
+              </button>
+            </div>
+          </ContextMenu>
+        );
+      }
     } else if (open.chip === 'folder') {
       menu = (
         <ContextMenu {...at} label="Folder">
@@ -500,7 +651,7 @@ export function NewSessionChips({
         },
       }));
       menu = <ContextMenu {...at} label="Permissions" items={items} />;
-    } else if (open.custom) {
+    } else if (open.custom && open.chip === 'model') {
       menu = (
         <ContextMenu {...at} label="Model">
           <ModelName value={custom ? values.model! : ''} onChange={(model) => onChange({ model })} onKeyDown={enterCloses} />
@@ -537,7 +688,12 @@ export function NewSessionChips({
         'workspace',
         <IconWorkspace />,
         <>
-          {workspace ? (
+          {workspace && wt ? (
+            <span class="new-chip-text">
+              <IconFork size={13} /> Worktree <b>{wt.branch.trim() || 'hqc/session-N'}</b> of {workspaceName(workspace)}
+              {worker && ` · ${worker}`}
+            </span>
+          ) : workspace ? (
             <span class="new-chip-text">
               <b>{workspaceName(workspace)}</b>
               {worker && ` · ${worker}`}
@@ -548,7 +704,9 @@ export function NewSessionChips({
           <IconChevronUp />
         </>,
         // The chip shows the name only: the label names what it is, with the whole path.
-        workspace
+        workspace && wt
+          ? `Workspace: a new worktree of ${workspaceName(workspace)} on ${wt.existing ? 'the existing branch' : 'a new branch'} ${wt.branch.trim() || 'hqc/session-N'}${!wt.existing && wt.base.trim() ? ` from ${wt.base.trim()}` : ''} — ${[worker, homePath(workspace.path)].filter(Boolean).join(':')}`
+          : workspace
           ? `Workspace: ${workspaceName(workspace)} — ${[worker, homePath(workspace.path)].filter(Boolean).join(':')}`
           : `Workspace: ${list?.length === 0 ? 'none' : 'loading'}`,
       )}

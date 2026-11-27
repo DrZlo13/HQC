@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.266, 2026-11-27. Status: the architecture agreed after six reviews and a survey of
+Version 0.267, 2026-11-28. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -4920,7 +4920,9 @@ The process environment is scrubbed: from the worker's environment only `PATH`, 
 `ANTHROPIC_*` pass, then the `env` of the session's environment (§14; it may replace one of
 those, e.g. `PATH`), then the worker's own `SSH_AUTH_SOCK` (only in an environment with
 `ssh_keys`: the socket of this process's own ssh-agent, §14; since 0.57 the user's
-`SSH_AUTH_SOCK` no longer passes), `CLAUDE_CODE_ENTRYPOINT` and `MCP_TOOL_TIMEOUT`;
+`SSH_AUTH_SOCK` no longer passes), `CLAUDE_CODE_ENTRYPOINT`, `MCP_TOOL_TIMEOUT`,
+`CLAUDE_CODE_ENABLE_TODO_TOOLS=1` with `task_tools` (since 0.223) and
+`CLAUDE_CODE_DISABLE_ARTIFACT=1` always (since 0.267);
 `HQC_*` never, except `HQC_SECRETS`: a session that may have secrets (since 0.147, §14
 `session_secrets`) gets an ssh-agent of its own in any environment, empty when nothing is to be
 loaded, with its environment's `ssh_keys` and the keys kept for its workspace, so
@@ -6140,6 +6142,14 @@ flag). Which
 `crossSessionInbound` applies, per the 2.1.312 binary **[verify]**: the first one set of
 managed policy, `--settings` and user settings; project settings and `settings.local.json` can
 only tighten it (`accept` < `hold` < `refuse`).
+
+Claude Code's built-in tool `Artifact` (with `ArtifactComments` and `ArtifactData`) publishes a
+page on claude.ai, and its description tells the model to publish pages unasked and to update
+the same page later. An hqc agent shows files to the user with `hqc_attach` and publishes with
+`hqc_publish` only when the user asks (§7). Since 0.267 the worker sets
+`CLAUDE_CODE_DISABLE_ARTIFACT=1` for every agent, over a value of the environment's `env` (§14);
+no setting brings the tool back. Checked with 2.1.329: `init.tools` of `claude -p` has
+`Artifact`, `ArtifactComments` and `ArtifactData` without the variable and none of them with it.
 
 ### 8.2 ACP agents (generic adapter)
 The adapter starts **a separate ACP process for each hqc session** (stdio JSON-RPC)
@@ -8647,6 +8657,12 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.266 → 0.267 (an agent goes without Claude Code's Artifact tool)
+§8.1: the worker sets `CLAUDE_CODE_DISABLE_ARTIFACT=1` for every agent, over a value of the
+environment's `env`. Claude Code 2.1.329 gives an agent its `Artifact` tool by default, and an
+agent asked for an HTML page published it on claude.ai and kept updating it there, past
+`hqc_attach` and `hqc_publish`. Worker only.
 
 ### 0.265 → 0.266 (iteration 10 planned: Codex and Google's agent over ACP)
 §19: item 10 is now the generic ACP adapter with Codex (`codex-acp`) and Antigravity CLI

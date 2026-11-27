@@ -5369,6 +5369,43 @@ environment = "e"
     );
 }
 
+/// Every agent goes without Claude Code's Artifact tool (SPEC 0.267): the child gets
+/// `CLAUDE_CODE_DISABLE_ARTIFACT=1`, also over a value the environment sets.
+#[tokio::test]
+async fn the_artifact_tool_is_always_off() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("ws")).unwrap();
+    let cfg = crate::config::Config::parse(&format!(
+        r#"hub_url = "https://h"
+allowed_roots = [{root:?}]
+[environments.e]
+env = {{ CLAUDE_CODE_DISABLE_ARTIFACT = "0" }}
+[[env_bindings]]
+path = "{}"
+environment = "e"
+"#,
+        root.join("ws").display()
+    ))
+    .unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let mut s = spec(Uuid::now_v7(), &root.join("ws"), Uuid::new_v4());
+    s.environment = cfg.environment(&s.workspace);
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let vars: Vec<String> = claude.commands()[0]
+        .env
+        .iter()
+        .filter(|(k, _)| k == "CLAUDE_CODE_DISABLE_ARTIFACT")
+        .map(|(_, v)| v.clone())
+        .collect();
+    assert_eq!(vars, ["1"]);
+    a.kill().await.unwrap();
+}
+
 /// A local slash command (`/name x`): the CLI answers with a `result` and no replay echo.
 /// The input still counts as taken, otherwise the supervisor resends it forever; taken before
 /// the turn's `status idle`, whose `ack` after it would open a turn on the hub (SPEC §5.2).

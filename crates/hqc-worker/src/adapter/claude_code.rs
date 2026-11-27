@@ -145,6 +145,11 @@ pub const PROJECT_SETTING_SOURCES: &str = "user,project,local";
 /// The variable that gives the 5.x models the task list tools (`task_tools`, SPEC §14).
 const TASK_TOOLS_ENV: &str = "CLAUDE_CODE_ENABLE_TODO_TOOLS";
 
+/// The variable that takes Claude Code's Artifact tool (pages on claude.ai) from every agent
+/// the worker starts (SPEC 0.267): the agent shows pages and files to the user with
+/// `hqc_attach` and `hqc_publish`, as the hqc chat expects.
+const ARTIFACT_OFF_ENV: &str = "CLAUDE_CODE_DISABLE_ARTIFACT";
+
 /// Credentials of the worker's own environment that a session with a provider does not get:
 /// the CLI would send them to the provider's endpoint.
 const PROVIDER_DROPS: &[&str] = &["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"];
@@ -793,7 +798,8 @@ impl ClaudeCodeAdapter {
     ///   `SSH_AUTH_SOCK` only as `ssh_agent`, the socket of the process's own ssh-agent (T44);
     ///   `HQC_SECRETS` only as `secrets`, the folder of the process's secrets (SPEC 0.147);
     ///   `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` only with `task_tools` ([`ClaudeOptions::task_tools`],
-    ///   SPEC 0.223);
+    ///   SPEC 0.223); `CLAUDE_CODE_DISABLE_ARTIFACT=1` always, over any value of the
+    ///   environment's own ([`ARTIFACT_OFF_ENV`], SPEC 0.267);
     /// - the hub's skills ([`StartSpec::skill_dir`], SPEC 0.245) → `--plugin-dir` and
     ///   `skillOverrides` off for their names in `--settings`;
     /// - `disallowed_tools` → `--disallowedTools`, `system_prompt` →
@@ -959,7 +965,10 @@ impl ClaudeCodeAdapter {
                 }
                 // The worker's own come last.
                 env.retain(|(k, _)| {
-                    k != "CLAUDE_CODE_ENTRYPOINT" && k != "MCP_TOOL_TIMEOUT" && k != TASK_TOOLS_ENV
+                    k != "CLAUDE_CODE_ENTRYPOINT"
+                        && k != "MCP_TOOL_TIMEOUT"
+                        && k != TASK_TOOLS_ENV
+                        && k != ARTIFACT_OFF_ENV
                 });
                 if let Some(sock) = ssh_agent {
                     env.push((crate::ssh::SSH_AUTH_SOCK.into(), sock.display().to_string()));
@@ -976,6 +985,7 @@ impl ClaudeCodeAdapter {
                 if self.opts.task_tools {
                     env.push((TASK_TOOLS_ENV.into(), "1".into()));
                 }
+                env.push((ARTIFACT_OFF_ENV.into(), "1".into()));
                 env.push((
                     "MCP_TOOL_TIMEOUT".into(),
                     mcp_tool_timeout_ms(spec.ask_timeout_s).to_string(),

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.264, 2026-11-26. Status: the architecture agreed after six reviews and a survey of
+Version 0.265, 2026-11-27. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -315,10 +315,14 @@ of: a `ready` workspace of the same project and worker that is not a worktree it
 T46: one level, so the tree in the client is two levels and deleting goes worktrees first). While
 any worktree record names it, the origin is not deleted (`409 workspace_in_use`, §6). `branch` —
 the worktree's branch, or the branch a clone was asked for (T45's `clone_branch`, renamed by
-`0029`).
+`0029`). `base` (since 0.265, hub migration `0062`) — what a worktree's new `branch` was asked to
+start from instead of the origin's `HEAD` (a branch, a remote branch, a tag or a commit),
+repeated in `workspace.create` (§5.3); absent for every other workspace.
 
 `ephemeral` (since 0.61, T47) — a worktree `hqc_spawn` made with `isolation: "worktree"` for the
-session it started (§7); otherwise like any worktree (sessions can be started there, the same
+session it started (§7), or, since 0.265, one a new session of the owner was started in with
+`isolation: "worktree"` (§6, "New worktree…" of the new session's workspace chip); otherwise like
+any worktree (sessions can be started there, the same
 deletion). It is **never deleted automatically**. `marked_for_deletion` — not stored: the hub
 computes it when serving, true for an `ephemeral`, `ready` workspace without a session that is
 not archived. So archiving its last session marks it, unarchiving (or a new session there) clears
@@ -1363,7 +1367,7 @@ MCP calls (worker → hub → worker):
   For both frames `request_id` equals the frame's `id`; the answer is `result` or `error` with
   the same `id`. The hub waits 10 s for the answer (`504 worker_timeout` in REST, §6).
 - `workspace.create` {request_id, kind: clone, path, url, branch?} or {request_id, kind:
-  worktree, path, origin, branch, new_branch?} → `ack`, then
+  worktree, path, origin, branch, new_branch?, base?} → `ack`, then
   `workspace.created` (§5.4) (since 0.58, T45; `kind: worktree` since 0.60, T46) — a new folder for a
   workspace (§13.1). `request_id` is the workspace's id, not the frame's. The worker checks
   `path` itself (§2.1): absolute without `.`/`..`, its parent with symlinks resolved a folder
@@ -1391,8 +1395,15 @@ MCP calls (worker → hub → worker):
   worker takes it only if it is a workspace it knows (as above, so the hub sends the origin's
   `workspace.rules` right before the request), still resolves to itself inside `allowed_roots` and
   is the top folder of a git repository (`git rev-parse --show-toplevel`). `branch` passes
-  `check_branch` and `git check-ref-format --branch`; with `new_branch` it must not exist and is
-  made from the origin's `HEAD` (`-b <branch> ... HEAD`); without, it is a local branch that no
+  `check_branch` and `git check-ref-format --branch`; with `new_branch` it must not exist (the
+  worker answers "the branch … exists already: pick it as an existing branch",
+  `hqc_proto::frame::branch_exists`, which the hub tells from other reasons, §6) and is made from
+  the origin's `HEAD` (`-b <branch> ... HEAD`), or since 0.265 from `base`: letters, digits and
+  `._/-~^` without a leading `-` or `/` or a `..` (`check_base`, so never an option), which the
+  worker resolves in the origin with `git rev-parse --verify --quiet <base>^{commit}` (a
+  branch, `origin/main`, a tag, a commit, `main~1`; "there is no branch, tag or commit …"
+  otherwise) and passes as that commit, so the new branch tracks nothing and no existing branch
+  is moved or reset; `base` without `new_branch` is refused. Without `new_branch` it is a local branch that no
   worktree has checked out (the worker reads `git worktree list --porcelain` and answers "the
   branch … is already checked out at …"), or a branch of exactly one remote, which becomes a
   local branch tracking it (`--track -b <branch> ... refs/remotes/<remote>/<branch>`). `path` is
@@ -1552,6 +1563,9 @@ MCP calls (worker → hub → worker):
   `vault_fields: true` (since 0.243), sent with `vault` — the worker reads a field of the entry
   (`secret.put.vault_field`): an older worker ignores the field and would give the password, so
   the hub offers the field, and `reads_vault` on a card, only to a worker that sends it.
+  `worktree_base: true` (since 0.265) — the worker starts a worktree's new branch from
+  `workspace.create.base` (§5.3); an older worker would ignore `base` and start from `HEAD`, so
+  the hub sends a `base` only to a worker that says this (`409 worker_outdated` otherwise, §6).
   `environments` (since 0.56, T43) — the environments of the local config (§14) as `{name,
   allow_local_mcp?, mcp_servers?, permissions {unblock?, allow?, deny?, remote_unblock?}}`, without `default` and never with the
   values (or the names) of `env`; `mcp_servers` (since 0.262) the names of its local MCP
@@ -1838,8 +1852,10 @@ the rest is marked "later"):
   plus the name as `creating` with `kind: clone`, `created_by_hqc: true` (the same
   `workspace_conflict` check) and sends `workspace.create` (§5.3); `201` with the workspace
   `creating`, which the client reads again until it is `ready` or `failed`. Since 0.60 (T46)
-  `{kind: worktree, project_id, worker_id, origin_workspace_id, branch, new_branch?, path?,
-  label?, mirror_enabled?}` (`api.workspace.worktree.request.json`): the origin must be the
+  `{kind: worktree, project_id, worker_id, origin_workspace_id, branch, new_branch?, base?, path?,
+  label?, mirror_enabled?}` (`api.workspace.worktree.request.json`; `base` since 0.265: with
+  `new_branch` only and passing `check_base`, else `400 invalid_base`, and only on a worker whose
+  `hello` has `worktree_base`, else `409 worker_outdated`): the origin must be the
   user's `ready` workspace of this project and worker and not a worktree (`400 invalid_origin`,
   also without `origin_workspace_id`), `branch` passes `check_branch` (`400 invalid_branch`);
   without `path` the new folder is `<origin-parent>/<origin-name>-<branch>` with the branch's
@@ -1898,10 +1914,13 @@ the rest is marked "later"):
   the folder goes with `git worktree remove`; a clone's dialog says its unpushed commits go with
   the folder; each warning says what "Delete folder" does with what it lists, since 0.64), and
   deletes with `force=true` only when it listed uncommitted files.
-  Since 0.61 (T47): an `ephemeral` worktree has the tag "spawned" on its row; a marked one also
+  Since 0.61 (T47): an `ephemeral` worktree has a tag on its row ("for a session" since 0.265,
+  "spawned" before); a marked one also
   "for deletion", the line "Its sessions are archived. hqc keeps the worktree and its branch
   until you delete it." and "Delete" instead of "Remove", which opens the same dialog (it adds
-  that hqc made the worktree for a session an agent started)
+  that hqc made the worktree for the session started in it). Since 0.265 "New worktree" has
+  "New from" for a new branch: a branch, `origin/main`, a tag or a commit (`base`), the origin's
+  `HEAD` when empty
 - hqc's allow rules of a workspace (since 0.52, T48; §3 Workspace), the workspace owner only
   (another user's: `404`): `GET /api/workspaces/{id}/rules` → `{rules[{id, rule, created_at}]}`,
   newest first (`api.workspace.rules.json`); `POST /api/workspaces/{id}/rules` {rules[]}
@@ -1934,8 +1953,25 @@ the rest is marked "later"):
   it and `GET /api/projects` (since 0.114 also `?archived=1`), not one request per project
 - `GET/POST /api/projects/{id}/sessions` (list: `{sessions: [<session>]}`; create:
   {title?, workspace_id?, worker_id?, cwd?, model?, auto_approve?, permission_mode?,
-  provider_id?} → `201` and
+  provider_id?, isolation?, branch?, base?, existing_branch?} → `201` and
   the session object, `api.session.request.json`), `GET/PATCH/DELETE /api/sessions/{id}` (§17.4).
+  `isolation: "worktree"` (since 0.265, `api.session.worktree.request.json`; another value, or
+  `branch`, `base` or `existing_branch` without it: `400`) starts the session in a new
+  `ephemeral` worktree (§3 Workspace) of the workspace the request picks, by `hqc_spawn`'s path
+  (§7, T47): the request is checked as without isolation in that workspace (model, title, folder,
+  provider), the origin by T46's rules (`400 invalid_origin`), then the hub stores the worktree
+  `creating` (mirror off) on `branch` — `hqc/session-N` when absent, N the one the session then
+  gets as "Session N" — new from `base` (`check_base`, `400 invalid_base`; `409 worker_outdated`
+  on a worker without `worktree_base`), the origin's `HEAD` when absent, or with
+  `existing_branch` (`branch` required, no `base`, else `400`) the existing branch checked out as
+  it is. The request waits until the worker answers (at most 15 minutes, `409
+  worktree_timeout`), then creates the session there: `201` with it. A failed worktree leaves no
+  record and no session: `409 branch_exists` when the new branch exists already (the worker's
+  reason, §5.3), else `409 worktree_failed`, the message "the worktree could not be made: <the
+  worker's reason>"; a worker offline is `409 worker_offline` from the `fs.stat`. The wait runs
+  on a task of its own, so a client that goes away meanwhile still gets the session in its list.
+  The session is the owner's, not spawned (no `spawned_by`, no chain), and the spawn limits of
+  §20 do not apply to it, though its worktree being made counts in them as any ephemeral one.
   `permission_mode` (since 0.42, T38): `ask` | `auto` | `allow_all` (since 0.129; anything else:
   `422`, the body cannot be read); absent — the worker's default. `PATCH /api/sessions/{id}` {title?, auto_approve?, permission_mode?, model?, provider_id?}:
   `provider_id` (since 0.144) — absent: unchanged, `null`: the runtime's own endpoint; a provider
@@ -2871,7 +2907,20 @@ with its worker and path, the default marked, "Add a workspace…" under them), 
 it (typed, `.` by default), the permissions (the worker's default, Ask, Auto, Auto after the
 one-line confirmation below) and the model (Claude Code's default, an alias, since 0.168 a
 version, or another name typed), the defaults already chosen: the project's
-`default_workspace_id`, else its first workspace (§13.4). The first message creates the
+`default_workspace_id`, else its first workspace (§13.4). Since 0.265 the workspace's menu has
+"New worktree…" of the chosen workspace when it is a `ready` folder that is not a worktree
+(whether it is a git repository only the worker knows): a step of the menu with the branch
+(empty: `hqc/session-N` after the session, the placeholder says so), "New from" (empty: the
+workspace's `HEAD`; a branch, `origin/main`, a tag or a commit), "The branch exists: check it
+out as it is" (only with a branch typed; "New from" is off then), "Done" and "No worktree";
+picking a workspace drops the worktree. The chip says "Worktree <branch> of <workspace>", its
+tooltip whether the branch is new and from what; the header shows the worker only, as the
+folder is the hub's to name. The first message then creates the session with `isolation:
+"worktree"` and those fields; while the worker makes the worktree the window shows "Making the
+worktree…" under the message (and on Send). A `409 branch_exists` for a branch typed keeps the
+draft and puts "Check out the existing <branch> instead" beside the reason: it switches the
+draft to the existing branch, and the next Send starts there; a branch that exists is never
+reset. Rooms have no worktree. The first message creates the
 session with those choices (`POST /api/projects/{id}/sessions`, no title) and goes in as its
 first input; until the chat is there
 the input sends nothing more ("Starting…") and the chips are off, while what is typed and
@@ -3792,6 +3841,10 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   deleted automatically. A branch outlives its worktree (§13.2), so a default name used again
   (a slug taken again after its session was deleted) is refused by the worker; the agent gives
   `branch` then.
+  Since 0.265 `base?`: with isolation (else `invalid_args`), what the new branch starts from
+  instead of the origin's `HEAD` (§5.3; a worker without `worktree_base` is `unavailable`).
+  `POST /api/projects/{id}/sessions` with `isolation: "worktree"` (§6) makes the owner's own
+  session in such a worktree by the same code.
   Since 0.176 the description also says what to do once the user chose "New session" for a task
   of their message (§7.2): `project` is the caller's project, `prompt` a brief (the task as the
   user would send it to a fresh session, the files or area, what done looks like, and what the
@@ -7245,6 +7298,8 @@ checks the origin, the branch and the new path itself and runs `git worktree add
 with the environment of the new path (§5.3), through the same `creating` → `ready` | `failed`.
 Since 0.61 (T47) `hqc_spawn` with `isolation: "worktree"` makes an `ephemeral` worktree the same
 way for the session it starts (§7); the owner's agent asks for it, so there is no confirmation.
+Since 0.265 the owner does the same from a new session's window ("New worktree…", §6), and a new
+branch may start from a `base` instead of the origin's `HEAD`.
 
 ### 13.2 Deletion
 `dir`: only the hub's record is deleted, the folder is left alone; while the workspace has
@@ -8579,6 +8634,21 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.264 → 0.265 (a new session in a new worktree, from the UI)
+§6: `POST /api/projects/{id}/sessions` takes `isolation: "worktree"`, `branch?`, `base?` and
+`existing_branch?`: the session starts in a new `ephemeral` worktree of the workspace by
+`hqc_spawn`'s code (T47), the request waiting until the worker made it; a failed one leaves
+nothing, `409 branch_exists` for a new branch that exists, else `409 worktree_failed`. The new
+session window's workspace chip has "New worktree…" (branch, "New from", the existing branch),
+shows "Making the worktree…" while it is made, and offers the existing branch after
+`branch_exists`. §5.3: `workspace.create {kind: worktree}` takes `base`, resolved by the worker
+to a commit (`check_base`, `git rev-parse --verify`), so a new branch starts from a branch, a
+remote branch, a tag or a commit and tracks nothing; §5.4: such a worker sends `worktree_base:
+true`, and the hub sends `base` only to it. §3: the workspace's `base` (hub migration `0062`,
+for the repeat after `hello`); `ephemeral` covers the owner's worktrees too, and the row's tag
+says "for a session". §6 `POST /api/workspaces` and the settings' "New worktree" take `base`
+too; §7 `hqc_spawn` takes `base?`.
 
 ### 0.263 → 0.264 (a phone's Send puts the keyboard down)
 §6: a press on a button of the composer keeps the focus in the field, and on a phone the keyboard

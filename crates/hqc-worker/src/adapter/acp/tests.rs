@@ -96,7 +96,8 @@ impl Spawner for FakeAgent {
                                     reply(json!({"sessionId": "s1",
                                 "modes": {"currentModeId": "default", "availableModes": [
                                     {"id": "default", "name": "Default"},
-                                    {"id": "accept-edits", "name": "Accept edits"}]},
+                                    {"id": "accept-edits", "name": "Accept edits"},
+                                    {"id": "broken", "name": "Broken"}]},
                                 "configOptions": [{"id": "model", "name": "Model",
                                     "category": "model", "type": "select", "currentValue": "m1",
                                     "options": [{"value": "m1", "name": "M1"},
@@ -105,6 +106,14 @@ impl Spawner for FakeAgent {
                                 .await
                             }
                         },
+                        Some("session/set_mode") if v["params"]["modeId"] == "broken" => {
+                            send(
+                                &mut out,
+                                json!({"jsonrpc": "2.0", "id": id,
+                                "error": {"code": -32602, "message": "no such mode"}}),
+                            )
+                            .await
+                        }
                         Some(
                             "session/resume"
                             | "session/load"
@@ -131,6 +140,16 @@ impl Spawner for FakeAgent {
                                         "options": [
                                             {"optionId": "yes", "name": "Allow", "kind": "allow_once"},
                                             {"optionId": "always", "name": "Allow for this session", "kind": "allow_always"},
+                                            {"optionId": "no", "name": "Deny", "kind": "reject_once"}]}})).await;
+                                prompt = Some((id.clone(), "permission"));
+                            } else if let Some(tc) = text.strip_prefix("ask ") {
+                                // A permission request with this `toolCall`, as an agent sends it.
+                                let tc: Value = serde_json::from_str(tc).unwrap();
+                                send(&mut out, json!({"jsonrpc": "2.0", "id": 900,
+                                    "method": "session/request_permission",
+                                    "params": {"sessionId": "s1", "toolCall": tc,
+                                        "options": [
+                                            {"optionId": "yes", "name": "Allow", "kind": "allow_once"},
                                             {"optionId": "no", "name": "Deny", "kind": "reject_once"}]}})).await;
                                 prompt = Some((id.clone(), "permission"));
                             } else if text == "wait" {
@@ -620,4 +639,137 @@ fn an_agent_runs_the_highest_mode_its_table_has() {
         PermissionMode::AllowAll
     );
     assert_eq!(b.mode_for(PermissionMode::Auto), PermissionMode::Ask);
+}
+
+/// Security review of part 1: only a mode the agent took is reported; a switch it refused, or
+/// one its table has no id for, is an error, so the supervisor starts it again lower (T39).
+#[tokio::test]
+async fn a_mode_the_agent_did_not_take_is_never_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeAgent::default();
+    let a = agent(AcpModes {
+        ask: Some("default".into()),
+        auto: Some("broken".into()),
+        allow_all: None,
+    });
+    let s = spec(dir.path(), a);
+    let (tx, mut rx) = mpsc::channel(256);
+    let mut ad = adapters(&fake).create(&s, tx);
+    ad.start(&s).await.unwrap();
+    until(&mut rx, |e| {
+        *e == AdapterEvent::PermissionMode(PermissionMode::Ask)
+    })
+    .await;
+    // The agent refuses `broken`: an error, and no Auto reported.
+    assert!(ad.set_permission_mode(PermissionMode::Auto).await.is_err());
+    // Allow all has no id: Auto's `broken` again, refused.
+    assert!(ad
+        .set_permission_mode(PermissionMode::AllowAll)
+        .await
+        .is_err());
+    ad.kill().await.unwrap();
+    while let Ok(e) = rx.try_recv() {
+        assert_ne!(e, AdapterEvent::PermissionMode(PermissionMode::Auto));
+    }
+
+    // A start in a mode the agent refuses falls to Ask, set and reported.
+    let mut s2 = spec(dir.path(), s.acp_agent.clone().unwrap());
+    s2.permission_mode = PermissionMode::Auto;
+    let (tx, mut rx) = mpsc::channel(256);
+    let mut ad = adapters(&fake).create(&s2, tx);
+    ad.start(&s2).await.unwrap();
+    let seen = until(&mut rx, |e| matches!(e, AdapterEvent::PermissionMode(_))).await;
+    assert_eq!(
+        seen.last(),
+        Some(&AdapterEvent::PermissionMode(PermissionMode::Ask))
+    );
+    ad.kill().await.unwrap();
+}
+
+#[tokio::test]
+async fn allow_all_by_a_start_flag_is_left_only_by_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeAgent::default();
+    let mut a = (*agent(AcpModes {
+        ask: Some("default".into()),
+        auto: None,
+        allow_all: None,
+    }))
+    .clone();
+    a.allow_all_args = vec!["--yolo".into()];
+    let mut s = spec(dir.path(), Arc::new(a));
+    s.permission_mode = PermissionMode::AllowAll;
+    let (tx, mut rx) = mpsc::channel(256);
+    let mut ad = adapters(&fake).create(&s, tx);
+    ad.start(&s).await.unwrap();
+    until(&mut rx, |e| {
+        *e == AdapterEvent::PermissionMode(PermissionMode::AllowAll)
+    })
+    .await;
+    assert!(fake.commands.lock().unwrap()[0]
+        .args
+        .contains(&"--yolo".to_string()));
+    assert!(ad.set_permission_mode(PermissionMode::Ask).await.is_err());
+    ad.kill().await.unwrap();
+}
+
+/// Security review of part 1: a request without `kind` is ACP's `other`, and one whose
+/// `rawInput` says more than the command is not allowed by a rule; `deny` applies to both.
+#[tokio::test]
+async fn only_a_plain_execute_request_is_allowed_by_a_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeAgent::default();
+    let perms = crate::permissions::Permissions {
+        allow: vec!["Bash(ls:*)".into()],
+        ..Default::default()
+    };
+    let mut s = spec(dir.path(), agent(AcpModes::default()));
+    s.environment = Arc::new(crate::config::Environment::default_of(&perms));
+    let (tx, mut rx) = mpsc::channel(256);
+    let mut ad = adapters(&fake).create(&s, tx);
+    ad.start(&s).await.unwrap();
+    until(&mut rx, |e| matches!(e, AdapterEvent::PermissionMode(_))).await;
+    // One request: answered by the worker (`Some(option)`), or a card (`None`).
+    let mut ask = async |tc: Value| -> Option<String> {
+        ad.input(&input(&format!("ask {tc}"))).await.unwrap();
+        let seen = until(&mut rx, |e| {
+            matches!(e, AdapterEvent::TurnEnded { .. })
+                || matches!(e, AdapterEvent::Event(ev) if matches!(ev.kind, EventKind::ApprovalRequest { .. }))
+        })
+        .await;
+        if let Some(EventKind::ApprovalRequest { request_id, .. }) =
+            kinds(&seen).into_iter().last().cloned()
+        {
+            ad.answer_approval(&request_id, "no", None).await.unwrap();
+            until(&mut rx, |e| matches!(e, AdapterEvent::TurnEnded { .. })).await;
+            return None;
+        }
+        let answer = fake
+            .got()
+            .into_iter()
+            .rev()
+            .find(|v| v["id"] == 900)
+            .unwrap();
+        answer["result"]["outcome"]["optionId"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    let allowed = ask(json!({"toolCallId": "a", "title": "ls", "kind": "execute",
+        "rawInput": {"command": "ls -la", "description": "list"}}))
+    .await;
+    assert_eq!(allowed.as_deref(), Some("yes"));
+    let no_kind =
+        ask(json!({"toolCallId": "b", "title": "ls", "rawInput": {"command": "ls"}})).await;
+    assert_eq!(no_kind, None);
+    let with_cwd = ask(json!({"toolCallId": "c", "title": "ls", "kind": "execute",
+        "rawInput": {"command": "ls", "cwd": "/etc"}}))
+    .await;
+    assert_eq!(with_cwd, None);
+    let denied = ask(
+        json!({"toolCallId": "d", "title": "sudo", "kind": "execute",
+        "rawInput": {"command": "sudo ls", "env": {"X": "1"}}}),
+    )
+    .await;
+    assert_eq!(denied.as_deref(), Some("no"));
+    ad.kill().await.unwrap();
 }

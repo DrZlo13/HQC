@@ -280,6 +280,14 @@ fn parse_acp_agent(
             bail!("modes: {id:?} is not a mode id");
         }
     }
+    // Lowering needs somewhere to go: a mode above Ask only with Ask's own id (SPEC §8.2).
+    if raw.modes.ask.is_none()
+        && (raw.modes.auto.is_some()
+            || raw.modes.allow_all.is_some()
+            || !raw.allow_all_args.is_empty())
+    {
+        bail!("modes: a table with auto, allow_all or allow_all_args names ask too");
+    }
     let warning = match raw.warning.map(|w| w.trim().to_string()) {
         Some(w) if w.is_empty() => None,
         Some(w) if w.len() > 300 || w.chars().any(char::is_control) => {
@@ -1681,6 +1689,8 @@ mod tests {
             "[acp_agents.agy]\ncommand = \"/bin/agy\"\nenvironments = [\"lab\"]\n",
             "[acp_agents.agy]\ncommand = \"/bin/agy\"\nmodes = { yolo = \"x\" }\n",
             "[acp_agents.agy]\ncommand = \"/bin/agy\"\nwarning = \"two\\nlines\"\n",
+            "[acp_agents.agy]\ncommand = \"/bin/agy\"\nmodes = { auto = \"a\" }\n",
+            "[acp_agents.agy]\ncommand = \"/bin/agy\"\nallow_all_args = [\"--yolo\"]\n",
         ] {
             assert!(Config::parse(&toml(bad)).is_err(), "{bad}");
         }

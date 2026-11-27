@@ -795,8 +795,8 @@ impl Shared {
         let title = tc["title"].as_str().unwrap_or("").to_string();
         let raw = tc.get("rawInput").filter(|v| !v.is_null()).cloned();
         let kind = tc["kind"].as_str();
-        // An `execute` call's command; a request that names no kind is read the same way.
-        let execute = matches!(kind, None | Some("execute"));
+        // An `execute` call's command; a request that names no kind is ACP's `other`: a card.
+        let execute = kind == Some("execute");
         let command = raw.as_ref().filter(|_| execute).and_then(execute_command);
         let options: Vec<Value> = req["options"]
             .as_array()
@@ -830,13 +830,16 @@ impl Shared {
                 return (Some(answer), out);
             }
             // The worker's allow rules and hqc's of the folder: once, without a card. A call
-            // whose command cannot be read is never allowed so.
-            let allowed = self.policy.allowed_by("Bash", &input).is_some()
-                || self.folder_rules.as_ref().is_some_and(|f| {
-                    self.policy
-                        .folder_allows(f, &self.workspace, "Bash", &input)
-                        .is_some()
-                });
+            // whose command cannot be read, or whose `rawInput` says more than the command
+            // (where or how it runs: `cwd`, `env`, a shell), is never allowed so.
+            let plain = raw.as_ref().is_some_and(only_harmless_keys);
+            let allowed = plain && self.policy.allowed_by("Bash", &input).is_some()
+                || plain
+                    && self.folder_rules.as_ref().is_some_and(|f| {
+                        self.policy
+                            .folder_allows(f, &self.workspace, "Bash", &input)
+                            .is_some()
+                    });
             if allowed {
                 if let Some(id) = pick(&["allow_once"]) {
                     return (
@@ -940,6 +943,19 @@ pub fn execute_command(raw: &Value) -> Option<String> {
         }
     }
     None
+}
+
+/// `rawInput` holds nothing but the command and keys that do not change where or how it
+/// runs: only such a call may be allowed by a rule without a card.
+fn only_harmless_keys(raw: &Value) -> bool {
+    raw.as_object().is_some_and(|o| {
+        o.keys().all(|k| {
+            matches!(
+                k.as_str(),
+                "command" | "cmd" | "description" | "timeout" | "timeout_ms" | "timeoutMs"
+            )
+        })
+    })
 }
 
 /// Words joined as a shell reads them back: a word with anything but plain characters quoted.
@@ -1314,7 +1330,7 @@ impl AcpAdapter {
                 .unwrap_or_default();
             s.config_options = v["configOptions"].as_array().cloned().unwrap_or_default();
         }
-        self.apply_mode(mode).await;
+        self.start_mode(mode).await?;
         if let Some(m) = &spec.model {
             if let Err(e) = self.apply_model(m).await {
                 tracing::warn!(session_id = %self.session_id, model = %m, "model not set: {e:#}");
@@ -1331,11 +1347,11 @@ impl AcpAdapter {
     }
 
     /// Sets the agent's own id of `mode` (its mode, else a config option of category `mode`
-    /// with that value) and reports the mode the session runs in. An agent whose table names
-    /// no id for Ask is never switched (it runs Ask).
-    async fn apply_mode(&mut self, mode: PermissionMode) {
+    /// offering that value). `Ok(true)`: the agent took it; `Ok(false)`: the table names no id
+    /// for `mode`, nothing was sent; `Err`: the agent refused it or offers no such mode.
+    async fn send_mode(&self, mode: PermissionMode) -> Result<bool, RpcError> {
         let Some(run) = &self.run else {
-            return;
+            return Ok(false);
         };
         let (agent, session, mode_ids, options) = {
             let s = run.shared.lock().unwrap();
@@ -1346,42 +1362,78 @@ impl AcpAdapter {
                 s.config_options.clone(),
             )
         };
-        let mut runs = PermissionMode::Ask;
-        if let Some(id) = agent.modes.id(mode) {
-            let r = if mode_ids.iter().any(|m| m == id) {
-                run.rpc
-                    .request(
-                        "session/set_mode",
-                        json!({"sessionId": session, "modeId": id}),
-                    )
-                    .await
-                    .map(|_| ())
-            } else if let Some(opt) = config_option_with(&options, "mode", id) {
-                run.rpc
-                    .request(
-                        "session/set_config_option",
-                        json!({"sessionId": session, "configId": opt, "value": id}),
-                    )
-                    .await
-                    .map(|_| ())
-            } else {
-                Err(RpcError {
-                    code: 0,
-                    message: format!("the agent offers no mode {id}"),
-                })
-            };
-            match r {
-                Ok(()) => runs = mode,
-                Err(e) => {
-                    tracing::warn!(session_id = %self.session_id, agent = %agent.name, ?mode, "mode not set: {e}")
+        let Some(id) = agent.modes.id(mode) else {
+            return Ok(false);
+        };
+        if mode_ids.iter().any(|m| m == id) {
+            run.rpc
+                .request(
+                    "session/set_mode",
+                    json!({"sessionId": session, "modeId": id}),
+                )
+                .await?;
+        } else if let Some(opt) = config_option_with(&options, "mode", id) {
+            run.rpc
+                .request(
+                    "session/set_config_option",
+                    json!({"sessionId": session, "configId": opt, "value": id}),
+                )
+                .await?;
+        } else {
+            return Err(RpcError {
+                code: 0,
+                message: format!("the agent offers no mode {id}"),
+            });
+        }
+        Ok(true)
+    }
+
+    /// The mode the session runs in is `mode`: kept and reported.
+    async fn reached(&self, mode: PermissionMode) {
+        if let Some(run) = &self.run {
+            run.shared.lock().unwrap().mode = mode;
+        }
+        let _ = self.events.send(AdapterEvent::PermissionMode(mode)).await;
+    }
+
+    /// At the start: `mode` (already what the agent's table can run, [`AcpAgent::mode_for`]).
+    /// Allow all by `allow_all_args` is reached by the start itself. An agent whose table names
+    /// no mode is never switched and runs its own default, taken as Ask. When the agent refuses
+    /// `mode`, Ask is set instead; when it refuses that too, the start fails: the worker reports
+    /// only a mode it reached (SPEC §8.2).
+    async fn start_mode(&mut self, mode: PermissionMode) -> anyhow::Result<()> {
+        let agent = match &self.run {
+            Some(run) => run.shared.lock().unwrap().agent.clone(),
+            None => return Ok(()),
+        };
+        if mode == PermissionMode::AllowAll
+            && agent.modes.allow_all.is_none()
+            && !agent.allow_all_args.is_empty()
+        {
+            self.reached(mode).await;
+            return Ok(());
+        }
+        match self.send_mode(mode).await {
+            Ok(_) if mode == PermissionMode::Ask => {
+                self.reached(PermissionMode::Ask).await;
+                Ok(())
+            }
+            Ok(true) => {
+                self.reached(mode).await;
+                Ok(())
+            }
+            Ok(false) | Err(_) => {
+                tracing::warn!(session_id = %self.session_id, agent = %agent.name, ?mode, "mode not set: trying Ask");
+                match self.send_mode(PermissionMode::Ask).await {
+                    Ok(true) => {
+                        self.reached(PermissionMode::Ask).await;
+                        Ok(())
+                    }
+                    Ok(false) => bail!("the agent {} has no Ask mode to fall back to", agent.name),
+                    Err(e) => bail!("the agent {} refused its Ask mode: {e}", agent.name),
                 }
             }
-        } else if mode == PermissionMode::AllowAll && !agent.allow_all_args.is_empty() {
-            // Its start flag did it.
-            runs = mode;
         }
-        run.shared.lock().unwrap().mode = runs;
-        let _ = self.events.send(AdapterEvent::PermissionMode(runs)).await;
     }
 
     async fn apply_model(&mut self, model: &str) -> anyhow::Result<()> {
@@ -1578,18 +1630,41 @@ impl Adapter for AcpAdapter {
         let Some(run) = &self.run else {
             return Ok(());
         };
-        let agent = run.shared.lock().unwrap().agent.clone();
-        let mode = agent.mode_for(mode);
-        // A start flag cannot be given to or taken from a running process.
-        if !agent.allow_all_args.is_empty()
+        let (agent, now) = {
+            let s = run.shared.lock().unwrap();
+            (s.agent.clone(), s.mode)
+        };
+        let target = agent.mode_for(mode);
+        // A process started with `allow_all_args` leaves Allow all only by a restart: no mode
+        // set later is known to undo the flag.
+        if now == PermissionMode::AllowAll
+            && target != now
             && agent.modes.allow_all.is_none()
-            && (mode == PermissionMode::AllowAll)
-                != (run.shared.lock().unwrap().mode == PermissionMode::AllowAll)
+            && !agent.allow_all_args.is_empty()
         {
-            bail!("this agent changes to or from Allow all only at its start");
+            bail!(
+                "the agent {} leaves Allow all only by a restart",
+                agent.name
+            );
         }
-        self.apply_mode(mode).await;
-        Ok(())
+        if target == now {
+            self.reached(now).await;
+            return Ok(());
+        }
+        // Only a mode the agent took is reported; anything else is an error, and the
+        // supervisor starts the process again in the mode asked for (T39, SPEC §8.2).
+        match self.send_mode(target).await {
+            Ok(true) => {
+                self.reached(target).await;
+                Ok(())
+            }
+            Ok(false) => bail!(
+                "the agent {} cannot switch to {} while it runs",
+                agent.name,
+                target.as_str()
+            ),
+            Err(e) => bail!("the agent {} refused {}: {e}", agent.name, target.as_str()),
+        }
     }
 
     async fn set_model(&mut self, model: &str) -> anyhow::Result<()> {

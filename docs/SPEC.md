@@ -6176,11 +6176,16 @@ auth-required error (`-32000`) on `session/new` or `session/prompt` is
 
 Modes: hqc's mode (capped by `[permissions]` as for Claude Code) goes to the agent as the id its
 table's `modes` names for it, by `session/set_mode` when the agent lists that mode, else by
-`session/set_config_option` on a config option of category `mode` offering it; a mode the table
-does not name falls to the next lower, an agent without `modes` runs Ask and is never switched;
-Allow all may come from `allow_all_args` at start instead (then it changes only with a restart).
-The worker reports the mode it runs (`session.state.permission_mode`) and follows
-`current_mode_update`. The model (`session.model`) goes through a config option of category
+`session/set_config_option` on a config option of category `mode` offering it. A table that
+names `auto`, `allow_all` or `allow_all_args` names `ask` too (a config error otherwise); a
+mode the table has no id for is not offered (the next lower one is asked for); an agent without
+`modes` is never switched and its own default is taken as Ask. Allow all may come from
+`allow_all_args` at start instead, and is then left only by a restart. The worker reports only
+a mode the agent took (`session.state.permission_mode`): at the start a refused mode falls to
+Ask, set by its id, and a refused Ask fails the start; a switch the agent refuses or cannot make
+while it runs is an error, and the supervisor starts it again in the mode asked for (T39). It
+follows `current_mode_update`. A permission request that names no `kind` is ACP's `other`: a
+card. The model (`session.model`) goes through a config option of category
 `model` offering it; the client shows the agent's name instead of Claude's model menu.
 
 Turns: `session/prompt` per input (the worker runs the queue, §17.2; `ack` right after sending);
@@ -6201,7 +6206,9 @@ Permissions: on `session/request_permission` the worker reads the command of an 
 words joined as a shell reads them) and checks it as a `Bash` call: a `deny` hit is answered
 with the agent's reject option without a card and `system policy_denied`; one that the
 `[permissions] allow` or hqc's folder rules cover is answered with its `allow_once` option
-without a card. A request whose command the worker cannot read is always a card. Otherwise
+without a card, but only when `rawInput` holds nothing beside the command but `description` or a
+timeout (a `cwd`, `env` or shell changes where or how it runs: a card). A request whose command
+the worker cannot read is always a card. Otherwise
 `approval.request` with the agent's **real** options by `optionId` and its names; `kind` only
 colours the card (`allow_always` shows as "this session"): agents disagree on what "always"
 keeps, so hqc writes no rule from it. Open requests are cancelled at the end of a turn, at Stop

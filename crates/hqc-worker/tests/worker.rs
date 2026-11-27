@@ -2591,10 +2591,10 @@ async fn a_runtime_that_cannot_switch_is_restarted_in_ask() {
 }
 
 // Security re-review of iteration 10: a runtime that reports a mode above the cap of the capped
-// turn that runs (it switched itself) is stopped, and the input runs again in a new process in
-// the capped mode; nothing is lost.
+// turn that runs (it switched itself) is stopped and started again in the capped mode; an input
+// it took already is not run again (it is in the conversation, and the hub has its ack).
 #[tokio::test]
-async fn a_raise_above_the_cap_during_a_capped_turn_restarts_it() {
+async fn a_raise_above_the_cap_stops_the_turn_without_running_it_again() {
     use PermissionMode::{AllowAll, Ask, Auto};
     let env = Env::new();
     let adapters = FakeAdapters::new();
@@ -2625,14 +2625,64 @@ async fn a_raise_above_the_cap_during_a_capped_turn_restarts_it() {
         .emit(sid, AdapterEvent::PermissionMode(AllowAll))
         .await;
     let calls = adapters
-        .wait_for("the input again", |c| {
-            c.iter().filter(|x| **x == first).count() == 2
-        })
+        .wait_for("restarted", |c| c.contains(&FakeCall::Resume(sid)))
         .await;
     assert!(index(&calls, &FakeCall::Kill(sid)) < index(&calls, &FakeCall::Resume(sid)));
-    assert_eq!(adapters.start_modes(), [(sid, Auto), (sid, Ask)]);
-    adapters.accept_input(sid, e1).await;
-    adapters.end_turn(sid).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        adapters.calls().iter().filter(|x| **x == first).count(),
+        1,
+        "taken once"
+    );
+    assert_eq!(adapters.start_modes()[0], (sid, Auto));
+    w.stop().await;
+}
+
+// Security re-review of iteration 10: an agent that keeps raising itself before it takes the
+// capped input does not loop: the input goes back by `requeue`, whose bound fails it.
+#[tokio::test]
+async fn a_raise_before_the_input_was_taken_stops_at_the_requeue_bound() {
+    use PermissionMode::{AllowAll, Ask};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    started_in(&mut c, &env, sid, "auto").await;
+    let e1 = Uuid::now_v7();
+    c.frame("session.input", capped_input(sid, e1, "ask")).await;
+    adapters
+        .wait_for("switch down", |c| {
+            c.contains(&FakeCall::PermissionMode(sid, Ask))
+        })
+        .await;
+    adapters.emit(sid, AdapterEvent::PermissionMode(Ask)).await;
+    let input_call = FakeCall::Input {
+        session_id: sid,
+        event_id: e1,
+    };
+    let mut handed = 0;
+    for _ in 0..6 {
+        let n = handed + 1;
+        let got = tokio::time::timeout(
+            Duration::from_secs(2),
+            adapters.wait_for("handed", |c| {
+                c.iter().filter(|x| **x == input_call).count() >= n
+            }),
+        )
+        .await;
+        if got.is_err() {
+            break;
+        }
+        handed = n;
+        // Raised before it took the input.
+        adapters
+            .emit(sid, AdapterEvent::PermissionMode(AllowAll))
+            .await;
+    }
+    assert!((1..=3).contains(&handed), "handed {handed} times");
     w.stop().await;
 }
 

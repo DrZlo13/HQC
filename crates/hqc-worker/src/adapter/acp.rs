@@ -527,6 +527,9 @@ impl Shared {
         if m.ask.is_none() && m.auto.is_none() && m.allow_all.is_none() {
             return None;
         }
+        if m.ask_also.iter().any(|a| a == id) {
+            return Some(PermissionMode::Ask);
+        }
         Some(
             [
                 PermissionMode::AllowAll,

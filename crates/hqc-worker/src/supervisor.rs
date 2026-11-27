@@ -3227,8 +3227,9 @@ impl Session {
                     self.send_state();
                 }
                 // The runtime went above the cap of the capped turn that runs (it switched
-                // itself): the turn stops, its input and those written into it go back to the
-                // head of the queue, and a new process in the turn's mode runs it (T39).
+                // itself): the turn stops there and the process starts again in the turn's mode
+                // (T39). An input the runtime took stays delivered and is not run again; one it
+                // had not taken yet goes back by `requeue`, whose bound ends a loop.
                 if let Some(c) = self
                     .turn
                     .as_ref()
@@ -3236,20 +3237,13 @@ impl Session {
                     .map(|t| cap(&t.input))
                 {
                     if m > c {
-                        let t = self.turn.take().expect("checked");
-                        tracing::warn!(session_id = %self.id, event_id = %t.input.event_id, mode = m.as_str(), cap = c.as_str(), "the agent raised its mode during a capped turn: restarting it");
-                        for q in std::mem::take(&mut self.injected).into_iter().rev() {
-                            self.queue.push_front(q);
-                        }
-                        self.queue.push_front(Queued {
-                            frame_id: t.frame_id,
-                            input: t.input,
-                            requeued: t.requeued,
-                            quiet: false,
-                            note: false,
-                        });
+                        let event_id = self.turn.as_ref().map(|t| t.input.event_id);
+                        tracing::warn!(session_id = %self.id, ?event_id, mode = m.as_str(), cap = c.as_str(), "the agent raised its mode during a capped turn: stopping it");
+                        let lost: Vec<Uuid> =
+                            self.injected.iter().map(|q| q.input.event_id).collect();
+                        self.end_turn(&[], &lost);
                         self.system_event(
-                            "The agent switched itself above this turn's permission cap: it was stopped and runs the input again in the capped mode",
+                            "The agent raised its permission mode above this message's cap: the turn was stopped",
                             "mode_above_cap",
                         );
                         self.restart_for_cap("the agent raised its mode").await;

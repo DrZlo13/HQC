@@ -149,6 +149,32 @@ struct RawConfig {
     providers: BTreeMap<String, RawProvider>,
     #[serde(default)]
     acp_agents: BTreeMap<String, RawAcpAgent>,
+    #[serde(default)]
+    codex: Option<RawCodex>,
+}
+
+/// `[codex]` (SPEC §8.6, §14, iteration 10): OpenAI's Codex, run as `codex app-server`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCodex {
+    command: PathBuf,
+    #[serde(default)]
+    environments: Vec<String>,
+}
+
+/// Codex on this machine (SPEC §8.6): the `codex` binary, signed in on the machine, and the
+/// environments whose folders may run it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexConfig {
+    /// Absolute: a non-interactive shell's `PATH` rarely has it.
+    pub command: PathBuf,
+    pub environments: Vec<String>,
+}
+
+impl CodexConfig {
+    pub fn allowed_in(&self, environment: &str) -> bool {
+        self.environments.iter().any(|e| e == environment)
+    }
 }
 
 /// `[acp_agents.<name>]` (SPEC §8.2, §14, iteration 10): an agent the generic ACP adapter runs.
@@ -181,6 +207,10 @@ pub struct AcpModes {
     pub auto: Option<String>,
     #[serde(default)]
     pub allow_all: Option<String>,
+    /// More of the agent's ids that count as Ask (a read-only plan mode), so that the agent
+    /// moving to one is not taken as Allow all (SPEC §8.2).
+    #[serde(default)]
+    pub ask_also: Vec<String>,
 }
 
 impl AcpModes {
@@ -275,6 +305,7 @@ fn parse_acp_agent(
     for id in [&raw.modes.ask, &raw.modes.auto, &raw.modes.allow_all]
         .into_iter()
         .flatten()
+        .chain(&raw.modes.ask_also)
     {
         if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
             bail!("modes: {id:?} is not a mode id");
@@ -956,6 +987,8 @@ pub struct Config {
     pub providers: Vec<AllowedProvider>,
     /// `[acp_agents.*]` by name (SPEC §8.2, §14).
     pub acp_agents: Vec<Arc<AcpAgent>>,
+    /// `[codex]` (SPEC §8.6, §14); `None`: no Codex sessions here.
+    pub codex: Option<Arc<CodexConfig>>,
     /// `$HQC_HOME/secrets` and `$HQC_HOME/workspace-keys` (SPEC 0.147).
     pub secrets: crate::secrets::Stores,
     /// The pins of the local MCP servers' tools: `$HQC_HOME/mcp-pins.json` (iteration 9).
@@ -1154,6 +1187,23 @@ impl Config {
                     .with_context(|| format!("acp_agents.{name}"))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
+        let codex = match raw.codex {
+            None => None,
+            Some(c) => {
+                if !c.command.is_absolute() {
+                    bail!("codex: command must be an absolute path");
+                }
+                for e in &c.environments {
+                    if e != DEFAULT_ENVIRONMENT && !environments.iter().any(|x| &x.name == e) {
+                        bail!("codex: environments: there is no [environments.{e}]");
+                    }
+                }
+                Some(Arc::new(CodexConfig {
+                    command: c.command,
+                    environments: c.environments,
+                }))
+            }
+        };
         let home = hqc_home().unwrap_or_else(|_| std::env::temp_dir().join("hqc"));
         Ok(Self {
             hub_url: raw.hub_url.trim_end_matches('/').to_string(),
@@ -1185,6 +1235,7 @@ impl Config {
             mcp_pins: home.join(crate::mcp::pins::FILE),
             providers,
             acp_agents,
+            codex,
         })
     }
 
@@ -1237,6 +1288,24 @@ impl Config {
                 Some(a.clone())
             }
             (Runtime::Acp, None) => return Err("runtime acp needs acp_agent".into()),
+            // SPEC §8.6: Codex as `worker.toml` gives it, on the same terms as an ACP agent.
+            (Runtime::Codex, None) => {
+                let Some(c) = &self.codex else {
+                    return Err("codex is not configured on this worker".into());
+                };
+                if !c.allowed_in(&environment.name) {
+                    return Err(format!(
+                        "codex may not run in the environment {} of this folder",
+                        environment.name
+                    ));
+                }
+                if !s.owner_is_worker_owner || s.restricted {
+                    return Err(
+                        "Codex runs only an unrestricted session of the worker's owner".into(),
+                    );
+                }
+                None
+            }
             (_, Some(_)) => return Err("acp_agent goes with runtime acp".into()),
             (_, None) => None,
         };
@@ -1280,7 +1349,10 @@ impl Config {
         let local_mcp = (!environment.mcp_servers.is_empty()
             && s.owner_is_worker_owner
             && !s.restricted
-            && matches!(s.runtime, Runtime::ClaudeCode | Runtime::Acp))
+            && matches!(
+                s.runtime,
+                Runtime::ClaudeCode | Runtime::Acp | Runtime::Codex
+            ))
         .then(|| LocalMcp {
             environment: environment.name.clone(),
             servers: environment.mcp_servers.clone(),
@@ -1293,7 +1365,10 @@ impl Config {
         } else if !environment.hub_mcp
             || !s.owner_is_worker_owner
             || s.restricted
-            || !matches!(s.runtime, Runtime::ClaudeCode | Runtime::Acp)
+            || !matches!(
+                s.runtime,
+                Runtime::ClaudeCode | Runtime::Acp | Runtime::Codex
+            )
         {
             tracing::info!(
                 session_id = %s.session_id,

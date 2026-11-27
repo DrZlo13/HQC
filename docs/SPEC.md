@@ -692,7 +692,7 @@ the client renders only them. The "source" column is the component that produces
 | `secret_given` | hub | since 0.147: a secret or an ssh key reached the session's agent (`POST /api/sessions/{id}/secrets`, `hqc_ssh_keygen`, §6, §7): the text names it and a key's fingerprint, never the value |
 | `waiting_for_slot` | worker | since 0.183: the worker already runs `max_sessions` agents, so the session waits for a slot and starts when one of them stops; its inputs wait with it (§8.1) |
 | `agent_signed_out` | worker | since 0.266: an ACP agent answered `session/new` or `session/prompt` with ACP's auth-required error (`-32000`); the agent is signed in on the machine (RUNBOOK §2.6.1), not from hqc (§8.2) |
-| `mode_above_cap` | worker | since 0.266: the runtime reported a permission mode above the cap of the capped turn that ran (an ACP agent moved itself, §8.2): the turn was stopped and its input runs again in a new process in the capped mode (T39) |
+| `mode_above_cap` | worker | since 0.266: the runtime reported a permission mode above the cap of the capped turn that ran (an ACP agent moved itself, §8.2): the turn was stopped and the process starts again in the capped mode; an input it took is not run again, one it had not taken goes back to the queue within the bound of requeues (T39) |
 | `acp_conversation_lost` | worker | since 0.266: an ACP agent could not continue the session's conversation (`session/resume`/`session/load` failed, or it offers neither) and started a new one (§8.2) |
 | `claude_signed_out` | worker | since 0.185: the runtime answered that it is signed out ("OAuth session expired", "Not logged in", "Invalid API key", …); the line sends the owner to Settings → Workers to sign the worker's Claude Code in again (§6) |
 | `browser_refused` | worker (adapter) | since 0.148: `session.start.browser` asks for the browser this worker does not give (no `browser = true` in its `worker.toml`, a session not of its owner or restricted); the agent starts without it (`--no-chrome`), and the text says why (§8.1, §14) |
@@ -6186,10 +6186,13 @@ a mode the agent took (`session.state.permission_mode`): at the start a refused 
 Ask, set by its id, and a refused Ask fails the start; a switch the agent refuses or cannot make
 while it runs is an error, and the supervisor starts it again in the mode asked for (T39). It
 follows the agent's own reports (`current_mode_update`, the value of a mode config option, the
-mode a resumed session answers with): an id the table does not name counts as Allow all, and a
-switch to the mode hqc last set is skipped only while the agent has not moved since. A mode
-reported above the cap of a capped turn stops the turn, and its input runs again in a new
-process in the capped mode (`system mode_above_cap`); a switch the running process refuses
+mode a resumed session answers with): an id the table does not name counts as Allow all
+(`modes.ask_also` lists more of the agent's ids that count as Ask, such as a read-only plan
+mode), and a switch to the mode hqc last set is skipped only while the agent has not moved
+since. A mode reported above the cap of a capped turn stops the turn and starts the process
+again in the capped mode (`system mode_above_cap`): an input the agent took stays delivered and
+is not run again, one it had not taken goes back to the queue within the usual bound of
+requeues; a switch the running process refuses
 restarts it in the mode asked for (at once when idle, else before the next turn). An agent
 without `modes` is assumed to run Ask: hqc sees no mode of it, so its own sandbox and settings
 are the boundary for any mode it moves to by itself. A permission request that names no `kind`

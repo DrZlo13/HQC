@@ -544,6 +544,7 @@ async fn modes_and_the_model_are_set_by_the_agents_ids() {
         ask: Some("default".into()),
         auto: Some("accept-edits".into()),
         allow_all: None,
+        ask_also: vec![],
     });
     let mut s = spec(dir.path(), a);
     // Allow all asked, the table has none: the next lower, Auto.
@@ -639,6 +640,7 @@ fn an_agent_runs_the_highest_mode_its_table_has() {
         ask: Some("a".into()),
         auto: None,
         allow_all: None,
+        ask_also: vec![],
     });
     assert_eq!(a.mode_for(PermissionMode::AllowAll), PermissionMode::Ask);
     let mut b = (*agent(AcpModes::default())).clone();
@@ -660,6 +662,7 @@ async fn a_mode_the_agent_did_not_take_is_never_reported() {
         ask: Some("default".into()),
         auto: Some("broken".into()),
         allow_all: None,
+        ask_also: vec![],
     });
     let s = spec(dir.path(), a);
     let (tx, mut rx) = mpsc::channel(256);
@@ -703,6 +706,7 @@ async fn allow_all_by_a_start_flag_is_left_only_by_a_restart() {
         ask: Some("default".into()),
         auto: None,
         allow_all: None,
+        ask_also: vec![],
     }))
     .clone();
     a.allow_all_args = vec!["--yolo".into()];
@@ -795,6 +799,7 @@ async fn an_unknown_mode_the_agent_moved_to_is_allow_all() {
             ask: Some("default".into()),
             auto: Some("accept-edits".into()),
             allow_all: None,
+            ask_also: vec![],
         }),
     );
     let (tx, mut rx) = mpsc::channel(256);

@@ -1259,7 +1259,8 @@ What hqc controls and what it does not:
   outside hqc's control; keep them out of its settings on the worker's machine;
 - `allow_all` needs `[permissions] allow_all = true`, as for Claude Code.
 - give `modes` whenever the agent has modes: hqc reads the agent's mode reports by that table,
-  and takes a mode it does not name as Allow all. An agent without `modes` is assumed to run Ask
+  and takes a mode it does not name as Allow all (`ask_also` lists the agent's read-only modes
+  that count as Ask); a turn under a cap stops when the agent moves above it. An agent without `modes` is assumed to run Ask
   and hqc sees none of its own mode switches.
 
 Antigravity CLI (Google's agent; Gemini CLI no longer serves Google accounts since 2026-06-18).
@@ -1272,7 +1273,7 @@ headless Linux box the keyring needs a D-Bus session (`export $(dbus-launch)`). 
 command = "/usr/local/bin/agy"          # absolute: `command -v agy`
 args = ["acp"]
 environments = ["default"]              # the environments whose folders may run it
-modes = { ask = "default" }             # agy's own mode for Ask; it has no auto mode since 1.5.18
+modes = { ask = "default", ask_also = ["plan"] }   # agy's mode for Ask; `plan` (read-only) counts as Ask too [verify]; no auto mode since 1.5.18
 allow_all_args = ["--dangerously-skip-permissions"]   # Allow all, only with [permissions] allow_all
 warning = "Google's consumer terms lean against third-party clients of Antigravity; accounts were suspended for it in Feb 2026. Use at your own risk; a spare Google account is safer."
 ```

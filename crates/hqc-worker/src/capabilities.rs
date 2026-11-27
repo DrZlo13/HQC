@@ -59,6 +59,34 @@ pub async fn acp_agents(agents: &[std::sync::Arc<crate::config::AcpAgent>], cwd:
     Value::Array(list)
 }
 
+/// `codex` (SPEC §3 Worker, §5.4, §8.6): the version, whether it is signed in and its models,
+/// with the environments that may run it; absent when `[codex]` is not set or Codex does not
+/// answer (the log says why).
+pub async fn codex(codex: Option<&crate::config::CodexConfig>, cwd: &Path) -> Option<Value> {
+    let c = codex?;
+    match crate::adapter::codex::probe(c, cwd.to_path_buf(), Duration::from_secs(30)).await {
+        Ok(p) => {
+            if !p.signed_in {
+                tracing::warn!(
+                    "Codex {} is not signed in on this machine: run `codex login --device-auth`",
+                    p.version
+                );
+            }
+            tracing::info!(version = %p.version, models = p.models.len(), "Codex available");
+            Some(json!({
+                "version": p.version,
+                "signed_in": p.signed_in,
+                "models": p.models,
+                "environments": c.environments,
+            }))
+        }
+        Err(e) => {
+            tracing::warn!(command = %c.command.display(), "Codex not available: {e:#}");
+            None
+        }
+    }
+}
+
 /// `claude_code.moves: true` when Claude Code's config folder (`config`) exists: the worker
 /// finds a moved session's transcript under `<config>/projects` (SPEC §8.1). Without it the hub
 /// does not move the worker's sessions, which would start a new conversation instead.

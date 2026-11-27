@@ -250,6 +250,10 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
     // worker's home folder (no session is made).
     capabilities["acp_agents"] =
         capabilities::acp_agents(&config.acp_agents, &config::hqc_home()?).await;
+    // SPEC §8.6: Codex, when `[codex]` is set and a supported version answers.
+    if let Some(c) = capabilities::codex(config.codex.as_deref(), &config::hqc_home()?).await {
+        capabilities["codex"] = c;
+    }
     let permission_mode = capabilities::claude_permission_mode(config.claude_bin.as_deref()).await;
     let p = &config.permissions;
     tracing::info!(hub = %config.hub_url, allowed_roots = ?config.allowed_roots, %capabilities, %permission_mode, permissions = ?p.mode, allow_auto = p.allow_auto, allow_all = p.allow_all, allow = p.allow.len(), deny = p.deny.len(), environments = config.environments.len(), env_bindings = config.env_bindings.len(), "starting worker");

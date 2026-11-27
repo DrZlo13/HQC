@@ -20,11 +20,13 @@ use crate::inbox::InboxFile;
 
 pub mod acp;
 pub mod claude_code;
+pub mod codex;
 pub mod fake;
 pub mod jsonrpc;
 
 use acp::AcpAdapters;
 use claude_code::ClaudeCodeAdapters;
+use codex::CodexAdapters;
 
 /// What an adapter reports to the supervisor.
 // Almost every value is an `Event`; boxing it would only add an allocation.
@@ -385,6 +387,7 @@ pub trait AdapterFactory: Send + Sync + 'static {
 pub struct BuiltinAdapters {
     claude: ClaudeCodeAdapters,
     acp: AcpAdapters,
+    codex: CodexAdapters,
 }
 
 impl BuiltinAdapters {
@@ -393,12 +396,14 @@ impl BuiltinAdapters {
         Self {
             claude: ClaudeCodeAdapters::from_config(cfg, ask_mode),
             acp: AcpAdapters::from_config(cfg),
+            codex: CodexAdapters::from_config(cfg),
         }
     }
 
     /// Every Claude Code session gets the hqc MCP server (SPEC §7.2).
     pub fn with_mcp(mut self, mcp: claude_code::McpLaunch) -> Self {
         self.acp = self.acp.clone().with_mcp(mcp.clone());
+        self.codex = self.codex.clone().with_mcp(mcp.clone());
         self.claude = self.claude.with_mcp(mcp);
         self
     }
@@ -411,7 +416,7 @@ impl BuiltinAdapters {
 
 impl AdapterFactory for BuiltinAdapters {
     fn supports(&self, runtime: Runtime) -> bool {
-        self.claude.supports(runtime) || self.acp.supports(runtime)
+        self.claude.supports(runtime) || self.acp.supports(runtime) || self.codex.supports(runtime)
     }
 
     fn mcp_program(&self) -> Option<std::path::PathBuf> {
@@ -419,8 +424,10 @@ impl AdapterFactory for BuiltinAdapters {
     }
 
     fn create(&self, spec: &StartSpec, events: EventSink) -> Box<dyn Adapter> {
-        if spec.runtime == Runtime::Acp {
-            return self.acp.create(spec, events);
+        match spec.runtime {
+            Runtime::Acp => return self.acp.create(spec, events),
+            Runtime::Codex => return self.codex.create(spec, events),
+            _ => {}
         }
         self.claude.create(spec, events)
     }

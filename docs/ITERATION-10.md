@@ -288,6 +288,9 @@ from hqc, no Node, no per-agent code in the ACP adapter.
    keeps needing `session`.
 6. **Two adapters** (after a survey of comparable tools): a generic ACP adapter with agy first,
    then a native Codex adapter over `codex app-server`.
+7. **No `agent-client-protocol` crate**: ACP v1 is read as plain `serde_json`. The crate and its
+   schema crate turn on `serde_json`'s `preserve_order` for the whole build, which changes the
+   hashes of iteration 9's MCP pins on every machine; keeping them stable matters more.
 
 ## Part 1: the generic ACP adapter
 

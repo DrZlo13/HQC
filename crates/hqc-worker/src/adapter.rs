@@ -18,9 +18,11 @@ use uuid::Uuid;
 use crate::config::{Config, StartSpec};
 use crate::inbox::InboxFile;
 
+pub mod acp;
 pub mod claude_code;
 pub mod fake;
 
+use acp::AcpAdapters;
 use claude_code::ClaudeCodeAdapters;
 
 /// What an adapter reports to the supervisor.
@@ -378,9 +380,10 @@ pub trait AdapterFactory: Send + Sync + 'static {
     }
 }
 
-/// The runtimes of this build: Claude Code (T4).
+/// The runtimes of this build: Claude Code (T4) and the ACP agents of `worker.toml` (SPEC §8.2).
 pub struct BuiltinAdapters {
     claude: ClaudeCodeAdapters,
+    acp: AcpAdapters,
 }
 
 impl BuiltinAdapters {
@@ -388,11 +391,13 @@ impl BuiltinAdapters {
     pub fn from_config(cfg: &Config, ask_mode: String) -> Self {
         Self {
             claude: ClaudeCodeAdapters::from_config(cfg, ask_mode),
+            acp: AcpAdapters::from_config(cfg),
         }
     }
 
     /// Every Claude Code session gets the hqc MCP server (SPEC §7.2).
     pub fn with_mcp(mut self, mcp: claude_code::McpLaunch) -> Self {
+        self.acp = self.acp.clone().with_mcp(mcp.clone());
         self.claude = self.claude.with_mcp(mcp);
         self
     }
@@ -405,7 +410,7 @@ impl BuiltinAdapters {
 
 impl AdapterFactory for BuiltinAdapters {
     fn supports(&self, runtime: Runtime) -> bool {
-        self.claude.supports(runtime)
+        self.claude.supports(runtime) || self.acp.supports(runtime)
     }
 
     fn mcp_program(&self) -> Option<std::path::PathBuf> {
@@ -413,6 +418,9 @@ impl AdapterFactory for BuiltinAdapters {
     }
 
     fn create(&self, spec: &StartSpec, events: EventSink) -> Box<dyn Adapter> {
+        if spec.runtime == Runtime::Acp {
+            return self.acp.create(spec, events);
+        }
         self.claude.create(spec, events)
     }
 }

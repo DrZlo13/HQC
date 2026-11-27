@@ -146,6 +146,7 @@ pub fn summary(cfg: &Config) -> String {
     for b in &cfg.env_bindings {
         let _ = writeln!(out, "  {} -> {}", b.path, b.environment);
     }
+    acp_agents(&mut out, cfg, None);
     // SPEC 0.144: a session runs on one only when the hub describes it with this base_url.
     out.push_str("providers:\n");
     if cfg.providers.is_empty() {
@@ -278,6 +279,7 @@ pub fn which(cfg: &Config, path: &Path) -> anyhow::Result<String> {
             "off"
         }
     );
+    acp_agents(&mut out, cfg, Some(&e.name));
     let p = &cfg.permissions;
     let _ = writeln!(
         out,
@@ -321,9 +323,95 @@ pub fn add_key(store: &Store, name: &str, file: &Path) -> anyhow::Result<String>
     ))
 }
 
+/// `[acp_agents.*]` (SPEC §8.2), all of them or those environment `only` may run, each with
+/// its `warning`; values of `env` never.
+fn acp_agents(out: &mut String, cfg: &Config, only: Option<&str>) {
+    let agents: Vec<_> = cfg
+        .acp_agents
+        .iter()
+        .filter(|a| only.is_none_or(|e| a.allowed_in(e)))
+        .collect();
+    out.push_str(match only {
+        None => "acp_agents:\n",
+        Some(_) => "ACP agents this folder may run:\n",
+    });
+    if agents.is_empty() {
+        out.push_str("  none\n");
+    }
+    for a in agents {
+        let _ = writeln!(
+            out,
+            "  {}: {} {}",
+            a.name,
+            a.command.display(),
+            a.args.join(" ")
+        );
+        if only.is_none() {
+            let envs = if a.environments.is_empty() {
+                "none (it runs nowhere)".to_string()
+            } else {
+                a.environments.join(", ")
+            };
+            let _ = writeln!(out, "    environments: {envs}");
+            let names: Vec<&str> = a.env.names().collect();
+            if !names.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "    env: {}",
+                    names
+                        .iter()
+                        .map(|n| format!("{n}=***"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+            }
+            let modes = [
+                ("ask", &a.modes.ask),
+                ("auto", &a.modes.auto),
+                ("allow_all", &a.modes.allow_all),
+            ]
+            .iter()
+            .filter_map(|(k, v)| v.as_ref().map(|v| format!("{k}={v}")))
+            .collect::<Vec<_>>();
+            let _ = writeln!(
+                out,
+                "    modes: {}",
+                if modes.is_empty() {
+                    "none (runs Ask only)".to_string()
+                } else {
+                    modes.join(" ")
+                }
+            );
+            if !a.allow_all_args.is_empty() {
+                let _ = writeln!(out, "    allow_all_args: {}", a.allow_all_args.join(" "));
+            }
+        }
+        if let Some(w) = &a.warning {
+            let _ = writeln!(out, "    warning: {w}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acp_agents_are_listed_with_their_warning_and_no_values() {
+        let c = Config::parse(
+            "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n\
+             [acp_agents.agy]\ncommand = \"/usr/local/bin/agy\"\nargs = [\"acp\"]\n\
+             env = { AGY_TOKEN = \"secret-value\" }\nenvironments = [\"default\"]\n\
+             modes = { ask = \"default\" }\nwarning = \"use at your own risk\"\n",
+        )
+        .unwrap();
+        let out = summary(&c);
+        assert!(out.contains("  agy: /usr/local/bin/agy acp"), "{out}");
+        assert!(out.contains("    warning: use at your own risk"), "{out}");
+        assert!(out.contains("env: AGY_TOKEN=***"), "{out}");
+        assert!(out.contains("modes: ask=default"), "{out}");
+        assert!(!out.contains("secret-value"));
+    }
 
     #[test]
     fn providers_are_listed_without_keys() {

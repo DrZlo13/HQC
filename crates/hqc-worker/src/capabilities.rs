@@ -30,6 +30,35 @@ pub fn build(claude_version: Option<&str>) -> Value {
     caps
 }
 
+/// `acp_agents` (SPEC §3 Worker, §5.4, §8.2): each agent of `worker.toml` that answered
+/// `initialize`, with what it said and the environments that may run it; one that did not is
+/// left out and logged, and its `warning` is logged once here.
+pub async fn acp_agents(agents: &[std::sync::Arc<crate::config::AcpAgent>], cwd: &Path) -> Value {
+    let mut list = Vec::new();
+    for a in agents {
+        if let Some(w) = &a.warning {
+            tracing::warn!(agent = %a.name, "acp_agents.{}: {w}", a.name);
+        }
+        match crate::adapter::acp::probe(a, cwd.to_path_buf(), Duration::from_secs(20)).await {
+            Ok(p) => {
+                tracing::info!(agent = %a.name, version = ?p.version, "ACP agent available");
+                list.push(json!({
+                    "name": a.name,
+                    "version": p.version,
+                    "environments": a.environments,
+                    "load_session": p.load_session,
+                    "resume": p.resume,
+                    "image": p.image,
+                }));
+            }
+            Err(e) => {
+                tracing::warn!(agent = %a.name, command = %a.command.display(), "ACP agent not available: {e:#}")
+            }
+        }
+    }
+    Value::Array(list)
+}
+
 /// `claude_code.moves: true` when Claude Code's config folder (`config`) exists: the worker
 /// finds a moved session's transcript under `<config>/projects` (SPEC §8.1). Without it the hub
 /// does not move the worker's sessions, which would start a new conversation instead.

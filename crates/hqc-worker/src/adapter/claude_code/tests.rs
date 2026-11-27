@@ -193,6 +193,7 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         local_mcp: None,
         skills: vec![],
         skill_dir: None,
+        acp_agent: None,
         fork: None,
     }
 }

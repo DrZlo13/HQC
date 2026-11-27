@@ -8417,10 +8417,11 @@ is not asked, does not see the question or the answer, and does not work on it.
 10. Google's and OpenAI's agents on the owner's subscriptions (planned since 0.266), by two
    adapters. First the generic ACP adapter (§8.2), which knows no agent by name: each agent is a
    `[acp_agents.<name>]` table of `worker.toml` (`command`, `args`, `env`, the environments that may
-   run it, `modes` for Ask / Auto / Allow all, `allow_all_args`), ready blocks in RUNBOOK; a
+   run it, `modes` for Ask / Auto / Allow all, `allow_all_args`, a `warning` that `hqc-worker env`
+   prints), ready blocks in RUNBOOK; a
    session is `runtime: acp` with `acp_agent: <name>`; its first agent is Antigravity CLI (`agy
    acp`; Gemini CLI no longer serves Google accounts since 2026-06-18), at the owner's risk under
-   Google's consumer terms (RUNBOOK and `hqc-worker env` say so). Then a native Codex adapter over
+   Google's consumer terms (RUNBOOK's block says so in its `warning`). Then a native Codex adapter over
    `codex app-server` (`runtime: codex`, one app-server process per session, a pinned Codex version
    and schema), with steer, per-turn modes and the account's limits. Both are signed in on the
    machine; hqc's servers (`hqc`, the hub's relays, the environment's local servers) reach them;
@@ -8654,8 +8655,8 @@ subscriptions; Hermes later; the bare model and the personal assistant session m
 Google AI Pro, Ultra and free accounts on 2026-06-18 (Antigravity CLI replaces it, native ACP
 since 1.5.0); comparable tools drive Codex through its App Server, and only IDEs use `codex-acp`;
 ACP v1 has `usage_update` and `session_info_update` stable; the Rust crate `agent-client-protocol`
-is at 5.6.1. Decided with the owner: the ACP adapter first; Antigravity at the owner's risk (a
-warning in RUNBOOK and `hqc-worker env`, none in the client); sign-in on the machine only; the
+is at 5.6.1. Decided with the owner: the ACP adapter first; Antigravity at the owner's risk (the
+`warning` of RUNBOOK's agy block, printed by `hqc-worker env`, none in the client); sign-in on the machine only; the
 agent's sandbox is the boundary for calls it runs without asking, the worker's `deny` checks the
 requests it gets, Allow all only with `allow_all = true`. The rest of the SPEC (§8.2, §8.2.1, a
 new §8.6, §14, §4 `usage`, §3 `runtime: codex`) changes with the code.

@@ -179,11 +179,13 @@ T83 confirm it before the code relies on it.
   environments = ["default"]                # where it may run; none listed: nowhere
   modes = { ask = "default" }               # the agent's own mode or config-option ids
   allow_all_args = ["--dangerously-skip-permissions"]   # for an agent that needs a start flag
+  warning = "Google's consumer terms lean against third-party clients; use at your own risk"
   ```
 
   `modes = { ask, auto, allow_all }` names the agent's ids for hqc's three modes; an agent without
-  `modes` runs Ask only and is not switched; a missing `auto` or `allow_all` falls to the next lower
-  mode, and the worker reports the mode it runs. `allow_all` (an id or `allow_all_args`) also needs
+  `modes` runs Ask only and is not switched; an optional `warning` is a line `hqc-worker env`
+  prints next to the agent and the worker logs once at start; a missing `auto` or `allow_all`
+  falls to the next lower mode, and the worker reports the mode it runs. `allow_all` (an id or `allow_all_args`) also needs
   `[permissions] allow_all = true`. `isolation` of SPEC §14 goes. RUNBOOK ships ready blocks for
   agy, and later Gemini CLI on an API key and Hermes: the presets live in the docs, not in the code.
 - **The command of an `execute` request** is read from common `rawInput` keys, `command` or `cmd`,
@@ -205,10 +207,10 @@ T83 confirm it before the code relies on it.
 - **The model menu** comes from the agent's `model` config option once a session runs; a new
   session starts on the agent's default.
 - **Antigravity on the owner's Google AI subscription, at the owner's risk** (decided with the
-  owner): RUNBOOK's agent setup section carries the warning (Google's consumer terms lean against
+  owner): RUNBOOK's agy block carries the warning (Google's consumer terms lean against
   third-party clients, accounts were suspended for it in February 2026, a spare account is safer)
-  and `hqc-worker env` prints one line next to an agent whose command is `agy`. No warning in the
-  client. (The one place a name is matched, and only for that line.)
+  as the block's `warning` field, which `hqc-worker env` prints next to the agent and the worker
+  logs once at start. No warning in the client, and no agent's name matched in the code.
 
 ### The native Codex adapter
 
@@ -292,12 +294,13 @@ from hqc, no Node, no per-agent code in the ACP adapter.
 ### T74. `[acp_agents]` and the probe at start
 
 `config.rs`: `[acp_agents.<name>]` (`command` absolute, `args`, `env` plain or vault,
-`environments`, `modes`, `allow_all_args`), checked at load (a name `[a-z0-9_-]{1,32}`, the
+`environments`, `modes`, `allow_all_args`, `warning`), checked at load (a name `[a-z0-9_-]{1,32}`, the
 environments exist, `allow_all` needs `[permissions] allow_all = true` to be offered); `isolation`
 dropped. At start the worker runs `initialize` on each agent (a timeout; the child allowlist plus
 `env`), keeps `agentInfo` and capabilities, and sends `hello.capabilities.acp_agents[{name,
 version, environments, modes, load_session, resume, image}]`; `hqc-worker env` and `env which`
-list the agents a folder may run, with the agy warning line. Touches `crates/hqc-worker/src/
+list the agents a folder may run, each with its `warning`, which the worker also logs once at
+start. Touches `crates/hqc-worker/src/
 config.rs`, `capabilities.rs`, `env_cmd.rs`, `crates/hqc-proto/src/frame.rs`, wire examples.
 
 ### T75. The adapter
@@ -391,7 +394,7 @@ SPEC: §8.2 rewritten (the generic adapter, the boundary of what the worker sees
 Codex, §8.2.1 marked as the old in-process Hermes, §4 `usage` and `system agent_signed_out`, §14
 `acp_agents` and `codex`, §3 `runtime: codex`. RUNBOOK: installing and signing in agy and Codex on
 the machine, the ready `[acp_agents]` blocks (agy now; Gemini CLI on an API key and Hermes later),
-the agy terms warning, and what the agents connect by themselves.
+the agy terms warning as that block's `warning`, and what the agents connect by themselves.
 
 ## Later
 

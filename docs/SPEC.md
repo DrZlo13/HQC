@@ -6321,12 +6321,16 @@ machine, `codex login --device-auth`). Then `thread/resume {threadId, excludeTur
 session's `runtime_session_id`, or, when there is none or Codex answers with another thread,
 `thread/start` (`system acp_conversation_lost` in the second case); a new thread's id becomes
 the `runtime_session_id`. Both carry the mode's `approvalPolicy` and `sandbox`, the model and
-hqc's servers as `config.mcp_servers` (the launchers of §8.1) **[verify]**.
+hqc's servers as `config.mcp_servers` (the launchers of §8.1) **[verify]**. The session token is
+in no config: the App Server's own environment holds `HQC_SESSION_TOKEN`, each server's entry
+names it in `env_vars`, and the thread's `shell_environment_policy.exclude = ["HQC_*"]` keeps it
+from the model's commands (Codex's default excludes `*TOKEN*` too) **[verify that the partial
+policy keeps the user's own]**.
 
 Modes: Ask = `on-request` with the `read-only` sandbox, Auto = `on-request` with
 `workspace-write`, Allow all = `never` with `danger-full-access` (only with `[permissions]
 allow_all`). `turn/start` carries `approvalPolicy` and `sandboxPolicy` only when the mode changed
-since the last turn, so the user's own sandbox settings (network access) stay; a switch between
+since the last turn Codex took (a refused `turn/start` leaves them to be sent again), so the user's own sandbox settings (network access) stay; a switch between
 turns is confirmed at once and goes with the next turn, a switch during a turn is refused and the
 supervisor asks again before the next turn, so a T39 cap takes its turn exactly.
 
@@ -6346,7 +6350,8 @@ App Server); the next input starts it again.
 
 Approvals: `item/commandExecution/requestApproval` carries the command explicitly: the worker's
 `deny` declines it without a card (`system policy_denied`), its allow rules and hqc's folder
-rules accept it without one when it runs in the session's workspace; otherwise, and for
+rules accept it without one only when its `cwd`, resolved, is the session's folder or the
+workspace's root (a symlink or `..` out of it, an unresolvable `cwd` or none: a card); otherwise, and for
 `item/fileChange/requestApproval` (the item's diffs on the card), a card with Codex's decisions:
 Allow (`accept`), Allow for this session (`acceptForSession`), Deny (`decline`), Deny and stop
 (`cancel`). `item/tool/requestUserInput` → `clarify.request`; an MCP server's form is declined.

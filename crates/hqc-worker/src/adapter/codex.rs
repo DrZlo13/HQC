@@ -266,6 +266,8 @@ struct Shared {
     policy: Policy,
     folder_rules: Option<crate::permissions::FolderRules>,
     workspace: PathBuf,
+    /// The session's working folder (`<workspace>/<cwd>`).
+    workdir: PathBuf,
     thread: Option<String>,
     turn: Option<Turn>,
     asked: BTreeMap<String, Asked>,
@@ -681,10 +683,17 @@ impl Shared {
                 ));
                 return (Some(json!({"decision": "decline"})), out);
             }
-            // Allowed by a rule only in the session's own folder (SPEC §8.6).
-            let here = p["cwd"]
-                .as_str()
-                .is_none_or(|c| std::path::Path::new(c).starts_with(&self.workspace));
+            // Allowed by a rule only when it runs in the session's own folder, resolved
+            // (a symlink or `..` inside the workspace leads out of it), and the rules are read
+            // against that folder: any other `cwd`, or one that does not resolve, is a card
+            // (SPEC §8.6).
+            let here = p["cwd"].as_str().is_some_and(|c| {
+                let real = std::fs::canonicalize(c).ok();
+                let same = |dir: &std::path::Path| {
+                    real.is_some() && std::fs::canonicalize(dir).ok() == real
+                };
+                same(&self.workspace) || same(&self.workdir)
+            });
             let allowed = here
                 && (self.policy.allowed_by("Bash", &input).is_some()
                     || self.folder_rules.as_ref().is_some_and(|f| {
@@ -924,6 +933,14 @@ impl CodexAdapter {
             )
         };
         let mut env = spec.environment.process_env();
+        // For hqc's MCP servers (`env_vars` of their config); Codex's shell environment policy
+        // keeps it from the model's commands (its default excludes `*TOKEN*`, and the thread's
+        // config excludes `HQC_*` too).
+        env.retain(|(k, _)| k != crate::mcp::TOKEN_ENV);
+        env.push((
+            crate::mcp::TOKEN_ENV.into(),
+            spec.session_token.expose().to_string(),
+        ));
         if let Some(a) = &ssh_agent {
             env.push((
                 crate::ssh::SSH_AUTH_SOCK.into(),
@@ -948,6 +965,7 @@ impl CodexAdapter {
             policy: Policy::new(&spec.environment.permissions),
             folder_rules: spec.folder_rules.clone(),
             workspace: spec.workspace.clone(),
+            workdir: spec.workdir.clone(),
             thread: None,
             turn: None,
             asked: BTreeMap::new(),
@@ -1049,7 +1067,10 @@ impl CodexAdapter {
         }
         let mode = spec.permission_mode;
         let (approval, sandbox, _) = policy_of(mode);
-        let config = json!({ "mcp_servers": mcp_servers(self.opts.mcp.as_ref(), spec) });
+        let config = json!({
+            "mcp_servers": mcp_servers(self.opts.mcp.as_ref(), spec),
+            "shell_environment_policy": {"exclude": ["HQC_*"]},
+        });
         let cwd = spec.workdir.display().to_string();
         let mut thread = None;
         if let Some(id) = &spec.runtime_session_id {
@@ -1143,7 +1164,13 @@ fn mcp_servers(mcp: Option<&McpLaunch>, spec: &StartSpec) -> Value {
         for (name, s) in servers {
             out.insert(
                 name.clone(),
-                json!({"command": s["command"], "args": s["args"], "env": s["env"]}),
+                json!({
+                    "command": s["command"],
+                    "args": s["args"],
+                    // The token comes from the App Server's own environment by name: the
+                    // thread's config, which Codex may keep, carries no secret (SPEC §8.6).
+                    "env_vars": [crate::mcp::TOKEN_ENV],
+                }),
             );
         }
     }
@@ -1169,16 +1196,17 @@ impl Adapter for CodexAdapter {
                 "input": [{"type": "text", "text": input.text, "text_elements": []}]});
             // Only what changed: a sandbox policy sent on every turn would reset the user's
             // network access (T3 Code's lesson).
+            // Recorded as sent only once Codex took the turn (below): a refused `turn/start`
+            // leaves the next one to send them again.
             if s.sent_mode != Some(s.mode) {
                 let (approval, _, sandbox) = policy_of(s.mode);
                 params["approvalPolicy"] = json!(approval);
                 params["sandboxPolicy"] = sandbox;
-                s.sent_mode = Some(s.mode);
             }
             if s.model.is_some() && s.model != s.sent_model {
                 params["model"] = json!(s.model);
-                s.sent_model = s.model.clone();
             }
+            let sending = (s.mode, s.model.clone());
             s.turn = Some(Turn {
                 input: input.event_id,
                 id: None,
@@ -1187,12 +1215,16 @@ impl Adapter for CodexAdapter {
                 tools: HashMap::new(),
                 changes: HashMap::new(),
             });
-            params
+            (params, sending)
         };
+        let (params, sending) = params;
         let rx = match run.rpc.send("turn/start", params).await {
             Ok(rx) => rx,
             Err(e) => {
-                run.shared.lock().unwrap().turn = None;
+                let mut s = run.shared.lock().unwrap();
+                s.turn = None;
+                s.sent_mode = None;
+                s.sent_model = None;
                 bail!("turn/start: {e}");
             }
         };
@@ -1207,18 +1239,22 @@ impl Adapter for CodexAdapter {
         tokio::spawn(async move {
             match rx.await.unwrap_or_else(|_| Err(RpcError::closed())) {
                 Ok(v) => {
-                    if let (Some(t), Some(id)) = (
-                        shared.lock().unwrap().turn.as_mut(),
-                        v["turn"]["id"].as_str(),
-                    ) {
+                    let mut s = shared.lock().unwrap();
+                    s.sent_mode = Some(sending.0);
+                    if sending.1.is_some() {
+                        s.sent_model = sending.1;
+                    }
+                    if let (Some(t), Some(id)) = (s.turn.as_mut(), v["turn"]["id"].as_str()) {
                         t.id.get_or_insert_with(|| id.to_string());
                     }
                 }
                 Err(_) if gone.load(Ordering::SeqCst) => {}
                 Err(e) => {
-                    // Refused: the turn ends here.
+                    // Refused: the turn ends here, and the next one sends its mode again.
                     let out = {
                         let mut s = shared.lock().unwrap();
+                        s.sent_mode = None;
+                        s.sent_model = None;
                         let fail = json!({"status": "failed", "error": {"message": e.message}});
                         s.end_turn(&fail)
                     };

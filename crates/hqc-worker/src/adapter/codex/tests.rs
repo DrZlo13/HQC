@@ -89,6 +89,9 @@ impl Spawner for FakeCodex {
                             };
                             send(&mut out, reply(json!({"thread": {"id": tid}}))).await
                         }
+                        Some("turn/start") if v["params"]["input"][0]["text"] == "toobig" => {
+                            send(&mut out, json!({"id": id, "error": {"code": -32600, "message": "input too large"}})).await
+                        }
                         Some("turn/start") => {
                             turns += 1;
                             let tid = format!("u{turns}");
@@ -98,7 +101,13 @@ impl Spawner for FakeCodex {
                                 .to_string();
                             send(&mut out, reply(json!({"turn": {"id": tid, "items": [], "status": "inProgress"}}))).await;
                             send(&mut out, note("turn/started", json!({"threadId": "th1", "turn": {"id": tid, "items": [], "status": "inProgress"}}))).await;
-                            if let Some(cmd) = text.strip_prefix("run ") {
+                            if let Some(rest) = text.strip_prefix("runat ") {
+                                // `runat <cwd> <command>`: an approval with that `cwd`.
+                                let (cwd, cmd) = rest.split_once(' ').unwrap();
+                                send(&mut out, json!({"id": 900, "method": "item/commandExecution/requestApproval",
+                                    "params": {"threadId": "th1", "turnId": tid, "itemId": "c1", "startedAtMs": 1,
+                                        "command": cmd, "cwd": cwd}})).await;
+                            } else if let Some(cmd) = text.strip_prefix("run ") {
                                 send(&mut out, note("item/started", json!({"threadId": "th1", "turnId": tid, "startedAtMs": 1,
                                     "item": {"type": "commandExecution", "id": "c1", "command": cmd, "commandActions": [], "cwd": "/w", "status": "inProgress"}}))).await;
                                 send(&mut out, json!({"id": 900, "method": "item/commandExecution/requestApproval",
@@ -316,10 +325,19 @@ async fn a_thread_starts_in_the_sessions_mode_with_hqcs_servers() {
         start["config"]["mcp_servers"]["hqc"]["command"],
         "/opt/test/hqc-worker"
     );
+    // The token never goes into the thread's config: the App Server's environment holds it, and
+    // the MCP server names it.
     assert_eq!(
-        start["config"]["mcp_servers"]["hqc"]["env"]["HQC_SESSION_TOKEN"],
-        "st"
+        start["config"]["mcp_servers"]["hqc"]["env_vars"],
+        json!(["HQC_SESSION_TOKEN"])
     );
+    assert!(!start.to_string().contains("\"st\""), "{start}");
+    assert_eq!(
+        start["config"]["shell_environment_policy"]["exclude"],
+        json!(["HQC_*"])
+    );
+    let env = fake.commands.lock().unwrap()[0].env.clone();
+    assert!(env.contains(&("HQC_SESSION_TOKEN".to_string(), "st".to_string())));
     assert_eq!(
         fake.commands.lock().unwrap()[0].args,
         vec!["app-server".to_string()]
@@ -544,5 +562,79 @@ async fn a_thread_is_resumed_and_a_lost_one_started_anew() {
         .iter()
         .any(|k| matches!(k, EventKind::System { code, .. } if code == CONVERSATION_LOST)));
     assert_eq!(fake.calls("thread/start").len(), 1);
+    ad.kill().await.unwrap();
+}
+
+/// Security review of the Codex adapter: a command is allowed by a rule only when it runs in the
+/// session's own folder, resolved; a symlink or `..` out of it, an unresolvable `cwd` or none is
+/// a card.
+#[tokio::test]
+async fn a_rule_allows_a_command_only_in_the_sessions_own_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("h")).unwrap();
+    let mut s = spec(dir.path());
+    s.environment = Arc::new(crate::config::Environment::default_of(
+        &crate::permissions::Permissions {
+            allow: vec!["Bash(ls:*)".into()],
+            ..Default::default()
+        },
+    ));
+    let root = s.workdir.display().to_string();
+    for (cwd, auto) in [
+        (root.clone(), true),
+        (format!("{root}/h"), false),
+        (format!("{root}/.."), false),
+        (format!("{root}/missing"), false),
+    ] {
+        let fake = FakeCodex::default();
+        let (mut ad, mut rx) = started(&fake, &s).await;
+        ad.input(&input(&format!("runat {cwd} ls -la")))
+            .await
+            .unwrap();
+        let seen = until(&mut rx, |e| {
+            matches!(e, AdapterEvent::TurnEnded { .. })
+                || matches!(e, AdapterEvent::Event(ev) if matches!(ev.kind, EventKind::ApprovalRequest { .. }))
+        })
+        .await;
+        let card = kinds(&seen)
+            .iter()
+            .any(|k| matches!(k, EventKind::ApprovalRequest { .. }));
+        assert_eq!(!card, auto, "{cwd}");
+        ad.kill().await.unwrap();
+    }
+    // No `cwd` at all: a card too.
+    let fake = FakeCodex::default();
+    let (mut ad, mut rx) = started(&fake, &s).await;
+    ad.input(&input("run ls -la")).await.unwrap();
+    until(&mut rx, |e| {
+        matches!(e, AdapterEvent::Event(ev) if matches!(ev.kind, EventKind::ApprovalRequest { .. }))
+    })
+    .await;
+    ad.kill().await.unwrap();
+}
+
+/// Security review of the Codex adapter: a refused `turn/start` leaves its mode unsent, so the
+/// next turn sends it again.
+#[tokio::test]
+async fn a_refused_turn_leaves_its_mode_to_be_sent_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeCodex::default();
+    let s = spec(dir.path());
+    let (mut ad, mut rx) = started(&fake, &s).await;
+    ad.set_permission_mode(PermissionMode::Auto).await.unwrap();
+    ad.input(&input("toobig")).await.unwrap();
+    until(&mut rx, |e| matches!(e, AdapterEvent::TurnEnded { .. })).await;
+    ad.input(&input("hello")).await.unwrap();
+    until(&mut rx, |e| matches!(e, AdapterEvent::TurnEnded { .. })).await;
+    let turns = fake.calls("turn/start");
+    assert_eq!(turns.len(), 2);
+    for t in &turns {
+        assert_eq!(
+            t["params"]["sandboxPolicy"],
+            json!({"type": "workspaceWrite"}),
+            "{t}"
+        );
+    }
     ad.kill().await.unwrap();
 }

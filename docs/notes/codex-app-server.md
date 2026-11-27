@@ -33,8 +33,11 @@ Messages carry no `"jsonrpc"` field.
 - `approvalPolicy`: `on-request` (Ask, Auto) or `never` (Allow all); `sandbox`: `read-only`,
   `workspace-write`, `danger-full-access`; `sandboxPolicy` on a turn: `{type: "readOnly"}`,
   `{type: "workspaceWrite"}`, `{type: "dangerFullAccess"}`, sent only when the mode changed.
-- `config.mcp_servers.<name> = {command, args, env}`: hqc's servers **[verify that
-  `thread/start`'s `config` takes them as `-c mcp_servers.…` would]**.
+- `config.mcp_servers.<name> = {command, args, env_vars: ["HQC_SESSION_TOKEN"]}`: hqc's servers,
+  the token taken by name from the App Server's environment (`env_vars`, `RawMcpServerConfig` in
+  `codex-rs/config/src/mcp_types.rs` of the tag), so no config Codex may keep holds it; and
+  `config.shell_environment_policy.exclude = ["HQC_*"]` **[verify that `thread/start`'s `config`
+  takes both as `-c` would, and that the partial policy keeps the user's own]**.
 - Notifications read: `turn/started`, `turn/completed` (`turn.status`: `completed`,
   `interrupted`, `failed` with `error.message` and `error.codexErrorInfo`, `unauthorized` read
   as signed out), `item/started` and `item/completed` (`commandExecution`, `fileChange`,

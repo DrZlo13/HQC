@@ -288,7 +288,8 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       title: s.title,
       slug: s.slug,
       agent: {
-        runtime: 'claude_code',
+        runtime: s.acp_agent ? 'acp' : s.codex ? 'codex' : 'claude_code',
+        ...(s.acp_agent ? { acp_agent: s.acp_agent } : {}),
         ...(s.model ? { model: s.model } : {}),
         runtime_session_id: s.id,
         process_state: s.turn ? 'running' : 'stopped',
@@ -1202,6 +1203,20 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     const mode = body?.permission_mode;
     if (mode !== undefined && !MODES.includes(mode)) throw fail(400, 'bad_request', 'permission_mode is ask, auto or allow_all');
     const agent = agentSettings({}, body);
+    // SPEC §8.2: an ACP agent the workspace's worker named at its start.
+    if (body?.runtime === 'acp' || body?.acp_agent !== undefined) {
+      const w = allWorkers().find((x) => x.id === ws.worker_id);
+      if (body.runtime !== 'acp' || !body.acp_agent) throw fail(400, 'bad_request', 'runtime acp goes with acp_agent');
+      if (!w?.capabilities?.acp_agents?.some((a) => a.name === body.acp_agent)) {
+        throw fail(422, 'acp_agent_unavailable', `the worker ${w?.name ?? '?'} has no ACP agent ${body.acp_agent}`);
+      }
+      agent.acp_agent = body.acp_agent;
+    } else if (body?.runtime === 'codex') {
+      // SPEC §8.6: Codex, on a worker that named it.
+      const w = allWorkers().find((x) => x.id === ws.worker_id);
+      if (!w?.capabilities?.codex) throw fail(422, 'codex_unavailable', `the worker ${w?.name ?? '?'} has no Codex`);
+      agent.codex = true;
+    }
     if (body?.isolation === 'worktree') {
       // SPEC 0.265: a new ephemeral worktree of the workspace, made for a moment; a new branch
       // whose name has `exists` in it exists already.
@@ -1648,7 +1663,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   route('GET', '/api/mock/artifacts/:id', (p) => ({ artifact_id: p.id, note: 'mock artifact' }));
   // Workers as the hub lists them (SPEC §6): `revoked` only with `include_revoked=1`.
   const allWorkers = () =>
-    [{ id: workerId, name: 'home-mac', os: 'macos', status: 'online', session_secrets: true, browser: true, capabilities: { claude_code: { version: '2.1.322', login: true } } }, ...enrolled].map((w) =>
+    [{ id: workerId, name: 'home-mac', os: 'macos', status: 'online', session_secrets: true, browser: true, capabilities: { claude_code: { version: '2.1.322', login: true }, acp_agents: [{ name: 'agy', version: '1.5.18', environments: ['default'] }], codex: { version: '0.172.0', signed_in: true, environments: ['default'], models: [{ id: 'gpt-5.6', name: 'GPT-5.6 Terra', default: true, efforts: ['low', 'medium', 'high'] }, { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', default: false, efforts: ['medium', 'high'] }] } } }, ...enrolled].map((w) =>
       revoked.has(w.id) ? { ...w, status: 'revoked', revoked_at: new Date().toISOString() } : w,
     );
   route('GET', '/api/workers', (_, __, q) => ({

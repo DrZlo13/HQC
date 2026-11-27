@@ -1521,6 +1521,8 @@ pub fn binding_for<'a>(bindings: &'a [EnvBinding], path: &str) -> Option<&'a Env
 pub enum Runtime {
     ClaudeCode,
     Acp,
+    /// OpenAI's Codex through its App Server (SPEC §8.6, since 0.266).
+    Codex,
     Bare,
     /// No agent: the worker's service session (SPEC §10.2); never started.
     None,

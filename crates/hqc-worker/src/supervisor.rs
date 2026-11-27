@@ -1988,7 +1988,12 @@ impl Session {
             self.ask_runtime(mode.min(c)).await;
             return;
         }
-        self.ask_runtime(mode).await;
+        // A runtime that cannot switch now runs a new process in the mode: at once when it is
+        // idle, else before the next turn (`pump` asks again and restarts on a refusal).
+        if !self.ask_runtime(mode).await && self.turn.is_none() && self.lowering.is_none() {
+            self.restart_for_cap("the runtime cannot switch").await;
+            self.pump().await;
+        }
     }
 
     /// Run `model` from now on: the next start takes it from the spec, a running agent
@@ -2275,11 +2280,15 @@ impl Session {
         if self.asked_mode == mode {
             return true;
         }
+        let before = self.asked_mode;
         self.asked_mode = mode;
         match self.adapter.set_permission_mode(mode).await {
             Ok(()) => true,
             Err(e) => {
-                tracing::warn!(session_id = %self.id, mode = mode.as_str(), "permission mode not switched until the next start: {e:#}");
+                // The process is still in the mode it was asked for before: the next ask
+                // tries again, and a refusal there restarts it.
+                self.asked_mode = before;
+                tracing::warn!(session_id = %self.id, mode = mode.as_str(), "permission mode not switched: {e:#}");
                 false
             }
         }
@@ -2426,8 +2435,14 @@ impl Session {
             let own = self.spec.permission_mode;
             let mode = own.min(cap(&q.input));
             if !capped(&q.input) {
-                // After a capped turn whose next input was capped too (T39).
-                self.ask_runtime(own).await;
+                // After a capped turn whose next input was capped too (T39), or a switch the
+                // runtime refused: a process that cannot run the session's mode is started
+                // again in it before the turn.
+                if !self.ask_runtime(own).await {
+                    self.queue.push_front(q);
+                    self.restart_for_cap("the runtime cannot switch").await;
+                    continue;
+                }
             } else if !(self.asked_mode == mode && self.permission_mode.is_some_and(|m| m <= mode))
             {
                 // The turn's mode is asked for or not confirmed yet. A runtime already at or
@@ -3210,6 +3225,31 @@ impl Session {
                 if self.permission_mode != Some(m) {
                     self.permission_mode = Some(m);
                     self.send_state();
+                }
+                // The runtime went above the cap of the capped turn that runs (it switched
+                // itself): the turn stops there and the process starts again in the turn's mode
+                // (T39). An input the runtime took stays delivered and is not run again; one it
+                // had not taken yet goes back by `requeue`, whose bound ends a loop.
+                if let Some(c) = self
+                    .turn
+                    .as_ref()
+                    .filter(|t| t.capped)
+                    .map(|t| cap(&t.input))
+                {
+                    if m > c {
+                        let event_id = self.turn.as_ref().map(|t| t.input.event_id);
+                        tracing::warn!(session_id = %self.id, ?event_id, mode = m.as_str(), cap = c.as_str(), "the agent raised its mode during a capped turn: stopping it");
+                        let lost: Vec<Uuid> =
+                            self.injected.iter().map(|q| q.input.event_id).collect();
+                        self.end_turn(&[], &lost);
+                        self.system_event(
+                            "The agent raised its permission mode above this message's cap: the turn was stopped",
+                            "mode_above_cap",
+                        );
+                        self.restart_for_cap("the agent raised its mode").await;
+                        self.pump().await;
+                        return;
+                    }
                 }
                 // The confirmation a capped input waits for (T39).
                 if m == self.asked_mode {

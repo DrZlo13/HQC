@@ -1619,6 +1619,10 @@ export interface SessionInfo {
   provider?: ProviderRef;
   /** The owner gave the agent their Chrome (`agent.browser`, SPEC 0.148); absent: no browser. */
   browser?: boolean;
+  /** The agent's runtime (`agent.runtime`, SPEC §3 Agent): `claude_code`, or `acp` with
+   *  `acp_agent`, an agent of the worker's `worker.toml` (SPEC §8.2). */
+  runtime?: string;
+  acp_agent?: string;
   /** Only on a room (a session with no worker whose agents are member sessions): which of the
    *  owner's and the agents' messages wake the agents. */
   room_mode?: RoomMode;
@@ -1890,6 +1894,8 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     favorite_at: optStr(o, 'favorite_at'),
     paused_at: optStr(o, 'paused_at'),
     model: optStr(agent, 'model'),
+    runtime: optStr(agent, 'runtime'),
+    acp_agent: optStr(agent, 'acp_agent'),
     provider: optProviderRef(agent),
     browser: optBool(agent, 'browser') || undefined,
     room_mode: oneOf(o, 'room_mode', ROOM_MODES),

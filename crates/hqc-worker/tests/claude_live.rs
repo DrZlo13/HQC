@@ -154,6 +154,7 @@ async fn live_repo_settings_ignored() {
         local_mcp: None,
         skills: vec![],
         skill_dir: None,
+        acp_agent: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -297,6 +298,7 @@ async fn live_environment_ssh() {
                 local_mcp: None,
                 skills: vec![],
                 skill_dir: None,
+                acp_agent: None,
                 fork: None,
             };
             println!("--- {dir}: environment {}", spec.environment.name);
@@ -531,6 +533,7 @@ async fn live_environment_ssh_keys() {
                 local_mcp: None,
                 skills: vec![],
                 skill_dir: None,
+                acp_agent: None,
                 fork: None,
             };
             println!("--- {dir}: environment {}", spec.environment.name);
@@ -685,6 +688,7 @@ async fn live_folder_rules() {
         local_mcp: None,
         skills: vec![],
         skill_dir: None,
+        acp_agent: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -796,6 +800,7 @@ async fn live_permission_mode_switch() {
         local_mcp: None,
         skills: vec![],
         skill_dir: None,
+        acp_agent: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -956,6 +961,7 @@ async fn live_bash_turn_with_approval() {
         local_mcp: None,
         skills: vec![],
         skill_dir: None,
+        acp_agent: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1206,6 +1212,7 @@ async fn live_permission_policy() {
         local_mcp: None,
         skills: vec![],
         skill_dir: None,
+        acp_agent: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1346,6 +1353,7 @@ async fn live_ai_title() {
         local_mcp: None,
         skills: vec![],
         skill_dir: None,
+        acp_agent: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1536,6 +1544,7 @@ async fn live_input_joins_turn() {
         local_mcp: None,
         skills: vec![],
         skill_dir: None,
+        acp_agent: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1694,6 +1703,7 @@ async fn live_move_resumes_in_the_new_folder() {
         local_mcp: None,
         skills: vec![],
         skill_dir: None,
+        acp_agent: None,
         fork: None,
     };
     let input = |text: &str| SessionInput {
@@ -1833,6 +1843,7 @@ async fn live_hub_skill() {
             sha256: "0".repeat(64),
         }],
         skill_dir: Some(plugin.canonicalize().unwrap()),
+        acp_agent: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);

@@ -1239,6 +1239,7 @@ pub(crate) async fn session_place<'b>(
         Some(w) if w.owner_id == owner && w.revoked_at.is_none() => w,
         _ => return Err(ApiError::BadRequest("unknown worker".into())),
     };
+    check_runtime(&worker, b)?;
     if let Some(p) = b.provider_id {
         crate::providers::check(app, owner, &worker, p).await?;
     }
@@ -1254,6 +1255,58 @@ pub(crate) async fn session_place<'b>(
         ));
     }
     Ok((ws, worker, cwd))
+}
+
+/// `runtime` and `acp_agent` of a new session (SPEC §8.2, §8.6): Claude Code by default, an ACP
+/// agent the worker named in `hello`, or Codex when the worker named it, without a model
+/// provider. The worker checks again that the folder's environment may run it (SPEC §2.1).
+fn check_runtime(worker: &db::WorkerRow, b: &CreateSessionRequest) -> ApiResult<()> {
+    use hqc_proto::frame::Runtime;
+    match (b.runtime, b.acp_agent.as_deref()) {
+        (None | Some(Runtime::ClaudeCode), None) => Ok(()),
+        (Some(Runtime::Acp), Some(name)) => {
+            if b.provider_id.is_some() {
+                return Err(ApiError::BadRequest(
+                    "a model provider is for Claude Code sessions only".into(),
+                ));
+            }
+            let offered = worker.capabilities["acp_agents"]
+                .as_array()
+                .is_some_and(|l| l.iter().any(|a| a["name"] == name));
+            if offered {
+                Ok(())
+            } else {
+                Err(ApiError::Unprocessable(
+                    "acp_agent_unavailable",
+                    format!("the worker {} has no ACP agent {name}", worker.name),
+                ))
+            }
+        }
+        (Some(Runtime::Acp), None) => {
+            Err(ApiError::BadRequest("runtime acp needs acp_agent".into()))
+        }
+        (Some(Runtime::Codex), None) => {
+            if b.provider_id.is_some() {
+                return Err(ApiError::BadRequest(
+                    "a model provider is for Claude Code sessions only".into(),
+                ));
+            }
+            if worker.capabilities["codex"].is_object() {
+                Ok(())
+            } else {
+                Err(ApiError::Unprocessable(
+                    "codex_unavailable",
+                    format!("the worker {} has no Codex", worker.name),
+                ))
+            }
+        }
+        (_, Some(_)) => Err(ApiError::BadRequest(
+            "acp_agent goes with runtime acp".into(),
+        )),
+        (Some(r), None) => Err(ApiError::BadRequest(format!(
+            "runtime {r:?} cannot be chosen for a new session"
+        ))),
+    }
 }
 
 /// [`new_session`] without the start: the session (an agent of a room with `member`, SPEC
@@ -1295,6 +1348,15 @@ async fn insert_session(
     if b.provider_id.is_some() {
         // Before the first start, which carries it.
         db::set_session_provider(&app.db, id, b.provider_id).await?;
+    }
+    match (b.runtime, &b.acp_agent) {
+        (Some(hqc_proto::frame::Runtime::Acp), Some(agent)) => {
+            db::set_runtime(&app.db, id, "acp", Some(agent)).await?
+        }
+        (Some(hqc_proto::frame::Runtime::Codex), None) => {
+            db::set_runtime(&app.db, id, "codex", None).await?
+        }
+        _ => {}
     }
     let s = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
     events::system(app, &s, "session_created", "Session created").await?;

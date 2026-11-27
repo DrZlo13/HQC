@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.265, 2026-11-27. Status: the architecture agreed after six reviews and a survey of
+Version 0.266, 2026-11-27. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -102,11 +102,13 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   environment with `project_settings` (since 0.83, §14) a repository's own hooks run outside the
   worker's `deny` and without an approval request, so a hub that clones a repository of its
   choice into one of that environment's folders runs that repository's code there.
-- The promise about local MCP servers holds for Claude Code (`--strict-mcp-config`)
-  and Hermes (`HERMES_ACP_SKIP_CONFIGURED_MCP=1`, the worker always sets it). For other
-  ACP agents there is no general way: in the local config each `acp_agent` declares
-  `isolation: verified | none`; an agent with `none` is not allowed into foreign sessions
-  (§11.1) and the promise does not extend to it.
+- The promise about local MCP servers holds for Claude Code (`--strict-mcp-config`). For ACP
+  agents (§8.2, since 0.266) there is no general way: hqc passes only its own servers, and what
+  an agent connects by itself (its settings' MCP servers, extensions, hooks) is outside hqc's
+  control, as RUNBOOK says; ACP agents run only sessions of the worker's owner (§11.1).
+- An ACP agent is checked by the worker only where it asks: what it runs without a permission
+  request (its own auto modes, reads) never reaches the worker's `deny`, and its own sandbox is
+  the boundary there (§8.2).
 - A worker is remote code execution on the owner's machine. Anyone who can write
   to a session on this worker runs code as the owner within the owner's policy.
 - Between sessions of one worker the boundary is soft (§14): the processes run as the same
@@ -216,8 +218,8 @@ and the two differ.
 
 ### Worker
 `owner_id`, `name`, `os`, `token_hash`, `status` (online/offline), `last_seen`,
-`protocol_version`, `boot_id` (from the last `hello`, §5.2), `capabilities` (`claude_code: {version, sessions_registry?, moves?, login?}`, `acp_agents[{name,
-version, load_session, resume, image, isolation}]` — the result of each agent's `initialize`
+`protocol_version`, `boot_id` (from the last `hello`, §5.2), `capabilities` (`claude_code: {version, sessions_registry?, moves?, login?}`, `codex?: {version, signed_in, models[], environments}` (since 0.266, §8.6), `acp_agents[{name,
+version, environments, load_session, resume, image}]` (since 0.266) — the result of each agent's `initialize`
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
 `environments[]` (since 0.56 `{name, allow_local_mcp?, mcp_servers? (0.262), permissions {unblock?, allow?, deny?, remote_unblock? (0.246)}}`,
 never the values of `env`; `default` is implied), `env_bindings[]` (`{path, environment}`; the
@@ -445,7 +447,7 @@ place there). Its `runtime_session_id` stays: the worker moves the transcript to
 (§8.1). Not to another worker.
 
 ### Agent (embedded in Session)
-`runtime` (claude_code / acp / bare / none; `none` — only for the worker's service session
+`runtime` (claude_code / acp / codex (since 0.266, §8.6) / bare / none; `none` — only for the worker's service session
 and, since 0.172, a room: there is no agent and no process starts, §10.2, §7.1.1), `acp_agent`
 (the agent's name from the worker's local config, for `acp`), `model` (since 0.74 also switched
 with `PATCH`, §6),
@@ -642,7 +644,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; since 0.181 also the worker after a background task's end, the task's output file (§8.1), with the same `author`, `kind: text`; since 0.209 also a publication the owner allowed (`hqc_publish`, §7), with `kind: site` (`event.attachment.site.json`); the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text or (since 0.208) its thinking was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input, and since 0.174 on a message of mode `send`: as on a `user.message`, §17.2), `joined_after?` (since 0.221, with `joined` or (since 0.231) `quiet`: as on a `user.message`), `quiet?` (since 0.231: as on a `user.message`), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
-| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `session_tokens?`, `model?`, `context_tokens?`, `context_limit?`, `cache_ttl_s?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost. Since 0.229 `session_tokens` is the runtime's cumulative tokens of the whole runtime session after the turn — input, output, cache reads and cache writes summed (Claude Code: `result.modelUsage` summed over its models), on every `usage` the adapter sends (the turn's, the compaction's and the total-only one) whose `result` has a `modelUsage`, absent otherwise; the client's header shows the latest one plus the last one before each `system conversation_cleared`, as it does the cost, but with no fallback to summing turns (§6). Since 0.222 a `usage` that carries tokens (not the one with the total only) also says how full the main agent's context is and how long its prompt cache lives: `context_tokens` is the context after the turn's last API response of the main agent (§8.1), `context_limit` the tokens it may hold before the runtime compacts it by itself, `cache_ttl_s` the seconds the session's cache has left when the turn ends, counted from the request of the response (3600 or 300, less the seconds since the response started, 0 at the least); each is absent when the runtime does not say it. `context_limit` is the threshold of the model's window; an override of the auto-compaction window or a disabled auto-compaction is not seen in the stream (§8.1). The client's header shows them (§6) |
+| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `session_tokens?`, `model?`, `context_tokens?`, `context_limit?`, `cache_ttl_s?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents (since 0.266) at the end of a turn when the agent reported its context (`usage_update`: `context_tokens`, `context_limit`, a USD `cost` as `session_cost_usd`) or the turn's tokens in the answer to `session/prompt`, never `cost_usd`. Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost. Since 0.229 `session_tokens` is the runtime's cumulative tokens of the whole runtime session after the turn — input, output, cache reads and cache writes summed (Claude Code: `result.modelUsage` summed over its models), on every `usage` the adapter sends (the turn's, the compaction's and the total-only one) whose `result` has a `modelUsage`, absent otherwise; the client's header shows the latest one plus the last one before each `system conversation_cleared`, as it does the cost, but with no fallback to summing turns (§6). Since 0.222 a `usage` that carries tokens (not the one with the total only) also says how full the main agent's context is and how long its prompt cache lives: `context_tokens` is the context after the turn's last API response of the main agent (§8.1), `context_limit` the tokens it may hold before the runtime compacts it by itself, `cache_ttl_s` the seconds the session's cache has left when the turn ends, counted from the request of the response (3600 or 300, less the seconds since the response started, 0 at the least); each is absent when the runtime does not say it. `context_limit` is the threshold of the model's window; an override of the auto-compaction window or a disabled auto-compaction is not seen in the stream (§8.1). The client's header shows them (§6) |
 | `tasks` | `items[{subject, status, active_form?}]` | Claude Code adapter (since 0.223), stored: the agent's task list after a change, the whole list each time, empty when it has none. `status` is `pending`, `in_progress` or `completed` (another value reads as "unknown", shown as pending); `subject` and `active_form` are at most 512 bytes and the list at most 200 tasks; `active_form` is what the agent is doing while the task is in progress, as the runtime names it (Claude Code: `activeForm`), absent when it names none. The latest one is the list, the client shows it as a row above the input (§6), never as a feed item; the adapter sends one only when the list changed (§8.1) |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.161 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`), `call_id?`, `status?`, `task_id?` (since 0.135, only on `task_notification`), `usage?{total_tokens, tool_uses, duration_ms}` (since 0.181, only on `task_notification`), `from_session_id?` (since 0.172, only on `room_passed`: the agent that passed), `trigger?`, `pre_tokens?`, `post_tokens?` (since 0.179, only on `context_compacted`), `model?` (since 0.179, only on `model_not_switched`) | hub or worker; codes below |
@@ -689,6 +691,9 @@ the client renders only them. The "source" column is the component that produces
 | `provider_refused` | worker (adapter) | since 0.144: `session.start.provider` names a provider this worker's `worker.toml` does not allow, or allows with another `base_url`; the agent starts on the runtime's own endpoint, and the text says which (§8.1, §14) |
 | `secret_given` | hub | since 0.147: a secret or an ssh key reached the session's agent (`POST /api/sessions/{id}/secrets`, `hqc_ssh_keygen`, §6, §7): the text names it and a key's fingerprint, never the value |
 | `waiting_for_slot` | worker | since 0.183: the worker already runs `max_sessions` agents, so the session waits for a slot and starts when one of them stops; its inputs wait with it (§8.1) |
+| `agent_signed_out` | worker | since 0.266: an ACP agent answered `session/new` or `session/prompt` with ACP's auth-required error (`-32000`); the agent is signed in on the machine (RUNBOOK §2.6.1), not from hqc (§8.2) |
+| `mode_above_cap` | worker | since 0.266: the runtime reported a permission mode above the cap of the capped turn that ran (an ACP agent moved itself, §8.2): the turn was stopped and the process starts again in the capped mode; an input it took is not run again, one it had not taken goes back to the queue within the bound of requeues (T39) |
+| `acp_conversation_lost` | worker | since 0.266: an ACP agent could not continue the session's conversation (`session/resume`/`session/load` failed, or it offers neither) and started a new one (§8.2) |
 | `claude_signed_out` | worker | since 0.185: the runtime answered that it is signed out ("OAuth session expired", "Not logged in", "Invalid API key", …); the line sends the owner to Settings → Workers to sign the worker's Claude Code in again (§6) |
 | `browser_refused` | worker (adapter) | since 0.148: `session.start.browser` asks for the browser this worker does not give (no `browser = true` in its `worker.toml`, a session not of its owner or restricted); the agent starts without it (`--no-chrome`), and the text says why (§8.1, §14) |
 | `turn_interrupted` | worker (adapter; since 0.162 mirror) | since 0.161: an interrupt ended the turn — Stop, or "No" to a permission request (Claude Code: `result` with a `terminal_reason` `aborted_*`, §8.1); `text` "Interrupted"; one per turn, at its end, after its `usage`. Since 0.162 the mirror gives it for the line "[Request interrupted by user]" or "[Request interrupted by user for tool use]" the CLI writes into the transcript (§9.1) |
@@ -1953,8 +1958,15 @@ the rest is marked "later"):
   it and `GET /api/projects` (since 0.114 also `?archived=1`), not one request per project
 - `GET/POST /api/projects/{id}/sessions` (list: `{sessions: [<session>]}`; create:
   {title?, workspace_id?, worker_id?, cwd?, model?, auto_approve?, permission_mode?,
-  provider_id?, isolation?, branch?, base?, existing_branch?} → `201` and
+  provider_id?, isolation?, branch?, base?, existing_branch?, runtime?, acp_agent?} → `201` and
   the session object, `api.session.request.json`), `GET/PATCH/DELETE /api/sessions/{id}` (§17.4).
+  `runtime: "acp"` with `acp_agent` (since 0.266) makes a session of an ACP agent (§8.2) the
+  session's worker named in `hello.capabilities.acp_agents` (else `422 acp_agent_unavailable`),
+  never with `provider_id` (`400`), its `runtime_session_id` empty until the agent reports its
+  own; `runtime: "codex"` (since 0.266, §8.6) makes a Codex session on a worker whose `hello`
+  names `codex` (else `422 codex_unavailable`), never with `provider_id` or `acp_agent`;
+  `acp_agent` without `runtime: "acp"`, or another runtime, is `400`. The worker checks again
+  that the folder's environment may run the agent (§14).
   `isolation: "worktree"` (since 0.265, `api.session.worktree.request.json`; another value, or
   `branch`, `base` or `existing_branch` without it: `400`) starts the session in a new
   `ephemeral` worktree (§3 Workspace) of the workspace the request picks, by `hqc_spawn`'s path
@@ -6142,36 +6154,80 @@ managed policy, `--settings` and user settings; project settings and `settings.l
 only tighten it (`accept` < `hold` < `refuse`).
 
 ### 8.2 ACP agents (generic adapter)
-The adapter starts **a separate ACP process for each hqc session** (stdio JSON-RPC)
-with the workspace environment (§14). The start command comes from the worker's local config
-by `acp_agent` name, as an absolute path (in a non-interactive shell `hermes` is not on PATH).
-On start the worker calls `initialize` on every configured agent and puts its `load_session`,
-`resume`, `image`, `isolation` and version into `hello.capabilities.acp_agents`; a missing
-binary is visible before a session is created.
+Since 0.266 (iteration 10). The adapter starts **a separate ACP process for each hqc session**
+(ACP v1, JSON-RPC over stdio, one message per line) with the workspace environment (§14). It
+knows no agent by name: everything particular to one is its `[acp_agents.<name>]` table of
+`worker.toml` (§14), and RUNBOOK §2.6.1 ships ready blocks (Antigravity CLI now). The messages are
+read as plain JSON: the Rust crate `agent-client-protocol` (5.6.1) turns on `serde_json`'s
+`preserve_order` for the whole build, which would change the hashes the MCP pins (iteration 9)
+keep. A session is `runtime: acp` with `acp_agent`; the worker runs it only where the agent's
+`environments` hold the folder's environment, for an unrestricted session of the worker's owner
+(`invalid_frame` otherwise). At its own start the worker asks every agent `initialize` in its
+home folder and names the ones that answered in `hello.capabilities.acp_agents` (§3 Worker); a
+missing binary is in the log, and the agent is not offered.
 
-Initialization: the adapter declares `clientCapabilities.fs` and `terminal` **unavailable**:
-the worker does not implement reading/writing files or a terminal on the agent's behalf. If
-`initialize` requires `authenticate` (the provider is not configured), the adapter writes a
-`system` event "the agent is not configured on the worker" and fails the start (§5.2).
+Start: `initialize` with `clientCapabilities.fs` and `terminal` **unavailable** (the agent uses
+its own tools) and no elicitation; then, for a session with a `runtime_session_id`,
+`session/resume` when the agent offers it (no replay: hqc has the history), else `session/load`
+with its replayed updates dropped, else, or when either fails, `session/new` and
+`system acp_conversation_lost`; a new session's id goes to the hub as `runtime_session_id`.
+`mcpServers` carries hqc's servers as stdio entries with the launchers of §8.1 (`hqc`, the hub's
+relays with `hub_mcp`, the environment's `mcp_servers`), the session token in each one's `env`
+**[verify per agent: that their processes descend from the agent's, §7.2]**. ACP's
+auth-required error (`-32000`) on `session/new` or `session/prompt` is
+`system agent_signed_out`: the agent is signed in on the machine, never from hqc.
 
-Mapping to §4: `session/new {cwd, mcpServers}` → creation; `session/prompt` → a turn,
-`ack` of `session.input` right after sending; `session/update` with
-`agent_message_chunk` → `agent.delta`/`agent.message`, `agent_thought_chunk` →
-`agent.thinking`, `tool_call`/`tool_call_update` → `tool.call`/`tool.result`.
-The end of a turn is the reply to `session/prompt` with a `stopReason`: the adapter holds
-the last text, sets `final: false` on a `tool_call` and `final: true` on the reply to
-`session/prompt`; `stopReason: cancelled` → no final message, `status idle`.
-Diffs from `tool_call` are stored as an artifact of `kind: diff` and referenced from
-`tool.result.artifact_id`, with the first 4 KB in `result_preview`. `session/request_permission`
-→ `approval.request` with the agent's **real** `options[]` (by `optionId`), `canonical`
-by `kind` and name; the answer is the chosen `optionId`. `session/cancel` → `session.stop`.
-Resume is `session/load` if the agent declared `loadSession`; otherwise `session/new`
-and a retelling of the history by the adapter. The adapter **checks the `sessionId` in the reply
-to `session/load`/`session/resume` against the requested one** and stops with an error on a
-mismatch: the agent may have silently created a new session. `usage` only if the agent reports
-tokens; ACP has no `clarify`. The adapter never sends a second `session/prompt` during a
-turn: the worker runs the input queue (§17.2), even if the agent can queue prompts itself —
-otherwise `in_reply_to` goes out of sync.
+Modes: hqc's mode (capped by `[permissions]` as for Claude Code) goes to the agent as the id its
+table's `modes` names for it, by `session/set_mode` when the agent lists that mode, else by
+`session/set_config_option` on a config option of category `mode` offering it. A table that
+names `auto`, `allow_all` or `allow_all_args` names `ask` too (a config error otherwise); a
+mode the table has no id for is not offered (the next lower one is asked for); an agent without
+`modes` is never switched and its own default is taken as Ask. Allow all may come from
+`allow_all_args` at start instead, and is then left only by a restart. The worker reports only
+a mode the agent took (`session.state.permission_mode`): at the start a refused mode falls to
+Ask, set by its id, and a refused Ask fails the start; a switch the agent refuses or cannot make
+while it runs is an error, and the supervisor starts it again in the mode asked for (T39). It
+follows the agent's own reports (`current_mode_update`, the value of a mode config option, the
+mode a resumed session answers with): an id the table does not name counts as Allow all
+(`modes.ask_also` lists more of the agent's ids that count as Ask, such as a read-only plan
+mode), and a switch to the mode hqc last set is skipped only while the agent has not moved
+since. A mode reported above the cap of a capped turn stops the turn and starts the process
+again in the capped mode (`system mode_above_cap`): an input the agent took stays delivered and
+is not run again, one it had not taken goes back to the queue within the usual bound of
+requeues; a switch the running process refuses
+restarts it in the mode asked for (at once when idle, else before the next turn). An agent
+without `modes` is assumed to run Ask: hqc sees no mode of it, so its own sandbox and settings
+are the boundary for any mode it moves to by itself. A permission request that names no `kind`
+is ACP's `other`: a card. The model (`session.model`) goes through a config option of category
+`model` offering it; the client shows the agent's name instead of Claude's model menu.
+
+Turns: `session/prompt` per input (the worker runs the queue, §17.2; `ack` right after sending);
+the reply with its `stopReason` ends the turn: the held text becomes the final `agent.message`
+(`cancelled`: no final message, an `interrupted` one if text was written), then `usage` (above),
+`status idle`. `session/update`: `agent_message_chunk` → `agent.delta` and the held text,
+`agent_thought_chunk` → thinking deltas and `agent.thinking`, `tool_call` → the held text as a
+non-final `agent.message`, then `tool.call` (the agent's title, `rawInput` as `args_preview`),
+`tool_call_update` with `completed`/`failed` → `tool.result` (text content, a diff as `---/+++`
+lines; longer than its preview, uploaded whole), `plan` → `tasks`, `available_commands_update`
+→ the slash commands, `session_info_update` → the runtime title, `usage_update` → the context of
+the next `usage`. `session/cancel` is Stop; an agent that has not ended its turn 10 s later is
+ended. Images, side questions, quiet input, input into a running turn, moves, copies, subagent
+lists, the mirror (§9) and providers are not available to ACP agents.
+
+Permissions: on `session/request_permission` the worker reads the command of an `execute` call
+(or one that names no kind) from `rawInput.command` or `rawInput.cmd` (a string, or an array of
+words joined as a shell reads them) and checks it as a `Bash` call: a `deny` hit is answered
+with the agent's reject option without a card and `system policy_denied`; one that the
+`[permissions] allow` or hqc's folder rules cover is answered with its `allow_once` option
+without a card, but only when `rawInput` holds nothing beside the command but `description` or a
+timeout (a `cwd`, `env` or shell changes where or how it runs: a card). A request whose command
+the worker cannot read is always a card. Otherwise
+`approval.request` with the agent's **real** options by `optionId` and its names; `kind` only
+colours the card (`allow_always` shows as "this session"): agents disagree on what "always"
+keeps, so hqc writes no rule from it. Open requests are cancelled at the end of a turn, at Stop
+and when the process ends. **The worker sees only what the agent asks**: what it runs without a
+request (reads, its own auto modes) never reaches `deny`, and the agent's own sandbox and
+settings are the boundary there (decided with the owner on 2026-11-27).
 
 Sessions without a workspace are not allowed for ACP agents (§8.4): they have no equivalent of
 `--restricted`.
@@ -6182,6 +6238,10 @@ SDK) is **not used**: the native adapter of §8.1 is proven, gives `--restricted
 on the worker.
 
 #### 8.2.1 Hermes specifics
+Describes the old in-process Hermes (below) and no code of hqc: Hermes v0.22+ is
+gateway-owned (`hermes acp` is a viewer of the profile's daemon), so this section is redone
+when Hermes comes to the generic adapter (iteration 10, "Later").
+
 Checked in the source on llm-server, canary version
 `v0.21.4+canary.20261005T071900Z-434-g4787e4d56f` (commit `4787e4d5`); canary has no
 stable number, so the hash is recorded.
@@ -6240,6 +6300,67 @@ The worker announces local OpenAI-compatible endpoints in `hello` (on llm-server
 in `model.proxy` frames with streamed chunks. By default local models are available
 only to the worker owner's sessions; `share_local_models: true` in the local config
 opens them to colleagues' bare models in shared projects.
+
+### 8.6 Codex (App Server)
+Since 0.266 (iteration 10). OpenAI's Codex runs as `codex app-server`, **one process per hqc
+session** in its working folder with the workspace environment (§14): a process holds the
+session's environment, ssh-agent and MCP check (§7.2), a wedged one stalls one session only, and
+each start reads the current sign-in. JSON-RPC over stdio, one message per line, without a
+`"jsonrpc"` field, read as plain JSON. The protocol is experimental: the worker speaks the one
+of Codex 0.172.x, checks `codex --version` at its start and offers no Codex for another version;
+`docs/notes/codex-app-server.md` holds the pinned schema's hash and what the adapter uses. A
+session is `runtime: codex`; `[codex]` of `worker.toml` names the binary and the environments
+whose folders may run it, for an unrestricted session of the worker's owner. At its start the
+worker asks a short-lived App Server `account/read` and `model/list` and names Codex in
+`hello.capabilities.codex {version, signed_in, models[{id, name, default, efforts}],
+environments}`; the client's Agent chip offers it and its models.
+
+Start: `initialize {clientInfo}`, the `initialized` notification, `account/read`: an account
+that needs OpenAI's sign-in and has none is `system agent_signed_out` (Codex is signed in on the
+machine, `codex login --device-auth`). Then `thread/resume {threadId, excludeTurns: true}` of the
+session's `runtime_session_id`, or, when there is none or Codex answers with another thread,
+`thread/start` (`system acp_conversation_lost` in the second case); a new thread's id becomes
+the `runtime_session_id`. Both carry the mode's `approvalPolicy` and `sandbox`, the model and
+hqc's servers as `config.mcp_servers` (the launchers of §8.1) **[verify]**. The session token is
+in no config: the App Server's own environment holds `HQC_SESSION_TOKEN`, each server's entry
+names it in `env_vars`, and the thread's `shell_environment_policy.exclude = ["HQC_*"]` keeps it
+from the model's commands (Codex's default excludes `*TOKEN*` too) **[verify that the partial
+policy keeps the user's own]**.
+
+Modes: Ask = `on-request` with the `read-only` sandbox, Auto = `on-request` with
+`workspace-write`, Allow all = `never` with `danger-full-access` (only with `[permissions]
+allow_all`). `turn/start` carries `approvalPolicy` and `sandboxPolicy` only when the mode changed
+since the last turn Codex took (a refused `turn/start` leaves them to be sent again), so the user's own sandbox settings (network access) stay; a switch between
+turns is confirmed at once and goes with the next turn, a switch during a turn is refused and the
+supervisor asks again before the next turn, so a T39 cap takes its turn exactly.
+
+Turns: `turn/start` per input (`ack` once sent); `turn/completed` ends it: `completed` → the final
+`agent.message` of the text since the last tool call, `interrupted` → none (an `interrupted`
+one if text was written), `failed` → a runtime message with Codex's error (`unauthorized`:
+`agent_signed_out`). Items: `item/agentMessage/delta` → `agent.delta`, reasoning summaries →
+thinking, `commandExecution` → `tool.call` `Bash` and its output, `fileChange` → `Edit` and its
+diffs, `mcpToolCall` → `mcp__<server>__<tool>`, `webSearch`; `turn/plan/updated` → `tasks`;
+`thread/tokenUsage/updated` → `usage` (the last response's tokens, the context and the model's
+window, the thread's total); `thread/name/updated` → the runtime title. A notification of
+another thread (a subagent's) is not the session's. An input written during a turn goes in by
+`turn/steer` with the running turn's id (`InputAccepted` with `joined`); a refused steer (the
+turn ended, a review or compaction runs) leaves it queued. Stop is `turn/interrupt`. A
+`turn/steer` or `turn/interrupt` not answered in 10 s ends the process (T3 Code's wedged
+App Server); the next input starts it again.
+
+Approvals: `item/commandExecution/requestApproval` carries the command explicitly: the worker's
+`deny` declines it without a card (`system policy_denied`), its allow rules and hqc's folder
+rules accept it without one only when its `cwd`, resolved, is the session's folder or the
+workspace's root (a symlink or `..` out of it, an unresolvable `cwd` or none: a card); otherwise, and for
+`item/fileChange/requestApproval` (the item's diffs on the card), a card with Codex's decisions:
+Allow (`accept`), Allow for this session (`acceptForSession`), Deny (`decline`), Deny and stop
+(`cancel`). `item/tool/requestUserInput` → `clarify.request`; an MCP server's form is declined.
+Open requests are cancelled at the end of a turn, at Stop and when the process ends; one Codex
+settles itself (`serverRequest/resolved`) loses its card.
+
+Not used yet: the account's rate limits (`account/rateLimits/*`: `worker.limits` is the worker's
+Claude Code account), sign-in from hqc (`chatgptDeviceCode`), `thread/fork`, the subagents'
+threads, side questions, quiet input, moves, the mirror and providers.
 
 ## 9. Mirror and import of Claude Code sessions
 
@@ -7355,8 +7476,14 @@ The worker's local config is the only source of truth for:
   bound folder back. The worker resolves it itself on every `session.start` (since 0.56 the frame
   carries no environment). A binding to an environment the file does not define, or the same
   path bound twice, is a config error;
-- `acp_agents{}` — `{name: {command: <absolute path>, args[], isolation:
-  verified|none}}`;
+- `acp_agents{}` (since 0.266, §8.2) — `[acp_agents.<name>]`: `command` (absolute), `args`,
+  `env` (on top of the environment's), `environments` (the environments whose folders may run it;
+  none: nowhere), `modes = {ask?, auto?, allow_all?}` (the agent's own mode or config-option ids),
+  `allow_all_args` (start arguments for Allow all, for an agent that needs a flag; with
+  `[permissions] allow_all` only), `warning` (one line `hqc-worker env` prints beside the agent
+  and the worker logs at start); a name is `[a-z0-9_-]{1,32}`; checked at load;
+- `codex` (since 0.266, §8.6) — `[codex]`: `command` (absolute) and `environments` (whose folders
+  may run it; none: nowhere); checked at load;
 - `allow_foreign_sessions`, `share_local_models`;
 - `max_sessions` (agent processes at once, default 8) and `insecure_http`
   (`http://` to a non-loopback hub, §5.1);
@@ -8414,9 +8541,21 @@ is not asked, does not see the question or the answer, and does not work on it.
    the launcher pins a hash of each server's tools (unless the server says `pin = false`), and a
    changed list fails the server until the owner approves it on the machine; `hello` names them for Settings. The hub cannot add or start one (§2.1). Tasks:
    `docs/ITERATION-9.md`.
-10. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
-   worker; the bare model; the personal assistant session (moved from 3: its default runtime is
-   the bare model, §8.3), until then `hqc_send` needs `session`.
+10. Google's and OpenAI's agents on the owner's subscriptions (planned since 0.266), by two
+   adapters. First the generic ACP adapter (§8.2), which knows no agent by name: each agent is a
+   `[acp_agents.<name>]` table of `worker.toml` (`command`, `args`, `env`, the environments that may
+   run it, `modes` for Ask / Auto / Allow all, `allow_all_args`, a `warning` that `hqc-worker env`
+   prints), ready blocks in RUNBOOK; a
+   session is `runtime: acp` with `acp_agent: <name>`; its first agent is Antigravity CLI (`agy
+   acp`; Gemini CLI no longer serves Google accounts since 2026-06-18), at the owner's risk under
+   Google's consumer terms (RUNBOOK's block says so in its `warning`). Then a native Codex adapter over
+   `codex app-server` (`runtime: codex`, one app-server process per session, a pinned Codex version
+   and schema), with steer, per-turn modes and the account's limits. Both are signed in on the
+   machine; hqc's servers (`hqc`, the hub's relays, the environment's local servers) reach them;
+   the worker checks its `deny` and allow rules on every permission request it gets, and for what an
+   agent runs without asking its own sandbox is the boundary. History is hqc's own (no mirror).
+   Hermes comes later on the ACP adapter; the bare model and the personal assistant session went to
+   `docs/BACKLOG.md` (until then `hqc_send` needs `session`). Tasks: `docs/ITERATION-10.md`.
 11. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
    (0.38, T35, with `hqc_schedule`).
 12. Tauri, native notifications, several agents in one session.
@@ -8634,6 +8773,54 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.265 → 0.266 (iteration 10 planned: Google's and OpenAI's agents)
+§19: item 10 is now two adapters: the generic ACP adapter with Antigravity CLI (`agy acp`) as
+its first agent, then a native Codex adapter over `codex app-server`, both on the owner's
+subscriptions; Hermes later; the bare model and the personal assistant session moved to
+`docs/BACKLOG.md`. Plan: `docs/ITERATION-10.md`. Found on 2026-11-27: Gemini CLI stopped serving
+Google AI Pro, Ultra and free accounts on 2026-06-18 (Antigravity CLI replaces it, native ACP
+since 1.5.0); comparable tools drive Codex through its App Server, and only IDEs use `codex-acp`;
+ACP v1 has `usage_update` and `session_info_update` stable; the Rust crate `agent-client-protocol`
+is at 5.6.1. Decided with the owner: the ACP adapter first; Antigravity at the owner's risk (the
+`warning` of RUNBOOK's agy block, printed by `hqc-worker env`, none in the client); sign-in on the machine only; the
+agent's sandbox is the boundary for calls it runs without asking, the worker's `deny` checks the
+requests it gets, Allow all only with `allow_all = true`. The rest of the SPEC (§8.2, §8.2.1, a
+new §8.6, §14, §4 `usage`, §3 `runtime: codex`) changes with the code.
+
+Implemented, part 1 (T74–T77, T84–T86 for ACP): §14 `[acp_agents.<name>]` (`command`, `args`,
+`env`, `environments`, `modes`, `allow_all_args`, `warning`; `isolation` gone), checked at load,
+listed by `hqc-worker env` with the `warning`, which the worker also logs at start; §3 Worker
+`hello.capabilities.acp_agents[{name, version, environments, load_session, resume, image}]` from
+each agent's `initialize` at the worker's start; §8.2 rewritten: the generic adapter (resume,
+else load, else new; hqc's MCP servers in `mcpServers`; modes and model through the agent's
+modes or config options; turns, updates and Stop; the worker's `deny` and allow rules on the
+command of an `execute` permission request, a card with the agent's options otherwise; the
+worker sees only what the agent asks); ACP v1 read as plain JSON, not through the
+`agent-client-protocol` crate, whose `serde_json/preserve_order` would change the MCP pin hashes
+of every machine; §8.2.1 marked as the old Hermes; §4 `system agent_signed_out` and
+`acp_conversation_lost`, `usage` of ACP agents; §2.1 the promise about local MCP servers for ACP
+agents; §6 `POST /api/projects/{id}/sessions` takes `runtime: "acp"` with `acp_agent`
+(`422 acp_agent_unavailable`), the hub's MCP servers go to ACP sessions too; the client's
+"Agent" chip in the new session window and the agent's name in place of the model menu.
+RUNBOOK §2.6.1: setting an ACP agent up, what hqc controls and what not, the Antigravity block
+with its terms warning. Checked against a fake ACP agent only; a live agy run is T78.
+
+Security review of part 1: only a mode an ACP agent took is reported (a refused switch is an
+error and the supervisor restarts the process in the mode asked for, at once when idle, else
+before the next turn); a mode the agent moves to by itself is read by its table, an unknown one
+as Allow all (`modes.ask_also` for more Ask ids); a mode above the cap of a capped turn stops the
+turn (`system mode_above_cap`: a taken input is not run again, others go back within the requeue
+bound); a table naming a mode above Ask names `ask` too; a permission request without `kind` is
+a card, and only one whose `rawInput` holds nothing but the command, a description and a timeout
+is allowed by a rule.
+
+Implemented, part 2 (T79–T82, T84–T86 for Codex): §8.6 the native Codex adapter over `codex
+app-server` (one process per session, Codex 0.172.x, `docs/notes/codex-app-server.md`), §14
+`[codex]`, §3 `runtime: codex` and `hello.capabilities.codex`, §6 `runtime: "codex"` (`422
+codex_unavailable`); the client's Agent chip offers Codex and its models. RUNBOOK §2.6.2.
+Checked against a fake App Server only; a live run is T83. The JSON-RPC transport is shared by
+both adapters.
 
 ### 0.264 → 0.265 (a new session in a new worktree, from the UI)
 §6: `POST /api/projects/{id}/sessions` takes `isolation: "worktree"`, `branch?`, `base?` and

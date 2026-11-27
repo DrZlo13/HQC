@@ -147,6 +147,195 @@ struct RawConfig {
     env_bindings: Vec<RawBinding>,
     #[serde(default)]
     providers: BTreeMap<String, RawProvider>,
+    #[serde(default)]
+    acp_agents: BTreeMap<String, RawAcpAgent>,
+    #[serde(default)]
+    codex: Option<RawCodex>,
+}
+
+/// `[codex]` (SPEC §8.6, §14, iteration 10): OpenAI's Codex, run as `codex app-server`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCodex {
+    command: PathBuf,
+    #[serde(default)]
+    environments: Vec<String>,
+}
+
+/// Codex on this machine (SPEC §8.6): the `codex` binary, signed in on the machine, and the
+/// environments whose folders may run it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexConfig {
+    /// Absolute: a non-interactive shell's `PATH` rarely has it.
+    pub command: PathBuf,
+    pub environments: Vec<String>,
+}
+
+impl CodexConfig {
+    pub fn allowed_in(&self, environment: &str) -> bool {
+        self.environments.iter().any(|e| e == environment)
+    }
+}
+
+/// `[acp_agents.<name>]` (SPEC §8.2, §14, iteration 10): an agent the generic ACP adapter runs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAcpAgent {
+    command: PathBuf,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    environments: Vec<String>,
+    #[serde(default)]
+    modes: AcpModes,
+    #[serde(default)]
+    allow_all_args: Vec<String>,
+    #[serde(default)]
+    warning: Option<String>,
+}
+
+/// `modes` of an ACP agent: the agent's own mode or config-option value for each of hqc's
+/// modes (SPEC §8.2). An agent without `ask` is never switched.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpModes {
+    #[serde(default)]
+    pub ask: Option<String>,
+    #[serde(default)]
+    pub auto: Option<String>,
+    #[serde(default)]
+    pub allow_all: Option<String>,
+    /// More of the agent's ids that count as Ask (a read-only plan mode), so that the agent
+    /// moving to one is not taken as Allow all (SPEC §8.2).
+    #[serde(default)]
+    pub ask_also: Vec<String>,
+}
+
+impl AcpModes {
+    /// The agent's id for `mode`, if the table names one.
+    pub fn id(&self, mode: PermissionMode) -> Option<&str> {
+        match mode {
+            PermissionMode::Ask => self.ask.as_deref(),
+            PermissionMode::Auto => self.auto.as_deref(),
+            PermissionMode::AllowAll => self.allow_all.as_deref(),
+        }
+    }
+}
+
+/// An agent the generic ACP adapter runs (SPEC §8.2, §14): everything particular to it is
+/// here, none of it in the code.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcpAgent {
+    pub name: String,
+    /// Absolute: a non-interactive shell's `PATH` rarely has it.
+    pub command: PathBuf,
+    pub args: Vec<String>,
+    /// On top of the environment's process environment.
+    pub env: EnvVars,
+    /// The environments whose folders may run it; none: nowhere.
+    pub environments: Vec<String>,
+    pub modes: AcpModes,
+    /// Arguments added at start for a session in Allow all, for an agent that needs a flag.
+    pub allow_all_args: Vec<String>,
+    /// A line `hqc-worker env` prints next to the agent and the worker logs once at start.
+    pub warning: Option<String>,
+}
+
+impl AcpAgent {
+    /// Whether a folder of `environment` may run it.
+    pub fn allowed_in(&self, environment: &str) -> bool {
+        self.environments.iter().any(|e| e == environment)
+    }
+
+    /// The highest of hqc's modes up to `mode` the agent can run: one the table names (or
+    /// Allow all by `allow_all_args`), else Ask, which an agent always runs as it starts.
+    pub fn mode_for(&self, mode: PermissionMode) -> PermissionMode {
+        let has = |m: PermissionMode| match m {
+            PermissionMode::Ask => true,
+            PermissionMode::AllowAll => {
+                self.modes.allow_all.is_some() || !self.allow_all_args.is_empty()
+            }
+            m => self.modes.id(m).is_some(),
+        };
+        [PermissionMode::AllowAll, PermissionMode::Auto]
+            .into_iter()
+            .find(|m| *m <= mode && has(*m))
+            .unwrap_or(PermissionMode::Ask)
+    }
+}
+
+/// `[acp_agents.<name>]`: checked at load.
+fn parse_acp_agent(
+    name: &str,
+    raw: RawAcpAgent,
+    environments: &[Arc<Environment>],
+) -> anyhow::Result<AcpAgent> {
+    if name.is_empty()
+        || name.len() > 32
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_'))
+    {
+        bail!("{name:?} is not an agent name: 1 to 32 of a-z, 0-9, - and _");
+    }
+    if !raw.command.is_absolute() {
+        bail!("command must be an absolute path");
+    }
+    for a in raw.args.iter().chain(&raw.allow_all_args) {
+        if a.contains('\0') {
+            bail!("an argument contains a NUL character");
+        }
+    }
+    for (k, v) in &raw.env {
+        check_var_name(k)?;
+        if k == crate::ssh::SSH_AUTH_SOCK {
+            bail!("env: {k}: the worker sets it for an environment with ssh_keys only");
+        }
+        if v.contains('\0') {
+            bail!("env: {k}: the value contains a NUL character");
+        }
+    }
+    for e in &raw.environments {
+        if e != DEFAULT_ENVIRONMENT && !environments.iter().any(|x| &x.name == e) {
+            bail!("environments: there is no [environments.{e}]");
+        }
+    }
+    for id in [&raw.modes.ask, &raw.modes.auto, &raw.modes.allow_all]
+        .into_iter()
+        .flatten()
+        .chain(&raw.modes.ask_also)
+    {
+        if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
+            bail!("modes: {id:?} is not a mode id");
+        }
+    }
+    // Lowering needs somewhere to go: a mode above Ask only with Ask's own id (SPEC §8.2).
+    if raw.modes.ask.is_none()
+        && (raw.modes.auto.is_some()
+            || raw.modes.allow_all.is_some()
+            || !raw.allow_all_args.is_empty())
+    {
+        bail!("modes: a table with auto, allow_all or allow_all_args names ask too");
+    }
+    let warning = match raw.warning.map(|w| w.trim().to_string()) {
+        Some(w) if w.is_empty() => None,
+        Some(w) if w.len() > 300 || w.chars().any(char::is_control) => {
+            bail!("warning: one line of at most 300 bytes")
+        }
+        w => w,
+    };
+    Ok(AcpAgent {
+        name: name.into(),
+        command: raw.command,
+        args: raw.args,
+        env: EnvVars(raw.env),
+        environments: raw.environments,
+        modes: raw.modes,
+        allow_all_args: raw.allow_all_args,
+        warning,
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -796,6 +985,10 @@ pub struct Config {
     pub ssh: crate::ssh::Store,
     /// `[providers.*]` by name.
     pub providers: Vec<AllowedProvider>,
+    /// `[acp_agents.*]` by name (SPEC §8.2, §14).
+    pub acp_agents: Vec<Arc<AcpAgent>>,
+    /// `[codex]` (SPEC §8.6, §14); `None`: no Codex sessions here.
+    pub codex: Option<Arc<CodexConfig>>,
     /// `$HQC_HOME/secrets` and `$HQC_HOME/workspace-keys` (SPEC 0.147).
     pub secrets: crate::secrets::Stores,
     /// The pins of the local MCP servers' tools: `$HQC_HOME/mcp-pins.json` (iteration 9).
@@ -878,6 +1071,8 @@ pub struct StartSpec {
     /// ([`crate::hub_skills::HubSkills::prepare`]): `--plugin-dir`. `None`: no skill of the
     /// hub could be had, or none was given.
     pub skill_dir: Option<PathBuf>,
+    /// The agent of a `runtime: acp` session (SPEC §8.2), from `worker.toml`; `None` otherwise.
+    pub acp_agent: Option<Arc<AcpAgent>>,
 }
 
 impl StartSpec {
@@ -983,6 +1178,32 @@ impl Config {
             .into_iter()
             .map(|(name, p)| parse_provider(&name, p).with_context(|| format!("providers.{name}")))
             .collect::<anyhow::Result<Vec<_>>>()?;
+        let acp_agents = raw
+            .acp_agents
+            .into_iter()
+            .map(|(name, a)| {
+                parse_acp_agent(&name, a, &environments)
+                    .map(Arc::new)
+                    .with_context(|| format!("acp_agents.{name}"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let codex = match raw.codex {
+            None => None,
+            Some(c) => {
+                if !c.command.is_absolute() {
+                    bail!("codex: command must be an absolute path");
+                }
+                for e in &c.environments {
+                    if e != DEFAULT_ENVIRONMENT && !environments.iter().any(|x| &x.name == e) {
+                        bail!("codex: environments: there is no [environments.{e}]");
+                    }
+                }
+                Some(Arc::new(CodexConfig {
+                    command: c.command,
+                    environments: c.environments,
+                }))
+            }
+        };
         let home = hqc_home().unwrap_or_else(|_| std::env::temp_dir().join("hqc"));
         Ok(Self {
             hub_url: raw.hub_url.trim_end_matches('/').to_string(),
@@ -1013,6 +1234,8 @@ impl Config {
             secrets: crate::secrets::Stores::in_home(&home),
             mcp_pins: home.join(crate::mcp::pins::FILE),
             providers,
+            acp_agents,
+            codex,
         })
     }
 
@@ -1043,9 +1266,49 @@ impl Config {
             Some(_) => self.environment(&ws),
             None => self.default_environment.clone(),
         };
-        if s.acp_agent.is_some() {
-            return Err("acp_agent is not configured on this worker".into());
-        }
+        // SPEC §8.2: an ACP agent of `worker.toml`, only where its table lets the folder's
+        // environment run it, and only for the worker's owner (§11.1).
+        let acp_agent = match (s.runtime, &s.acp_agent) {
+            (Runtime::Acp, Some(name)) => {
+                let Some(a) = self.acp_agents.iter().find(|a| &a.name == name) else {
+                    return Err(format!("acp_agent {name} is not configured on this worker"));
+                };
+                if !a.allowed_in(&environment.name) {
+                    return Err(format!(
+                        "acp_agent {name} may not run in the environment {} of this folder",
+                        environment.name
+                    ));
+                }
+                if !s.owner_is_worker_owner || s.restricted {
+                    return Err(
+                        "an ACP agent runs only an unrestricted session of the worker's owner"
+                            .into(),
+                    );
+                }
+                Some(a.clone())
+            }
+            (Runtime::Acp, None) => return Err("runtime acp needs acp_agent".into()),
+            // SPEC §8.6: Codex as `worker.toml` gives it, on the same terms as an ACP agent.
+            (Runtime::Codex, None) => {
+                let Some(c) = &self.codex else {
+                    return Err("codex is not configured on this worker".into());
+                };
+                if !c.allowed_in(&environment.name) {
+                    return Err(format!(
+                        "codex may not run in the environment {} of this folder",
+                        environment.name
+                    ));
+                }
+                if !s.owner_is_worker_owner || s.restricted {
+                    return Err(
+                        "Codex runs only an unrestricted session of the worker's owner".into(),
+                    );
+                }
+                None
+            }
+            (_, Some(_)) => return Err("acp_agent goes with runtime acp".into()),
+            (_, None) => None,
+        };
         if !s.owner_is_worker_owner && !self.allow_foreign_sessions {
             return Err("foreign sessions are not allowed on this worker".into());
         }
@@ -1086,20 +1349,26 @@ impl Config {
         let local_mcp = (!environment.mcp_servers.is_empty()
             && s.owner_is_worker_owner
             && !s.restricted
-            && s.runtime == Runtime::ClaudeCode)
-            .then(|| LocalMcp {
-                environment: environment.name.clone(),
-                servers: environment.mcp_servers.clone(),
-                rbw: self.rbw_bin.clone(),
-                pins: self.mcp_pins.clone(),
-            });
+            && matches!(
+                s.runtime,
+                Runtime::ClaudeCode | Runtime::Acp | Runtime::Codex
+            ))
+        .then(|| LocalMcp {
+            environment: environment.name.clone(),
+            servers: environment.mcp_servers.clone(),
+            rbw: self.rbw_bin.clone(),
+            pins: self.mcp_pins.clone(),
+        });
         // SPEC 0.235: the hub's MCP servers, only where `worker.toml` takes them.
         let mut mcp_servers = if s.mcp_servers.is_empty() {
             vec![]
         } else if !environment.hub_mcp
             || !s.owner_is_worker_owner
             || s.restricted
-            || s.runtime != Runtime::ClaudeCode
+            || !matches!(
+                s.runtime,
+                Runtime::ClaudeCode | Runtime::Acp | Runtime::Codex
+            )
         {
             tracing::info!(
                 session_id = %s.session_id,
@@ -1198,6 +1467,7 @@ impl Config {
             local_mcp,
             skills,
             skill_dir: None,
+            acp_agent,
         })
     }
 
@@ -1437,6 +1707,68 @@ mod tests {
         };
         s.workspace_path = Some(ws.display().to_string());
         s.clone()
+    }
+
+    /// SPEC §8.2, iteration 10: `[acp_agents]` checked at load; a session runs one only where
+    /// its table lets the folder's environment, for the worker's owner.
+    #[test]
+    fn acp_agents_are_checked_and_bound_to_environments() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ws")).unwrap();
+        let toml = |extra: &str| {
+            format!(
+                "hub_url = \"http://127.0.0.1:1/\"\nallowed_roots = [{:?}]\n{extra}",
+                dir.path().display().to_string(),
+            )
+        };
+        let c = Config::parse(&toml(
+            "[acp_agents.agy]\ncommand = \"/usr/local/bin/agy\"\nargs = [\"acp\"]\n\
+             environments = [\"default\"]\nmodes = { ask = \"default\" }\n\
+             allow_all_args = [\"--dangerously-skip-permissions\"]\n\
+             warning = \"at your own risk\"\n\
+             [acp_agents.nowhere]\ncommand = \"/bin/x\"\n",
+        ))
+        .unwrap();
+        let agy = &c.acp_agents[0];
+        assert_eq!(agy.name, "agy");
+        assert_eq!(agy.modes.ask.as_deref(), Some("default"));
+        assert_eq!(agy.warning.as_deref(), Some("at your own risk"));
+        let ws = dir.path().join("ws");
+        let mut s = start(&ws);
+        s.owner_is_worker_owner = true;
+        s.restricted = false;
+        s.runtime = Runtime::Acp;
+        s.acp_agent = Some("agy".into());
+        let spec = c.check_start(&s).unwrap();
+        assert_eq!(spec.acp_agent.as_ref().unwrap().name, "agy");
+        let mut other = s.clone();
+        other.acp_agent = Some("nowhere".into());
+        assert!(c.check_start(&other).unwrap_err().contains("may not run"));
+        other.acp_agent = Some("missing".into());
+        assert!(c
+            .check_start(&other)
+            .unwrap_err()
+            .contains("not configured"));
+        let mut foreign = s.clone();
+        foreign.owner_is_worker_owner = false;
+        assert!(c.check_start(&foreign).is_err());
+        let mut none = s.clone();
+        none.acp_agent = None;
+        assert!(c.check_start(&none).is_err());
+        let mut claude = s.clone();
+        claude.runtime = Runtime::ClaudeCode;
+        assert!(c.check_start(&claude).is_err());
+        for bad in [
+            "[acp_agents.agy]\ncommand = \"agy\"\n",
+            "[acp_agents.Agy]\ncommand = \"/bin/agy\"\n",
+            "[acp_agents.agy]\ncommand = \"/bin/agy\"\nenvironments = [\"lab\"]\n",
+            "[acp_agents.agy]\ncommand = \"/bin/agy\"\nmodes = { yolo = \"x\" }\n",
+            "[acp_agents.agy]\ncommand = \"/bin/agy\"\nwarning = \"two\\nlines\"\n",
+            "[acp_agents.agy]\ncommand = \"/bin/agy\"\nmodes = { auto = \"a\" }\n",
+            "[acp_agents.agy]\ncommand = \"/bin/agy\"\nallow_all_args = [\"--yolo\"]\n",
+        ] {
+            assert!(Config::parse(&toml(bad)).is_err(), "{bad}");
+        }
     }
 
     /// SPEC 0.147: secrets only with `session_secrets`, for the owner's session that is not

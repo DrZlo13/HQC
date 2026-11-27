@@ -301,7 +301,7 @@ export function Chat({
           app.dropRequest({ session_id: sessionId, request_id: requestId });
         }
       : undefined,
-    fork: !system && info?.workspace_id
+    fork: !system && info?.workspace_id && (!info.runtime || info.runtime === 'claude_code')
       ? (e) =>
           void app.forkSession(sessionId, e.event_id, e.payload.text).then(
             (s) => {
@@ -930,6 +930,9 @@ export function Chat({
   // without one. A room has neither of its own (its agents have them): its mode stands in the
   // meta row. On a computer they stand in the row after the state, on a phone on a line of their
   // own under it, "started by" after them.
+  // SPEC §8.2: an ACP agent's session has no Claude model, provider, browser, copy or side
+  // question.
+  const claude = !info?.runtime || info.runtime === 'claude_code';
   const pills = !system && !room && info && (
     <>
       <ModePill
@@ -937,8 +940,19 @@ export function Chat({
         phone={phone}
         frozen={archived}
         onMode={setMode}
-        onBrowser={app.givesBrowser(info.worker_id) ? setBrowser : undefined}
+        onBrowser={claude && app.givesBrowser(info.worker_id) ? setBrowser : undefined}
       />
+      {info.runtime === 'codex' ? (
+        // SPEC §8.6: Codex and the model it runs.
+        <span class="btn-model-pill" title={`Codex on the worker${info.model ? `, ${info.model}` : ''}`}>
+          <span class="pill-text">{info.model ? `Codex · ${info.model}` : 'Codex'}</span>
+        </span>
+      ) : !claude ? (
+        // SPEC §8.2: an ACP agent picks its model itself; its name stands here.
+        <span class="btn-model-pill" title={`ACP agent ${info.acp_agent ?? ''} of the worker`}>
+          <span class="pill-text">{info.acp_agent ?? 'ACP agent'}</span>
+        </span>
+      ) : (
       <ModelPill
         info={info}
         model={model}
@@ -948,6 +962,7 @@ export function Chat({
         loadLimits={loadLimits}
         onAgent={setAgent}
       />
+      )}
     </>
   );
   const title = (
@@ -1364,7 +1379,7 @@ export function Chat({
           onSend={(text) => {
             stick.current = true;
             // Files cannot go with a side question: such a text goes as any message.
-            const side = files.length === 0 ? sideQuestionOf(text) : undefined;
+            const side = files.length === 0 && (!info?.runtime || info.runtime === 'claude_code') ? sideQuestionOf(text) : undefined;
             if (side !== undefined) {
               // Refused: the notice says why, and the Composer puts the text back.
               return chat.sideQuestion(side).catch((e: Error) => {

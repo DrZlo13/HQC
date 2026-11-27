@@ -513,7 +513,7 @@ pub struct CreateSessionRequest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub existing_branch: bool,
     /// Absent: Claude Code. `acp` (SPEC §8.2, iteration 10) with `acp_agent`, an agent the
-    /// session's worker named in `hello`.
+    /// session's worker named in `hello`; `codex` (SPEC §8.6) when the worker named Codex.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<crate::frame::Runtime>,
     /// With `runtime: acp`: the agent's name from the worker's `worker.toml`.

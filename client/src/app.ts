@@ -3,7 +3,7 @@
 // the list order (T50) of the projects that have been looked at, a session archived from the
 // list that has not gone to the hub yet, and the archived projects the project search finds.
 
-import { Api, ApiError, type AcpAgentInfo, type NewRoom, type NewSessionOptions, type NewWorktree, type ProviderFields, type SessionPatch } from './api';
+import { Api, ApiError, type AcpAgentInfo, type CodexInfo, type NewRoom, type NewSessionOptions, type NewWorktree, type ProviderFields, type SessionPatch } from './api';
 import type {
   ClarifyAction,
   ClarifyAnswer,
@@ -53,6 +53,8 @@ export interface NewSessionDraft {
   worktree?: NewWorktree;
   /** An ACP agent of the workspace's worker instead of Claude Code (SPEC §8.2). */
   acp_agent?: string;
+  /** Codex on the workspace's worker instead of Claude Code (SPEC §8.6). */
+  codex?: boolean;
   started?: string;
 }
 
@@ -1397,8 +1399,9 @@ export class AppState {
     // An agent the chosen workspace's worker does not have is left out, as its chip does; an
     // ACP agent takes no Claude model and no provider.
     const acp = this.acpAgentsFor(worker).find((a) => a.name === d.acp_agent)?.name;
+    const codex = !acp && !!d.codex && !!this.codexFor(worker);
     // A provider the chosen workspace's worker does not allow is left out, as its chip does.
-    const provider = acp ? undefined : this.providersFor(worker).find((p) => p.id === d.provider_id)?.id;
+    const provider = acp || codex ? undefined : this.providersFor(worker).find((p) => p.id === d.provider_id)?.id;
     const s = await this.api.createSession(d.projectId, undefined, {
       workspace_id: workspaceId,
       cwd: d.cwd.trim(),
@@ -1407,6 +1410,7 @@ export class AppState {
       provider_id: provider,
       worktree: d.worktree,
       acp_agent: acp,
+      codex: codex || undefined,
     });
     // The worktree the hub made is a workspace of the project now: the chat's header shows it.
     if (d.worktree) await this.workspacesChanged(d.projectId).catch(() => {});
@@ -1482,13 +1486,21 @@ export class AppState {
 
   /** The ACP agents each worker named at its start (SPEC §8.2), by worker id. */
   acpAgents = new Map<string, AcpAgentInfo[]>();
+  /** Codex as each worker named it at its start (SPEC §8.6), by worker id. */
+  codexes = new Map<string, CodexInfo>();
 
   async loadWorkers(): Promise<void> {
     const ws = await this.api.workers();
     this.secretWorkers = new Set(ws.filter((w) => w.session_secrets).map((w) => w.id));
     this.browserWorkers = new Set(ws.filter((w) => w.browser).map((w) => w.id));
     this.acpAgents = new Map(ws.map((w) => [w.id, w.capabilities?.acp_agents ?? []]));
+    this.codexes = new Map(ws.flatMap((w) => (w.capabilities?.codex ? [[w.id, w.capabilities.codex] as const] : [])));
     this.changed();
+  }
+
+  /** Codex on worker `workerId`, if it has it; its `worker.toml` decides in which folders. */
+  codexFor(workerId: string | undefined): CodexInfo | undefined {
+    return workerId ? this.codexes.get(workerId) : undefined;
   }
 
   /** The ACP agents worker `workerId` runs; its `worker.toml` decides in which folders. */

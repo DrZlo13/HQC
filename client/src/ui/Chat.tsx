@@ -942,7 +942,12 @@ export function Chat({
         onMode={setMode}
         onBrowser={claude && app.givesBrowser(info.worker_id) ? setBrowser : undefined}
       />
-      {!claude ? (
+      {info.runtime === 'codex' ? (
+        // SPEC §8.6: Codex and the model it runs.
+        <span class="btn-model-pill" title={`Codex on the worker${info.model ? `, ${info.model}` : ''}`}>
+          <span class="pill-text">{info.model ? `Codex · ${info.model}` : 'Codex'}</span>
+        </span>
+      ) : !claude ? (
         // SPEC §8.2: an ACP agent picks its model itself; its name stands here.
         <span class="btn-model-pill" title={`ACP agent ${info.acp_agent ?? ''} of the worker`}>
           <span class="pill-text">{info.acp_agent ?? 'ACP agent'}</span>

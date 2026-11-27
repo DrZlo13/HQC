@@ -714,6 +714,33 @@ it('starts a session of an ACP agent of the worker from the agent chip (SPEC §8
   await until('archived', () => app.sessions.get(s.id)?.archived);
 });
 
+it('starts a Codex session with a model of its account from the agent chip (SPEC §8.6)', async () => {
+  const pid = app.me!.personal_project_id;
+  await until('workers', () => !!app.codexFor(app.workspaces.get(pid)?.[0]?.worker_id));
+  location.hash = `#/p/${pid}/new`;
+  await until('new session window', () => app.newSession?.projectId === pid && $('.chat-new .btn-chip-agent'));
+  $<HTMLButtonElement>('.btn-chip-agent')!.click();
+  const item = await until('Codex in the menu', () => $('.ctx-menu .btn-agent-codex'));
+  (item as HTMLButtonElement).click();
+  await settle();
+  expect($('.btn-chip-agent')!.textContent).toBe('Agent: Codex');
+  $<HTMLButtonElement>('.chat-new .btn-chip-model')!.click();
+  const sol = await until('its models', () => $$('.ctx-menu .btn-codex-model').find((b) => b.textContent?.includes('Sol')));
+  (sol as HTMLButtonElement).click();
+  await settle();
+  expect($('.chat-new .btn-chip-model')!.textContent).toBe('Model: gpt-5.6-sol');
+  type('.chat-new .composer-input', 'Hello from Codex');
+  await settle();
+  submit('.chat-new form.composer');
+  await until('chat', () => location.hash.startsWith('#/s/') && $('.chat:not(.chat-new) textarea'));
+  const s = await app.api.session(location.hash.split('/')[2]);
+  expect(s.runtime).toBe('codex');
+  expect(s.model).toBe('gpt-5.6-sol');
+  await until('Codex in the header', () => $('.chat .btn-model-pill')?.textContent === 'Codex · gpt-5.6-sol');
+  await app.api.archive(s.id);
+  await until('archived', () => app.sessions.get(s.id)?.archived);
+});
+
 it('orders the project bar by name or by hand, and keeps the order in the hub', async () => {
   const names = () => $$('.rail .project-row').map((r) => r.getAttribute('title'));
   const before = names();

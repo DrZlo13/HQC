@@ -16,7 +16,9 @@ async fn setup(hub: &TestHub) -> (FakeWorker, String, String) {
     let mut w = FakeWorker::connect(hub, &token)
         .await
         .expect("worker connect");
-    let capabilities = json!({"claude_code": {"version": "2.1.307"}, "acp_agents": [
+    let capabilities = json!({"claude_code": {"version": "2.1.307"},
+        "codex": {"version": "0.172.0", "signed_in": true, "models": [], "environments": ["default"]},
+        "acp_agents": [
         {"name": "agy", "version": "1.5.18", "environments": ["default"],
          "load_session": true, "resume": true, "image": true}]});
     w.hello_with(
@@ -94,5 +96,53 @@ async fn an_acp_session_never_takes_a_provider_and_the_pair_goes_together() {
         .await
         .unwrap();
     assert_eq!(n, 0);
+    hub.finish().await;
+}
+
+/// SPEC §8.6: a Codex session on a worker that named Codex; none on one that did not.
+#[tokio::test]
+async fn a_codex_session_on_a_worker_that_named_codex() {
+    let hub = TestHub::start().await;
+    let (mut w, pid, ws) = setup(&hub).await;
+    let (s, v) = create(&hub, &pid, json!({"workspace_id": ws, "runtime": "codex"})).await;
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(v["agent"]["runtime"], "codex");
+    assert!(v["agent"]["runtime_session_id"].is_null(), "{v}");
+    let sid = v["id"].as_str().unwrap().to_string();
+    let start = ack_start(&mut w, &sid).await;
+    assert_eq!(start["payload"]["runtime"], "codex");
+    let provider = uuid::Uuid::new_v4().to_string();
+    for body in [
+        json!({"workspace_id": ws, "runtime": "codex", "provider_id": provider}),
+        json!({"workspace_id": ws, "runtime": "codex", "acp_agent": "agy"}),
+    ] {
+        let (s, v) = create(&hub, &pid, body.clone()).await;
+        assert_eq!(s, 400, "{body} -> {v}");
+    }
+    hub.finish().await;
+
+    // A worker whose hello has no codex.
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let mut w = FakeWorker::connect(&hub, &token).await.unwrap();
+    w.hello_with(
+        WS_PATH,
+        hub.boot_id,
+        json!({"capabilities": {"claude_code": {"version": "2.1.307"}, "acp_agents": []}}),
+    )
+    .await;
+    let pid = hub.personal_project().await;
+    let (_, ws) = hub.add_workspace(&mut w, &pid, WS_PATH).await;
+    let (s, v) = create(
+        &hub,
+        &pid,
+        json!({"workspace_id": ws["id"], "runtime": "codex"}),
+    )
+    .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (422, Some("codex_unavailable")),
+        "{v}"
+    );
     hub.finish().await;
 }

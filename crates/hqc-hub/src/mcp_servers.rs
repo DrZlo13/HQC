@@ -830,13 +830,13 @@ async fn run(
             .await
             .map_err(internal)?;
     if caller.restricted
-        || !matches!(caller.runtime.as_str(), "claude_code" | "acp")
+        || !matches!(caller.runtime.as_str(), "claude_code" | "acp" | "codex")
         || worker_owner != Some(caller.owner_id)
     {
         return Err(McpError::new(
             error_code::NOT_FOUND,
-            "only an unrestricted session of Claude Code or an ACP agent on its owner's own \
-             worker gets the hub's MCP servers",
+            "only an unrestricted session of Claude Code, an ACP agent or Codex on its owner's \
+             own worker gets the hub's MCP servers",
         ));
     }
     if !per_minute(

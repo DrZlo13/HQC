@@ -1257,9 +1257,9 @@ pub(crate) async fn session_place<'b>(
     Ok((ws, worker, cwd))
 }
 
-/// `runtime` and `acp_agent` of a new session (SPEC §8.2): Claude Code by default, or an ACP
-/// agent the worker named in `hello`, without a model provider. The worker checks again that
-/// the folder's environment may run it (SPEC §2.1).
+/// `runtime` and `acp_agent` of a new session (SPEC §8.2, §8.6): Claude Code by default, an ACP
+/// agent the worker named in `hello`, or Codex when the worker named it, without a model
+/// provider. The worker checks again that the folder's environment may run it (SPEC §2.1).
 fn check_runtime(worker: &db::WorkerRow, b: &CreateSessionRequest) -> ApiResult<()> {
     use hqc_proto::frame::Runtime;
     match (b.runtime, b.acp_agent.as_deref()) {
@@ -1284,6 +1284,21 @@ fn check_runtime(worker: &db::WorkerRow, b: &CreateSessionRequest) -> ApiResult<
         }
         (Some(Runtime::Acp), None) => {
             Err(ApiError::BadRequest("runtime acp needs acp_agent".into()))
+        }
+        (Some(Runtime::Codex), None) => {
+            if b.provider_id.is_some() {
+                return Err(ApiError::BadRequest(
+                    "a model provider is for Claude Code sessions only".into(),
+                ));
+            }
+            if worker.capabilities["codex"].is_object() {
+                Ok(())
+            } else {
+                Err(ApiError::Unprocessable(
+                    "codex_unavailable",
+                    format!("the worker {} has no Codex", worker.name),
+                ))
+            }
         }
         (_, Some(_)) => Err(ApiError::BadRequest(
             "acp_agent goes with runtime acp".into(),
@@ -1334,8 +1349,14 @@ async fn insert_session(
         // Before the first start, which carries it.
         db::set_session_provider(&app.db, id, b.provider_id).await?;
     }
-    if let (Some(hqc_proto::frame::Runtime::Acp), Some(agent)) = (b.runtime, &b.acp_agent) {
-        db::set_acp_runtime(&app.db, id, agent).await?;
+    match (b.runtime, &b.acp_agent) {
+        (Some(hqc_proto::frame::Runtime::Acp), Some(agent)) => {
+            db::set_runtime(&app.db, id, "acp", Some(agent)).await?
+        }
+        (Some(hqc_proto::frame::Runtime::Codex), None) => {
+            db::set_runtime(&app.db, id, "codex", None).await?
+        }
+        _ => {}
     }
     let s = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
     events::system(app, &s, "session_created", "Session created").await?;

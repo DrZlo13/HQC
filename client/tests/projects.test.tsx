@@ -687,6 +687,33 @@ it('starts a new session in a new worktree from the workspace chip (SPEC 0.265)'
   await until('its turn ended', () => app.sessions.get(s.id)?.state === 'idle');
 });
 
+it('starts a session of an ACP agent of the worker from the agent chip (SPEC §8.2)', async () => {
+  const pid = app.me!.personal_project_id;
+  await until('workers', () => app.acpAgentsFor(app.workspaces.get(pid)?.[0]?.worker_id).length > 0);
+  location.hash = `#/p/${pid}/new`;
+  await until('new session window', () => app.newSession?.projectId === pid && $('.chat-new .btn-chip-agent'));
+  expect($('.btn-chip-agent')!.textContent).toBe('Agent: Claude Code');
+  expect($('.chat-new .btn-chip-model')).not.toBeNull();
+  $<HTMLButtonElement>('.btn-chip-agent')!.click();
+  const agy = await until('the agent in the menu', () => $$('.ctx-menu .btn-agent-acp').find((b) => b.textContent?.includes('agy')));
+  (agy as HTMLButtonElement).click();
+  await settle();
+  expect($('.btn-chip-agent')!.textContent).toBe('Agent: agy');
+  // An ACP agent picks its model itself.
+  expect($('.chat-new .btn-chip-model')).toBeNull();
+  type('.chat-new .composer-input', 'Hello from agy');
+  await settle();
+  submit('.chat-new form.composer');
+  await until('chat', () => location.hash.startsWith('#/s/') && $('.chat:not(.chat-new) textarea'));
+  const s = await app.api.session(location.hash.split('/')[2]);
+  expect(s.runtime).toBe('acp');
+  expect(s.acp_agent).toBe('agy');
+  await until('the agent in the header', () => $('.chat .btn-model-pill')?.textContent === 'agy');
+  // The mock's turn asks for a permission: archived, it leaves the rail as it was.
+  await app.api.archive(s.id);
+  await until('archived', () => app.sessions.get(s.id)?.archived);
+});
+
 it('orders the project bar by name or by hand, and keeps the order in the hub', async () => {
   const names = () => $$('.rail .project-row').map((r) => r.getAttribute('title'));
   const before = names();

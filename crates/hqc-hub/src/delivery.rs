@@ -265,7 +265,7 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
         // SPEC 0.235: the names only; the worker takes them where its environment has `hub_mcp`.
         // Only for the owner's own worker: a foreign worker gets no name of them.
         mcp_servers: if s.restricted
-            || s.runtime != "claude_code"
+            || !matches!(s.runtime.as_str(), "claude_code" | "acp")
             || worker_owner != Some(s.owner_id)
         {
             vec![]

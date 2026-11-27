@@ -116,6 +116,8 @@ export interface NewSessionOptions {
   /** The session starts in a new worktree of the workspace (SPEC 0.265): the request waits
    *  until the worker made it. */
   worktree?: NewWorktree;
+  /** An ACP agent of the workspace's worker instead of Claude Code (SPEC §8.2). */
+  acp_agent?: string;
 }
 
 /** A new session's worktree (SPEC 0.265): its branch (`hqc/session-N` after the session when
@@ -250,7 +252,15 @@ export interface WorkerInfo {
   browser?: boolean;
   /** Its `hello.capabilities`: `claude_code.login` (SPEC 0.185) — its Claude Code is signed
    *  in from hqc. */
-  capabilities?: { claude_code?: { version?: string; login?: boolean } };
+  capabilities?: { claude_code?: { version?: string; login?: boolean }; acp_agents?: AcpAgentInfo[] };
+}
+
+/** An ACP agent of a worker's `worker.toml` that answered at its start (SPEC §8.2, §5.4). */
+export interface AcpAgentInfo {
+  name: string;
+  version?: string;
+  /** The environments whose folders may run it. */
+  environments?: string[];
 }
 
 /** How a worker's own Claude Code is signed in (SPEC 0.185, `claude auth status`). */
@@ -458,6 +468,10 @@ export class Api {
     if (opts.permission_mode) body.permission_mode = opts.permission_mode;
     if (opts.model) body.model = opts.model;
     if (opts.provider_id) body.provider_id = opts.provider_id;
+    if (opts.acp_agent) {
+      body.runtime = 'acp';
+      body.acp_agent = opts.acp_agent;
+    }
     if (opts.worktree) {
       body.isolation = 'worktree';
       const branch = opts.worktree.branch.trim();

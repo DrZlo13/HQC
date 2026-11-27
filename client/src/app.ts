@@ -3,7 +3,7 @@
 // the list order (T50) of the projects that have been looked at, a session archived from the
 // list that has not gone to the hub yet, and the archived projects the project search finds.
 
-import { Api, ApiError, type NewRoom, type NewSessionOptions, type NewWorktree, type ProviderFields, type SessionPatch } from './api';
+import { Api, ApiError, type AcpAgentInfo, type NewRoom, type NewSessionOptions, type NewWorktree, type ProviderFields, type SessionPatch } from './api';
 import type {
   ClarifyAction,
   ClarifyAnswer,
@@ -51,6 +51,8 @@ export interface NewSessionDraft {
   /** "New worktree…" of the workspace chip (SPEC 0.265): the session starts in a new worktree
    *  of the workspace. */
   worktree?: NewWorktree;
+  /** An ACP agent of the workspace's worker instead of Claude Code (SPEC §8.2). */
+  acp_agent?: string;
   started?: string;
 }
 
@@ -1392,15 +1394,19 @@ export class AppState {
     if (!this.me) throw new Error('not signed in');
     const workspaceId = this.newSessionWorkspace(d);
     const worker = this.workspaces.get(d.projectId)?.find((w) => w.id === workspaceId)?.worker_id;
+    // An agent the chosen workspace's worker does not have is left out, as its chip does; an
+    // ACP agent takes no Claude model and no provider.
+    const acp = this.acpAgentsFor(worker).find((a) => a.name === d.acp_agent)?.name;
     // A provider the chosen workspace's worker does not allow is left out, as its chip does.
-    const provider = this.providersFor(worker).find((p) => p.id === d.provider_id)?.id;
+    const provider = acp ? undefined : this.providersFor(worker).find((p) => p.id === d.provider_id)?.id;
     const s = await this.api.createSession(d.projectId, undefined, {
       workspace_id: workspaceId,
       cwd: d.cwd.trim(),
       permission_mode: d.permission_mode,
-      model: provider ? undefined : d.model,
+      model: provider || acp ? undefined : d.model,
       provider_id: provider,
       worktree: d.worktree,
+      acp_agent: acp,
     });
     // The worktree the hub made is a workspace of the project now: the chat's header shows it.
     if (d.worktree) await this.workspacesChanged(d.projectId).catch(() => {});
@@ -1474,11 +1480,20 @@ export class AppState {
   /** The workers that give a session the user's Chrome (`browser`, SPEC 0.148), by id. */
   browserWorkers = new Set<string>();
 
+  /** The ACP agents each worker named at its start (SPEC §8.2), by worker id. */
+  acpAgents = new Map<string, AcpAgentInfo[]>();
+
   async loadWorkers(): Promise<void> {
     const ws = await this.api.workers();
     this.secretWorkers = new Set(ws.filter((w) => w.session_secrets).map((w) => w.id));
     this.browserWorkers = new Set(ws.filter((w) => w.browser).map((w) => w.id));
+    this.acpAgents = new Map(ws.map((w) => [w.id, w.capabilities?.acp_agents ?? []]));
     this.changed();
+  }
+
+  /** The ACP agents worker `workerId` runs; its `worker.toml` decides in which folders. */
+  acpAgentsFor(workerId: string | undefined): AcpAgentInfo[] {
+    return (workerId && this.acpAgents.get(workerId)) || [];
   }
 
   /** Whether worker `workerId` gives a session the user's Chrome. */

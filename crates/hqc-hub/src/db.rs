@@ -2206,6 +2206,20 @@ pub async fn set_session_provider(
     Ok(())
 }
 
+/// Makes a new session, before its first start, one of ACP agent `agent` (SPEC §8.2): its
+/// `runtime_session_id` is the agent's, reported once the agent made its session.
+pub async fn set_acp_runtime(db: &PgPool, id: Uuid, agent: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE sessions SET runtime = 'acp', acp_agent = $2, runtime_session_id = NULL,
+            updated_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(agent)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// A title from the runtime (`session.state.title`), applied unless the user set one.
 pub async fn set_runtime_title(db: &PgPool, id: Uuid, title: &str) -> sqlx::Result<()> {
     sqlx::query(

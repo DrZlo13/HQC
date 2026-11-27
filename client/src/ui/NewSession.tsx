@@ -387,7 +387,7 @@ export function NewChatWindow({
   );
 }
 
-type Chip = 'mode' | 'workspace' | 'folder' | 'permissions' | 'model';
+type Chip = 'mode' | 'workspace' | 'folder' | 'permissions' | 'model' | 'agent';
 
 /** The permission modes a new session or room starts in. */
 export const PERMISSIONS: [PermissionMode | undefined, string][] = [
@@ -398,7 +398,7 @@ export const PERMISSIONS: [PermissionMode | undefined, string][] = [
 ];
 
 /** What the chips choose, as a new session's draft keeps it. */
-export type ChipValues = Pick<NewSessionDraft, 'workspace_id' | 'cwd' | 'permission_mode' | 'model' | 'provider_id' | 'worktree'>;
+export type ChipValues = Pick<NewSessionDraft, 'workspace_id' | 'cwd' | 'permission_mode' | 'model' | 'provider_id' | 'worktree' | 'acp_agent'>;
 
 /** Where a chip's menu opens: its top left corner, and the chip that toggles it. */
 export interface ChipAt {
@@ -496,6 +496,10 @@ export function NewSessionChips({
   const custom = isTypedModel(values.model);
   // A provider the draft chose that this workspace's worker does not allow is not shown.
   const chosenProvider = app.providersFor(workspace?.worker_id).find((p) => p.id === values.provider_id);
+  // SPEC §8.2: the ACP agents of the workspace's worker; one the draft chose that this worker
+  // does not have is not shown. The worker refuses one its folder may not run.
+  const agents = withModel ? app.acpAgentsFor(workspace?.worker_id) : [];
+  const chosenAgent = agents.find((a) => a.name === values.acp_agent);
   const close = () => setOpen(null);
   // Enter in a menu's field closes it: the field has set its value already.
   const enterCloses = (e: KeyboardEvent) => {
@@ -616,6 +620,26 @@ export function NewSessionChips({
           </ContextMenu>
         );
       }
+    } else if (open.chip === 'agent') {
+      const items: MenuEntry[] = [
+        {
+          label: 'Claude Code',
+          cls: 'btn-agent-claude',
+          checked: !chosenAgent,
+          onSelect: () => onChange({ acp_agent: undefined }),
+        },
+        ...agents.map(
+          (a): MenuEntry => ({
+            label: a.name,
+            detail: a.version ? `ACP · ${a.version}` : 'ACP',
+            cls: 'btn-agent-acp',
+            title: "An agent of this machine's worker.toml, signed in on the machine",
+            checked: chosenAgent?.name === a.name,
+            onSelect: () => onChange({ acp_agent: a.name, model: undefined, provider_id: undefined }),
+          }),
+        ),
+      ];
+      menu = <ContextMenu {...at} label="Agent" heading="Agent" items={items} />;
     } else if (open.chip === 'folder') {
       menu = (
         <ContextMenu {...at} label="Folder">
@@ -724,7 +748,16 @@ export function NewSessionChips({
           Permissions: <b>{values.permission_mode ? permission : "worker's default"}</b>
         </span>,
       )}
+      {agents.length > 0 &&
+        chip(
+          'agent',
+          <IconModel />,
+          <span class="new-chip-text">
+            Agent: <b>{chosenAgent ? chosenAgent.name : 'Claude Code'}</b>
+          </span>,
+        )}
       {withModel &&
+        !chosenAgent &&
         chip(
           'model',
           <IconModel />,

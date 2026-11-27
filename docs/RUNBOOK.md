@@ -1235,6 +1235,59 @@ pass through the hub. A worker older than 0.185 has no "Sign in": update it, or 
 a terminal on the machine (not over ssh: the Keychain is locked there, and the CLI writes
 `~/.claude/.credentials.json` instead).
 
+### 2.6.1 ACP agents (Antigravity CLI and others)
+
+The worker runs other agents than Claude Code through the generic ACP adapter (SPEC §8.2): an
+agent that speaks the Agent Client Protocol v1 over stdio, declared in `worker.toml`. hqc has no
+code for any one agent: a block below is all it knows of one. Install the agent and sign it in
+**on the machine** (hqc does not sign these agents in), add its block, restart the worker
+(SIGUSR1), and check `hqc-worker env`: the agent is listed with its environments and its
+`warning`. At its start the worker asks each agent `initialize`; one that does not answer is not
+offered (the log says why). In the client the new session window then has an "Agent" chip.
+
+What hqc controls and what it does not:
+
+- the agent runs in the session's folder with the environment's variables and ssh keys, gets
+  hqc's MCP servers (`hqc`, the hub's servers with `hub_mcp`, the environment's `mcp_servers`)
+  and no files or terminal of the worker's: it uses its own tools;
+- the worker sees only what the agent **asks** about. On each permission request it checks the
+  command of an `execute` call (`rawInput.command` or `cmd`) against `deny` (refused, no card)
+  and the allow rules and hqc's folder rules (allowed once, no card); a request whose command it
+  cannot read is always a card. What the agent runs without asking (reads, its own auto modes)
+  never reaches the worker: there the agent's own sandbox and settings are the boundary;
+- what the agent connects by itself (MCP servers of its own settings, extensions, hooks) is
+  outside hqc's control; keep them out of its settings on the worker's machine;
+- `allow_all` needs `[permissions] allow_all = true`, as for Claude Code.
+
+Antigravity CLI (Google's agent; Gemini CLI no longer serves Google accounts since 2026-06-18).
+Install `agy` (1.5.1 or newer) from Google's installer, then sign in on the machine: `agy` once in
+a terminal, or `agy acp --login` over ssh (it prints a URL; open it, paste the code back). On a
+headless Linux box the keyring needs a D-Bus session (`export $(dbus-launch)`). Then:
+
+```toml
+[acp_agents.agy]
+command = "/usr/local/bin/agy"          # absolute: `command -v agy`
+args = ["acp"]
+environments = ["default"]              # the environments whose folders may run it
+modes = { ask = "default" }             # agy's own mode for Ask; it has no auto mode since 1.5.18
+allow_all_args = ["--dangerously-skip-permissions"]   # Allow all, only with [permissions] allow_all
+warning = "Google's consumer terms lean against third-party clients of Antigravity; accounts were suspended for it in Feb 2026. Use at your own risk; a spare Google account is safer."
+```
+
+**The terms.** Running `agy` from hqc on a Google AI Pro, Ultra or free account is at the owner's
+risk: Antigravity's Additional Terms §6 forbid "using third party software, tools, or services
+to access the Service", its FAQ says wrapping agy in third-party agents is not supported under
+consumer plans, and Google suspended accounts for it in February 2026 (since September the
+penalty is the Antigravity account, not the whole Google account). A spare Google account is
+safer. The `warning` line keeps this in front of whoever reads `hqc-worker env` or the log.
+
+Not checked yet on a real agy (T78): whether it asks over ACP at all and for which calls, the
+options and `rawInput` of its requests (a subagent's requests reportedly never reach the client),
+how it names the MCP tools hqc gives it and whether their processes descend from `agy acp`.
+
+When a session says "The agent … is not signed in on this machine", sign the agent in on the
+machine as above; the next message starts it again.
+
 ### 2.7 Token revocation
 
 In the client: "Settings" → "Workers" → "Revoke". The hub marks the token revoked, drops the

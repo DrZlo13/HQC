@@ -130,7 +130,7 @@ T83 confirm it before the code relies on it.
 
 ### ACP
 
-- Rust crate `agent-client-protocol` **5.6.1** (2026-11-25): pin `=5.6.1`, v1 module. Stable in v1:
+- Rust crate `agent-client-protocol` **5.6.1** (2026-11-25), v1 module; not used in the end (T75): it and its schema crate turn on `serde_json`'s `preserve_order` for the whole build, which changes the MCP pin hashes of iteration 9. Stable in v1:
   `session/load`, `resume`, `list`, `close`, `set_config_option`, elicitation, `usage_update`
   (context `used` / `size`, optional `cost`) and `session_info_update` (title)
   ([updates](https://agentclientprotocol.com/updates)). v2 is alpha.
@@ -175,7 +175,7 @@ T83 confirm it before the code relies on it.
   [acp_agents.agy]
   command = "/usr/local/bin/agy"            # absolute (§8.2)
   args = ["acp"]
-  env = {}                                  # plain or { vault = … }, as in iteration 9
+  env = {}                                  # plain values, on top of the environment's
   environments = ["default"]                # where it may run; none listed: nowhere
   modes = { ask = "default" }               # the agent's own mode or config-option ids
   allow_all_args = ["--dangerously-skip-permissions"]   # for an agent that needs a start flag
@@ -291,9 +291,12 @@ from hqc, no Node, no per-agent code in the ACP adapter.
 
 ## Part 1: the generic ACP adapter
 
+Done (T74–T77 with the hub's and the client's parts of T84–T86), checked against a fake ACP
+agent; T78 waits for a live agy run.
+
 ### T74. `[acp_agents]` and the probe at start
 
-`config.rs`: `[acp_agents.<name>]` (`command` absolute, `args`, `env` plain or vault,
+`config.rs`: `[acp_agents.<name>]` (`command` absolute, `args`, `env` plain values,
 `environments`, `modes`, `allow_all_args`, `warning`), checked at load (a name `[a-z0-9_-]{1,32}`, the
 environments exist, `allow_all` needs `[permissions] allow_all = true` to be offered); `isolation`
 dropped. At start the worker runs `initialize` on each agent (a timeout; the child allowlist plus
@@ -305,7 +308,7 @@ config.rs`, `capabilities.rs`, `env_cmd.rs`, `crates/hqc-proto/src/frame.rs`, wi
 
 ### T75. The adapter
 
-`adapter/acp.rs` on `agent-client-protocol = "=5.6.1"` (v1): a process per session in the
+`adapter/acp.rs`, ACP v1 read as plain JSON (see the research above for why not the crate): a process per session in the
 workspace's environment (§14), `initialize` with `fs` and `terminal` off and form elicitation on,
 `session/new {cwd, mcpServers}`, resume/load with the id check, `session/prompt` per input
 (`InputAccepted` on send, images where advertised), `session/cancel`, the events of the decisions,

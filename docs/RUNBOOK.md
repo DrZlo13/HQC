@@ -1292,6 +1292,31 @@ how it names the MCP tools hqc gives it and whether their processes descend from
 When a session says "The agent … is not signed in on this machine", sign the agent in on the
 machine as above; the next message starts it again.
 
+### 2.6.2 Codex
+
+OpenAI's Codex runs as `codex app-server`, one process per session (SPEC §8.6), on the owner's
+ChatGPT plan. The worker speaks the App Server of **Codex 0.172.x** only: install exactly that
+version (`npm i -g @openai/codex@0.172` or the release binary), and sign in **on the machine**:
+`codex login --device-auth` (device codes must be enabled in ChatGPT's security settings; it
+prints a link and a code to open on any device), or sign in elsewhere and copy `~/.codex/auth.json`
+(treat it like a password). Then:
+
+```toml
+[codex]
+command = "/opt/homebrew/bin/codex"     # absolute: `command -v codex`
+environments = ["default"]              # the environments whose folders may run it
+```
+
+Restart the worker (SIGUSR1); its log says "Codex available" with the version and the number of
+models, or why not (another version, not signed in). In the client the Agent chip offers Codex
+and the Model chip its models. Modes: Ask runs Codex in its read-only sandbox and asks before
+anything else, Auto in its workspace-write sandbox (it asks to leave it), Allow all with no
+sandbox and no questions (only with `[permissions] allow_all = true`). The worker's `deny` sees
+every command Codex asks about; what Codex runs inside its sandbox without asking is bounded by
+the sandbox. MCP servers of `~/.codex/config.toml` reach the agent too: keep them out of it on
+the worker's machine. When a session says "Codex is not signed in on this machine", sign in again
+as above.
+
 ### 2.7 Token revocation
 
 In the client: "Settings" → "Workers" → "Revoke". The hub marks the token revoked, drops the

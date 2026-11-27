@@ -218,7 +218,7 @@ and the two differ.
 
 ### Worker
 `owner_id`, `name`, `os`, `token_hash`, `status` (online/offline), `last_seen`,
-`protocol_version`, `boot_id` (from the last `hello`, §5.2), `capabilities` (`claude_code: {version, sessions_registry?, moves?, login?}`, `acp_agents[{name,
+`protocol_version`, `boot_id` (from the last `hello`, §5.2), `capabilities` (`claude_code: {version, sessions_registry?, moves?, login?}`, `codex?: {version, signed_in, models[], environments}` (since 0.266, §8.6), `acp_agents[{name,
 version, environments, load_session, resume, image}]` (since 0.266) — the result of each agent's `initialize`
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
 `environments[]` (since 0.56 `{name, allow_local_mcp?, mcp_servers? (0.262), permissions {unblock?, allow?, deny?, remote_unblock? (0.246)}}`,
@@ -447,7 +447,7 @@ place there). Its `runtime_session_id` stays: the worker moves the transcript to
 (§8.1). Not to another worker.
 
 ### Agent (embedded in Session)
-`runtime` (claude_code / acp / bare / none; `none` — only for the worker's service session
+`runtime` (claude_code / acp / codex (since 0.266, §8.6) / bare / none; `none` — only for the worker's service session
 and, since 0.172, a room: there is no agent and no process starts, §10.2, §7.1.1), `acp_agent`
 (the agent's name from the worker's local config, for `acp`), `model` (since 0.74 also switched
 with `PATCH`, §6),
@@ -1963,7 +1963,9 @@ the rest is marked "later"):
   `runtime: "acp"` with `acp_agent` (since 0.266) makes a session of an ACP agent (§8.2) the
   session's worker named in `hello.capabilities.acp_agents` (else `422 acp_agent_unavailable`),
   never with `provider_id` (`400`), its `runtime_session_id` empty until the agent reports its
-  own; `acp_agent` without `runtime: "acp"`, or another runtime, is `400`. The worker checks again
+  own; `runtime: "codex"` (since 0.266, §8.6) makes a Codex session on a worker whose `hello`
+  names `codex` (else `422 codex_unavailable`), never with `provider_id` or `acp_agent`;
+  `acp_agent` without `runtime: "acp"`, or another runtime, is `400`. The worker checks again
   that the folder's environment may run the agent (§14).
   `isolation: "worktree"` (since 0.265, `api.session.worktree.request.json`; another value, or
   `branch`, `base` or `existing_branch` without it: `400`) starts the session in a new
@@ -6299,6 +6301,62 @@ in `model.proxy` frames with streamed chunks. By default local models are availa
 only to the worker owner's sessions; `share_local_models: true` in the local config
 opens them to colleagues' bare models in shared projects.
 
+### 8.6 Codex (App Server)
+Since 0.266 (iteration 10). OpenAI's Codex runs as `codex app-server`, **one process per hqc
+session** in its working folder with the workspace environment (§14): a process holds the
+session's environment, ssh-agent and MCP check (§7.2), a wedged one stalls one session only, and
+each start reads the current sign-in. JSON-RPC over stdio, one message per line, without a
+`"jsonrpc"` field, read as plain JSON. The protocol is experimental: the worker speaks the one
+of Codex 0.172.x, checks `codex --version` at its start and offers no Codex for another version;
+`docs/notes/codex-app-server.md` holds the pinned schema's hash and what the adapter uses. A
+session is `runtime: codex`; `[codex]` of `worker.toml` names the binary and the environments
+whose folders may run it, for an unrestricted session of the worker's owner. At its start the
+worker asks a short-lived App Server `account/read` and `model/list` and names Codex in
+`hello.capabilities.codex {version, signed_in, models[{id, name, default, efforts}],
+environments}`; the client's Agent chip offers it and its models.
+
+Start: `initialize {clientInfo}`, the `initialized` notification, `account/read`: an account
+that needs OpenAI's sign-in and has none is `system agent_signed_out` (Codex is signed in on the
+machine, `codex login --device-auth`). Then `thread/resume {threadId, excludeTurns: true}` of the
+session's `runtime_session_id`, or, when there is none or Codex answers with another thread,
+`thread/start` (`system acp_conversation_lost` in the second case); a new thread's id becomes
+the `runtime_session_id`. Both carry the mode's `approvalPolicy` and `sandbox`, the model and
+hqc's servers as `config.mcp_servers` (the launchers of §8.1) **[verify]**.
+
+Modes: Ask = `on-request` with the `read-only` sandbox, Auto = `on-request` with
+`workspace-write`, Allow all = `never` with `danger-full-access` (only with `[permissions]
+allow_all`). `turn/start` carries `approvalPolicy` and `sandboxPolicy` only when the mode changed
+since the last turn, so the user's own sandbox settings (network access) stay; a switch between
+turns is confirmed at once and goes with the next turn, a switch during a turn is refused and the
+supervisor asks again before the next turn, so a T39 cap takes its turn exactly.
+
+Turns: `turn/start` per input (`ack` once sent); `turn/completed` ends it: `completed` → the final
+`agent.message` of the text since the last tool call, `interrupted` → none (an `interrupted`
+one if text was written), `failed` → a runtime message with Codex's error (`unauthorized`:
+`agent_signed_out`). Items: `item/agentMessage/delta` → `agent.delta`, reasoning summaries →
+thinking, `commandExecution` → `tool.call` `Bash` and its output, `fileChange` → `Edit` and its
+diffs, `mcpToolCall` → `mcp__<server>__<tool>`, `webSearch`; `turn/plan/updated` → `tasks`;
+`thread/tokenUsage/updated` → `usage` (the last response's tokens, the context and the model's
+window, the thread's total); `thread/name/updated` → the runtime title. A notification of
+another thread (a subagent's) is not the session's. An input written during a turn goes in by
+`turn/steer` with the running turn's id (`InputAccepted` with `joined`); a refused steer (the
+turn ended, a review or compaction runs) leaves it queued. Stop is `turn/interrupt`. A
+`turn/steer` or `turn/interrupt` not answered in 10 s ends the process (T3 Code's wedged
+App Server); the next input starts it again.
+
+Approvals: `item/commandExecution/requestApproval` carries the command explicitly: the worker's
+`deny` declines it without a card (`system policy_denied`), its allow rules and hqc's folder
+rules accept it without one when it runs in the session's workspace; otherwise, and for
+`item/fileChange/requestApproval` (the item's diffs on the card), a card with Codex's decisions:
+Allow (`accept`), Allow for this session (`acceptForSession`), Deny (`decline`), Deny and stop
+(`cancel`). `item/tool/requestUserInput` → `clarify.request`; an MCP server's form is declined.
+Open requests are cancelled at the end of a turn, at Stop and when the process ends; one Codex
+settles itself (`serverRequest/resolved`) loses its card.
+
+Not used yet: the account's rate limits (`account/rateLimits/*`: `worker.limits` is the worker's
+Claude Code account), sign-in from hqc (`chatgptDeviceCode`), `thread/fork`, the subagents'
+threads, side questions, quiet input, moves, the mirror and providers.
+
 ## 9. Mirror and import of Claude Code sessions
 
 The VS Code extension and the CLI write the same files
@@ -7419,6 +7477,8 @@ The worker's local config is the only source of truth for:
   `allow_all_args` (start arguments for Allow all, for an agent that needs a flag; with
   `[permissions] allow_all` only), `warning` (one line `hqc-worker env` prints beside the agent
   and the worker logs at start); a name is `[a-z0-9_-]{1,32}`; checked at load;
+- `codex` (since 0.266, §8.6) — `[codex]`: `command` (absolute) and `environments` (whose folders
+  may run it; none: nowhere); checked at load;
 - `allow_foreign_sessions`, `share_local_models`;
 - `max_sessions` (agent processes at once, default 8) and `insecure_http`
   (`http://` to a non-loopback hub, §5.1);
@@ -8740,6 +8800,22 @@ agents; §6 `POST /api/projects/{id}/sessions` takes `runtime: "acp"` with `acp_
 "Agent" chip in the new session window and the agent's name in place of the model menu.
 RUNBOOK §2.6.1: setting an ACP agent up, what hqc controls and what not, the Antigravity block
 with its terms warning. Checked against a fake ACP agent only; a live agy run is T78.
+
+Security review of part 1: only a mode an ACP agent took is reported (a refused switch is an
+error and the supervisor restarts the process in the mode asked for, at once when idle, else
+before the next turn); a mode the agent moves to by itself is read by its table, an unknown one
+as Allow all (`modes.ask_also` for more Ask ids); a mode above the cap of a capped turn stops the
+turn (`system mode_above_cap`: a taken input is not run again, others go back within the requeue
+bound); a table naming a mode above Ask names `ask` too; a permission request without `kind` is
+a card, and only one whose `rawInput` holds nothing but the command, a description and a timeout
+is allowed by a rule.
+
+Implemented, part 2 (T79–T82, T84–T86 for Codex): §8.6 the native Codex adapter over `codex
+app-server` (one process per session, Codex 0.172.x, `docs/notes/codex-app-server.md`), §14
+`[codex]`, §3 `runtime: codex` and `hello.capabilities.codex`, §6 `runtime: "codex"` (`422
+codex_unavailable`); the client's Agent chip offers Codex and its models. RUNBOOK §2.6.2.
+Checked against a fake App Server only; a live run is T83. The JSON-RPC transport is shared by
+both adapters.
 
 ### 0.264 → 0.265 (a new session in a new worktree, from the UI)
 §6: `POST /api/projects/{id}/sessions` takes `isolation: "worktree"`, `branch?`, `base?` and

@@ -345,6 +345,12 @@ so); MCP tool naming and process tree; sign-out; the keyring on a headless Linux
 
 ## Part 2: the native Codex adapter
 
+Done (T79–T82 with the hub's and the client's parts of T84–T86), checked against a fake App
+Server of Codex 0.172.0's schema; T83 waits for a live run. The schema is not checked into the
+repo (685 KB): `docs/notes/codex-app-server.md` holds its hash and what the adapter uses. The
+account's limits in the model menu are not done: `worker.limits` is the worker's Claude Code
+account, and Codex's plan needs a field of its own.
+
 ### T79. `[codex]`, the version and the schema
 
 `config.rs` `[codex]` (`command`, `environments`); `codex --version` against the supported range;

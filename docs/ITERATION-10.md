@@ -5,7 +5,7 @@ harnesses, Codex and Google's terminal agent, from hqc as easily as Claude Code,
 owner's ChatGPT and Google AI subscriptions rather than API keys. One generic ACP adapter on the
 worker (SPEC §8.2) drives both; Hermes comes later on the same adapter.
 
-Criterion: on home-mac, with `[acp_agents.codex]` in `worker.toml` and Codex signed in with
+Criterion: on a macOS worker, with `[acp_agents.codex]` in `worker.toml` and Codex signed in with
 ChatGPT on the machine, a new session in a folder whose environment allows `codex` picks "Codex"
 in the new session window, gets an answer from a GPT model chosen in the model menu, edits a file
 with the usual permission card (Ask) and without one (Auto), calls `hqc_attach` and a tool of a
@@ -14,7 +14,7 @@ without a card; the session survives a worker restart (resumed, not a new conver
 header shows the context and the turn's tokens; a folder whose environment does not list `codex`
 does not offer it. Then the same with Antigravity on the owner's Google AI subscription.
 
-Not in this iteration: Hermes (it needs a worker on llm-server and a new §8.2.1, below); signing
+Not in this iteration: Hermes (it needs a Linux worker for Hermes and a new §8.2.1, below); signing
 an agent in from hqc (on the machine only, decided below); the hub's skills for ACP agents; mirror, import and takeover of
 an ACP agent's own sessions (SPEC §9); moves (§5.3) and copies of ACP sessions; ACP agents in
 rooms (§7.1.1: no system prompt in ACP), without a workspace (§8.4) or in foreign sessions (§11.1);
@@ -78,7 +78,7 @@ issue threads say, to be checked on the machine before the code relies on it.
 - Codex has no ACP mode of its own. Zed's Rust `zed-industries/codex-acp` was **archived on
   2026-07-22**; its successor is
   [agentclientprotocol/codex-acp](https://github.com/agentclientprotocol/codex-acp)
-  (`@agentclientprotocol/codex-acp` on npm, Node), which starts `codex app-server`, the JSON-RPC
+  (`@agentclientprotocol/codex-acp` on npm, Node ≥ 20), which starts `codex app-server`, the JSON-RPC
   interface OpenAI documents for third-party clients (VS Code, JetBrains, Xcode), and translates
   ACP to it. Latest seen: **v2.8.0, 2026-11-19**, on Codex 0.170.0 (ACP SDK 2.8); Codex itself is
   at **0.172.0** (2026-11-24). Node and a pinned npm version therefore come to the worker's
@@ -141,7 +141,7 @@ issue threads say, to be checked on the machine before the code relies on it.
 
   ```toml
   [acp_agents.codex]
-  command = "/Users/drzlo/.local/share/hqc/node_modules/.bin/codex-acp"   # absolute (§8.2)
+  command = "<prefix>/bin/codex-acp"       # an absolute path (§8.2)
   args = []
   env = { NO_BROWSER = "1" }               # plain or { vault = … } as in iteration 9
   environments = ["default", "firmware"]  # where it may run; none listed: nowhere
@@ -227,7 +227,8 @@ issue threads say, to be checked on the machine before the code relies on it.
   Code's) unless codex-acp reports the plan's windows (later).
 - **Order: generic adapter with Codex first, then Antigravity.** Codex's route is the sanctioned
   one, codex-acp is the more complete adapter (modes, auth methods, resume after an App Server
-  restart), and both machines can run it today (Node: home-mac has Node 26, drzlo-mac `npx`).
+  restart), and it needs only Node ≥ 20 on the worker (codex-acp declares no `engines`; its dependency
+  `open@11` needs 20).
   Antigravity follows on the same adapter; its specifics are one task.
 - **Antigravity on the owner's Google AI subscription, at the owner's risk** (the owner,
   2026-11-27). Google's terms for consumer plans lean against third-party clients, and accounts
@@ -248,11 +249,6 @@ issue threads say, to be checked on the machine before the code relies on it.
 4. **Node on the workers** for codex-acp is fine.
 5. **The bare model and the personal assistant session go to `docs/BACKLOG.md`**; `hqc_send`
    keeps needing `session`.
-
-## Open
-
-- **vvzvlad:** does anyone run Codex or agy through a gateway (codex-acp's gateway auth,
-  `modelProvider` of agy) that the worker should not break?
 
 ## T74. The worker: `[acp_agents]` and the probe at start
 
@@ -309,7 +305,7 @@ of the agent. Touches `adapter/acp/mcp.rs`, `mcp/procs.rs` if needed.
 `@agentclientprotocol/codex-acp` pinned (2.8.0 or newer, checked), installed under the worker's
 folder by RUNBOOK; its mode and config-option ids, its permission options and `rawInput` of exec
 and patch approvals, its auth error; `system acp_signed_out`; live test `live_acp_codex` on
-home-mac (a turn, an edit asked and allowed, a deny, a resume after a worker restart, an hqc tool).
+a macOS worker (a turn, an edit asked and allowed, a deny, a resume after a worker restart, an hqc tool).
 Touches `adapter/acp/codex.rs` (the per-agent table), `crates/hqc-worker/tests/`, RUNBOOK.
 
 ## T79. Antigravity
@@ -347,7 +343,7 @@ only the calls the agent asks about.
 
 ## Later
 
-- **Hermes** on the same adapter: a worker on llm-server, a new §8.2.1 for the gateway-owned
+- **Hermes** on the same adapter: a Linux worker for Hermes, a new §8.2.1 for the gateway-owned
   Hermes v0.22+ (ACP is a viewer of the profile's daemon, environments map to profiles), steer.
 - Sign-in from hqc (Codex's device code would fit the relay of 0.185); Codex's plan windows in the limit bar; the hub's skills for
   Codex and agy (both read `SKILL.md` folders) once a skill is wanted there.

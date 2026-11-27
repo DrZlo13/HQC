@@ -173,3 +173,9 @@ Second:
   `docs/notes/t24-questions.md`.
 - "Deny always" for a new folder in the worker's service session: iteration 6.
 - The personal assistant session: iteration 5 (SPEC §19).
+
+## The bare model and the personal assistant session (2026-11-27)
+
+Left SPEC §19.10 when iteration 10 became Codex and Google's agent over ACP (SPEC 0.266): the
+bare model in the hub (§8.3, local models through the worker, §8.5) and the personal assistant
+session whose default runtime it is. No current user; until then `hqc_send` needs `session`.

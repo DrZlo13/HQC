@@ -7,6 +7,7 @@
     "path": "/Users/home-mac/work/c6-displays-hqc-fix-backlight",
     "origin": "/Users/home-mac/work/c6-displays",
     "branch": "hqc/fix-backlight",
-    "new_branch": true
+    "new_branch": true,
+    "base": "origin/main"
   }
 }

@@ -364,6 +364,10 @@ pub const TOOLS: &[Tool] = &[
                     "branch": {
                         "type": "string",
                         "description": "With isolation: the worktree's new branch; hqc/<session-slug> when absent."
+                    },
+                    "base": {
+                        "type": "string",
+                        "description": "With isolation: what the new branch starts from (a branch, origin/main, a tag or a commit); the workspace's current HEAD when absent."
                     }
                 },
                 "required": ["project", "prompt"],

@@ -3,7 +3,7 @@
 // the list order (T50) of the projects that have been looked at, a session archived from the
 // list that has not gone to the hub yet, and the archived projects the project search finds.
 
-import { Api, ApiError, type NewRoom, type NewSessionOptions, type ProviderFields, type SessionPatch } from './api';
+import { Api, ApiError, type NewRoom, type NewSessionOptions, type NewWorktree, type ProviderFields, type SessionPatch } from './api';
 import type {
   ClarifyAction,
   ClarifyAnswer,
@@ -48,6 +48,9 @@ export interface NewSessionDraft {
   model?: string;
   /** A provider instead of a Claude model (SPEC 0.144). */
   provider_id?: string;
+  /** "New worktree…" of the workspace chip (SPEC 0.265): the session starts in a new worktree
+   *  of the workspace. */
+  worktree?: NewWorktree;
   started?: string;
 }
 
@@ -1397,7 +1400,10 @@ export class AppState {
       permission_mode: d.permission_mode,
       model: provider ? undefined : d.model,
       provider_id: provider,
+      worktree: d.worktree,
     });
+    // The worktree the hub made is a workspace of the project now: the chat's header shows it.
+    if (d.worktree) await this.workspacesChanged(d.projectId).catch(() => {});
     this.sessions.set(s.id, s);
     // In the same change: the list never shows both the draft and its session.
     if (this.newSession === d) this.newSession = { ...d, started: s.id };

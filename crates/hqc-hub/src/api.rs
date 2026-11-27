@@ -1183,33 +1183,57 @@ pub async fn create_session(
     Json(b): Json<CreateSessionRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let project = project_for(&app, &user, project_id).await?;
-    let s = new_session(&app, user.id, &project, &b, None).await?;
+    let s = match b.isolation.as_deref() {
+        None if b.branch.is_some() || b.base.is_some() || b.existing_branch => {
+            return Err(ApiError::BadRequest(
+                "branch, base and existing_branch go with isolation: worktree".into(),
+            ))
+        }
+        None => new_session(&app, user.id, &project, &b, None, None).await?,
+        // SPEC 0.265: in a new ephemeral worktree, as `hqc_spawn` makes one (T47).
+        Some("worktree") => crate::spawn::isolated_session(&app, user.id, project, b).await?,
+        Some(i) => {
+            return Err(ApiError::BadRequest(format!(
+                "isolation {i} is not known; only worktree"
+            )))
+        }
+    };
     let v = state::view(&app, user.id, s).await?;
     Ok((StatusCode::CREATED, Json(json!(v))))
 }
 
 /// Creates a session of `owner` in their `project` and starts its agent (SPEC §6, §13.4):
-/// `POST /api/projects/{id}/sessions` and `hqc_spawn` (SPEC §7, with `spawn`).
+/// `POST /api/projects/{id}/sessions` and `hqc_spawn` (SPEC §7, with `spawn`). `number`: the
+/// N of its default title, chosen with its worktree's branch (T47).
 pub async fn new_session(
     app: &AppState,
     owner: Uuid,
     project: &db::ProjectRow,
     b: &CreateSessionRequest,
     spawn: Option<db::Spawn>,
+    number: Option<i64>,
 ) -> ApiResult<SessionRow> {
-    let id = insert_session(app, owner, project, b, spawn, None).await?;
+    let id = insert_session(app, owner, project, b, spawn, None, number).await?;
     delivery::kick(app, id, true).await;
     db::session(&app.db, id).await?.ok_or(ApiError::NotFound)
 }
 
 /// The workspace, worker and folder of a new session (SPEC §6, §13.4): a ready workspace of
-/// the project on a worker of `owner`, `cwd` a relative path inside it (`.` when absent).
-async fn session_place<'b>(
+/// the project on a worker of `owner`, `cwd` a relative path inside it (`.` when absent); the
+/// model and the title checked too. A session with isolation (SPEC 0.265) is checked by it
+/// before its worktree is made, in the worktree's origin.
+pub(crate) async fn session_place<'b>(
     app: &AppState,
     owner: Uuid,
     project: &db::ProjectRow,
     b: &'b CreateSessionRequest,
 ) -> ApiResult<(db::WorkspaceRow, db::WorkerRow, &'b str)> {
+    if let Some(m) = &b.model {
+        check_model(m)?;
+    }
+    if let Some(t) = b.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        check_title(t)?;
+    }
     let ws = session_workspace(app, project, b).await?;
     let worker = match db::worker(&app.db, ws.worker_id).await? {
         Some(w) if w.owner_id == owner && w.revoked_at.is_none() => w,
@@ -1241,16 +1265,11 @@ async fn insert_session(
     b: &CreateSessionRequest,
     spawn: Option<db::Spawn>,
     member: Option<db::Member<'_>>,
+    number: Option<i64>,
 ) -> ApiResult<Uuid> {
-    if let Some(m) = &b.model {
-        check_model(m)?;
-    }
     let (ws, worker, cwd) = session_place(app, owner, project, b).await?;
     // No title: "Session N" (SPEC §3 Session), which the runtime's title may replace.
     let title = b.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
-    if let Some(t) = title {
-        check_title(t)?;
-    }
     let title = title.map(hqc_proto::replace_nul);
     let id = db::create_spawned_session(
         &app.db,
@@ -1270,6 +1289,7 @@ async fn insert_session(
         },
         spawn,
         member,
+        number,
     )
     .await?;
     if b.provider_id.is_some() {
@@ -1398,7 +1418,7 @@ pub async fn new_room(
             system_prompt: system_prompt.as_deref(),
             chain_id: spawn.map(|s| s.chain_id),
         };
-        insert_session(app, owner, project, &req, None, Some(member)).await?;
+        insert_session(app, owner, project, &req, None, Some(member), None).await?;
     }
     db::session(&app.db, id).await?.ok_or(ApiError::NotFound)
 }

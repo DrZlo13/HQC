@@ -474,6 +474,10 @@ pub struct PutProjectOrder {
 /// `POST /api/projects/{id}/sessions`. Without `workspace_id` the project's
 /// `default_workspace_id`; with only `worker_id` a workspace of the project on that worker
 /// (SPEC §6, §13.4). `cwd` is relative to the workspace, `.` by default.
+/// With `isolation: "worktree"` (since SPEC 0.265) the session starts in a new `ephemeral`
+/// worktree of that workspace, as `hqc_spawn` makes one (T47): on `branch`, `hqc/session-N`
+/// after the session when absent, new from `base` (the origin's `HEAD` when absent), or the
+/// existing `branch` with `existing_branch`. The request waits until the worker made it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CreateSessionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -496,6 +500,18 @@ pub struct CreateSessionRequest {
     /// runtime's own endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<Uuid>,
+    /// `worktree` (since SPEC 0.265): the session works in a new ephemeral worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<String>,
+    /// With isolation: the worktree's branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// With isolation, for a new branch: what it starts from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    /// With isolation: check out `branch`, which exists, instead of creating it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub existing_branch: bool,
 }
 
 /// `POST /api/projects/{id}/rooms` (SPEC §6, §7.1.1, since 0.172): a room and a session for
@@ -952,6 +968,10 @@ pub struct CreateWorkspace {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// A worktree's new branch starts from this branch, tag or commit instead of the origin's
+    /// `HEAD` (since SPEC 0.265; only with `new_branch`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 /// `PATCH /api/workspaces/{id}`.
@@ -1726,6 +1746,15 @@ mod tests {
         // The model, as the session object shows it in `agent`.
         let created: Session = roundtrip(include_str!("../examples/wire/api.session.json"));
         assert_eq!(s.model.as_deref(), created.agent.model.as_deref());
+        // SPEC 0.265: a session in a new worktree of the workspace.
+        let iso: CreateSessionRequest = roundtrip(include_str!(
+            "../examples/wire/api.session.worktree.request.json"
+        ));
+        assert_eq!(iso.workspace_id, Some(w.id));
+        assert_eq!(iso.isolation.as_deref(), Some("worktree"));
+        assert!(crate::frame::check_branch(iso.branch.as_deref().unwrap()).is_ok());
+        assert!(crate::frame::check_base(iso.base.as_deref().unwrap()).is_ok());
+        assert!(!iso.existing_branch);
         assert_eq!(
             serde_json::from_str::<CreateSessionRequest>("{}").unwrap(),
             CreateSessionRequest::default()

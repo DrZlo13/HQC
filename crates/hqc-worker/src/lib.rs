@@ -114,6 +114,11 @@ impl Worker {
                 o.insert("vault_fields".into(), true.into());
             }
         }
+        // A new worktree's branch starts from `base` (SPEC 0.265); an older worker would ignore
+        // it and start from the origin's `HEAD`.
+        if let Some(o) = capabilities.as_object_mut() {
+            o.insert("worktree_base".into(), true.into());
+        }
         // Workspaces are hub objects (SPEC §3); only `allowed_roots` bounds them here.
         Hello {
             protocol_version: hqc_proto::PROTOCOL_VERSION,

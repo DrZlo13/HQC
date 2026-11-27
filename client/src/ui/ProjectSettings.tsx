@@ -284,8 +284,11 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
                       </span>
                     )}
                     {w.ephemeral && (
-                      <span class="tag workspace-ephemeral" title="hqc_spawn made this worktree for the session it started">
-                        spawned
+                      <span
+                        class="tag workspace-ephemeral"
+                        title="hqc made this worktree for the session it started there: an agent's hqc_spawn, or New worktree… of a new session"
+                      >
+                        for a session
                       </span>
                     )}
                     {w.marked_for_deletion && <span class="tag tag-failed workspace-marked">for deletion</span>}
@@ -973,7 +976,8 @@ function CloneRepository({
 }
 
 /** "New worktree" of a workspace (T46, SPEC §13.1), under its row: a branch, new (made from
- *  the origin's current commit) or existing, and the folder, by default next to the origin
+ *  the origin's current commit, or from a branch, tag or commit typed, SPEC 0.265) or existing,
+ *  and the folder, by default next to the origin
  *  (`<origin-name>-<branch>`, following the branch until it is edited). The worker checks the
  *  origin is a git repository and the branch is not checked out elsewhere; the new row shows
  *  the worktree until it is added, or why it was not. */
@@ -990,6 +994,7 @@ function NewWorktree({
 }) {
   const [branch, setBranch] = useState('');
   const [isNew, setIsNew] = useState(true);
+  const [base, setBase] = useState('');
   // `null`: the hub's default, shown as it will be.
   const [path, setPath] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1008,6 +1013,7 @@ function NewWorktree({
         origin_workspace_id: origin.id,
         branch: branch.trim(),
         new_branch: isNew,
+        base: (isNew && base.trim()) || undefined,
         path: path?.trim() || undefined,
       });
       await app.workspacesChanged(projectId);
@@ -1044,6 +1050,19 @@ function NewWorktree({
           </label>
         </div>
       </div>
+      {isNew && (
+        <label class="field">
+          <span class="muted small">New from</span>
+          <input
+            class="input mono"
+            name="base"
+            placeholder={`HEAD of ${workspaceName(origin)}: or a branch, origin/main, a tag, a commit`}
+            autocomplete="off"
+            value={base}
+            onInput={(e) => setBase((e.target as HTMLInputElement).value)}
+          />
+        </label>
+      )}
       <label class="field">
         <span class="muted small">Folder on the worker</span>
         <input
@@ -1165,7 +1184,7 @@ function DeleteFolderDialog({
             {!folder
               ? 'Removing it deletes only the record: the folder on the worker stays.'
               : worktree
-                ? `A worktree of ${repo} that hqc made${w.ephemeral ? ' for a session an agent started' : ''}.`
+                ? `A worktree of ${repo} that hqc made${w.ephemeral ? ' for the session started in it' : ''}.`
                 : 'A clone that hqc made.'}
           </p>
           {blocked && (

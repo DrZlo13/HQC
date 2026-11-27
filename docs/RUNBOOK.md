@@ -1258,6 +1258,9 @@ What hqc controls and what it does not:
 - what the agent connects by itself (MCP servers of its own settings, extensions, hooks) is
   outside hqc's control; keep them out of its settings on the worker's machine;
 - `allow_all` needs `[permissions] allow_all = true`, as for Claude Code.
+- give `modes` whenever the agent has modes: hqc reads the agent's mode reports by that table,
+  and takes a mode it does not name as Allow all. An agent without `modes` is assumed to run Ask
+  and hqc sees none of its own mode switches.
 
 Antigravity CLI (Google's agent; Gemini CLI no longer serves Google accounts since 2026-06-18).
 Install `agy` (1.5.1 or newer) from Google's installer, then sign in on the machine: `agy` once in

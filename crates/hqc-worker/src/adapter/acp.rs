@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,13 +33,13 @@ use hqc_proto::event::{
 };
 use hqc_proto::frame::{PermissionMode, Runtime, SessionInput, SlashCommand};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{oneshot, Mutex as AsyncMutex};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use uuid::Uuid;
 
 use super::claude_code::engine::{preview, PREVIEW_LIMIT};
 use super::claude_code::process::{CommandSpec, OsSpawner, Sig, SignalFn, Spawner};
 use super::claude_code::McpLaunch;
+use super::jsonrpc::{read_loop, Handler, NoHandler, Rpc, RpcError, METHOD_NOT_FOUND};
 use super::{new_event, Adapter, AdapterEvent, AdapterFactory, EventSink, ResultFiles};
 use crate::config::{AcpAgent, Config, StartSpec};
 use crate::permissions::Policy;
@@ -52,11 +52,6 @@ pub const AGENT_SIGNED_OUT: &str = "agent_signed_out";
 pub const CONVERSATION_LOST: &str = "acp_conversation_lost";
 /// `system.code` of a permission request the worker's `deny` refused (SPEC §4).
 pub const POLICY_DENIED: &str = "policy_denied";
-
-/// ACP's error code for "authentication required".
-const AUTH_REQUIRED: i64 = -32000;
-/// JSON-RPC's "method not found".
-const METHOD_NOT_FOUND: i64 = -32601;
 
 /// The factory's settings.
 #[derive(Clone)]
@@ -161,7 +156,7 @@ pub async fn probe_with(
         .spawn(&cmd)
         .with_context(|| format!("spawning {}", cmd.program.display()))?;
     let signal = spawned.signal;
-    let rpc = Rpc::new(spawned.stdin);
+    let rpc = Rpc::new(spawned.stdin, true);
     let reader = tokio::spawn(read_loop(spawned.stdout, rpc.clone(), Arc::new(NoHandler)));
     let r = tokio::time::timeout(timeout, rpc.request("initialize", initialize_params())).await;
     let _ = signal(Sig::Terminate);
@@ -213,178 +208,6 @@ fn initialize_params() -> Value {
 }
 
 // ----------------------------------------------------------------------------------------------
-// JSON-RPC over the process's stdio.
-
-/// An error answer of the agent, or a connection that ended.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RpcError {
-    pub code: i64,
-    pub message: String,
-}
-
-impl std::fmt::Display for RpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", self.message, self.code)
-    }
-}
-
-impl RpcError {
-    fn closed() -> Self {
-        Self {
-            code: -32099,
-            message: "the agent's connection ended".into(),
-        }
-    }
-
-    pub fn auth_required(&self) -> bool {
-        self.code == AUTH_REQUIRED
-    }
-}
-
-type Pending = Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>;
-
-struct Rpc {
-    writer: AsyncMutex<std::pin::Pin<Box<dyn AsyncWrite + Send>>>,
-    next: AtomicU64,
-    pending: Pending,
-}
-
-impl Rpc {
-    fn new(stdin: std::pin::Pin<Box<dyn AsyncWrite + Send>>) -> Arc<Self> {
-        Arc::new(Self {
-            writer: AsyncMutex::new(stdin),
-            next: AtomicU64::new(1),
-            pending: Mutex::new(HashMap::new()),
-        })
-    }
-
-    async fn write(&self, msg: &Value) -> Result<(), RpcError> {
-        let mut line = msg.to_string();
-        line.push('\n');
-        let mut w = self.writer.lock().await;
-        w.write_all(line.as_bytes())
-            .await
-            .map_err(|_| RpcError::closed())?;
-        w.flush().await.map_err(|_| RpcError::closed())
-    }
-
-    /// Sends a request; the answer is awaited by the returned future, the write is done
-    /// when this returns.
-    async fn send(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<oneshot::Receiver<Result<Value, RpcError>>, RpcError> {
-        let id = self.next.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
-        let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        if let Err(e) = self.write(&msg).await {
-            self.pending.lock().unwrap().remove(&id);
-            return Err(e);
-        }
-        Ok(rx)
-    }
-
-    async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
-        let rx = self.send(method, params).await?;
-        rx.await.unwrap_or_else(|_| Err(RpcError::closed()))
-    }
-
-    async fn notify(&self, method: &str, params: Value) -> Result<(), RpcError> {
-        self.write(&json!({"jsonrpc": "2.0", "method": method, "params": params}))
-            .await
-    }
-
-    async fn respond(&self, id: Value, result: Value) {
-        let _ = self
-            .write(&json!({"jsonrpc": "2.0", "id": id, "result": result}))
-            .await;
-    }
-
-    async fn respond_error(&self, id: Value, code: i64, message: &str) {
-        let _ = self
-            .write(
-                &json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}),
-            )
-            .await;
-    }
-
-    fn resolve(&self, v: &Value) {
-        let Some(id) = v["id"].as_u64() else {
-            return;
-        };
-        let Some(tx) = self.pending.lock().unwrap().remove(&id) else {
-            return;
-        };
-        let r = match v.get("error") {
-            Some(e) => Err(RpcError {
-                code: e["code"].as_i64().unwrap_or(0),
-                message: e["message"].as_str().unwrap_or("error").to_string(),
-            }),
-            None => Ok(v.get("result").cloned().unwrap_or(Value::Null)),
-        };
-        let _ = tx.send(r);
-    }
-
-    /// Fails every request still waiting: the connection is gone.
-    fn close(&self) {
-        for (_, tx) in self.pending.lock().unwrap().drain() {
-            let _ = tx.send(Err(RpcError::closed()));
-        }
-    }
-}
-
-/// What the agent sends on its own: requests and notifications.
-#[async_trait]
-trait Handler: Send + Sync {
-    async fn request(&self, rpc: &Arc<Rpc>, id: Value, method: &str, params: Value);
-    async fn notification(&self, method: &str, params: Value);
-}
-
-struct NoHandler;
-
-#[async_trait]
-impl Handler for NoHandler {
-    async fn request(&self, rpc: &Arc<Rpc>, id: Value, _: &str, _: Value) {
-        rpc.respond_error(id, METHOD_NOT_FOUND, "not supported")
-            .await;
-    }
-    async fn notification(&self, _: &str, _: Value) {}
-}
-
-/// Reads the agent's stdout line by line until it ends; every message is handled before the
-/// next is read, so the events of a turn go out before the answer that ends it is resolved.
-async fn read_loop(
-    stdout: std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>,
-    rpc: Arc<Rpc>,
-    handler: Arc<dyn Handler>,
-) {
-    let mut lines = BufReader::new(stdout).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
-            if !line.trim().is_empty() {
-                tracing::debug!(line = %preview(&line, 200), "not a JSON-RPC message from the agent");
-            }
-            continue;
-        };
-        match (v.get("method").and_then(Value::as_str), v.get("id")) {
-            (Some(m), Some(id)) => {
-                let params = v.get("params").cloned().unwrap_or(Value::Null);
-                handler.request(&rpc, id.clone(), m, params).await
-            }
-            (Some(m), None) => {
-                let params = v.get("params").cloned().unwrap_or(Value::Null);
-                handler.notification(m, params).await
-            }
-            (None, Some(_)) => rpc.resolve(&v),
-            (None, None) => {}
-        }
-    }
-    rpc.close();
-}
-
-// ----------------------------------------------------------------------------------------------
 // The session.
 
 /// A permission request waiting for the person.
@@ -412,6 +235,9 @@ struct Shared {
     config_options: Vec<Value>,
     /// The mode the session runs in, as last set or told.
     mode: PermissionMode,
+    /// The agent took the mode hqc last set and has not moved since: a switch to the same
+    /// mode may be skipped only then.
+    confirmed: bool,
     /// Context use as the last `usage_update` said it.
     context: Option<(u64, u64)>,
     cost: Option<f64>,
@@ -603,14 +429,18 @@ impl Shared {
                 ));
             }
             "current_mode_update" => {
-                if let Some(mode) = u["currentModeId"].as_str().and_then(|m| self.hqc_mode(m)) {
-                    self.mode = mode;
-                    out.push(AdapterEvent::PermissionMode(mode));
+                if let Some(id) = u["currentModeId"].as_str() {
+                    self.agent_moved(id, &mut out);
                 }
             }
             "config_option_update" => {
                 if let Some(o) = u["configOptions"].as_array() {
                     self.config_options = o.clone();
+                }
+                if let Some(id) = mode_option_value(&self.config_options) {
+                    if self.hqc_mode(&id) != Some(self.mode) {
+                        self.agent_moved(&id, &mut out);
+                    }
                 }
             }
             "session_info_update" => {
@@ -688,15 +518,38 @@ impl Shared {
         }
     }
 
-    /// hqc's mode of the agent's mode or config value `id`, by the agent's table.
+    /// hqc's mode of the agent's mode or config value `id`, by the agent's table; an id the
+    /// table does not name counts as Allow all (an unknown mode is taken as the highest).
+    /// `None` for an agent whose table names no mode: it is assumed to run Ask, and hqc cannot
+    /// read its own modes (SPEC §8.2).
     fn hqc_mode(&self, id: &str) -> Option<PermissionMode> {
-        [
-            PermissionMode::AllowAll,
-            PermissionMode::Auto,
-            PermissionMode::Ask,
-        ]
-        .into_iter()
-        .find(|m| self.agent.modes.id(*m) == Some(id))
+        let m = &self.agent.modes;
+        if m.ask.is_none() && m.auto.is_none() && m.allow_all.is_none() {
+            return None;
+        }
+        Some(
+            [
+                PermissionMode::AllowAll,
+                PermissionMode::Auto,
+                PermissionMode::Ask,
+            ]
+            .into_iter()
+            .find(|x| m.id(*x) == Some(id))
+            .unwrap_or(PermissionMode::AllowAll),
+        )
+    }
+
+    /// The mode the agent says it is in (`current_mode_update`, a mode config option's value):
+    /// kept and reported; one hqc did not set ends the confirmation of the last switch.
+    fn agent_moved(&mut self, id: &str, out: &mut Vec<AdapterEvent>) {
+        let Some(mode) = self.hqc_mode(id) else {
+            return;
+        };
+        if mode != self.mode {
+            self.confirmed = false;
+        }
+        self.mode = mode;
+        out.push(AdapterEvent::PermissionMode(mode));
     }
 
     /// The end of the turn of input `input`: the agent answered `session/prompt` with `r`.
@@ -1142,7 +995,7 @@ impl AcpAdapter {
             .spawn(&cmd)
             .with_context(|| format!("spawning {}", cmd.program.display()))?;
         tracing::info!(session_id = %self.session_id, agent = %agent.name, cwd = %spec.workdir.display(), environment = %spec.environment.name, ?mode, "ACP agent started");
-        let rpc = Rpc::new(spawned.stdin);
+        let rpc = Rpc::new(spawned.stdin, true);
         let shared = Arc::new(Mutex::new(Shared {
             session_id: self.session_id,
             agent: agent.clone(),
@@ -1157,6 +1010,7 @@ impl AcpAdapter {
             mode_ids: vec![],
             config_options: vec![],
             mode: PermissionMode::Ask,
+            confirmed: false,
             context: None,
             cost: None,
         }));
@@ -1329,6 +1183,16 @@ impl AcpAdapter {
                 })
                 .unwrap_or_default();
             s.config_options = v["configOptions"].as_array().cloned().unwrap_or_default();
+            // The mode the agent is in now (a resumed session may restore its own), until hqc
+            // sets one below.
+            let current = v["modes"]["currentModeId"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| mode_option_value(&s.config_options));
+            if let Some(m) = current.and_then(|id| s.hqc_mode(&id)) {
+                s.mode = m;
+            }
+            s.confirmed = false;
         }
         self.start_mode(mode).await?;
         if let Some(m) = &spec.model {
@@ -1388,10 +1252,12 @@ impl AcpAdapter {
         Ok(true)
     }
 
-    /// The mode the session runs in is `mode`: kept and reported.
+    /// The agent took `mode`: kept, confirmed and reported.
     async fn reached(&self, mode: PermissionMode) {
         if let Some(run) = &self.run {
-            run.shared.lock().unwrap().mode = mode;
+            let mut s = run.shared.lock().unwrap();
+            s.mode = mode;
+            s.confirmed = true;
         }
         let _ = self.events.send(AdapterEvent::PermissionMode(mode)).await;
     }
@@ -1456,6 +1322,14 @@ impl AcpAdapter {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
     }
+}
+
+/// The current value of the agent's config option of category `mode`, if it has one.
+fn mode_option_value(options: &[Value]) -> Option<String> {
+    options
+        .iter()
+        .find(|o| o["category"] == "mode")
+        .and_then(|o| o["currentValue"].as_str().map(str::to_owned))
 }
 
 /// The id of the config option of `category` that offers `value`, flat or in groups.
@@ -1630,9 +1504,9 @@ impl Adapter for AcpAdapter {
         let Some(run) = &self.run else {
             return Ok(());
         };
-        let (agent, now) = {
+        let (agent, now, confirmed) = {
             let s = run.shared.lock().unwrap();
-            (s.agent.clone(), s.mode)
+            (s.agent.clone(), s.mode, s.confirmed)
         };
         let target = agent.mode_for(mode);
         // A process started with `allow_all_args` leaves Allow all only by a restart: no mode
@@ -1647,7 +1521,7 @@ impl Adapter for AcpAdapter {
                 agent.name
             );
         }
-        if target == now {
+        if target == now && confirmed {
             self.reached(now).await;
             return Ok(());
         }

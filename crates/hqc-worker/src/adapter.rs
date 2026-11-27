@@ -21,6 +21,7 @@ use crate::inbox::InboxFile;
 pub mod acp;
 pub mod claude_code;
 pub mod fake;
+pub mod jsonrpc;
 
 use acp::AcpAdapters;
 use claude_code::ClaudeCodeAdapters;

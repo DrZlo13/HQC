@@ -2590,6 +2590,83 @@ async fn a_runtime_that_cannot_switch_is_restarted_in_ask() {
     w.stop().await;
 }
 
+// Security re-review of iteration 10: a runtime that reports a mode above the cap of the capped
+// turn that runs (it switched itself) is stopped, and the input runs again in a new process in
+// the capped mode; nothing is lost.
+#[tokio::test]
+async fn a_raise_above_the_cap_during_a_capped_turn_restarts_it() {
+    use PermissionMode::{AllowAll, Ask, Auto};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    started_in(&mut c, &env, sid, "auto").await;
+    let e1 = Uuid::now_v7();
+    c.frame("session.input", capped_input(sid, e1, "ask")).await;
+    adapters
+        .wait_for("switch down", |c| {
+            c.contains(&FakeCall::PermissionMode(sid, Ask))
+        })
+        .await;
+    adapters.emit(sid, AdapterEvent::PermissionMode(Ask)).await;
+    let first = FakeCall::Input {
+        session_id: sid,
+        event_id: e1,
+    };
+    adapters
+        .wait_for("capped input", |c| c.contains(&first))
+        .await;
+    adapters.accept_input(sid, e1).await;
+    // The agent moves itself to a mode hqc does not know (reported as Allow all).
+    adapters
+        .emit(sid, AdapterEvent::PermissionMode(AllowAll))
+        .await;
+    let calls = adapters
+        .wait_for("the input again", |c| {
+            c.iter().filter(|x| **x == first).count() == 2
+        })
+        .await;
+    assert!(index(&calls, &FakeCall::Kill(sid)) < index(&calls, &FakeCall::Resume(sid)));
+    assert_eq!(adapters.start_modes(), [(sid, Auto), (sid, Ask)]);
+    adapters.accept_input(sid, e1).await;
+    adapters.end_turn(sid).await;
+    w.stop().await;
+}
+
+// Security re-review of iteration 10: the owner's switch down that the running process refuses
+// (an ACP agent started with its Allow all flag) restarts it in that mode, so later turns do not
+// run higher than the session's mode.
+#[tokio::test]
+async fn a_refused_switch_down_restarts_the_idle_agent() {
+    use PermissionMode::{Ask, Auto};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    started_in(&mut c, &env, sid, "auto").await;
+    adapters.set_refuse_modes(true);
+    c.frame(
+        "session.permission_mode",
+        json!({"session_id": sid, "permission_mode": "ask"}),
+    )
+    .await;
+    adapters
+        .wait_for("restarted", |_| adapters.start_modes().len() == 2)
+        .await;
+    assert_eq!(adapters.start_modes(), [(sid, Auto), (sid, Ask)]);
+    let calls = adapters.calls();
+    assert!(
+        index(&calls, &FakeCall::PermissionMode(sid, Ask)) < index(&calls, &FakeCall::Kill(sid))
+    );
+    w.stop().await;
+}
+
 // T39: a stopped agent starts in ask for a capped input (no switch needed); a turn lost with
 // its process leaves nothing behind: the next input starts the process in the session's mode.
 #[tokio::test]

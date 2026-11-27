@@ -152,6 +152,15 @@ impl Spawner for FakeAgent {
                                             {"optionId": "yes", "name": "Allow", "kind": "allow_once"},
                                             {"optionId": "no", "name": "Deny", "kind": "reject_once"}]}})).await;
                                 prompt = Some((id.clone(), "permission"));
+                            } else if let Some(m) = text.strip_prefix("selfmode ") {
+                                // The agent moves itself (its own command, a tool).
+                                send(
+                                    &mut out,
+                                    update(json!({"sessionUpdate": "current_mode_update",
+                                    "currentModeId": m})),
+                                )
+                                .await;
+                                send(&mut out, reply(json!({"stopReason": "end_turn"}))).await;
                             } else if text == "wait" {
                                 prompt = Some((id.clone(), "cancel"));
                             } else {
@@ -771,5 +780,57 @@ async fn only_a_plain_execute_request_is_allowed_by_a_rule() {
     )
     .await;
     assert_eq!(denied.as_deref(), Some("no"));
+    ad.kill().await.unwrap();
+}
+
+/// Security re-review: a mode the agent moved to itself that its table does not name counts as
+/// Allow all, and a switch to the mode hqc last set is not skipped after it.
+#[tokio::test]
+async fn an_unknown_mode_the_agent_moved_to_is_allow_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeAgent::default();
+    let s = spec(
+        dir.path(),
+        agent(AcpModes {
+            ask: Some("default".into()),
+            auto: Some("accept-edits".into()),
+            allow_all: None,
+        }),
+    );
+    let (tx, mut rx) = mpsc::channel(256);
+    let mut ad = adapters(&fake).create(&s, tx);
+    ad.start(&s).await.unwrap();
+    until(&mut rx, |e| {
+        *e == AdapterEvent::PermissionMode(PermissionMode::Ask)
+    })
+    .await;
+    ad.input(&input("selfmode yolo")).await.unwrap();
+    let seen = until(&mut rx, |e| matches!(e, AdapterEvent::TurnEnded { .. })).await;
+    assert!(seen.contains(&AdapterEvent::PermissionMode(PermissionMode::AllowAll)));
+    // Back to Ask: sent again, not skipped.
+    let before = fake
+        .got()
+        .iter()
+        .filter(|v| v["method"] == "session/set_mode")
+        .count();
+    ad.set_permission_mode(PermissionMode::Ask).await.unwrap();
+    let after = fake
+        .got()
+        .iter()
+        .filter(|v| v["method"] == "session/set_mode" && v["params"]["modeId"] == "default")
+        .count();
+    assert!(
+        after > 0
+            && fake
+                .got()
+                .iter()
+                .filter(|v| v["method"] == "session/set_mode")
+                .count()
+                > before
+    );
+    until(&mut rx, |e| {
+        *e == AdapterEvent::PermissionMode(PermissionMode::Ask)
+    })
+    .await;
     ad.kill().await.unwrap();
 }

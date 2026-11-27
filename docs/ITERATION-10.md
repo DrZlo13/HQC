@@ -12,11 +12,10 @@ with the usual permission card (Ask) and without one (Auto), calls `hqc_attach` 
 hub relay and of an iteration-9 local server; a command under the worker's `deny` is refused
 without a card; the session survives a worker restart (resumed, not a new conversation); the
 header shows the context and the turn's tokens; a folder whose environment does not list `codex`
-does not offer it. Then the same with Google's agent, if the owner decides to run it on the
-subscription (question 1).
+does not offer it. Then the same with Antigravity on the owner's Google AI subscription.
 
 Not in this iteration: Hermes (it needs a worker on llm-server and a new §8.2.1, below); signing
-an agent in from hqc (question 3); the hub's skills for ACP agents; mirror, import and takeover of
+an agent in from hqc (on the machine only, decided below); the hub's skills for ACP agents; mirror, import and takeover of
 an ACP agent's own sessions (SPEC §9); moves (§5.3) and copies of ACP sessions; ACP agents in
 rooms (§7.1.1: no system prompt in ACP), without a workspace (§8.4) or in foreign sessions (§11.1);
 model providers (iteration 5) and the owner's Chrome (0.148) for them; an agent's subagents in
@@ -72,7 +71,7 @@ issue threads say, to be checked on the machine before the code relies on it.
   and never touches its tokens; whether that is allowed is asked in
   [antigravity-cli#1493](https://github.com/google-antigravity/antigravity-cli/issues/1493),
   still open. Since September 2026 the penalty is limited to the Antigravity / Gemini CLI account,
-  not the whole Google account. **The owner decides (question 1).**
+  not the whole Google account. The owner runs it anyway, at their own risk (decided below).
 
 ### Codex: `codex-acp` on top of the Codex App Server
 
@@ -163,11 +162,11 @@ issue threads say, to be checked on the machine before the code relies on it.
   per machine, made by the owner on the machine. A separate `CODEX_HOME` per hqc would need a
   second sign-in and copied tokens whose refresh then splits. What the agent's own config adds
   behind hqc's back is checked instead (MCP, below).
-- **Sign-in only on the machine in this iteration.** RUNBOOK gives the commands
-  (`codex login --device-auth`; `agy acp --login`, or `agy` once over ssh). A start or a turn that
-  the agent ends with "authentication required" (`-32000` or its auth error) becomes
+- **Sign-in only on the machine** (the owner, 2026-11-27): no relay through hqc. RUNBOOK gives
+  the commands (`codex login --device-auth`; `agy acp --login`, or `agy` once over ssh). A start or
+  a turn that the agent ends with "authentication required" (`-32000` or its auth error) becomes
   `system acp_signed_out {agent, command}` in the feed and in Settings → Workers, as
-  `claude_signed_out` (0.185). Sign-in from hqc is question 3.
+  `claude_signed_out` (0.185).
 - **Modes map to the agent's own modes; the worker's `[permissions]` caps them as for Claude
   Code:**
 
@@ -196,10 +195,12 @@ issue threads say, to be checked on the machine before the code relies on it.
   - "Always" on the card is "for this session" for both agents (their `allow_always` is
     session-scoped); hqc writes no folder rule from it in this iteration.
 
-  **The limit, said plainly in SPEC and Settings:** the worker sees only what the agent asks.
-  What it runs without asking (reads in Ask, everything in Auto and Allow all) never reaches the
-  worker's `deny`; the boundary there is the agent's sandbox (Codex: Seatbelt/Landlock, network
-  off in workspace-write). Hence question 2.
+  **The limit, accepted by the owner (2026-11-27) and said plainly in SPEC §8.2 and RUNBOOK:**
+  the worker sees only what the agent asks. What it runs without asking (reads in Ask,
+  everything in Auto and Allow all) never reaches the worker's `deny`; the boundary there is the
+  agent's own sandbox (Codex: Seatbelt/Landlock, network off in workspace-write; agy: its terminal
+  sandbox). The worker checks `deny` and the allow rules on every request it does get, and Allow
+  all needs `allow_all = true`, as for Claude Code.
 - **MCP: hqc's servers in `session/new.mcpServers`, nothing else.** `hqc`, the hub's relays
   (`hub_mcp`) and the environment's local servers (`mcp_servers`, iteration 9) go as `stdio`
   entries with the same launchers and the session token in their `env` (`McpLaunch::config`
@@ -225,33 +226,33 @@ issue threads say, to be checked on the machine before the code relies on it.
   call's title, kind, content (diff, text) and `rawInput`; no limit bar (`worker.limits` is Claude
   Code's) unless codex-acp reports the plan's windows (later).
 - **Order: generic adapter with Codex first, then Antigravity.** Codex's route is the sanctioned
-  one (question 1 does not block it), codex-acp is the more complete adapter (modes, auth methods,
-  resume after an App Server restart), and both machines can run it today. Antigravity follows on
-  the same adapter once the owner has decided question 1; its specifics are one task.
+  one, codex-acp is the more complete adapter (modes, auth methods, resume after an App Server
+  restart), and both machines can run it today (Node: home-mac has Node 26, drzlo-mac `npx`).
+  Antigravity follows on the same adapter; its specifics are one task.
+- **Antigravity on the owner's Google AI subscription, at the owner's risk** (the owner,
+  2026-11-27). Google's terms for consumer plans lean against third-party clients, and accounts
+  were suspended for it in February 2026; hqc says so where the agent is set up, not in the UI:
+  RUNBOOK's agent setup section carries the warning (a spare Google account is safer), and
+  `hqc-worker env` prints one line next to an `agy` agent. No warning in the client.
 - **No speculative code:** no unknown-agent fallbacks beyond what `initialize` tells, no ACP v2,
   no `session/fork`, no `session/list` import, no limits bar for agents, no agent auth from hqc.
 
-## Questions for the owner and vvzvlad
+## Decided with the owner (2026-11-27)
 
-1. **Antigravity on the Google AI subscription.** Google's terms and FAQ lean against running
-   `agy` from a third-party app on a consumer plan, its ACP docs invite any client, the
-   clarification (#1493) is open, and accounts were suspended in February (since September only
-   the Antigravity account, not the Google account). Run it on the subscription anyway (the
-   owner's risk), wait for Google's answer, or run Gemini through Gemini CLI on an AI Studio key
-   (pay per token, no ToS question)? The plan builds the adapter either way; T79 waits for this.
-2. **The worker's `deny` in Auto and Allow all.** It cannot stop what an ACP agent runs without
-   asking. Accept it (the agent's sandbox is the boundary; Settings says so), or allow ACP agents
-   only Ask and Auto, or only Ask until a way to see every call exists? Proposed: Ask and Auto
-   allowed, Allow all only with `allow_all = true` as for Claude Code.
-3. **Sign-in from hqc.** Codex's device code (a URL and a code, then the machine polls) would fit
-   the relay of 0.185 well; agy's `--login` prints a URL and takes a code. Worth doing in this
-   iteration, or on the machine only until a sign-in expires in practice? Proposed: machine only.
-4. **Node on the worker's machine** for codex-acp (npm, pinned version under the worker's
-   folder), and agy from Google's installer. Fine on home-mac and drzlo-mac?
-5. **The bare model and the personal assistant session** were in this item; they have no user
-   now and go to `docs/BACKLOG.md`, so `hqc_send` keeps needing `session`. Agreed?
-6. **vvzvlad:** does anyone run Codex or agy through a gateway (codex-acp's gateway auth,
-   `modelProvider` of agy) that the worker should not break?
+1. **Antigravity runs on the Google AI subscription**, with the warning above in RUNBOOK and in
+   `hqc-worker env`, none in the client; after Codex.
+2. **The agent's own sandbox is the boundary** for what it runs without asking; the worker checks
+   `deny` and the allow rules on every permission request it gets; Allow all only with
+   `allow_all = true`. Documented in SPEC §8.2 and RUNBOOK.
+3. **Sign-in on the machine only**; no relay through hqc for now.
+4. **Node on the workers** for codex-acp is fine.
+5. **The bare model and the personal assistant session go to `docs/BACKLOG.md`**; `hqc_send`
+   keeps needing `session`.
+
+## Open
+
+- **vvzvlad:** does anyone run Codex or agy through a gateway (codex-acp's gateway auth,
+  `modelProvider` of agy) that the worker should not break?
 
 ## T74. The worker: `[acp_agents]` and the probe at start
 
@@ -260,7 +261,8 @@ issue threads say, to be checked on the machine before the code relies on it.
 `isolation` dropped. At start the worker runs `initialize` on each agent (a timeout, the child
 allowlist environment plus `env`), records name, version and capabilities, and puts them into
 `hello.capabilities.acp_agents` (proto, SPEC §5.4); `hqc-worker env` and `env which` list the
-agents a folder may run. A `session.start` with an agent the folder's environment does not list
+agents a folder may run, with one line of warning next to an `agy` agent (Google's consumer terms,
+the owner's risk). A `session.start` with an agent the folder's environment does not list
 is refused (`agent_start_failed`, not retryable). Touches `crates/hqc-worker/src/config.rs`,
 `capabilities.rs`, `env_cmd.rs`, `crates/hqc-proto/src/frame.rs`, wire examples.
 
@@ -310,7 +312,7 @@ and patch approvals, its auth error; `system acp_signed_out`; live test `live_ac
 home-mac (a turn, an edit asked and allowed, a deny, a resume after a worker restart, an hqc tool).
 Touches `adapter/acp/codex.rs` (the per-agent table), `crates/hqc-worker/tests/`, RUNBOOK.
 
-## T79. Antigravity (after question 1)
+## T79. Antigravity
 
 The same for `agy acp` (pinned version ≥ 1.5.1): its modes, options (questions vs. approvals),
 MCP naming and process tree, `--dangerously-skip-permissions` for Allow all, the keyring on a
@@ -339,11 +341,13 @@ agents with version and environments, and "signed out" with the command to run. 
 
 SPEC §8.2 rewritten from the generic part above; §8.2.1 marked as the old in-process Hermes until
 Hermes is redone; §4 `usage` for ACP; §14 `acp_agents`; §3 Worker capabilities; RUNBOOK: install
-Node and codex-acp, sign in Codex and agy on the machine, `worker.toml` examples.
+Node and codex-acp, sign in Codex and agy on the machine, `worker.toml` examples, the warning on
+agy and Google's consumer terms (a spare account is safer), and that the worker's `deny` reaches
+only the calls the agent asks about.
 
 ## Later
 
 - **Hermes** on the same adapter: a worker on llm-server, a new §8.2.1 for the gateway-owned
   Hermes v0.22+ (ACP is a viewer of the profile's daemon, environments map to profiles), steer.
-- Sign-in from hqc (question 3); Codex's plan windows in the limit bar; the hub's skills for
+- Sign-in from hqc (Codex's device code would fit the relay of 0.185); Codex's plan windows in the limit bar; the hub's skills for
   Codex and agy (both read `SKILL.md` folders) once a skill is wanted there.

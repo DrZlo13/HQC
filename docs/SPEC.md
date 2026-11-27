@@ -8420,11 +8420,13 @@ is not asked, does not see the question or the answer, and does not work on it.
    is `runtime: acp` with `acp_agent: <name>`, picked in the new session window. First Codex
    through `codex-acp` (on the Codex App Server), then Antigravity CLI (`agy acp`; Gemini CLI no
    longer serves Google accounts since 2026-06-18), both on the owner's ChatGPT and Google AI
-   subscriptions, signed in on the machine. hqc's servers (`hqc`, the hub's relays, the
+   subscriptions, signed in on the machine only (Antigravity at the owner's risk: Google's consumer
+   terms lean against third-party clients; RUNBOOK and `hqc-worker env` say so). hqc's servers (`hqc`, the hub's relays, the
    environment's local servers) go in `session/new.mcpServers`, and a start is refused when the
    agent's own config adds MCP servers outside `allow_local_mcp`; Ask / Auto / Allow all map to
    the agent's own modes, capped by `[permissions]`; the worker checks every permission request
-   against its `deny` and allow rules, but sees only what the agent asks. History is hqc's own (no
+   against its `deny` and allow rules, but sees only what the agent asks: for what it runs without
+   asking, the agent's own sandbox is the boundary. History is hqc's own (no
    mirror). Hermes comes later on the same adapter; the bare model and the personal assistant
    session went to `docs/BACKLOG.md` (until then `hqc_send` needs `session`). Tasks:
    `docs/ITERATION-10.md`.
@@ -8654,7 +8656,11 @@ the personal assistant session moved to `docs/BACKLOG.md`. Plan: `docs/ITERATION
 successor for them is Antigravity CLI, native ACP since 1.5.0); Zed's `codex-acp` was archived on
 2026-07-22 for `agentclientprotocol/codex-acp` (Node, on the Codex App Server); ACP v1 now has
 `usage_update` and `session_info_update` stable; the Rust crate `agent-client-protocol` is at
-5.6.1. The rest of the SPEC (§8.2, §8.2.1, §14 `acp_agents`, §4 `usage`) changes with the code.
+5.6.1. Decided with the owner: Codex first, then Antigravity on the Google AI subscription at the
+owner's risk (a warning in RUNBOOK and `hqc-worker env`, none in the client); sign-in on the
+machine only; the agent's sandbox is the boundary for calls it runs without asking, the worker's
+`deny` checks the requests it gets, Allow all only with `allow_all = true`. The rest of the SPEC
+(§8.2, §8.2.1, §14 `acp_agents`, §4 `usage`) changes with the code.
 
 ### 0.264 → 0.265 (a new session in a new worktree, from the UI)
 §6: `POST /api/projects/{id}/sessions` takes `isolation: "worktree"`, `branch?`, `base?` and

@@ -8414,22 +8414,20 @@ is not asked, does not see the question or the answer, and does not work on it.
    the launcher pins a hash of each server's tools (unless the server says `pin = false`), and a
    changed list fails the server until the owner approves it on the machine; `hello` names them for Settings. The hub cannot add or start one (§2.1). Tasks:
    `docs/ITERATION-9.md`.
-10. Codex and Google's agent through the generic ACP adapter (planned since 0.266): one adapter
-   (§8.2) drives agents that speak ACP over stdio, each declared by the machine's owner in
-   `[acp_agents.<name>]` of `worker.toml` with the environments that may run it (§2.1); a session
-   is `runtime: acp` with `acp_agent: <name>`, picked in the new session window. First Codex
-   through `codex-acp` (on the Codex App Server), then Antigravity CLI (`agy acp`; Gemini CLI no
-   longer serves Google accounts since 2026-06-18), both on the owner's ChatGPT and Google AI
-   subscriptions, signed in on the machine only (Antigravity at the owner's risk: Google's consumer
-   terms lean against third-party clients; RUNBOOK and `hqc-worker env` say so). hqc's servers (`hqc`, the hub's relays, the
-   environment's local servers) go in `session/new.mcpServers`, and a start is refused when the
-   agent's own config adds MCP servers outside `allow_local_mcp`; Ask / Auto / Allow all map to
-   the agent's own modes, capped by `[permissions]`; the worker checks every permission request
-   against its `deny` and allow rules, but sees only what the agent asks: for what it runs without
-   asking, the agent's own sandbox is the boundary. History is hqc's own (no
-   mirror). Hermes comes later on the same adapter; the bare model and the personal assistant
-   session went to `docs/BACKLOG.md` (until then `hqc_send` needs `session`). Tasks:
-   `docs/ITERATION-10.md`.
+10. Google's and OpenAI's agents on the owner's subscriptions (planned since 0.266), by two
+   adapters. First the generic ACP adapter (§8.2), which knows no agent by name: each agent is a
+   `[acp_agents.<name>]` table of `worker.toml` (`command`, `args`, `env`, the environments that may
+   run it, `modes` for Ask / Auto / Allow all, `allow_all_args`), ready blocks in RUNBOOK; a
+   session is `runtime: acp` with `acp_agent: <name>`; its first agent is Antigravity CLI (`agy
+   acp`; Gemini CLI no longer serves Google accounts since 2026-06-18), at the owner's risk under
+   Google's consumer terms (RUNBOOK and `hqc-worker env` say so). Then a native Codex adapter over
+   `codex app-server` (`runtime: codex`, one app-server process per session, a pinned Codex version
+   and schema), with steer, per-turn modes and the account's limits. Both are signed in on the
+   machine; hqc's servers (`hqc`, the hub's relays, the environment's local servers) reach them;
+   the worker checks its `deny` and allow rules on every permission request it gets, and for what an
+   agent runs without asking its own sandbox is the boundary. History is hqc's own (no mirror).
+   Hermes comes later on the ACP adapter; the bare model and the personal assistant session went to
+   `docs/BACKLOG.md` (until then `hqc_send` needs `session`). Tasks: `docs/ITERATION-10.md`.
 11. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
    (0.38, T35, with `hqc_schedule`).
 12. Tauri, native notifications, several agents in one session.
@@ -8648,19 +8646,19 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
-### 0.265 → 0.266 (iteration 10 planned: Codex and Google's agent over ACP)
-§19: item 10 is now the generic ACP adapter with Codex (`codex-acp`) and Antigravity CLI
-(`agy acp`) as its first agents, on the owner's subscriptions; Hermes later; the bare model and
-the personal assistant session moved to `docs/BACKLOG.md`. Plan: `docs/ITERATION-10.md`. Found on
-2026-11-27: Gemini CLI stopped serving Google AI Pro, Ultra and free accounts on 2026-06-18 (its
-successor for them is Antigravity CLI, native ACP since 1.5.0); Zed's `codex-acp` was archived on
-2026-07-22 for `agentclientprotocol/codex-acp` (Node, on the Codex App Server); ACP v1 now has
-`usage_update` and `session_info_update` stable; the Rust crate `agent-client-protocol` is at
-5.6.1. Decided with the owner: Codex first, then Antigravity on the Google AI subscription at the
-owner's risk (a warning in RUNBOOK and `hqc-worker env`, none in the client); sign-in on the
-machine only; the agent's sandbox is the boundary for calls it runs without asking, the worker's
-`deny` checks the requests it gets, Allow all only with `allow_all = true`. The rest of the SPEC
-(§8.2, §8.2.1, §14 `acp_agents`, §4 `usage`) changes with the code.
+### 0.265 → 0.266 (iteration 10 planned: Google's and OpenAI's agents)
+§19: item 10 is now two adapters: the generic ACP adapter with Antigravity CLI (`agy acp`) as
+its first agent, then a native Codex adapter over `codex app-server`, both on the owner's
+subscriptions; Hermes later; the bare model and the personal assistant session moved to
+`docs/BACKLOG.md`. Plan: `docs/ITERATION-10.md`. Found on 2026-11-27: Gemini CLI stopped serving
+Google AI Pro, Ultra and free accounts on 2026-06-18 (Antigravity CLI replaces it, native ACP
+since 1.5.0); comparable tools drive Codex through its App Server, and only IDEs use `codex-acp`;
+ACP v1 has `usage_update` and `session_info_update` stable; the Rust crate `agent-client-protocol`
+is at 5.6.1. Decided with the owner: the ACP adapter first; Antigravity at the owner's risk (a
+warning in RUNBOOK and `hqc-worker env`, none in the client); sign-in on the machine only; the
+agent's sandbox is the boundary for calls it runs without asking, the worker's `deny` checks the
+requests it gets, Allow all only with `allow_all = true`. The rest of the SPEC (§8.2, §8.2.1, a
+new §8.6, §14, §4 `usage`, §3 `runtime: codex`) changes with the code.
 
 ### 0.264 → 0.265 (a new session in a new worktree, from the UI)
 §6: `POST /api/projects/{id}/sessions` takes `isolation: "worktree"`, `branch?`, `base?` and

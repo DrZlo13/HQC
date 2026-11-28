@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.267, 2026-11-28. Status: the architecture agreed after six reviews and a survey of
+Version 0.268, 2026-11-28. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2957,9 +2957,11 @@ their trailing line breaks, which would put the buttons lines below the text. Si
 0.156, until the hub answers a fork (it copies the source's history first, seconds for a long
 session) the message says "· forking…" and its "Fork from here" is disabled; the client asks for
 no second fork before the same message meanwhile.
-A run of tool calls is "N tool calls ·
-time" and the call's line when it is one, else the tools it called, each once, in the order
-first called ("(Bash, Read, chrome-devtools/take_screenshot)", an MCP tool as
+A run of tool calls holds the agent's thinking between its calls as rows; since 0.268 a thinking
+after its last call is, like one before its first, a block of its own after the run until another
+call of the run follows it, so a group of one call holds that call alone. A run of tool calls is
+"N tool calls · time" and the call's line when it is one, else the tools it called, each once, in
+the order first called ("(Bash, Read, chrome-devtools/take_screenshot)", an MCP tool as
 `<server>/<tool>`); a Skill call's line names its skill, a SendMessage call's line (since 0.163)
 says what it sent: its `summary`, else its plain-text `message` on one line; since 0.177 a call
 with none of the keys a line reads (an MCP tool's) shows its arguments in the order of
@@ -3435,8 +3437,9 @@ collapsed "Thinking · …" line that opens to the text so far, with the same ma
 look, as a block of its own after the stored events, above the inputs that stand under it
 (below) and before the messages not stored yet. It is never a row of the run of tool calls
 before it, folded with the run: it is there to be read while it is written; the stored
-`agent.thinking` joins that run as any stored thinking does. Otherwise the stored
-`agent.thinking` that ends it keeps its block, so a thinking the user opened stays open. Since
+`agent.thinking` joins that run as any stored thinking does, since 0.268 only once a call follows
+it there (§6). Otherwise the stored `agent.thinking` that ends it keeps its block, so a thinking
+the user opened stays open. Since
 0.108 a `user.message`
 or `peer.message` that came while that text was being written stands under it in the feed, live
 (after the text, with the messages not stored yet) and once the text
@@ -8657,6 +8660,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.267 → 0.268 (a thinking after a run's last call stands outside the run)
+§4, §6: a stored thinking after a call was a row of the folded run of tool calls before it, and a
+thinking before the run's first call a block of its own. When a request card, a message or the
+answer ended the run after such a thinking, the feed showed "1 tool call" folding a call and a
+thinking, next to a thinking of its own above it. A run now holds only what came between its
+calls: a thinking after its last call is a block of its own after it and joins it once a call
+follows it there; the thinking before a call a request card took leaves the run with it. Client
+only.
 
 ### 0.266 → 0.267 (an agent goes without Claude Code's Artifact tool)
 §8.1: the worker sets `CLAUDE_CODE_DISABLE_ARTIFACT=1` for every agent, over a value of the

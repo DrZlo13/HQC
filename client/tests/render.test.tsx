@@ -269,7 +269,7 @@ describe("the thinking being written (SPEC §6)", () => {
     expect(root.querySelector(".msg-streaming")!.textContent).toBe("Yes.");
   });
 
-  it("after a tool call stands under its folded group, not in it, and joins it when stored", () => {
+  it("after a tool call stands under its folded group, not in it, and joins it once a call follows it", () => {
     const t = new Timeline();
     t.applyAll([call(1, "c1", "Bash", { command: "ls" }), result(2, "c1")]);
     t.apply(thinking("Checking"));
@@ -287,11 +287,68 @@ describe("the thinking being written (SPEC §6)", () => {
       }),
     );
     draw();
-    // Stored, a row of the group of the calls before it, as any stored thinking.
+    // Stored after the run's last call, still a block of its own under the group (SPEC 0.268).
+    expect(buildFeed(t.items(), t).map((b) => b.kind)).toEqual(["tools", "item"]);
+    const kept = root.querySelector<HTMLDetailsElement>("details.thinking")!;
+    expect(kept.closest(".tool-group")).toBeNull();
+    expect(kept.querySelector("summary")!.textContent).toBe("Thinking · Checking.");
+
+    // The next call takes it into the run: a row between the two calls.
+    t.applyAll([call(4, "c2", "Read", { file_path: "a.rs" }), result(5, "c2")]);
+    draw();
     expect(buildFeed(t.items(), t).map((b) => b.kind)).toEqual(["tools"]);
     expect(root.querySelector("details.thinking")).toBeNull();
     act(() => root.querySelector<HTMLButtonElement>(".tool-group-head")!.click());
     expect(root.querySelector(".tool-group-body details.thinking .thinking-text")!.textContent).toBe("Checking.");
+  });
+
+  const stored = (seq: number, text: string) =>
+    ev("event.agent.thinking", (e) => {
+      e.seq = seq;
+      e.payload.text = text;
+    });
+  const request = (seq: number) =>
+    ev("event.approval.request", (e) => {
+      e.seq = seq;
+      e.payload.tool = "Bash";
+    });
+
+  it("a run whose next call a request card took holds its last call alone, and the thinking before that call stands after the run (SPEC 0.268)", () => {
+    // A thinking, a call, a thinking, then a call whose request the card shows: the group was
+    // "1 tool call" folding the call and the thinking after it.
+    const t = new Timeline();
+    t.applyAll([
+      stored(1, "Starting a sampler."),
+      call(2, "c1", "Bash", { command: "ssh vm" }),
+      result(3, "c1"),
+      stored(4, "Updating the skill."),
+      call(5, "c2", "Bash", { command: "cp a b" }),
+      request(6),
+    ]);
+    const blocks = buildFeed(t.items(), t);
+    expect(blocks.map((b) => b.kind)).toEqual(["item", "tools", "item", "approval"]);
+    const [, run, after] = blocks;
+    expect(run.kind === "tools" && run.rows.map((r) => r.key)).toEqual(["e2"]);
+    expect(after.kind === "item" && after.item.kind === "event" && after.item.event.seq).toBe(4);
+  });
+
+  it("a closed run a request card takes a call from leaves the thinking before it outside, before the cards after it", () => {
+    // The subagent's card closed the run, and the request of the run's last call came after it.
+    const t = new Timeline();
+    t.applyAll([
+      call(1, "c1", "Read", { file_path: "a.rs" }),
+      result(2, "c1"),
+      stored(3, "Running it."),
+      call(4, "c2", "Bash", { command: "make" }),
+      call(5, "a1", "Agent", { description: "Check", prompt: "Check it" }),
+      request(6),
+    ]);
+    const blocks = buildFeed(t.items(), t);
+    expect(blocks.map((b) => b.kind)).toEqual(["tools", "item", "subagent", "approval"]);
+    const [run, after, , card] = blocks;
+    expect(run.kind === "tools" && run.rows.map((r) => r.key)).toEqual(["e1"]);
+    expect(after.kind === "item" && after.item.kind === "event" && after.item.event.seq).toBe(3);
+    expect(card.kind === "approval" && card.call?.seq).toBe(4);
   });
 
   const ends: [string, (t: Timeline) => void][] = [

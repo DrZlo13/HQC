@@ -1,6 +1,7 @@
 // What the feed draws, built from the timeline's items (T26): runs of tool calls fold into
 // one group, and every agent message stays a message of its own (the agent narrates in its
-// thinking, which goes into the group; what it writes is for the user); the `usage` after a
+// thinking, which goes into the group between its calls, while a thinking before the first call
+// or after the last stands outside it; what it writes is for the user); the `usage` after a
 // final answer goes into the answer's meta line; a `tool.call` followed at once by the
 // `approval.request` for it is shown by the request card, not as a row of its own. Messages
 // between sessions (T51) are blocks of their own: the agent's `hqc_send` / `hqc_ask` call and
@@ -127,7 +128,22 @@ function relays(items: Item[], timeline: Timeline): Relays {
 export function buildFeed(items: Item[], timeline: Timeline): Block[] {
   const out: Block[] = [];
   let group: Extract<Block, { kind: 'tools' }> | null = null;
-  const close = () => (group = null);
+  // A run holds what came between its calls: a thinking after its last call is no row of it but
+  // a block of its own right after it, as a thinking before its first call stands before it, so
+  // a group of one call holds that call alone (SPEC 0.268). It goes back into the run when a
+  // call follows it there.
+  const trim = (g: Extract<Block, { kind: 'tools' }>) => {
+    let n = g.rows.length;
+    while (n > 0 && g.rows[n - 1].kind === 'thinking') n--;
+    const tail = g.rows.splice(n).flatMap((r) => (r.kind === 'thinking' ? [r] : []));
+    const after = tail.map((r): Block => ({ kind: 'item', key: r.key, item: { kind: 'event', key: r.key, event: r.event } }));
+    // From the end: the group is the last block, or a few blocks before it in a look-back.
+    out.splice(out.lastIndexOf(g) + 1, 0, ...after);
+  };
+  const close = () => {
+    if (group) trim(group);
+    group = null;
+  };
   const rel = relays(items, timeline);
   // The `Agent` calls of background launches by the `agentId` their results name.
   const launches = new Map<string, EventOf<'tool.call'>>();
@@ -203,7 +219,8 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
         break;
       // The thinking being written (the timeline's only `agent.delta` item) is a block of its
       // own, never a row of a folded group of calls: it is there to be read while it is
-      // written. Stored, it joins the group before it as above.
+      // written. Stored, it stays a block of its own after the group until a call follows it
+      // there (SPEC 0.268), then it is a row of the group as above.
       case 'agent.delta':
         break;
       case 'approval.request': {
@@ -227,6 +244,8 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
           call = last.call;
           g.rows.pop();
           if (!g.rows.some((r) => r.kind === 'call')) out.splice(out.indexOf(g), 1);
+          // The thinking before the call the card took is after the run's last call now.
+          else trim(g);
         }
         close();
         out.push({ kind: 'approval', key: it.key, event: e, call });
@@ -291,6 +310,8 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
     close();
     out.push({ kind: 'item', key: it.key, item: it });
   }
+  // A run at the feed's end (its turn goes on) leaves its last thinking outside too.
+  close();
   return out;
 }
 
